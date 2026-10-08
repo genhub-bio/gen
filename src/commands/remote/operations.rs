@@ -18,12 +18,13 @@
 //! A repository remote URL and an asset URI have separate meanings here. A repository
 //! `file://` remote points directly to another Dolt database (or a workspace containing
 //! `.gen/default.db`), so graph operations use that path directly and transfers happen
-//! directly between the workspaces. For an HTTP(S) repository remote, Gen requests a scoped,
-//! short-lived transfer capability, installs the returned URL as the graph database's Dolt
-//! remote, performs the operation, and restores the canonical URL. An authorization failure
-//! is retried once with a fresh capability. Failure to restore the canonical URL is reported
-//! as a warning because the graph transfer may already have succeeded and will be replaced on
-//! the next attempt.
+//! directly between the workspaces. For a GenHub remote, clone and pull use a scoped,
+//! short-lived HTTP capability as the graph database's Dolt remote. Push instead opens a
+//! direct GCS database URI behind an in-process loopback `RemoteServer`, stages the Dolt push,
+//! and asks GenHub to publish the accepted manifest. An idempotency token persisted with the
+//! push operation lets an interrupted push resume its staged session. Failure to restore a
+//! temporary clone or pull URL is reported as a warning because the graph transfer may already
+//! have succeeded and the canonical URL will be restored on the next attempt.
 //!
 //! Assets referenced by the transferred branch are handled after the graph operation.
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
@@ -43,9 +44,11 @@
 //! then the assets are transfered. Thus, an asset transfer can fail and need to be resumed. We
 //! track the state of asset transfers and checkpoint after each commit is successfully transfered.
 //! When the entire commit range has been transfered, we mark the operation as complete. For pushes,
-//! a server provides a transfer ID and expiry that serve as a lease. Gen persists both so an
-//! interrupted asset phase can reuse an active lease, while an expired lease triggers fresh graph
-//! authorization. The lease restricts uploads to a single client and is released after assets are
+//! the client idempotency token identifies a durable direct-GCS staging session. Gen persists that
+//! token and the transfer lease so an interrupted graph push can reopen the same session and resume
+//! from its accepted manifest checkpoints. An expired lease is renewed against the same session
+//! before graph or asset requests continue. Changing the push destination starts a distinct
+//! session. The lease restricts asset uploads to a single client and is released after assets are
 //! uploaded.
 //!
 //! Pull records the branch commit from before the Dolt operation so downloads can
@@ -63,10 +66,12 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use base64::{Engine as _, engine::general_purpose};
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crc32c::crc32c_append;
 use flate2::read::MultiGzDecoder;
 use gen_core::{
@@ -98,7 +103,13 @@ use reqwest::{
     blocking::{Body, Client, Response},
     header::{CONTENT_RANGE, RANGE},
 };
-use rusqlite::Error as SqlError;
+use rusqlite::{
+    BlockCacheSessionOptions, Error as SqlError, RemoteFailureKind, RemoteServer,
+    RemoteServerOptions, SessionOperationId, SessionOperationStatus, SessionScope,
+    blockcachevfs::{
+        AuthError, AuthRefreshReason, CloudConnectionIdentity, CloudConnectionUri, StorageFailure,
+    },
+};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 use uuid::Uuid;
@@ -107,10 +118,17 @@ use crate::{
     commands::remote::{
         client::{
             AssetTransferCompletionRequest, AssetTransferRequest, AssetUploadReceipt,
-            CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
-            acquire_asset_transfers, acquire_capability, complete_asset_transfers,
+            CapabilityRequest, CapabilityResponse, DirectPushCapability, RemoteClientError,
+            RemoteOperation, RepositoryRemote, SessionScope as ClientSessionScope,
+            acquire_asset_transfers, acquire_capability, acquire_push_capability,
+            complete_asset_transfers, confirm_direct_push_session_stale, publish_direct_push,
         },
         login_origin,
+        progress::{
+            AssetUploadProgressReporter, GraphUploadProgressReporter, TransferProgress,
+            UploadBodyReader, format_elapsed,
+        },
+        server::AuthTokens,
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
 };
@@ -179,8 +197,302 @@ struct PushTransferLease {
 }
 
 struct GraphTransferAuthorization {
-    remote_url: String,
+    remote_url: Option<String>,
     push_lease: Option<PushTransferLease>,
+    direct_push: Option<DirectPushCapability>,
+    capability_response: Option<CapabilityResponse>,
+}
+
+const PUSH_AUTHORIZATION_REFRESH_MARGIN_SECONDS: i64 = 60;
+const DIRECT_GCS_UPLOAD_CONCURRENCY: u32 = 10;
+
+type PushCapabilityFetcher =
+    dyn Fn() -> Result<CapabilityResponse, RemoteClientError> + Send + Sync + 'static;
+
+struct PushCapabilityState {
+    response: CapabilityResponse,
+    issued_at: DateTime<Utc>,
+}
+
+enum CapabilityRefreshFailure {
+    Fetch(RemoteClientError),
+    Expired,
+    InvalidScope,
+}
+
+#[derive(Clone)]
+struct PushCapabilityRenewal {
+    expected_publish_origin: String,
+    expected_scope: ClientSessionScope,
+    expected_session_id: Uuid,
+    expected_transfer_id: Uuid,
+    expected_uri_identity: CloudConnectionIdentity,
+    fetch: Arc<PushCapabilityFetcher>,
+    state: Arc<Mutex<PushCapabilityState>>,
+}
+
+impl PushCapabilityRenewal {
+    fn new(
+        response: CapabilityResponse,
+        expected_transfer_id: Uuid,
+        expected_session_id: Uuid,
+        publish_origin: &str,
+        fetch: Arc<PushCapabilityFetcher>,
+    ) -> Result<Self, PushGraphTransferError> {
+        if response.transfer_id != expected_transfer_id || response.remote_url.is_some() {
+            return Err(PushGraphTransferError::Protocol(
+                "GenHub returned a direct-push capability for a different transfer".to_string(),
+            ));
+        }
+        let direct_push = response.direct_push.as_ref().ok_or_else(|| {
+            PushGraphTransferError::Protocol(
+                "GenHub push capability did not include a direct GCS session".to_string(),
+            )
+        })?;
+        if direct_push.session_id != expected_session_id {
+            return Err(PushGraphTransferError::Protocol(
+                "GenHub returned a direct-push session that does not match the idempotency token"
+                    .to_string(),
+            ));
+        }
+        let connection_uri =
+            CloudConnectionUri::parse(&direct_push.database_uri).map_err(|_| {
+                PushGraphTransferError::Protocol(
+                    "GenHub returned an invalid direct GCS database URI".to_string(),
+                )
+            })?;
+        if connection_uri.gcs_access_token().is_none() {
+            return Err(PushGraphTransferError::Protocol(
+                "GenHub returned an invalid direct GCS database URI".to_string(),
+            ));
+        }
+        let expected_uri_identity = connection_uri.identity();
+        if !same_http_origin(publish_origin, &direct_push.publish_url) {
+            return Err(PushGraphTransferError::Protocol(
+                "GenHub returned a direct-push publication URL outside the repository origin"
+                    .to_string(),
+            ));
+        }
+        let expected_scope = direct_push.session_scope.clone();
+        let renewal = Self {
+            expected_publish_origin: publish_origin.to_string(),
+            expected_scope,
+            expected_session_id,
+            expected_transfer_id,
+            expected_uri_identity,
+            fetch,
+            state: Arc::new(Mutex::new(PushCapabilityState {
+                response,
+                issued_at: Utc::now(),
+            })),
+        };
+        renewal
+            .auth_token_internal(AuthRefreshReason::Request)
+            .map_err(PushCapabilityRenewal::transfer_error)?;
+        Ok(renewal)
+    }
+
+    fn auth_token(&self, reason: AuthRefreshReason) -> Result<String, AuthError> {
+        self.auth_token_internal(reason)
+            .map_err(|_| AuthError("GenHub rejected direct-push credential renewal".to_string()))
+    }
+
+    fn auth_token_internal(
+        &self,
+        reason: AuthRefreshReason,
+    ) -> Result<String, CapabilityRefreshFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CapabilityRefreshFailure::InvalidScope)?;
+        let should_refresh = matches!(reason, AuthRefreshReason::Unauthorized)
+            || capability_needs_refresh(&state.response, state.issued_at, Utc::now());
+        if should_refresh {
+            let response = (self.fetch)().map_err(CapabilityRefreshFailure::Fetch)?;
+            self.validate_renewal(&response)?;
+            state.response = response;
+            state.issued_at = Utc::now();
+        }
+        direct_push_access_token(&state.response)
+            .map_err(|_| CapabilityRefreshFailure::InvalidScope)
+    }
+
+    fn validate_renewal(
+        &self,
+        response: &CapabilityResponse,
+    ) -> Result<(), CapabilityRefreshFailure> {
+        self.validate_session_identity(response)?;
+        let direct_push = response
+            .direct_push
+            .as_ref()
+            .ok_or(CapabilityRefreshFailure::InvalidScope)?;
+        if response.expires_at <= Utc::now() || direct_push.token_expires_at <= Utc::now() {
+            return Err(CapabilityRefreshFailure::Expired);
+        }
+        Ok(())
+    }
+
+    fn validate_session_identity(
+        &self,
+        response: &CapabilityResponse,
+    ) -> Result<(), CapabilityRefreshFailure> {
+        let direct_push = response
+            .direct_push
+            .as_ref()
+            .ok_or(CapabilityRefreshFailure::InvalidScope)?;
+        let uri_identity_matches =
+            CloudConnectionUri::parse(&direct_push.database_uri).is_ok_and(|uri| {
+                uri.gcs_access_token().is_some() && uri.identity() == self.expected_uri_identity
+            });
+        if response.remote_url.is_some()
+            || response.transfer_id != self.expected_transfer_id
+            || direct_push.session_id != self.expected_session_id
+            || direct_push.session_scope != self.expected_scope
+            || !uri_identity_matches
+            || !same_http_origin(&self.expected_publish_origin, &direct_push.publish_url)
+        {
+            return Err(CapabilityRefreshFailure::InvalidScope);
+        }
+        Ok(())
+    }
+
+    fn capability_response(&self) -> Result<CapabilityResponse, PushGraphTransferError> {
+        let state = self.state.lock().map_err(|_| {
+            PushGraphTransferError::Protocol(
+                "direct-push credential state is unavailable".to_string(),
+            )
+        })?;
+        Ok(state.response.clone())
+    }
+
+    fn push_lease(&self) -> Result<PushTransferLease, PushGraphTransferError> {
+        let response = self.capability_response()?;
+        Ok(PushTransferLease {
+            transfer_id: response.transfer_id,
+            expires_at: response.expires_at.timestamp(),
+        })
+    }
+
+    fn ensure_fresh(&self) -> Result<PushTransferLease, PushGraphTransferError> {
+        self.auth_token_internal(AuthRefreshReason::Request)
+            .map_err(PushCapabilityRenewal::transfer_error)?;
+        self.push_lease()
+    }
+
+    fn publish(&self) -> Result<(), PushGraphTransferError> {
+        self.ensure_fresh()?;
+        let response = self.capability_response()?;
+        let direct_push = response.direct_push.as_ref().ok_or_else(|| {
+            PushGraphTransferError::Protocol(
+                "GenHub push capability did not include a direct GCS session".to_string(),
+            )
+        })?;
+        publish_direct_push(direct_push).map_err(PushGraphTransferError::Client)
+    }
+
+    fn confirm_stale_session(&self) -> Result<bool, PushGraphTransferError> {
+        let response = self.capability_response()?;
+        let direct_push = response.direct_push.as_ref().ok_or_else(|| {
+            PushGraphTransferError::Protocol(
+                "GenHub push capability did not include a direct GCS session".to_string(),
+            )
+        })?;
+        confirm_direct_push_session_stale(direct_push).map_err(PushGraphTransferError::Client)
+    }
+}
+
+impl PushCapabilityRenewal {
+    fn transfer_error(error: CapabilityRefreshFailure) -> PushGraphTransferError {
+        match error {
+            CapabilityRefreshFailure::Fetch(error) => {
+                PushGraphTransferError::Client(sanitize_capability_fetch_error(error))
+            }
+            CapabilityRefreshFailure::Expired => {
+                PushGraphTransferError::Client(RemoteClientError::AuthenticationRequired)
+            }
+            CapabilityRefreshFailure::InvalidScope => PushGraphTransferError::Protocol(
+                "GenHub changed the scope of the direct-push capability".to_string(),
+            ),
+        }
+    }
+}
+
+fn sanitize_capability_fetch_error(error: RemoteClientError) -> RemoteClientError {
+    match error {
+        RemoteClientError::InvalidRepositoryUrl(_) => {
+            RemoteClientError::InvalidRepositoryUrl("configured GenHub repository".to_string())
+        }
+        RemoteClientError::AuthenticationRequired => RemoteClientError::AuthenticationRequired,
+        RemoteClientError::StaleGraphSession => RemoteClientError::StaleGraphSession,
+        RemoteClientError::Http { status, .. } => RemoteClientError::Http {
+            status,
+            message: "direct-push credential renewal failed".to_string(),
+        },
+        RemoteClientError::ResponseDecode {
+            endpoint,
+            status,
+            declared_content_length,
+            source,
+        } => RemoteClientError::ResponseDecode {
+            endpoint,
+            status,
+            declared_content_length,
+            source: source.without_url(),
+        },
+        RemoteClientError::Request(source) => RemoteClientError::Request(source.without_url()),
+        RemoteClientError::TokenStorage(_) => RemoteClientError::TokenStorage(io::Error::other(
+            "direct-push credential storage failed",
+        )),
+    }
+}
+
+fn capability_needs_refresh(
+    response: &CapabilityResponse,
+    issued_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(direct_push) = response.direct_push.as_ref() else {
+        return true;
+    };
+    let expires_at = if response.expires_at <= direct_push.token_expires_at {
+        response.expires_at
+    } else {
+        direct_push.token_expires_at
+    };
+    let lifetime_milliseconds = expires_at
+        .signed_duration_since(issued_at)
+        .num_milliseconds()
+        .max(0);
+    let margin_milliseconds =
+        (lifetime_milliseconds / 10).min(PUSH_AUTHORIZATION_REFRESH_MARGIN_SECONDS * 1_000);
+    now >= expires_at - ChronoDuration::milliseconds(margin_milliseconds)
+}
+
+fn direct_push_access_token(response: &CapabilityResponse) -> Result<String, AuthError> {
+    let direct_push = response
+        .direct_push
+        .as_ref()
+        .ok_or_else(|| AuthError("GenHub did not return a direct-push capability".to_string()))?;
+    let connection_uri = CloudConnectionUri::parse(&direct_push.database_uri)
+        .map_err(|_| AuthError("GenHub returned an invalid direct GCS database URI".to_string()))?;
+    connection_uri
+        .gcs_access_token()
+        .map(str::to_string)
+        .ok_or_else(|| AuthError("GenHub returned an invalid direct GCS database URI".to_string()))
+}
+
+fn same_http_origin(expected_origin: &str, candidate_url: &str) -> bool {
+    let Ok(expected) = Url::parse(expected_origin) else {
+        return false;
+    };
+    let Ok(candidate) = Url::parse(candidate_url) else {
+        return false;
+    };
+    matches!(candidate.scheme(), "http" | "https")
+        && candidate.username().is_empty()
+        && candidate.password().is_none()
+        && candidate.fragment().is_none()
+        && expected.origin() == candidate.origin()
 }
 
 fn transfer_authorization(
@@ -188,11 +500,15 @@ fn transfer_authorization(
     operation: RemoteOperation,
     branch: Option<&str>,
     force: bool,
+    idempotency_token: Option<Uuid>,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn Error>>,
 ) -> Result<GraphTransferAuthorization, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
         return Ok(GraphTransferAuthorization {
-            remote_url: file_graph_url(&remote.url)?,
+            remote_url: Some(file_graph_url(&remote.url)?),
             push_lease: None,
+            direct_push: None,
+            capability_response: None,
         });
     }
     let repository = RepositoryRemote::parse(&remote.url)?;
@@ -201,15 +517,81 @@ fn transfer_authorization(
         branch,
         force,
     };
-    let capability = acquire_capability(&repository, &request, login_origin)?;
+    let capability = if operation == RemoteOperation::Push {
+        let idempotency_token = idempotency_token
+            .ok_or("GenHub push capabilities require a persisted idempotency token")?;
+        acquire_push_capability(&repository, &request, idempotency_token, interactive_login)?
+    } else {
+        acquire_capability(&repository, &request, interactive_login)?
+    };
     let push_lease = (operation == RemoteOperation::Push).then_some(PushTransferLease {
         transfer_id: capability.transfer_id,
         expires_at: capability.expires_at.timestamp(),
     });
+    let direct_push = capability.direct_push.clone();
     Ok(GraphTransferAuthorization {
-        remote_url: capability.remote_url,
+        remote_url: capability.remote_url.clone(),
         push_lease,
+        direct_push,
+        capability_response: Some(capability),
     })
+}
+
+fn push_capability_renewal(
+    remote: &Remote,
+    branch: &str,
+    force: bool,
+    session_id: Uuid,
+    expected_transfer_id: Uuid,
+    response: CapabilityResponse,
+) -> Result<PushCapabilityRenewal, PushGraphTransferError> {
+    let repository =
+        RepositoryRemote::parse(&remote.url).map_err(PushGraphTransferError::Client)?;
+    let refresh_repository = repository.clone();
+    let refresh_branch = branch.to_string();
+    let fetch: Arc<PushCapabilityFetcher> = Arc::new(move || {
+        let request = CapabilityRequest {
+            operation: RemoteOperation::Push,
+            branch: Some(&refresh_branch),
+            force,
+        };
+        acquire_push_capability(&refresh_repository, &request, session_id, |_| {
+            Err("interactive login is unavailable during a push".into())
+        })
+    });
+    PushCapabilityRenewal::new(
+        response,
+        expected_transfer_id,
+        session_id,
+        repository.origin(),
+        fetch,
+    )
+}
+
+fn acquire_existing_push_renewal(
+    remote: &Remote,
+    branch: &str,
+    force: bool,
+    session_id: Uuid,
+    expected_transfer_id: Uuid,
+) -> Result<PushCapabilityRenewal, PushGraphTransferError> {
+    let repository =
+        RepositoryRemote::parse(&remote.url).map_err(PushGraphTransferError::Client)?;
+    let request = CapabilityRequest {
+        operation: RemoteOperation::Push,
+        branch: Some(branch),
+        force,
+    };
+    let response = acquire_push_capability(&repository, &request, session_id, login_origin)
+        .map_err(PushGraphTransferError::Client)?;
+    push_capability_renewal(
+        remote,
+        branch,
+        force,
+        session_id,
+        expected_transfer_id,
+        response,
+    )
 }
 
 fn ensure_graph_remote(
@@ -237,10 +619,618 @@ fn restore_canonical_url(graph: &GraphConnection, remote: &Remote) {
 }
 
 fn is_authorization_error(error: &SqlError) -> bool {
-    matches!(
-        error,
-        SqlError::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_AUTH
+    error.remote_failure_kind() == Some(RemoteFailureKind::Authorization)
+}
+
+fn is_stale_accepted_session_error(error: &SqlError) -> bool {
+    error.remote_failure_kind() == Some(RemoteFailureKind::StaleSession)
+}
+
+fn is_non_fast_forward_push_error(error: &SqlError) -> bool {
+    error.remote_failure_kind() == Some(RemoteFailureKind::NonFastForward)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PushGraphTransferError {
+    #[error("{phase} failed: {source}")]
+    Database {
+        phase: &'static str,
+        #[source]
+        source: SqlError,
+    },
+    #[error(transparent)]
+    Client(#[from] RemoteClientError),
+    #[error("GenHub confirmed the direct GCS graph session is stale")]
+    StaleSessionConfirmed,
+    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
+    NonFastForward,
+    #[error("{primary}; GenHub could not verify the stale session: {confirmation}")]
+    StaleSessionCheckFailed {
+        primary: Box<PushGraphTransferError>,
+        confirmation: Box<PushGraphTransferError>,
+    },
+    #[error("object storage reported {0}")]
+    StorageFailure(StorageFailure),
+    #[error("{primary}; object storage also reported {failure}")]
+    Storage {
+        #[source]
+        primary: Box<PushGraphTransferError>,
+        failure: StorageFailure,
+    },
+    #[error("{primary}; local server cleanup also failed: {cleanup}")]
+    Cleanup {
+        #[source]
+        primary: Box<PushGraphTransferError>,
+        cleanup: String,
+    },
+    #[error("{0}")]
+    Protocol(String),
+}
+
+fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
+    match error {
+        PushGraphTransferError::Database {
+            phase,
+            source: SqlError::SqliteFailure(code, _),
+        } => format!("{phase} (SQLite code {})", code.extended_code),
+        PushGraphTransferError::Database { phase, .. } => format!("{phase} (database error)"),
+        PushGraphTransferError::StorageFailure(failure) => {
+            format!("object storage: {failure}")
+        }
+        PushGraphTransferError::Storage { primary, failure } => {
+            format!(
+                "{}; object storage: {failure}",
+                safe_graph_error_context(primary)
+            )
+        }
+        PushGraphTransferError::Cleanup { primary, cleanup } => {
+            format!(
+                "{}; additionally {cleanup}",
+                safe_graph_error_context(primary)
+            )
+        }
+        PushGraphTransferError::Client(RemoteClientError::Http { status, .. }) => {
+            format!("remote request HTTP {status}")
+        }
+        PushGraphTransferError::Client(_) => "remote client request".to_string(),
+        PushGraphTransferError::StaleSessionConfirmed
+        | PushGraphTransferError::StaleSessionCheckFailed { .. } => {
+            "stale direct GCS session recovery".to_string()
+        }
+        PushGraphTransferError::NonFastForward => {
+            "Dolt rejected a non-fast-forward branch update".to_string()
+        }
+        PushGraphTransferError::Protocol(_) => "remote protocol response".to_string(),
+    }
+}
+
+impl PushGraphTransferError {
+    fn database(phase: &'static str, source: SqlError) -> Self {
+        Self::Database { phase, source }
+    }
+
+    fn is_authorization_error(&self) -> bool {
+        match self {
+            Self::Database { source, .. } => is_authorization_error(source),
+            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => {
+                primary.is_authorization_error()
+            }
+            Self::StorageFailure(_) => false,
+            Self::Client(RemoteClientError::Http { status, .. }) => {
+                matches!(*status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+            }
+            Self::Client(_)
+            | Self::StaleSessionConfirmed
+            | Self::NonFastForward
+            | Self::StaleSessionCheckFailed { .. }
+            | Self::Protocol(_) => false,
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        match self {
+            Self::Client(RemoteClientError::Http { status, .. }) => *status == StatusCode::CONFLICT,
+            Self::Client(RemoteClientError::StaleGraphSession)
+            | Self::StaleSessionConfirmed
+            | Self::StaleSessionCheckFailed { .. } => false,
+            Self::StorageFailure(_) => true,
+            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => primary.is_terminal(),
+            Self::Protocol(_) => true,
+            Self::Database { .. } | Self::Client(_) | Self::NonFastForward => false,
+        }
+    }
+
+    fn is_stale_session(&self) -> bool {
+        match self {
+            Self::Database { source, .. } => is_stale_accepted_session_error(source),
+            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => {
+                primary.is_stale_session()
+            }
+            Self::StorageFailure(_) => false,
+            Self::Client(RemoteClientError::StaleGraphSession) => true,
+            Self::Client(_)
+            | Self::StaleSessionConfirmed
+            | Self::NonFastForward
+            | Self::StaleSessionCheckFailed { .. }
+            | Self::Protocol(_) => false,
+        }
+    }
+
+    fn is_non_fast_forward(&self) -> bool {
+        match self {
+            Self::NonFastForward => true,
+            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => {
+                primary.is_non_fast_forward()
+            }
+            _ => false,
+        }
+    }
+}
+
+fn close_direct_push_server(
+    mut server: RemoteServer,
+    progress: &GraphUploadProgressReporter,
+    preserve_phase: bool,
+) -> Result<(), PushGraphTransferError> {
+    let _heartbeat = if preserve_phase {
+        progress.heartbeat_preserving_phase("closing the direct GCS graph session")
+    } else {
+        progress.heartbeat("closing the direct GCS graph session")
+    };
+    let quiesce_result = server
+        .quiesce()
+        .map_err(|error| PushGraphTransferError::database("quiescing direct GCS server", error));
+    let storage_failure = server.first_storage_error();
+    let close_result = server
+        .close()
+        .map_err(|error| PushGraphTransferError::database("closing direct GCS server", error));
+    let cleanup_result = match (quiesce_result, close_result) {
+        (Err(quiesce_error), Err(close_error)) => Err(PushGraphTransferError::Cleanup {
+            primary: Box::new(quiesce_error),
+            cleanup: safe_graph_error_context(&close_error),
+        }),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    };
+    match (cleanup_result, storage_failure) {
+        (Err(error), Some(failure)) => Err(PushGraphTransferError::Storage {
+            primary: Box::new(error),
+            failure,
+        }),
+        (Err(error), None) => Err(error),
+        (Ok(()), Some(failure)) => Err(PushGraphTransferError::StorageFailure(failure)),
+        (Ok(()), None) => Ok(()),
+    }
+}
+
+fn preserve_graph_error_after_close(
+    primary_error: PushGraphTransferError,
+    close_result: Result<(), PushGraphTransferError>,
+) -> PushGraphTransferError {
+    match close_result {
+        Err(PushGraphTransferError::StorageFailure(failure)) => PushGraphTransferError::Storage {
+            primary: Box::new(primary_error),
+            failure,
+        },
+        Err(cleanup) => PushGraphTransferError::Cleanup {
+            primary: Box::new(primary_error),
+            cleanup: safe_graph_error_context(&cleanup),
+        },
+        Ok(()) => primary_error,
+    }
+}
+
+fn close_server_after_graph_failure(
+    server: RemoteServer,
+    progress: &GraphUploadProgressReporter,
+    primary_error: PushGraphTransferError,
+) -> PushGraphTransferError {
+    progress.waiting_for_local_server_cleanup();
+    preserve_graph_error_after_close(
+        primary_error,
+        close_direct_push_server(server, progress, true),
     )
+}
+
+struct DirectGraphPushRequest<'a> {
+    graph: &'a GraphConnection,
+    remote: &'a Remote,
+    branch: &'a str,
+    force: bool,
+    destination_hash: &'a DoltHashId,
+    renewal: &'a PushCapabilityRenewal,
+    attempt: usize,
+    progress: &'a TransferProgress,
+}
+
+fn push_graph_through_direct_session(
+    request: DirectGraphPushRequest<'_>,
+) -> Result<(), PushGraphTransferError> {
+    let graph_progress = request.progress.graph_reporter(request.attempt, 2);
+    let result = push_graph_through_direct_session_inner(request, &graph_progress);
+    if let Err(error) = &result {
+        if error.is_non_fast_forward() {
+            graph_progress.failed_silently();
+        } else {
+            graph_progress.failed();
+        }
+    }
+    result
+}
+
+fn push_graph_through_direct_session_inner(
+    request: DirectGraphPushRequest<'_>,
+    graph_progress: &GraphUploadProgressReporter,
+) -> Result<(), PushGraphTransferError> {
+    let DirectGraphPushRequest {
+        graph,
+        remote,
+        branch,
+        force,
+        destination_hash,
+        renewal,
+        attempt,
+        progress,
+    } = request;
+    let response = {
+        let _heartbeat = progress.heartbeat("fetching direct-push session capability");
+        renewal.capability_response()?
+    };
+    let capability = response.direct_push.as_ref().ok_or_else(|| {
+        PushGraphTransferError::Protocol(
+            "GenHub push capability did not include a direct GCS session".to_string(),
+        )
+    })?;
+    if capability.session_id != renewal.expected_session_id {
+        return Err(PushGraphTransferError::Protocol(
+            "GenHub returned a direct-push session that does not match the idempotency token"
+                .to_string(),
+        ));
+    }
+    let scope = SessionScope::new(
+        &capability.session_scope.principal,
+        &capability.session_scope.target_database,
+        &capability.session_scope.operations,
+    )
+    .map_err(|error| PushGraphTransferError::database("creating session scope", error))?;
+    let operation_id = SessionOperationId::from_request("POST", "/default.db/commit", b"")
+        .map_err(|error| {
+            PushGraphTransferError::database("creating session operation ID", error)
+        })?;
+    progress.println(&format!(
+        "Opening direct GCS graph session (attempt {attempt}/2)..."
+    ));
+    let renewal_callback = renewal.clone();
+    let graph_progress_callback = graph_progress.clone();
+    let session =
+        BlockCacheSessionOptions::for_uri(capability.session_id.to_string(), scope, operation_id)
+            .map_err(|error| PushGraphTransferError::database("attaching GCS session", error))?
+            .upload_concurrency(DIRECT_GCS_UPLOAD_CONCURRENCY)
+            .auth_callback(move |_storage, _account, _container, reason| {
+                renewal_callback.auth_token(reason)
+            })
+            .upload_progress_callback(move |progress| graph_progress_callback.report(progress));
+    let options = RemoteServerOptions::new().blockcache_session(session);
+    let connection_uri = CloudConnectionUri::parse(&capability.database_uri).map_err(|_| {
+        PushGraphTransferError::Protocol(
+            "GenHub returned an invalid direct GCS database URI".to_string(),
+        )
+    })?;
+    if connection_uri.gcs_access_token().is_none() {
+        return Err(PushGraphTransferError::Protocol(
+            "GenHub returned an invalid direct GCS database URI".to_string(),
+        ));
+    }
+    let mut local_server = {
+        let _heartbeat = progress.heartbeat("opening the direct GCS graph database");
+        RemoteServer::start_with_options(Path::new(connection_uri.as_str()), &options)
+            .map_err(|error| PushGraphTransferError::database("opening direct GCS server", error))?
+    };
+    let operation_status_result = {
+        let _heartbeat = progress.heartbeat("checking direct-push session status");
+        local_server.operation_status()
+    };
+    let operation_status = match operation_status_result {
+        Ok(operation_status) => operation_status,
+        Err(error) => {
+            return Err(close_server_after_graph_failure(
+                local_server,
+                graph_progress,
+                PushGraphTransferError::database("reading direct-push session status", error),
+            ));
+        }
+    };
+    match operation_status {
+        SessionOperationStatus::Accepted | SessionOperationStatus::Committed => {
+            progress.println("Reusing accepted graph checkpoint; verifying the staged branch...");
+            let validation = {
+                let _heartbeat = progress.heartbeat("validating the staged graph branch");
+                validate_direct_session_branch(&local_server, branch, destination_hash)
+            };
+            if let Err(error) = validation {
+                graph_progress.finish();
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    error,
+                ));
+            }
+            graph_progress.finish();
+            close_direct_push_server(local_server, graph_progress, false)?;
+            progress.println("Accepted graph checkpoint is ready for publication.");
+        }
+        SessionOperationStatus::New => {
+            progress.println(&format!(
+                "Staging graph database to GCS (attempt {attempt}/2)..."
+            ));
+            let local_remote_url =
+                local_server.database_url(&capability.session_scope.target_database);
+            let configure_remote = {
+                let _heartbeat = progress.heartbeat("configuring the loopback Dolt remote");
+                ensure_graph_remote(graph, &remote.name, &local_remote_url)
+            };
+            if let Err(error) = configure_remote {
+                graph_progress.finish();
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    PushGraphTransferError::database("configuring loopback Dolt remote", error),
+                ));
+            }
+            log::debug!(
+                "Planning destination-missing Dolt chunks before the first logical chunk upload...",
+            );
+            let push_result = {
+                let _heartbeat =
+                    progress.heartbeat("running Dolt push through loopback RemoteServer");
+                push_graph_branch_with_progress(graph, &remote.name, branch, force, graph_progress)
+            };
+            if let Err(error) = push_result {
+                graph_progress.finish();
+                let push_error = if is_non_fast_forward_push_error(&error) {
+                    PushGraphTransferError::NonFastForward
+                } else {
+                    PushGraphTransferError::database(
+                        "running Dolt push through loopback RemoteServer",
+                        error,
+                    )
+                };
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    push_error,
+                ));
+            }
+            let validation = {
+                let _heartbeat = progress.heartbeat("validating the staged graph branch");
+                validate_direct_session_branch(&local_server, branch, destination_hash)
+            };
+            if let Err(error) = validation {
+                graph_progress.finish();
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    error,
+                ));
+            }
+            let stage_result = {
+                let _heartbeat =
+                    progress.heartbeat("staging graph blocks and checkpointing the session");
+                local_server.stage_request().map_err(|error| {
+                    PushGraphTransferError::database("staging direct-push operation", error)
+                })
+            };
+            if let Err(primary_error) = stage_result {
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    primary_error,
+                ));
+            }
+            let close_result = close_direct_push_server(local_server, graph_progress, false);
+            graph_progress.finish();
+            close_result?;
+            progress.println("Graph staging complete.");
+        }
+        SessionOperationStatus::Failed => {
+            graph_progress.finish();
+            return Err(close_server_after_graph_failure(
+                local_server,
+                graph_progress,
+                PushGraphTransferError::Protocol(
+                    "GenHub direct-push session has already failed".to_string(),
+                ),
+            ));
+        }
+        SessionOperationStatus::Conflict => {
+            graph_progress.finish();
+            return Err(close_server_after_graph_failure(
+                local_server,
+                graph_progress,
+                PushGraphTransferError::Protocol(
+                    "GenHub direct-push session conflicts with another operation".to_string(),
+                ),
+            ));
+        }
+    }
+    progress.println("Publishing graph manifest...");
+    {
+        let _heartbeat = progress.heartbeat("publishing the graph manifest to GenHub");
+        renewal.publish()?;
+    }
+    progress.println("Graph manifest published.");
+    Ok(())
+}
+
+fn validate_direct_session_branch(
+    local_server: &RemoteServer,
+    branch: &str,
+    destination_hash: &DoltHashId,
+) -> Result<(), PushGraphTransferError> {
+    let Some(connection) = local_server.database_connection() else {
+        return Err(PushGraphTransferError::Protocol(
+            "GenHub direct-push server has no inspectable database connection".to_string(),
+        ));
+    };
+    let staged_hash: DoltHashId = connection
+        .query_row("SELECT dolt_hashof(?1)", [branch], |row| row.get(0))
+        .map_err(|error| {
+            PushGraphTransferError::Protocol(format!(
+                "GenHub direct-push session has no valid target branch: {error:?}"
+            ))
+        })?;
+    if staged_hash != *destination_hash {
+        return Err(PushGraphTransferError::Protocol(format!(
+            "GenHub direct-push session branch '{branch}' does not match the local destination"
+        )));
+    }
+    Ok(())
+}
+
+struct PushGraphTransferRequest<'a> {
+    graph: &'a GraphConnection,
+    remote: &'a Remote,
+    branch: &'a str,
+    force: bool,
+    idempotency_token: Uuid,
+    expected_transfer_id: Option<Uuid>,
+    destination_hash: &'a DoltHashId,
+    progress: &'a TransferProgress,
+}
+
+fn run_push_graph_transfer(
+    request: PushGraphTransferRequest<'_>,
+) -> Result<PushCapabilityRenewal, Box<dyn Error>> {
+    let PushGraphTransferRequest {
+        graph,
+        remote,
+        branch,
+        force,
+        idempotency_token,
+        expected_transfer_id,
+        destination_hash,
+        progress,
+    } = request;
+    let mut last_error = None;
+    let mut expected_session_identity: Option<PushCapabilityRenewal> = None;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            progress.println("Retrying direct GCS graph transfer (attempt 2/2)...");
+        }
+        let authorization = {
+            let _heartbeat = progress.heartbeat("requesting GenHub direct-push capability");
+            if attempt == 0 {
+                transfer_authorization(
+                    remote,
+                    RemoteOperation::Push,
+                    Some(branch),
+                    force,
+                    Some(idempotency_token),
+                    login_origin,
+                )
+            } else {
+                transfer_authorization(
+                    remote,
+                    RemoteOperation::Push,
+                    Some(branch),
+                    force,
+                    Some(idempotency_token),
+                    |_| Err("interactive login is unavailable during a push retry".into()),
+                )
+            }
+        }?;
+        let Some(capability) = authorization.direct_push.as_ref() else {
+            restore_canonical_url(graph, remote);
+            return Err(Box::new(PushGraphTransferError::Protocol(
+                "GenHub push capability did not include a direct GCS session".to_string(),
+            )));
+        };
+        let response = authorization
+            .capability_response
+            .clone()
+            .ok_or_else(|| "GenHub push capability response was missing".to_string())?;
+        if let Some(expected_session_identity) = expected_session_identity.as_ref() {
+            expected_session_identity
+                .validate_session_identity(&response)
+                .map_err(PushCapabilityRenewal::transfer_error)?;
+        }
+        let expected_transfer_id = expected_transfer_id.unwrap_or(
+            authorization
+                .push_lease
+                .ok_or_else(|| "GenHub push capability did not include a lease".to_string())?
+                .transfer_id,
+        );
+        let renewal = push_capability_renewal(
+            remote,
+            branch,
+            force,
+            idempotency_token,
+            expected_transfer_id,
+            response,
+        )?;
+        if expected_session_identity.is_none() {
+            expected_session_identity = Some(renewal.clone());
+        }
+        if capability.session_id != idempotency_token {
+            restore_canonical_url(graph, remote);
+            return Err(Box::new(PushGraphTransferError::Protocol(
+                "GenHub returned a direct-push session that does not match the idempotency token"
+                    .to_string(),
+            )));
+        }
+        let transfer_result = push_graph_through_direct_session(DirectGraphPushRequest {
+            graph,
+            remote,
+            branch,
+            force,
+            destination_hash,
+            renewal: &renewal,
+            attempt: attempt + 1,
+            progress,
+        });
+        match transfer_result {
+            Ok(()) => {
+                restore_canonical_url(graph, remote);
+                return Ok(renewal);
+            }
+            Err(error) if attempt == 0 && error.is_authorization_error() => {
+                restore_canonical_url(graph, remote);
+                last_error = Some(error);
+            }
+            Err(error) if error.is_stale_session() => {
+                restore_canonical_url(graph, remote);
+                if matches!(
+                    &error,
+                    PushGraphTransferError::Client(RemoteClientError::StaleGraphSession)
+                ) {
+                    return Err(Box::new(PushGraphTransferError::StaleSessionConfirmed));
+                }
+                let confirmation = {
+                    let _heartbeat =
+                        progress.heartbeat("confirming the stale graph session with GenHub");
+                    renewal.confirm_stale_session()
+                };
+                return match confirmation {
+                    Ok(true) => Err(Box::new(PushGraphTransferError::StaleSessionConfirmed)),
+                    Ok(false) => Err(Box::new(error)),
+                    Err(confirmation) => {
+                        Err(Box::new(PushGraphTransferError::StaleSessionCheckFailed {
+                            primary: Box::new(error),
+                            confirmation: Box::new(confirmation),
+                        }))
+                    }
+                };
+            }
+            Err(error) => {
+                restore_canonical_url(graph, remote);
+                return Err(Box::new(error));
+            }
+        }
+    }
+    restore_canonical_url(graph, remote);
+    Err(Box::new(
+        last_error.expect("should retain authorization error"),
+    ))
 }
 
 fn resolve_remote(
@@ -280,6 +1270,34 @@ fn connect_persisted_branch(
     Ok(persisted_branch)
 }
 
+fn persist_refreshed_push_lease(
+    operation: &mut RemoteOperationRecord,
+    config: &ConfigConnection,
+    destination_hash: &DoltHashId,
+    renewal: &PushCapabilityRenewal,
+) -> Result<(), Box<dyn Error>> {
+    let lease = renewal.ensure_fresh()?;
+    if operation
+        .transfer_id
+        .is_some_and(|transfer_id| transfer_id != lease.transfer_id)
+    {
+        return Err(Box::new(PushGraphTransferError::Protocol(
+            "GenHub changed the active push transfer ID".to_string(),
+        )));
+    }
+    if operation.transfer_id != Some(lease.transfer_id)
+        || operation.transfer_expires_at != Some(lease.expires_at)
+    {
+        operation.set_push_destination(
+            config,
+            destination_hash,
+            lease.transfer_id,
+            lease.expires_at,
+        )?;
+    }
+    Ok(())
+}
+
 fn run_graph_transfer(
     graph: &GraphConnection,
     remote: &Remote,
@@ -289,8 +1307,13 @@ fn run_graph_transfer(
     mut transfer: impl FnMut() -> Result<(), SqlError>,
 ) -> Result<Option<PushTransferLease>, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
-        let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
-        ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
+        let authorization =
+            transfer_authorization(remote, operation, Some(branch), force, None, login_origin)?;
+        let remote_url = authorization
+            .remote_url
+            .as_deref()
+            .ok_or("file remote did not resolve to a graph database URL")?;
+        ensure_graph_remote(graph, &remote.name, remote_url)?;
         let result = transfer();
         restore_canonical_url(graph, remote);
         result?;
@@ -299,8 +1322,17 @@ fn run_graph_transfer(
 
     let mut last_error = None;
     for attempt in 0..2 {
-        let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
-        ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
+        let authorization =
+            transfer_authorization(remote, operation, Some(branch), force, None, login_origin)?;
+        let Some(remote_url) = authorization.remote_url.as_deref() else {
+            restore_canonical_url(graph, remote);
+            return Err(format!(
+                "GenHub {:?} capability did not include a graph remote URL",
+                operation
+            )
+            .into());
+        };
+        ensure_graph_remote(graph, &remote.name, remote_url)?;
         match transfer() {
             Ok(()) => {
                 restore_canonical_url(graph, remote);
@@ -334,6 +1366,26 @@ fn push_graph_branch(
     }
 }
 
+fn push_graph_branch_with_progress(
+    graph: &GraphConnection,
+    remote_name: &str,
+    branch: &str,
+    force: bool,
+    progress: &GraphUploadProgressReporter,
+) -> Result<(), SqlError> {
+    let progress_callback = progress.clone();
+    let push_result = {
+        let _progress_callback = graph.dolt_push_progress_callback(move |event| {
+            progress_callback.report_dolt_progress(event);
+        })?;
+        push_graph_branch(graph, remote_name, branch, force)
+    };
+    if !matches!(&push_result, Err(error) if is_non_fast_forward_push_error(error)) {
+        progress.finish_dolt_progress(push_result.is_ok());
+    }
+    push_result
+}
+
 fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
     asset
         .checksum
@@ -347,18 +1399,24 @@ fn materialized_asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn E
     }
 }
 
-fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String), std::io::Error> {
+fn calculate_upload_checksums(
+    path: &Path,
+    progress: &AssetUploadProgressReporter,
+) -> Result<(Sha256Hash, String, String), std::io::Error> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut sha256 = Sha256::new();
     let mut md5 = Md5::new();
     let mut crc32c = 0;
+    let mut bytes_read = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let length = reader.read(&mut buffer)?;
         if length == 0 {
             break;
         }
+        bytes_read += length as u64;
+        progress.checksum_bytes(bytes_read);
         sha256.update(&buffer[..length]);
         md5.update(&buffer[..length]);
         crc32c = crc32c_append(crc32c, &buffer[..length]);
@@ -370,11 +1428,31 @@ fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String
     ))
 }
 
+fn progress_asset_name(asset: &AssetRef, source_path: &Path) -> String {
+    let name = asset
+        .logical_path
+        .as_deref()
+        .or_else(|| source_path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or("asset");
+    name.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn upload_asset(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
+    index: usize,
+    total: usize,
+    progress: &TransferProgress,
 ) -> Result<AssetUploadReceipt, Box<dyn Error>> {
     let relative_path = LocalAssetUri::path_from_uri(&asset.uri)
         .ok_or_else(|| format!("Invalid local asset URI: {}", asset.uri))?;
@@ -392,14 +1470,49 @@ fn upload_asset(
             asset.logical_path.as_deref(),
         )?
     };
-    let (actual_checksum, md5, crc32c) =
-        calculate_upload_checksums(&source_path).map_err(|error| {
-            format!(
-                "Unable to read asset {} at {}: {error}",
-                asset.id,
-                source_path.display()
-            )
-        })?;
+    let length = fs::metadata(&source_path)?.len();
+    let progress = progress.asset_reporter(
+        index,
+        total,
+        progress_asset_name(asset, &source_path),
+        length,
+    );
+    let result = upload_asset_with_progress(
+        client,
+        asset,
+        url,
+        source_path,
+        expected_checksum,
+        length,
+        &progress,
+    );
+    if result.is_err() {
+        progress.failed();
+    }
+    result
+}
+
+fn upload_asset_with_progress(
+    client: &Client,
+    asset: &AssetRef,
+    url: &str,
+    source_path: PathBuf,
+    expected_checksum: Sha256Hash,
+    length: u64,
+    progress: &AssetUploadProgressReporter,
+) -> Result<AssetUploadReceipt, Box<dyn Error>> {
+    progress.checksum_started();
+    let (actual_checksum, md5, crc32c) = {
+        let _heartbeat = progress.heartbeat("scanning and checksumming the local asset");
+        calculate_upload_checksums(&source_path, progress)
+    }
+    .map_err(|error| {
+        format!(
+            "Unable to read asset {} at {}: {error}",
+            asset.id,
+            source_path.display()
+        )
+    })?;
     if actual_checksum != expected_checksum {
         return Err(format!(
             "Asset {} at {} does not match its recorded checksum",
@@ -409,17 +1522,31 @@ fn upload_asset(
         .into());
     }
     let file = fs::File::open(&source_path)?;
-    let length = file.metadata()?.len();
-    let response = client
-        .put(url)
-        .header("content-type", "application/octet-stream")
-        // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
-        // composite objects (those > 5GB)
-        .header("content-md5", &md5)
-        .header("x-goog-if-generation-match", "0")
-        .body(Body::sized(file, length))
-        .send()
-        .map_err(|error| error.without_url())?;
+    if file.metadata()?.len() != length {
+        return Err(format!(
+            "Asset {} at {} changed size while its checksum was being verified",
+            asset.id,
+            source_path.display()
+        )
+        .into());
+    }
+    progress.checksum_verified();
+    progress.upload_started();
+    let request_body = UploadBodyReader::new(file, progress.clone());
+    let response = {
+        let _heartbeat =
+            progress.heartbeat("sending the asset request and waiting for storage acceptance");
+        client
+            .put(url)
+            .header("content-type", "application/octet-stream")
+            // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
+            // composite objects (those > 5GB)
+            .header("content-md5", &md5)
+            .header("x-goog-if-generation-match", "0")
+            .body(Body::sized(request_body, length))
+            .send()
+            .map_err(|error| error.without_url())?
+    };
     if !response.status().is_success()
         && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
     {
@@ -429,6 +1556,11 @@ fn upload_asset(
             response.status()
         )
         .into());
+    }
+    if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+        progress.upload_already_present();
+    } else {
+        progress.upload_accepted();
     }
     Ok(AssetUploadReceipt {
         id: asset.id,
@@ -454,6 +1586,11 @@ struct AssetTransferTarget<'transfer> {
     branch: &'transfer str,
     history_ref: &'transfer str,
     range: AssetTransferRange<'transfer>,
+}
+
+struct AssetTransferRun<'transfer> {
+    target: AssetTransferTarget<'transfer>,
+    progress: &'transfer TransferProgress,
 }
 
 /// This is effectively a dirty file check. On clones/pulls we want to update
@@ -1072,9 +2209,11 @@ fn transfer_assets(
     workspace: &Workspace,
     remote: &Remote,
     operation: RemoteOperation,
-    target: AssetTransferTarget<'_>,
+    request: AssetTransferRun<'_>,
     mut complete_commit: impl FnMut(&DoltHashId) -> Result<(), Box<dyn Error>>,
+    mut before_transfer: impl FnMut() -> Result<(), Box<dyn Error>>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
+    let AssetTransferRun { target, progress } = request;
     let commit_hash = hash_of(graph, target.history_ref)?;
     let range_assets: HashMap<_, _> =
         AssetRef::get_cumulative_assets_at(graph, target.range.from_commit, Some(&commit_hash))?
@@ -1152,16 +2291,34 @@ fn transfer_assets(
     }
 
     let repository = RepositoryRemote::parse(&remote.url)?;
-    let response = acquire_asset_transfers(
-        &repository,
-        &AssetTransferRequest {
-            operation,
-            branch: target.branch,
-            from_commit: target.range.from_commit,
-            to_commit: Some(&commit_hash),
-        },
-        login_origin,
-    )?;
+    if operation == RemoteOperation::Push {
+        let local_asset_count = assets.len();
+        let asset_label = if local_asset_count == 1 {
+            "asset"
+        } else {
+            "assets"
+        };
+        progress.println(&format!(
+            "Checking {local_asset_count} local {asset_label} for transfer..."
+        ));
+        {
+            let _heartbeat = progress.heartbeat("refreshing the push lease before asset transfer");
+            before_transfer()?;
+        }
+    }
+    let response = {
+        let _heartbeat = progress.heartbeat("requesting GenHub asset transfer URLs");
+        acquire_asset_transfers(
+            &repository,
+            &AssetTransferRequest {
+                operation,
+                branch: target.branch,
+                from_commit: target.range.from_commit,
+                to_commit: Some(&commit_hash),
+            },
+            login_origin,
+        )?
+    };
     let client = Client::new();
     for transfer in &response.assets {
         if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
@@ -1173,13 +2330,41 @@ fn transfer_assets(
         }
     }
     if operation == RemoteOperation::Push {
+        let upload_total = response
+            .assets
+            .iter()
+            .filter(|transfer| assets.contains_key(&transfer.id))
+            .count();
+        if upload_total == 0 {
+            progress.println("No new assets need uploading.");
+        } else {
+            let asset_label = if upload_total == 1 { "asset" } else { "assets" };
+            progress.println(&format!(
+                "Preparing {upload_total} {asset_label} for upload..."
+            ));
+        }
         let mut assets = assets;
         let mut upload_receipts = Vec::new();
+        let mut upload_index = 0;
         for transfer in response.assets {
             let Some(asset) = assets.remove(&transfer.id) else {
                 continue;
             };
-            upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
+            upload_index += 1;
+            {
+                let _heartbeat =
+                    progress.heartbeat("refreshing the push lease before asset upload");
+                before_transfer()?;
+            }
+            upload_receipts.push(upload_asset(
+                &client,
+                workspace,
+                &asset,
+                &transfer.url,
+                upload_index,
+                upload_total,
+                progress,
+            )?);
         }
         if !assets.is_empty() {
             return Err(format!(
@@ -1244,8 +2429,19 @@ pub fn clone_into_workspace(
     };
     let mut clone_result = None;
     for attempt in 0..attempt_count {
-        let authorization = transfer_authorization(remote, RemoteOperation::Clone, None, false)?;
-        match clone_remote(&graph, &authorization.remote_url) {
+        let authorization = transfer_authorization(
+            remote,
+            RemoteOperation::Clone,
+            None,
+            false,
+            None,
+            login_origin,
+        )?;
+        let remote_url = authorization
+            .remote_url
+            .as_deref()
+            .ok_or("GenHub clone capability did not include a graph remote URL")?;
+        match clone_remote(&graph, remote_url) {
             Ok(()) => {
                 clone_result = Some(Ok(()));
                 break;
@@ -1284,24 +2480,29 @@ pub fn clone_into_workspace(
     operation.set_destination(config, &destination_hash)?;
     let assets_transfer_checkpoint = operation.assets_transfer_checkpoint;
     let previous_hash = operation.from_commit;
+    let progress = TransferProgress::stderr();
     transfer_assets(
         &graph,
         workspace,
         remote,
         RemoteOperation::Clone,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &branch,
-            range: AssetTransferRange {
-                from_commit: assets_transfer_checkpoint.as_ref(),
-                previous_hash: previous_hash.as_ref(),
-                materialize: true,
+        AssetTransferRun {
+            target: AssetTransferTarget {
+                branch: &branch,
+                history_ref: &branch,
+                range: AssetTransferRange {
+                    from_commit: assets_transfer_checkpoint.as_ref(),
+                    previous_hash: previous_hash.as_ref(),
+                    materialize: true,
+                },
             },
+            progress: &progress,
         },
         |commit_hash| {
             operation.advance_assets_transfer_checkpoint(config, commit_hash)?;
             Ok(())
         },
+        || Ok(()),
     )?;
     operation.complete(config)?;
     Ok(branch)
@@ -1331,6 +2532,9 @@ pub enum RemotePushError {
     /// Dolt could not transfer the graph branch.
     #[error("Graph transfer failed: {0}")]
     GraphTransfer(#[source] Box<dyn Error>),
+    /// The remote branch has commits that are not in the local branch.
+    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
+    NonFastForward,
     /// The branch's assets could not be transferred.
     #[error("Asset transfer failed: {0}")]
     AssetTransfer(#[source] Box<dyn Error>),
@@ -1342,12 +2546,27 @@ pub enum RemotePushError {
     IncompleteTransferLease { branch: String },
 }
 
+fn remote_push_graph_error(error: Box<dyn Error>) -> RemotePushError {
+    if error
+        .downcast_ref::<SqlError>()
+        .is_some_and(is_non_fast_forward_push_error)
+        || error
+            .downcast_ref::<PushGraphTransferError>()
+            .is_some_and(PushGraphTransferError::is_non_fast_forward)
+    {
+        RemotePushError::NonFastForward
+    } else {
+        RemotePushError::GraphTransfer(error)
+    }
+}
+
 pub fn execute_push(
     workspace: &Workspace,
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
     force: bool,
 ) -> Result<(), RemotePushError> {
+    let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let intended_branch = Defaults::get_current_branch(&config);
     let graph = get_connection_for_branch(workspace.graph_db_path()?, intended_branch.as_deref())?;
@@ -1361,6 +2580,10 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
+    progress.println(&format!(
+        "Preparing push of branch '{branch}' to '{}'...",
+        remote.name,
+    ));
     // A missing or stale tracking ref only makes the transfer conservatively include more assets.
     // Force pushes cannot use the tracking ref as a lower bound because they may replace history.
     let tracking_ref = format!("{}/{branch}", remote.name);
@@ -1376,7 +2599,7 @@ pub fn execute_push(
             force,
             || push_graph_branch(&graph, &remote.name, &branch, force),
         )
-        .map_err(RemotePushError::GraphTransfer)?;
+        .map_err(remote_push_graph_error)?;
         None
     } else {
         let mut operation = RemoteOperationRecord::begin_or_resume(
@@ -1386,8 +2609,19 @@ pub fn execute_push(
             StoredRemoteOperationKind::Push,
             previous_hash.as_ref(),
         )?;
+        if operation.push_session_id.is_none() {
+            operation.set_push_session_id(&config, Uuid::new_v4())?;
+        }
         let destination_hash = hash_of(&graph, &branch)?;
-        let transfer_lease = match (
+        let same_destination = operation
+            .to_commit
+            .as_ref()
+            .is_some_and(|recorded_destination| recorded_destination == &destination_hash);
+        let destination_changed = operation
+            .to_commit
+            .as_ref()
+            .is_some_and(|recorded_destination| recorded_destination != &destination_hash);
+        let existing_transfer_lease = match (
             operation.to_commit.as_ref(),
             operation.transfer_id,
             operation.transfer_expires_at,
@@ -1396,83 +2630,191 @@ pub fn execute_push(
                 if recorded_destination == &destination_hash
                     && expires_at > Utc::now().timestamp() =>
             {
-                PushTransferLease {
+                Some(PushTransferLease {
                     transfer_id,
                     expires_at,
-                }
+                })
             }
-            (Some(_), Some(_), Some(_)) | (None, None, None) => {
-                let graph_transfer = run_graph_transfer(
-                    &graph,
-                    &remote,
-                    RemoteOperation::Push,
-                    &branch,
-                    force,
-                    || push_graph_branch(&graph, &remote.name, &branch, force),
-                );
-                let transfer_lease = match graph_transfer {
-                    Ok(Some(transfer_lease)) => transfer_lease,
-                    Ok(None) => {
-                        return Err(RemotePushError::MissingTransferId);
-                    }
-                    Err(error) => {
-                        if operation.to_commit.is_none()
-                            && let Err(metadata_error) = operation.fail(&config)
-                        {
-                            eprintln!(
-                                "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
-                            );
-                        }
-                        return Err(RemotePushError::GraphTransfer(error));
-                    }
-                };
-                operation.set_push_destination(
-                    &config,
-                    &destination_hash,
-                    transfer_lease.transfer_id,
-                    transfer_lease.expires_at,
-                )?;
-                transfer_lease
-            }
+            (Some(_), Some(_), Some(_)) | (None, None, None) => None,
             _ => {
                 return Err(RemotePushError::IncompleteTransferLease { branch });
             }
         };
-        Some((operation, transfer_lease, destination_hash))
+        if destination_changed {
+            operation.set_push_session_id(&config, Uuid::new_v4())?;
+        }
+        let renewal = if let Some(transfer_lease) = existing_transfer_lease {
+            progress.println("Graph manifest already published; resuming asset transfer...");
+            let push_session_id = operation
+                .push_session_id
+                .expect("push session UUID should be persisted before transfer");
+            let renewal_result = {
+                let _heartbeat = progress.heartbeat("resuming the existing direct-push lease");
+                acquire_existing_push_renewal(
+                    &remote,
+                    &branch,
+                    force,
+                    push_session_id,
+                    transfer_lease.transfer_id,
+                )
+            };
+            let renewal = match renewal_result {
+                Ok(renewal) => renewal,
+                Err(error) => {
+                    if error.is_terminal()
+                        && let Err(metadata_error) = operation.fail(&config)
+                    {
+                        eprintln!(
+                            "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+                        );
+                    }
+                    return Err(RemotePushError::GraphTransfer(Box::new(error)));
+                }
+            };
+            let refreshed_lease = {
+                let _heartbeat = progress.heartbeat("refreshing the existing push lease");
+                renewal
+                    .ensure_fresh()
+                    .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?
+            };
+            operation.set_push_destination(
+                &config,
+                &destination_hash,
+                refreshed_lease.transfer_id,
+                refreshed_lease.expires_at,
+            )?;
+            renewal
+        } else {
+            let push_session_id = operation
+                .push_session_id
+                .expect("push session UUID should be persisted before transfer");
+            let expected_transfer_id = same_destination.then_some(operation.transfer_id).flatten();
+            let mut graph_transfer = run_push_graph_transfer(PushGraphTransferRequest {
+                graph: &graph,
+                remote: &remote,
+                branch: &branch,
+                force,
+                idempotency_token: push_session_id,
+                expected_transfer_id,
+                destination_hash: &destination_hash,
+                progress: &progress,
+            });
+            let confirmed_stale_session = graph_transfer.as_ref().is_err_and(|error| {
+                error
+                    .downcast_ref::<PushGraphTransferError>()
+                    .is_some_and(|error| {
+                        matches!(error, PushGraphTransferError::StaleSessionConfirmed)
+                    })
+            });
+            if confirmed_stale_session {
+                progress.println(
+                    "GenHub confirmed the accepted graph session is stale; opening a fresh session...",
+                );
+                let replacement_session_id = Uuid::new_v4();
+                operation.reset_stale_push_session(&config, replacement_session_id)?;
+                graph_transfer = run_push_graph_transfer(PushGraphTransferRequest {
+                    graph: &graph,
+                    remote: &remote,
+                    branch: &branch,
+                    force,
+                    idempotency_token: replacement_session_id,
+                    expected_transfer_id: None,
+                    destination_hash: &destination_hash,
+                    progress: &progress,
+                });
+            }
+            let renewal = match graph_transfer {
+                Ok(renewal) => renewal,
+                Err(error) => {
+                    let terminal_direct_failure = error
+                        .downcast_ref::<PushGraphTransferError>()
+                        .is_some_and(PushGraphTransferError::is_terminal);
+                    let should_fail_operation = terminal_direct_failure;
+                    if should_fail_operation && let Err(metadata_error) = operation.fail(&config) {
+                        eprintln!(
+                            "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+                        );
+                    }
+                    return Err(remote_push_graph_error(error));
+                }
+            };
+            let transfer_lease = renewal
+                .push_lease()
+                .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
+            operation.set_push_destination(
+                &config,
+                &destination_hash,
+                transfer_lease.transfer_id,
+                transfer_lease.expires_at,
+            )?;
+            renewal
+        };
+        Some((operation, renewal, destination_hash))
     };
     let assets_transfer_checkpoint = if let Some((operation, _, _)) = push_context.as_ref() {
-        operation.assets_transfer_checkpoint.as_ref()
+        operation.assets_transfer_checkpoint
     } else {
-        previous_hash.as_ref()
+        previous_hash
     };
-    let upload_receipts = transfer_assets(
-        &graph,
-        workspace,
-        &remote,
-        RemoteOperation::Push,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &branch,
-            range: AssetTransferRange {
-                from_commit: assets_transfer_checkpoint,
-                previous_hash: previous_hash.as_ref(),
-                materialize: true,
+    let upload_receipts = {
+        let mut refresh_push_lease = || {
+            if let Some((operation, renewal, destination_hash)) = push_context.as_mut() {
+                persist_refreshed_push_lease(operation, &config, destination_hash, renewal)?;
+            }
+            Ok(())
+        };
+        transfer_assets(
+            &graph,
+            workspace,
+            &remote,
+            RemoteOperation::Push,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: &branch,
+                    history_ref: &branch,
+                    range: AssetTransferRange {
+                        from_commit: assets_transfer_checkpoint.as_ref(),
+                        previous_hash: previous_hash.as_ref(),
+                        materialize: true,
+                    },
+                },
+                progress: &progress,
             },
-        },
-        |_| Ok(()),
-    )
+            |_| Ok(()),
+            &mut refresh_push_lease,
+        )
+    }
     .map_err(RemotePushError::AssetTransfer)?;
-    if let Some((operation, transfer_lease, destination_hash)) = push_context.as_mut() {
+    if let Some((operation, renewal, destination_hash)) = push_context.as_mut() {
+        persist_refreshed_push_lease(operation, &config, destination_hash, renewal)
+            .map_err(RemotePushError::AssetTransfer)?;
+        let transfer_lease = renewal
+            .push_lease()
+            .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
         let repository = RepositoryRemote::parse(&remote.url)?;
-        complete_asset_transfers(
-            &repository,
-            &AssetTransferCompletionRequest {
-                transfer_id: transfer_lease.transfer_id,
-                branch: &branch,
-                assets: &upload_receipts,
-            },
-            login_origin,
-        )?;
+        progress.println("Verifying asset uploads and finishing push...");
+        let verification_started = Instant::now();
+        let verification_result = {
+            let _heartbeat = progress
+                .heartbeat("waiting for GenHub to verify asset uploads and finish the push");
+            complete_asset_transfers(
+                &repository,
+                &AssetTransferCompletionRequest {
+                    transfer_id: transfer_lease.transfer_id,
+                    branch: &branch,
+                    assets: &upload_receipts,
+                },
+                login_origin,
+            )
+        };
+        if let Err(error) = verification_result {
+            progress.println(&format!(
+                "GenHub did not confirm asset verification after {}; per-asset request progress above reflects bytes consumed.",
+                format_elapsed(verification_started.elapsed()),
+            ));
+            return Err(RemotePushError::Client(error));
+        }
+        progress.println("GenHub verified and accepted the asset uploads.");
         operation.advance_assets_transfer_checkpoint(&config, destination_hash)?;
         operation.complete(&config)?;
     }
@@ -1499,6 +2841,7 @@ pub fn execute_pull(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let graph_path = workspace.graph_db_path()?;
     if !graph_path.exists() {
@@ -1544,19 +2887,23 @@ pub fn execute_pull(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &branch,
-            range: AssetTransferRange {
-                from_commit: assets_transfer_checkpoint.as_ref(),
-                previous_hash: previous_hash.as_ref(),
-                materialize: true,
+        AssetTransferRun {
+            target: AssetTransferTarget {
+                branch: &branch,
+                history_ref: &branch,
+                range: AssetTransferRange {
+                    from_commit: assets_transfer_checkpoint.as_ref(),
+                    previous_hash: previous_hash.as_ref(),
+                    materialize: true,
+                },
             },
+            progress: &progress,
         },
         |commit_hash| {
             operation.advance_assets_transfer_checkpoint(&config, commit_hash)?;
             Ok(())
         },
+        || Ok(()),
     )?;
     operation.complete(&config)?;
     RemoteBranch::set_remote_validated(&config, &branch, Some(&remote.name))?;
@@ -1572,6 +2919,7 @@ pub fn execute_fetch(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let graph = get_connection_for_branch(workspace.graph_db_path()?, None)?;
     let branch = explicit_branch
@@ -1594,16 +2942,20 @@ pub fn execute_fetch(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &tracking_ref,
-            range: AssetTransferRange {
-                from_commit: None,
-                previous_hash: None,
-                materialize: false,
+        AssetTransferRun {
+            target: AssetTransferTarget {
+                branch: &branch,
+                history_ref: &tracking_ref,
+                range: AssetTransferRange {
+                    from_commit: None,
+                    previous_hash: None,
+                    materialize: false,
+                },
             },
+            progress: &progress,
         },
         |_| Ok(()),
+        || Ok(()),
     )?;
     println!("Fetched branch '{branch}' from '{}'.", remote.name);
     Ok(())
@@ -1650,19 +3002,19 @@ mod tests {
         io::{Cursor, Read as _, Write as _},
         net::TcpListener,
         path::PathBuf,
-        sync::Mutex,
+        sync::{Arc, Mutex},
         thread,
     };
 
-    use chrono::Utc;
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{DoltHashId, HashId, Sha256Hash, config::Workspace};
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
-        db::GraphConnection,
+        db::{ConfigConnection, GraphConnection},
         file_types::FileTypes,
-        history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
+        history::dolt::{clone_remote, commit_all, remote_rows, remove_remote},
         operations::{
             Defaults, FileAddition, OperationFile, Remote,
             RemoteOperationKind as StoredRemoteOperationKind, RemoteOperationRecord,
@@ -1671,23 +3023,387 @@ mod tests {
     };
     use noodles::bgzf;
     use reqwest::blocking::Client;
-    use rusqlite::{Connection, Error as SqlError};
+    use rusqlite::{
+        Connection, Error as SqlError,
+        blockcachevfs::{
+            AuthRefreshReason, StorageFailure, StorageFailureCause, StorageFailurePhase,
+        },
+    };
     use serde_json::json;
     use tempfile::tempdir;
     use uuid::Uuid;
 
     use super::{
-        AssetTransferRange, AssetTransferTarget, DownloadAssetOutcome, PushTransferLease,
-        RemoteOperation, canonical_remote_url, clone_destination_name, copy_versioned_asset,
-        download_asset, download_to_versioned_store, execute_pull, execute_push, file_graph_url,
-        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
-        transfer_assets,
+        AssetTransferRange, AssetTransferRun, AssetTransferTarget, DownloadAssetOutcome,
+        PushCapabilityFetcher, PushCapabilityRenewal, RemoteOperation, canonical_remote_url,
+        clone_destination_name, copy_versioned_asset, download_asset, download_to_versioned_store,
+        execute_pull, execute_push, file_graph_url, get_remaining_assets_to_transfer,
+        preserve_graph_error_after_close, push_capability_renewal, resolve_remote,
+        run_graph_transfer, safe_graph_error_context, temporary_path, transfer_assets,
     };
-    use crate::{get_config_connection, get_connection, get_raw_connection};
+    use crate::{
+        commands::remote::client::{
+            CapabilityResponse, DirectPushCapability, SessionScope as ClientSessionScope,
+        },
+        get_config_connection, get_connection, get_raw_connection,
+    };
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
     const RETRIED_TRANSFER_ID: Uuid = Uuid::from_u128(2);
+
+    fn push_capability_response(
+        token: &str,
+        token_expires_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        database_uri: &str,
+        publish_url: &str,
+        session_scope: ClientSessionScope,
+    ) -> CapabilityResponse {
+        CapabilityResponse {
+            remote_url: None,
+            expires_at,
+            default_branch: "main".to_string(),
+            transfer_id: TEST_TRANSFER_ID,
+            direct_push: Some(DirectPushCapability {
+                database_uri: database_uri.replace("TOKEN", token),
+                token_expires_at,
+                session_id: TEST_TRANSFER_ID,
+                session_scope,
+                publish_url: publish_url.to_string(),
+            }),
+        }
+    }
+
+    fn push_session_scope() -> ClientSessionScope {
+        ClientSessionScope {
+            principal: "repository:repo-id".to_string(),
+            target_database: "default.db".to_string(),
+            operations: r#"["write","push","main",false]"#.to_string(),
+        }
+    }
+
+    fn push_database_uri() -> &'static str {
+        "gcs://bucket/.gen/graph_db/?database=default.db&project=test-project&vfs=blockcachevfs&endpoint=https%3A%2F%2Fstorage.googleapis.com&access_token=TOKEN"
+    }
+
+    fn push_publish_url(token: &str) -> String {
+        format!("https://genhub.bio/api/publish?capability={token}")
+    }
+
+    fn request_session_id(request: &str) -> Uuid {
+        request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("idempotency-token")
+                    .then(|| value.trim().parse::<Uuid>().ok())
+                    .flatten()
+            })
+            .expect("capability request should include its persisted session UUID")
+    }
+
+    fn direct_push_capability_body(request: &str, origin: &str) -> String {
+        let scope = push_session_scope();
+        json!({
+            "remote_url": null,
+            "expires_at": (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339(),
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID,
+            "direct_push": {
+                "database_uri": push_database_uri(),
+                "token_expires_at": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
+                "session_id": request_session_id(request),
+                "session_scope": {
+                    "principal": scope.principal,
+                    "target_database": scope.target_database,
+                    "operations": scope.operations,
+                },
+                "publish_url": format!("{origin}/api/publish?capability=mock-signed-value")
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_push_capability_renewal_rotates_token_and_publication_capability() {
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "renewal-test-key");
+        let now = Utc::now();
+        let scope = push_session_scope();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind renewal server");
+        let address = listener
+            .local_addr()
+            .expect("should read renewal server address");
+        let publish_origin = format!("http://{address}");
+        let refreshed_expiry = now + ChronoDuration::minutes(30);
+        let refreshed_token_expiry = now + ChronoDuration::hours(2);
+        let initial = push_capability_response(
+            "initial-token",
+            now + ChronoDuration::hours(1),
+            now + ChronoDuration::minutes(15),
+            push_database_uri(),
+            &format!("{publish_origin}/api/publish?capability=initial-signed-value"),
+            scope.clone(),
+        );
+        let body = json!({
+            "remote_url": null,
+            "expires_at": refreshed_expiry.to_rfc3339(),
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID,
+            "direct_push": {
+                "database_uri": "gcs://bucket/.gen/graph_db/?access_token=rotated-token&endpoint=https%3A%2F%2Fstorage.googleapis.com&vfs=blockcachevfs&project=test-project&database=default.db",
+                "token_expires_at": refreshed_token_expiry.to_rfc3339(),
+                "session_id": TEST_TRANSFER_ID,
+                "session_scope": {
+                    "principal": scope.principal,
+                    "target_database": scope.target_database,
+                    "operations": scope.operations,
+                },
+                "publish_url": format!("{publish_origin}/api/publish?capability=refreshed-signed-value")
+            }
+        })
+        .to_string();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("should accept renewal request");
+            let mut request = [0_u8; 8192];
+            let length = stream
+                .read(&mut request)
+                .expect("should read renewal request");
+            let request = String::from_utf8_lossy(&request[..length]).into_owned();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should send renewed capability");
+            request
+        });
+
+        let remote = Remote {
+            name: "origin".to_string(),
+            url: format!("http://{address}/api/repos/alice/example"),
+        };
+        let renewal = push_capability_renewal(
+            &remote,
+            "main",
+            false,
+            TEST_TRANSFER_ID,
+            TEST_TRANSFER_ID,
+            initial,
+        )
+        .expect("should create the direct-push renewal coordinator");
+
+        let token = renewal
+            .auth_token(AuthRefreshReason::Unauthorized)
+            .expect("should renew after an authorization rejection");
+        let request = server.join().expect("renewal server should finish");
+        let latest = renewal
+            .capability_response()
+            .expect("should read the renewed capability response");
+        let latest_lease = renewal
+            .push_lease()
+            .expect("should read the renewed push lease");
+
+        assert_eq!(token, "rotated-token");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
+        );
+        assert_eq!(latest.transfer_id, TEST_TRANSFER_ID);
+        assert_eq!(latest_lease.transfer_id, TEST_TRANSFER_ID);
+        assert_eq!(latest_lease.expires_at, refreshed_expiry.timestamp());
+        assert_eq!(
+            latest
+                .direct_push
+                .as_ref()
+                .expect("should keep a direct-push capability")
+                .publish_url,
+            format!("{publish_origin}/api/publish?capability=refreshed-signed-value")
+        );
+    }
+
+    #[test]
+    fn test_expired_initial_push_capability_renews_before_open() {
+        let now = Utc::now();
+        let initial = push_capability_response(
+            "expired-token",
+            now - ChronoDuration::seconds(1),
+            now + ChronoDuration::minutes(15),
+            push_database_uri(),
+            &push_publish_url("initial-signed-value"),
+            push_session_scope(),
+        );
+        let refreshed = push_capability_response(
+            "rotated-token",
+            now + ChronoDuration::hours(1),
+            now + ChronoDuration::minutes(30),
+            push_database_uri(),
+            &push_publish_url("refreshed-signed-value"),
+            push_session_scope(),
+        );
+        let refresh_count = Arc::new(Mutex::new(0));
+        let fetch_count = Arc::clone(&refresh_count);
+        let fetch_response = refreshed.clone();
+        let fetch: Arc<PushCapabilityFetcher> = Arc::new(move || {
+            *fetch_count
+                .lock()
+                .expect("should lock capability renewal counter") += 1;
+            Ok(fetch_response.clone())
+        });
+
+        let renewal = PushCapabilityRenewal::new(
+            initial,
+            TEST_TRANSFER_ID,
+            TEST_TRANSFER_ID,
+            "https://genhub.bio",
+            fetch,
+        )
+        .expect("should renew an expired capability before opening the database");
+
+        assert_eq!(
+            renewal
+                .auth_token(AuthRefreshReason::Request)
+                .expect("should use the renewed access token"),
+            "rotated-token"
+        );
+        assert_eq!(
+            *refresh_count
+                .lock()
+                .expect("should lock capability renewal counter"),
+            1,
+            "a valid renewed capability should be reused"
+        );
+        assert_eq!(
+            renewal
+                .capability_response()
+                .expect("should read the renewed capability"),
+            refreshed
+        );
+    }
+
+    #[test]
+    fn test_push_capability_request_uses_fractional_margin_for_short_lifetimes() {
+        let now = Utc::now();
+        let response = push_capability_response(
+            "short-lived-token",
+            now + ChronoDuration::seconds(10),
+            now + ChronoDuration::minutes(15),
+            push_database_uri(),
+            &push_publish_url("short-lived-value"),
+            push_session_scope(),
+        );
+
+        assert!(
+            !super::capability_needs_refresh(
+                &response,
+                now,
+                now + ChronoDuration::milliseconds(500)
+            ),
+            "a fresh short-lived token should not trigger an immediate renewal"
+        );
+        assert!(super::capability_needs_refresh(
+            &response,
+            now,
+            now + ChronoDuration::seconds(9)
+        ));
+    }
+
+    #[test]
+    fn test_session_auth_io_error_is_retryable_authorization_failure() {
+        let error = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_AUTH),
+            Some("credential refresh failed".to_string()),
+        );
+
+        assert!(super::is_authorization_error(&error));
+    }
+
+    #[test]
+    fn test_push_capability_renewal_rejects_changed_uri_or_scope() {
+        let now = Utc::now();
+        let cases = [
+            push_capability_response(
+                "rotated-token",
+                now + ChronoDuration::hours(2),
+                now + ChronoDuration::minutes(30),
+                "gcs://other-bucket/.gen/graph_db/?database=default.db&project=test-project&vfs=blockcachevfs&endpoint=https%3A%2F%2Fstorage.googleapis.com&access_token=TOKEN",
+                &push_publish_url("refreshed-signed-value"),
+                push_session_scope(),
+            ),
+            push_capability_response(
+                "rotated-token",
+                now + ChronoDuration::hours(2),
+                now + ChronoDuration::minutes(30),
+                push_database_uri(),
+                &push_publish_url("refreshed-signed-value"),
+                ClientSessionScope {
+                    operations: r#"["write","push","feature",false]"#.to_string(),
+                    ..push_session_scope()
+                },
+            ),
+        ];
+
+        for refreshed in cases {
+            let initial = push_capability_response(
+                "initial-token",
+                now + ChronoDuration::hours(1),
+                now + ChronoDuration::minutes(15),
+                push_database_uri(),
+                &push_publish_url("initial-signed-value"),
+                push_session_scope(),
+            );
+            let response = refreshed.clone();
+            let fetch: Arc<PushCapabilityFetcher> = Arc::new(move || Ok(response.clone()));
+            let renewal = PushCapabilityRenewal::new(
+                initial.clone(),
+                TEST_TRANSFER_ID,
+                TEST_TRANSFER_ID,
+                "https://genhub.bio",
+                fetch,
+            )
+            .expect("should create a valid initial renewal coordinator");
+
+            let error = renewal
+                .auth_token(AuthRefreshReason::Unauthorized)
+                .expect_err("renewal must reject changes outside access_token");
+
+            assert!(!format!("{error:?}").contains("initial-token"));
+            assert_eq!(
+                renewal
+                    .capability_response()
+                    .expect("should retain the previous capability"),
+                initial
+            );
+        }
+    }
+
+    fn seed_push_lease(
+        config: &ConfigConnection,
+        branch: &str,
+        destination_hash: &DoltHashId,
+        transfer_id: Uuid,
+        expires_at: i64,
+    ) -> Uuid {
+        let mut operation = RemoteOperationRecord::begin_or_resume(
+            config,
+            "origin",
+            branch,
+            StoredRemoteOperationKind::Push,
+            None,
+        )
+        .expect("should create pending push operation");
+        let session_id = operation
+            .push_session_id
+            .expect("should allocate a push session UUID");
+        operation
+            .set_push_destination(config, destination_hash, transfer_id, expires_at)
+            .expect("should seed graph transfer lease");
+        session_id
+    }
 
     mod clone {
         use std::{
@@ -2993,16 +4709,20 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Pull,
-            AssetTransferTarget {
-                branch: "main",
-                history_ref: "main",
-                range: AssetTransferRange {
-                    from_commit: Some(&previous_hash),
-                    previous_hash: Some(&previous_hash),
-                    materialize: true,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: "main",
+                    history_ref: "main",
+                    range: AssetTransferRange {
+                        from_commit: Some(&previous_hash),
+                        previous_hash: Some(&previous_hash),
+                        materialize: true,
+                    },
                 },
+                progress: &crate::commands::remote::progress::TransferProgress::stderr(),
             },
             |_| Ok(()),
+            || Ok(()),
         )
         .expect("should transfer only the asset delta");
         let transfer_request = transfer_server
@@ -3061,16 +4781,20 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Clone,
-            AssetTransferTarget {
-                branch: "main",
-                history_ref: "main",
-                range: AssetTransferRange {
-                    from_commit: None,
-                    previous_hash: None,
-                    materialize: true,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: "main",
+                    history_ref: "main",
+                    range: AssetTransferRange {
+                        from_commit: None,
+                        previous_hash: None,
+                        materialize: true,
+                    },
                 },
+                progress: &crate::commands::remote::progress::TransferProgress::stderr(),
             },
             |_| Ok(()),
+            || Ok(()),
         )
         .expect("should transfer clone assets");
         let transfer_request = transfer_server
@@ -3496,7 +5220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_authorization_failure_retries_with_a_fresh_capability() {
+    fn test_pull_authorization_failure_retries_with_a_fresh_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -3542,7 +5266,7 @@ mod tests {
         let transfer_lease = run_graph_transfer(
             &graph,
             &remote,
-            RemoteOperation::Push,
+            RemoteOperation::Pull,
             "main",
             false,
             || {
@@ -3561,13 +5285,7 @@ mod tests {
         server.join().expect("capability server should finish");
 
         assert_eq!(attempts, 2);
-        assert_eq!(
-            transfer_lease,
-            Some(PushTransferLease {
-                transfer_id: RETRIED_TRANSFER_ID,
-                expires_at: 1_893_456_000,
-            })
-        );
+        assert_eq!(transfer_lease, None);
         let remotes = remote_rows(&graph).expect("should read restored canonical URL");
         assert!(
             remotes
@@ -3577,7 +5295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_uploads_assets_before_tracking_fetch() {
+    fn test_push_rejects_legacy_http_capability_without_uploading_assets() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -3587,43 +5305,26 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create push test directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for request_index in 0..4 {
-                let (mut stream, _) = listener.accept().expect("should accept capability request");
-                let mut request = [0_u8; 8192];
-                let read = stream
-                    .read(&mut request)
-                    .expect("should read capability request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                if request_index == 2 {
-                    write!(
-                        stream,
-                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                    )
-                    .expect("should write completion response");
-                    continue;
-                }
-                let body = if request_index == 1 {
-                    "{\"assets\":[]}".to_string()
-                } else {
-                    format!(
-                        "{{\"remote_url\":\"{transfer_url}\",\
-                         \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                         \"default_branch\":\"main\",\
-                         \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
-                    )
-                };
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .expect("should write capability response");
-            }
-            requests
+            let (mut stream, _) = listener.accept().expect("should accept capability request");
+            let mut request = [0_u8; 8192];
+            let read = stream
+                .read(&mut request)
+                .expect("should read capability request");
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = format!(
+                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                 \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                 \"default_branch\":\"main\",\
+                 \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should write legacy capability response");
+            request
         });
 
         let workspace = Workspace::new(temp.path().join("local"));
@@ -3641,25 +5342,24 @@ mod tests {
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
         drop(graph);
-        drop(config);
 
-        execute_push(&workspace, None, None, false).expect("push should succeed");
-        let requests = server.join().expect("capability server should finish");
+        let error = execute_push(&workspace, None, None, false)
+            .expect_err("push should reject a legacy HTTP-only capability");
+        let request = server.join().expect("capability server should finish");
 
-        assert_eq!(requests.len(), 4);
-        assert!(requests[0].contains("\"operation\":\"push\""));
-        assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[1].contains("\"operation\":\"push\""));
-        assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
-        assert!(requests[2].contains("\"branch\":\"main\""));
-        assert!(requests[2].contains("\"assets\":[]"));
-        assert!(requests[3].contains("\"operation\":\"pull\""));
-        let graph =
-            get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
-        let local_hash = hash_of(&graph, "main").expect("should query local branch");
-        let tracking_hash = hash_of(&graph, "origin/main").expect("should query tracking branch");
-        assert_eq!(tracking_hash, local_hash);
+        assert!(error.to_string().contains("direct GCS session"));
+        assert!(request.contains("\"operation\":\"push\""));
+        assert!(request.to_ascii_lowercase().contains("idempotency-token:"));
+        assert!(!request.contains("/asset-transfers "));
+        let failed_operations = config
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations \
+                 WHERE operation = 'push' AND failed_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("should count failed push operations");
+        assert_eq!(failed_operations, 1);
     }
 
     #[test]
@@ -3673,33 +5373,28 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create push retry directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for request_index in 0..6 {
+            for request_index in 0..7 {
                 let (mut stream, _) = listener.accept().expect("should accept GenHub request");
                 let mut request = [0_u8; 8192];
                 let read = stream
                     .read(&mut request)
                     .expect("should read GenHub request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                requests.push(request.clone());
                 match request_index {
-                    0 | 5 => {
-                        let body = format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
-                        );
+                    0 | 3 => {
+                        let body =
+                            direct_push_capability_body(&request, &format!("http://{address}"));
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                             body.len()
                         )
-                        .expect("should write capability response");
+                        .expect("should write refreshed direct-push capability");
                     }
-                    1 | 3 => {
+                    1 | 4 => {
                         let body = "{\"assets\":[]}";
                         write!(
                             stream,
@@ -3717,10 +5412,19 @@ mod tests {
                         )
                         .expect("should write failed completion response");
                     }
-                    4 => {
+                    5 => {
                         stream
                             .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
                             .expect("should write completion response");
+                    }
+                    6 => {
+                        let body = "tracking fetch unavailable";
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write failed tracking-fetch response");
                     }
                     _ => unreachable!("request index should be covered"),
                 }
@@ -3743,35 +5447,49 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        let session_id = seed_push_lease(
+            &config,
+            "main",
+            &destination_hash,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
         drop(graph);
 
         execute_push(&workspace, None, None, false)
             .expect_err("first push should retain its lease after completion fails");
-        let pending_transfer: (DoltHashId, Uuid) = config
+        let pending_transfer: (DoltHashId, Uuid, Uuid) = config
             .query_row(
-                "SELECT to_commit, transfer_id FROM remote_operations \
+                "SELECT to_commit, transfer_id, push_session_id FROM remote_operations \
                  WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("should retain pending push lease");
-        assert_eq!(pending_transfer, (destination_hash, TEST_TRANSFER_ID));
+        assert_eq!(
+            pending_transfer,
+            (destination_hash, TEST_TRANSFER_ID, session_id)
+        );
 
         execute_push(&workspace, None, None, false).expect("push retry should complete");
         let requests = server.join().expect("GenHub server should finish");
 
-        assert_eq!(requests.len(), 6);
+        assert_eq!(requests.len(), 7);
+        assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
         assert!(requests[0].contains("\"operation\":\"push\""));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
         assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[3].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        for request in [&requests[2], &requests[4]] {
+        assert!(requests[3].starts_with("POST /api/repos/alice/example/remote-capability "));
+        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers "));
+        assert!(requests[5].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
+        for request in [&requests[2], &requests[5]] {
             assert!(request.contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
             assert!(request.contains("\"branch\":\"main\""));
             assert!(request.contains("\"assets\":[]"));
         }
-        assert!(requests[5].contains("\"operation\":\"pull\""));
+        assert_eq!(request_session_id(&requests[0]), session_id);
+        assert_eq!(request_session_id(&requests[3]), session_id);
+        assert!(requests[6].contains("\"operation\":\"pull\""));
         let pending_operations = config
             .query_row(
                 "SELECT COUNT(*) FROM remote_operations \
@@ -3784,9 +5502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_retry_pushes_advanced_head_with_new_transfer_lease() {
-        // This tests that if we have a resumed push, but have commited work since the last failed push, the to_commit recorded
-        // as the end state of the push is advanced to the current head commit.
+    fn test_advanced_push_retry_requires_a_direct_gcs_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -3796,38 +5512,28 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create advanced push retry directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for request_index in 0..7 {
+            for request_index in 0..4 {
                 let (mut stream, _) = listener.accept().expect("should accept GenHub request");
                 let mut request = [0_u8; 8192];
                 let read = stream
                     .read(&mut request)
                     .expect("should read GenHub request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                requests.push(request.clone());
                 match request_index {
-                    0 | 3 | 6 => {
-                        let transfer_id = if request_index == 0 {
-                            TEST_TRANSFER_ID
-                        } else {
-                            RETRIED_TRANSFER_ID
-                        };
-                        let body = format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{transfer_id}\"}}"
-                        );
+                    0 => {
+                        let body =
+                            direct_push_capability_body(&request, &format!("http://{address}"));
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                             body.len()
                         )
-                        .expect("should write capability response");
+                        .expect("should write existing direct-push capability");
                     }
-                    1 | 4 => {
+                    1 => {
                         let body = "{\"assets\":[]}";
                         write!(
                             stream,
@@ -3845,10 +5551,19 @@ mod tests {
                         )
                         .expect("should write failed completion response");
                     }
-                    5 => {
-                        stream
-                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                            .expect("should write completion response");
+                    3 => {
+                        let body = format!(
+                            "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                             \"default_branch\":\"main\",\
+                             \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
+                        );
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write capability response");
                     }
                     _ => unreachable!("request index should be covered"),
                 }
@@ -3871,19 +5586,29 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        let original_session_id = seed_push_lease(
+            &config,
+            "main",
+            &original_destination,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
         drop(graph);
 
         execute_push(&workspace, None, None, false)
             .expect_err("first push should retain its lease after completion fails");
-        let pending_transfer: (DoltHashId, Uuid) = config
+        let pending_transfer: (DoltHashId, Uuid, Uuid) = config
             .query_row(
-                "SELECT to_commit, transfer_id FROM remote_operations \
+                "SELECT to_commit, transfer_id, push_session_id FROM remote_operations \
                  WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("should retain pending push lease");
-        assert_eq!(pending_transfer, (original_destination, TEST_TRANSFER_ID));
+        assert_eq!(
+            pending_transfer,
+            (original_destination, TEST_TRANSFER_ID, original_session_id)
+        );
 
         let graph =
             get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
@@ -3891,42 +5616,39 @@ mod tests {
         let advanced_destination =
             commit_all(&graph, "advance push retry").expect("should commit advanced local head");
         drop(graph);
+        assert_ne!(advanced_destination, original_destination);
 
-        execute_push(&workspace, None, None, false).expect("advanced push retry should complete");
+        let error = execute_push(&workspace, None, None, false)
+            .expect_err("advanced push retry should reject a legacy HTTP capability");
         let requests = server.join().expect("GenHub server should finish");
 
-        assert_eq!(requests.len(), 7);
-        assert!(requests[0].contains("\"operation\":\"push\""));
-        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
+        assert!(error.to_string().contains("direct GCS session"));
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
+        assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
+        assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
         assert!(requests[3].contains("\"operation\":\"push\""));
-        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[5].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[5].contains(&format!("\"transfer_id\":\"{RETRIED_TRANSFER_ID}\"")));
-        assert!(requests[6].contains("\"operation\":\"pull\""));
-        let completed_transfer: (DoltHashId, DoltHashId, Uuid) = config
+        assert!(!requests[3].contains(&original_session_id.to_string()));
+        assert!(
+            requests[3]
+                .to_ascii_lowercase()
+                .contains("idempotency-token:")
+        );
+        let failed_transfer: (DoltHashId, Uuid, bool) = config
             .query_row(
-                "SELECT to_commit, assets_transfer_checkpoint, transfer_id \
-                 FROM remote_operations WHERE operation = 'push' AND completed_at IS NOT NULL",
+                "SELECT to_commit, push_session_id, failed_at IS NOT NULL \
+                 FROM remote_operations WHERE operation = 'push'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .expect("should complete advanced push operation");
-        assert_eq!(
-            completed_transfer,
-            (
-                advanced_destination,
-                advanced_destination,
-                RETRIED_TRANSFER_ID
-            )
-        );
-        let graph =
-            get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
-        let tracking_hash = hash_of(&graph, "origin/main").expect("should query tracking branch");
-        assert_eq!(tracking_hash, advanced_destination);
+            .expect("should mark advanced push as failed");
+        assert_eq!(failed_transfer.0, original_destination);
+        assert_ne!(failed_transfer.1, original_session_id);
+        assert!(failed_transfer.2);
     }
 
     #[test]
-    fn test_push_retry_refreshes_expired_transfer_lease() {
+    fn test_expired_push_lease_requires_a_direct_gcs_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -3937,64 +5659,26 @@ mod tests {
             .local_addr()
             .expect("should read expired lease retry server address");
         let temp = tempdir().expect("should create expired lease retry directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for request_index in 0..7 {
-                let (mut stream, _) = listener.accept().expect("should accept GenHub request");
-                let mut request = [0_u8; 8192];
-                let read = stream
-                    .read(&mut request)
-                    .expect("should read GenHub request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                match request_index {
-                    0 | 3 | 6 => {
-                        let transfer_id = if request_index == 0 {
-                            TEST_TRANSFER_ID
-                        } else {
-                            RETRIED_TRANSFER_ID
-                        };
-                        let body = format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{transfer_id}\"}}"
-                        );
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write capability response");
-                    }
-                    1 | 4 => {
-                        let body = "{\"assets\":[]}";
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write asset response");
-                    }
-                    2 => {
-                        let body = "asset verification unavailable";
-                        write!(
-                            stream,
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write failed completion response");
-                    }
-                    5 => {
-                        stream
-                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                            .expect("should write completion response");
-                    }
-                    _ => unreachable!("request index should be covered"),
-                }
-            }
-            requests
+            let (mut stream, _) = listener.accept().expect("should accept GenHub request");
+            let mut request = [0_u8; 8192];
+            let read = stream
+                .read(&mut request)
+                .expect("should read GenHub request");
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = format!(
+                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                 \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                 \"default_branch\":\"main\",\
+                 \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should write legacy capability response");
+            request
         });
 
         let workspace = Workspace::new(temp.path().join("local"));
@@ -4013,39 +5697,30 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        let original_session_id =
+            seed_push_lease(&config, "main", &destination_hash, TEST_TRANSFER_ID, 0);
         drop(graph);
 
-        execute_push(&workspace, None, None, false)
-            .expect_err("first push should retain its lease after completion fails");
-        config
-            .execute(
-                "UPDATE remote_operations SET transfer_expires_at = 0 \
-                 WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
-                [],
-            )
-            .expect("should expire the persisted transfer lease");
+        let error = execute_push(&workspace, None, None, false)
+            .expect_err("expired push lease should require a direct GCS capability");
+        let request = server.join().expect("GenHub server should finish");
 
-        execute_push(&workspace, None, None, false)
-            .expect("expired lease retry should obtain a new transfer");
-        let requests = server.join().expect("GenHub server should finish");
-
-        assert_eq!(requests.len(), 7);
-        assert!(requests[0].contains("\"operation\":\"push\""));
-        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
-        assert!(requests[3].contains("\"operation\":\"push\""));
-        assert!(requests[5].contains(&format!("\"transfer_id\":\"{RETRIED_TRANSFER_ID}\"")));
-        assert!(requests[6].contains("\"operation\":\"pull\""));
-        let completed_transfer: (DoltHashId, Uuid, i64) = config
+        assert!(error.to_string().contains("direct GCS session"));
+        assert!(request.contains("\"operation\":\"push\""));
+        assert!(request.to_ascii_lowercase().contains("idempotency-token:"));
+        assert!(request.contains(&original_session_id.to_string()));
+        assert!(!request.contains("/asset-transfers "));
+        let failed_transfer: (DoltHashId, Uuid, bool) = config
             .query_row(
-                "SELECT to_commit, transfer_id, transfer_expires_at \
-                 FROM remote_operations WHERE operation = 'push' AND completed_at IS NOT NULL",
+                "SELECT to_commit, push_session_id, failed_at IS NOT NULL \
+                 FROM remote_operations WHERE operation = 'push'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .expect("should complete refreshed transfer lease");
-        assert_eq!(completed_transfer.0, destination_hash);
-        assert_eq!(completed_transfer.1, RETRIED_TRANSFER_ID);
-        assert!(completed_transfer.2 > Utc::now().timestamp());
+            .expect("should mark expired push as failed");
+        assert_eq!(failed_transfer.0, destination_hash);
+        assert_eq!(failed_transfer.1, original_session_id);
+        assert!(failed_transfer.2);
     }
 
     #[test]
@@ -4059,8 +5734,6 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create push test directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
             for request_index in 0..4 {
@@ -4069,40 +5742,43 @@ mod tests {
                 let read = stream
                     .read(&mut request)
                     .expect("should read capability request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                if request_index < 3 {
-                    if request_index == 2 {
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                requests.push(request.clone());
+                match request_index {
+                    0 => {
+                        let body =
+                            direct_push_capability_body(&request, &format!("http://{address}"));
                         write!(
                             stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
                         )
-                        .expect("should write completion response");
-                        continue;
+                        .expect("should write direct-push capability");
                     }
-                    let body = if request_index == 0 {
-                        format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
+                    1 => {
+                        let body = "{\"assets\":[]}";
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
                         )
-                    } else {
-                        "{\"assets\":[]}".to_string()
-                    };
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .expect("should write successful response");
-                } else {
-                    let body = "tracking fetch unavailable";
-                    write!(
-                        stream,
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .expect("should write failed response");
+                        .expect("should write asset response");
+                    }
+                    2 => {
+                        stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                            .expect("should write completion response");
+                    }
+                    3 => {
+                        let body = "tracking fetch unavailable";
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write failed response");
+                    }
+                    _ => unreachable!("request index should be covered"),
                 }
             }
             requests
@@ -4114,7 +5790,8 @@ mod tests {
             .expect("should open push config");
         let graph = get_connection(workspace.graph_db_path().unwrap()).expect("should open graph");
         Collection::create(&graph, "push-fixture").expect("should create push fixture");
-        commit_all(&graph, "push fixture").expect("should commit push fixture");
+        let destination_hash =
+            commit_all(&graph, "push fixture").expect("should commit push fixture");
         Remote::create(
             &config,
             "origin",
@@ -4122,6 +5799,13 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        seed_push_lease(
+            &config,
+            "main",
+            &destination_hash,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
         drop(graph);
         drop(config);
 
@@ -4130,13 +5814,24 @@ mod tests {
         let requests = server.join().expect("capability server should finish");
 
         assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
         assert!(requests[0].contains("\"operation\":\"push\""));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[1].contains("\"operation\":\"push\""));
         assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
         assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
         assert!(requests[2].contains("\"branch\":\"main\""));
         assert!(requests[3].contains("\"operation\":\"pull\""));
+        let config = get_config_connection(workspace.gen_db_path().unwrap())
+            .expect("should reopen push config");
+        let completed_operations: i64 = config
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations \
+                 WHERE operation = 'push' AND completed_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should count completed push operations");
+        assert_eq!(completed_operations, 1);
     }
 
     #[test]
@@ -4197,5 +5892,139 @@ mod tests {
                 .expect("should query remotes")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_direct_push_cleanup_error_does_not_replace_primary_sql_error() {
+        let primary = super::PushGraphTransferError::database(
+            "running Dolt push through loopback RemoteServer",
+            SqlError::InvalidQuery,
+        );
+        let close = Err(super::PushGraphTransferError::database(
+            "closing direct GCS server",
+            SqlError::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some("signed-url=secret access_token=secret".to_string()),
+            ),
+        ));
+
+        let cleanup_context = safe_graph_error_context(close.as_ref().expect_err("should fail"));
+        let error = preserve_graph_error_after_close(primary, close);
+
+        let super::PushGraphTransferError::Cleanup { primary, cleanup } = &error else {
+            panic!("should retain the primary and cleanup errors together: {error}");
+        };
+        assert!(matches!(
+            primary.as_ref(),
+            super::PushGraphTransferError::Database {
+                phase: "running Dolt push through loopback RemoteServer",
+                source: SqlError::InvalidQuery,
+            }
+        ));
+        assert_eq!(cleanup, &cleanup_context);
+        assert!(cleanup.contains("closing direct GCS server"));
+        assert!(cleanup_context.contains("SQLite code"));
+        assert!(!cleanup_context.contains("secret"));
+        assert!(!error.to_string().contains("access_token"));
+        assert!(!error.to_string().contains("signed"));
+    }
+
+    #[test]
+    fn test_direct_push_cleanup_preserves_typed_storage_failure_without_provider_details() {
+        let primary = super::PushGraphTransferError::database(
+            "running Dolt push through loopback RemoteServer",
+            SqlError::InvalidQuery,
+        );
+        let failure = StorageFailure {
+            phase: StorageFailurePhase::StageBlockPut,
+            cause: StorageFailureCause::HttpStatus(403),
+        };
+        let error = preserve_graph_error_after_close(
+            primary,
+            Err(super::PushGraphTransferError::StorageFailure(failure)),
+        );
+
+        let super::PushGraphTransferError::Storage {
+            primary,
+            failure: actual_failure,
+        } = &error
+        else {
+            panic!("should retain the primary and typed storage failure: {error}");
+        };
+        assert!(matches!(
+            primary.as_ref(),
+            super::PushGraphTransferError::Database {
+                phase: "running Dolt push through loopback RemoteServer",
+                source: SqlError::InvalidQuery,
+            }
+        ));
+        assert_eq!(*actual_failure, failure);
+        assert!(
+            error
+                .to_string()
+                .contains("staged block upload failed with HTTP 403")
+        );
+    }
+
+    #[test]
+    fn test_non_fast_forward_classifier_requires_exact_sqlite_constraint_error() {
+        let exact = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        let other_constraint = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("constraint failed".to_string()),
+        );
+        let other_code = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        let unique_constraint = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        assert!(!super::is_non_fast_forward_push_error(&other_constraint));
+        let wrapped_conflict =
+            super::remote_push_graph_error(Box::new(super::PushGraphTransferError::NonFastForward));
+        let wrapped_unrelated_constraint = super::remote_push_graph_error(Box::new(
+            super::PushGraphTransferError::database("running Dolt push", other_constraint),
+        ));
+
+        assert!(super::is_non_fast_forward_push_error(&exact));
+        assert!(!super::is_non_fast_forward_push_error(&other_code));
+        assert!(!super::is_non_fast_forward_push_error(&unique_constraint));
+        assert!(matches!(
+            wrapped_conflict,
+            super::RemotePushError::NonFastForward
+        ));
+        assert!(matches!(
+            wrapped_unrelated_constraint,
+            super::RemotePushError::GraphTransfer(_)
+        ));
+        assert_eq!(
+            super::remote_push_graph_error(Box::new(exact)).to_string(),
+            "The branch is not a fast-forward of the remote. Use --force to overwrite the remote."
+        );
+    }
+
+    #[test]
+    fn test_stale_session_classifier_requires_exact_sqlite_busy_error() {
+        let exact = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("published manifest changed since the accepted session head".to_string()),
+        );
+        let other_busy = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        );
+        let other_code = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+            Some("published manifest changed since the accepted session head".to_string()),
+        );
+
+        assert!(super::is_stale_accepted_session_error(&exact));
+        assert!(!super::is_stale_accepted_session_error(&other_busy));
+        assert!(!super::is_stale_accepted_session_error(&other_code));
     }
 }

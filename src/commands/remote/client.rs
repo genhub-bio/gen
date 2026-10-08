@@ -25,13 +25,19 @@
 //! refreshed through GenHub's CLI refresh endpoint when possible, and refreshed or
 //! newly issued tokens are saved for later requests.
 
-use std::{env, io};
+use std::{env, fmt, io};
 
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
 use reqwest::{
-    StatusCode, Url,
+    StatusCode, Url, Version,
     blocking::{Client, RequestBuilder},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
+    redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -143,13 +149,64 @@ pub struct CapabilityRequest<'branch> {
     pub force: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct CapabilityResponse {
-    pub remote_url: String,
+    pub remote_url: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub default_branch: String,
     /// Identifies the capability's transfer-scoped push lease.
     pub transfer_id: Uuid,
+    /// Direct GCS upload details returned for GenHub pushes.
+    #[serde(default)]
+    pub direct_push: Option<DirectPushCapability>,
+}
+
+impl fmt::Debug for CapabilityResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapabilityResponse")
+            .field("remote_url", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("default_branch", &self.default_branch)
+            .field("transfer_id", &self.transfer_id)
+            .field("direct_push", &self.direct_push)
+            .finish()
+    }
+}
+
+/// A GenHub capability for staging graph blocks directly in cloud storage.
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+pub struct DirectPushCapability {
+    /// GCS database URI containing the short-lived, downscoped token.
+    pub database_uri: String,
+    /// Expiration time of the downscoped token carried by `database_uri`.
+    pub token_expires_at: DateTime<Utc>,
+    /// Stable client session UUID shared with the GenHub lease.
+    pub session_id: Uuid,
+    /// Context used to bind the local and server-side session attachments.
+    pub session_scope: SessionScope,
+    /// Signed GenHub endpoint that publishes the accepted session manifest.
+    pub publish_url: String,
+}
+
+impl fmt::Debug for DirectPushCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DirectPushCapability")
+            .field("database_uri", &"[REDACTED]")
+            .field("session_id", &self.session_id)
+            .field("session_scope", &self.session_scope)
+            .field("publish_url", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Scope fields shared by the direct uploader and GenHub's manifest publisher.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct SessionScope {
+    pub principal: String,
+    pub target_database: String,
+    pub operations: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -208,8 +265,20 @@ pub enum RemoteClientError {
     InvalidRepositoryUrl(String),
     #[error("Authentication is required; run `gen remote login` or set GENHUB_API_KEY")]
     AuthenticationRequired,
-    #[error("GenHub request failed with HTTP {status}: {message}")]
+    #[error("Remote endpoint returned HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
+    #[error("GenHub confirmed that the direct GCS graph session is stale")]
+    StaleGraphSession,
+    #[error(
+        "Failed to decode {endpoint} response (HTTP {status}, declared Content-Length {declared_content_length:?}): {source}"
+    )]
+    ResponseDecode {
+        endpoint: &'static str,
+        status: StatusCode,
+        declared_content_length: Option<u64>,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("HTTP client error: {0}")]
     Request(#[from] reqwest::Error),
     #[error("Token storage error: {0}")]
@@ -235,6 +304,20 @@ fn response_error(response: reqwest::blocking::Response) -> RemoteClientError {
     RemoteClientError::Http { status, message }
 }
 
+fn is_invalid_refresh_grant(error: &RemoteClientError) -> bool {
+    let RemoteClientError::Http { status, message } = error else {
+        return false;
+    };
+    if *status != StatusCode::BAD_REQUEST {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .is_some_and(|body| {
+            body.get("error").and_then(serde_json::Value::as_str) == Some("invalid_grant")
+        })
+}
+
 #[derive(Clone, Copy)]
 enum RequestAuthorization<'credential> {
     Anonymous,
@@ -257,17 +340,27 @@ fn send_capability(
     client: &Client,
     repository: &RepositoryRemote,
     request: &CapabilityRequest<'_>,
+    idempotency_token: Option<Uuid>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let response = authorize_request(
-        client.post(repository.capability_url()).json(request),
-        authorization,
-    )
-    .send()?;
+    let mut builder = client.post(repository.capability_url()).json(request);
+    if let Some(idempotency_token) = idempotency_token {
+        builder = builder.header("Idempotency-Token", idempotency_token.to_string());
+    }
+    let response = authorize_request(builder, authorization).send()?;
     if !response.status().is_success() {
         return Err(response_error(response));
     }
-    Ok(response.json()?)
+    let status = response.status();
+    let declared_content_length = response.content_length();
+    response
+        .json()
+        .map_err(|source| RemoteClientError::ResponseDecode {
+            endpoint: "remote capability",
+            status,
+            declared_content_length,
+            source,
+        })
 }
 
 fn send_asset_transfers(
@@ -284,7 +377,16 @@ fn send_asset_transfers(
     if !response.status().is_success() {
         return Err(response_error(response));
     }
-    Ok(response.json()?)
+    let status = response.status();
+    let declared_content_length = response.content_length();
+    response
+        .json()
+        .map_err(|source| RemoteClientError::ResponseDecode {
+            endpoint: "asset transfers",
+            status,
+            declared_content_length,
+            source,
+        })
 }
 
 fn send_asset_transfer_completion(
@@ -331,6 +433,56 @@ fn refresh_tokens(
     })
 }
 
+fn access_token_expired_hint(token: &str, now: DateTime<Utc>) -> bool {
+    let mut segments = token.split('.');
+    let (Some(header_segment), Some(payload_segment), Some(signature_segment), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    if header_segment.is_empty() || payload_segment.is_empty() || signature_segment.is_empty() {
+        return false;
+    }
+
+    let decode_segment = |segment: &str| {
+        URL_SAFE_NO_PAD
+            .decode(segment)
+            .or_else(|_| URL_SAFE.decode(segment))
+            .ok()
+    };
+    let Some(header_bytes) = decode_segment(header_segment) else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header_bytes) else {
+        return false;
+    };
+    if !header
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|algorithm| !algorithm.is_empty() && algorithm != "none")
+    {
+        return false;
+    }
+    if decode_segment(signature_segment).is_none() {
+        return false;
+    }
+
+    let Some(payload_bytes) = decode_segment(payload_segment) else {
+        return false;
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) else {
+        return false;
+    };
+    let Some(expiration) = claims.get("exp").and_then(serde_json::Value::as_f64) else {
+        return false;
+    };
+
+    expiration <= now.timestamp() as f64
+}
+
 trait TokenStore {
     fn load(&self, identity: &str) -> io::Result<AuthTokens>;
     fn save(&self, identity: &str, tokens: &AuthTokens) -> io::Result<()>;
@@ -346,6 +498,21 @@ impl TokenStore for FileTokenStore {
     fn save(&self, identity: &str, tokens: &AuthTokens) -> io::Result<()> {
         save_tokens(identity, tokens)
     }
+}
+
+fn interactive_login_tokens<Store, Login>(
+    repository: &RepositoryRemote,
+    token_store: &Store,
+    interactive_login: Login,
+) -> Result<AuthTokens, RemoteClientError>
+where
+    Store: TokenStore,
+    Login: FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+{
+    let tokens = interactive_login(repository.origin())
+        .map_err(|_| RemoteClientError::AuthenticationRequired)?;
+    token_store.save(repository.origin(), &tokens)?;
+    Ok(tokens)
 }
 
 struct AuthenticationOptions<'credential, Store> {
@@ -384,6 +551,25 @@ fn acquire_request_with_store<T, Store: TokenStore>(
         }
     }
     if let Ok(tokens) = options.token_store.load(repository.origin()) {
+        let tokens = if access_token_expired_hint(&tokens.jwt, Utc::now()) {
+            match refresh_tokens(client, repository, &tokens) {
+                Ok(refreshed) => {
+                    options.token_store.save(repository.origin(), &refreshed)?;
+                    refreshed
+                }
+                Err(error) if is_invalid_refresh_grant(&error) => {
+                    let login_tokens = interactive_login_tokens(
+                        repository,
+                        options.token_store,
+                        interactive_login,
+                    )?;
+                    return send(RequestAuthorization::Bearer(&login_tokens.jwt));
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            tokens
+        };
         match send(RequestAuthorization::Bearer(&tokens.jwt)) {
             Ok(response) => return Ok(response),
             Err(RemoteClientError::Http {
@@ -394,8 +580,21 @@ fn acquire_request_with_store<T, Store: TokenStore>(
                 status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
                 ..
             }) => {
-                let refreshed = refresh_tokens(client, repository, &tokens)?;
-                options.token_store.save(repository.origin(), &refreshed)?;
+                let refreshed = match refresh_tokens(client, repository, &tokens) {
+                    Ok(refreshed) => {
+                        options.token_store.save(repository.origin(), &refreshed)?;
+                        refreshed
+                    }
+                    Err(error) if is_invalid_refresh_grant(&error) => {
+                        let login_tokens = interactive_login_tokens(
+                            repository,
+                            options.token_store,
+                            interactive_login,
+                        )?;
+                        return send(RequestAuthorization::Bearer(&login_tokens.jwt));
+                    }
+                    Err(error) => return Err(error),
+                };
                 match send(RequestAuthorization::Bearer(&refreshed.jwt)) {
                     Ok(response) => return Ok(response),
                     Err(RemoteClientError::Http {
@@ -408,9 +607,7 @@ fn acquire_request_with_store<T, Store: TokenStore>(
             Err(error) => return Err(error),
         }
     }
-    let tokens = interactive_login(repository.origin())
-        .map_err(|_| RemoteClientError::AuthenticationRequired)?;
-    options.token_store.save(repository.origin(), &tokens)?;
+    let tokens = interactive_login_tokens(repository, options.token_store, interactive_login)?;
     send(RequestAuthorization::Bearer(&tokens.jwt))
 }
 
@@ -418,6 +615,26 @@ fn acquire_capability_with_store(
     client: &Client,
     repository: &RepositoryRemote,
     request: &CapabilityRequest<'_>,
+    api_key: Option<&str>,
+    token_store: &impl TokenStore,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<CapabilityResponse, RemoteClientError> {
+    acquire_capability_with_store_and_token(
+        client,
+        repository,
+        request,
+        None,
+        api_key,
+        token_store,
+        interactive_login,
+    )
+}
+
+fn acquire_capability_with_store_and_token(
+    client: &Client,
+    repository: &RepositoryRemote,
+    request: &CapabilityRequest<'_>,
+    idempotency_token: Option<Uuid>,
     api_key: Option<&str>,
     token_store: &impl TokenStore,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
@@ -435,7 +652,15 @@ fn acquire_capability_with_store(
             token_store,
         },
         interactive_login,
-        |authorization| send_capability(client, repository, request, authorization),
+        |authorization| {
+            send_capability(
+                client,
+                repository,
+                request,
+                idempotency_token,
+                authorization,
+            )
+        },
     )
 }
 
@@ -454,6 +679,146 @@ pub fn acquire_capability(
         &FileTokenStore,
         interactive_login,
     )
+}
+
+/// Requests a push capability with a caller-persisted idempotency token.
+pub fn acquire_push_capability(
+    repository: &RepositoryRemote,
+    request: &CapabilityRequest<'_>,
+    idempotency_token: Uuid,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<CapabilityResponse, RemoteClientError> {
+    let client = Client::new();
+    let api_key = env::var("GENHUB_API_KEY").ok();
+    acquire_capability_with_store_and_token(
+        &client,
+        repository,
+        request,
+        Some(idempotency_token),
+        api_key.as_deref(),
+        &FileTokenStore,
+        interactive_login,
+    )
+}
+
+const MAX_DIRECT_PUSH_ERROR_BODY_BYTES: u64 = 4096;
+const STALE_SESSION_CHECK_HEADER: &str = "x-gen-session-stale-check";
+
+/// Publishes a staged direct-GCS session through its signed GenHub endpoint.
+pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), RemoteClientError> {
+    send_direct_push_request(capability, false)
+}
+
+/// Asks GenHub to reopen a session and report whether its accepted base is stale.
+///
+/// A successful response means the session is not stale. The server leaves a valid session and
+/// its transfer lease untouched; only the exact stale-session response returns `true`.
+pub fn confirm_direct_push_session_stale(
+    capability: &DirectPushCapability,
+) -> Result<bool, RemoteClientError> {
+    match send_direct_push_request(capability, true) {
+        Ok(()) => Ok(false),
+        Err(RemoteClientError::StaleGraphSession) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn send_direct_push_request(
+    capability: &DirectPushCapability,
+    stale_check: bool,
+) -> Result<(), RemoteClientError> {
+    let client = Client::builder().redirect(Policy::none()).build()?;
+    let mut request = client
+        .post(&capability.publish_url)
+        .header(CONTENT_LENGTH, "0");
+    if stale_check {
+        request = request.header(STALE_SESSION_CHECK_HEADER, "1");
+    }
+    let mut response = request
+        .send()
+        .map_err(|error| RemoteClientError::Request(error.without_url()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        if status == StatusCode::CONFLICT && is_stale_session_response(&mut response) {
+            return Err(RemoteClientError::StaleGraphSession);
+        }
+        let content_type = response_content_type_label(response.headers());
+        let protocol = http_version_label(response.version());
+        log::debug!(
+            "Direct GCS manifest publication returned HTTP {status}; response protocol {protocol}, content type {content_type}"
+        );
+        return Err(RemoteClientError::Http {
+            status,
+            message: "direct GCS manifest publication failed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn is_stale_session_response(response: &mut reqwest::blocking::Response) -> bool {
+    let is_json = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("application/json")
+            })
+        });
+    if !is_json {
+        return false;
+    }
+    let mut bounded_response = io::Read::take(&mut *response, MAX_DIRECT_PUSH_ERROR_BODY_BYTES + 1);
+    let mut body = Vec::new();
+    if io::Read::read_to_end(&mut bounded_response, &mut body).is_err() {
+        return false;
+    }
+    if body.len() as u64 > MAX_DIRECT_PUSH_ERROR_BODY_BYTES {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|reason| reason == "stale_graph_session")
+}
+
+fn http_version_label(version: Version) -> &'static str {
+    match version {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_11 => "HTTP/1.1",
+        Version::HTTP_2 => "HTTP/2",
+        Version::HTTP_3 => "HTTP/3",
+        _ => "unknown HTTP version",
+    }
+}
+
+fn response_content_type_label(headers: &HeaderMap) -> &'static str {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return "absent";
+    };
+    let Ok(value) = value.to_str() else {
+        return "other";
+    };
+    let media_type = value
+        .split_once(';')
+        .map_or(value, |(media_type, _)| media_type)
+        .trim()
+        .to_ascii_lowercase();
+    if media_type == "application/json"
+        || (media_type.starts_with("application/") && media_type.ends_with("+json"))
+    {
+        "JSON"
+    } else if media_type == "text/html" || media_type == "application/xhtml+xml" {
+        "HTML"
+    } else {
+        "other"
+    }
 }
 
 pub fn acquire_asset_transfers(
@@ -503,52 +868,82 @@ pub fn complete_asset_transfers(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         io::{self, Read as _, Write as _},
         net::{TcpListener, TcpStream},
         sync::Mutex,
         thread::{self, JoinHandle},
     };
 
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use chrono::Utc;
     use reqwest::{StatusCode, blocking::Client};
     use uuid::Uuid;
 
     use super::{
-        AuthTokens, CapabilityRequest, CapabilityResponse, RemoteClientError, RemoteOperation,
-        RepositoryRemote, TokenStore, acquire_capability_with_store, normalized_origin,
+        AssetTransferRequest, AuthTokens, CapabilityRequest, CapabilityResponse,
+        DirectPushCapability, MAX_DIRECT_PUSH_ERROR_BODY_BYTES, RemoteClientError, RemoteOperation,
+        RepositoryRemote, RequestAuthorization, SessionScope, TokenStore,
+        access_token_expired_hint, acquire_capability_with_store,
+        acquire_capability_with_store_and_token, confirm_direct_push_session_stale,
+        http_version_label, normalized_origin, publish_direct_push, response_content_type_label,
+        send_asset_transfers,
     };
 
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
 
+    fn test_jwt_with_expiration(expiration: i64) -> String {
+        let header = serde_json::json!({"alg": "HS256", "typ": "JWT"}).to_string();
+        let claims = serde_json::json!({"exp": expiration}).to_string();
+        format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(header),
+            URL_SAFE_NO_PAD.encode(claims),
+            URL_SAFE_NO_PAD.encode("test-signature")
+        )
+    }
+
     struct MemoryTokenStore {
-        tokens: Mutex<Option<AuthTokens>>,
+        tokens: Mutex<HashMap<String, AuthTokens>>,
     }
 
     impl MemoryTokenStore {
         fn empty() -> Self {
             Self {
-                tokens: Mutex::new(None),
+                tokens: Mutex::new(HashMap::new()),
             }
         }
 
-        fn with_tokens(tokens: AuthTokens) -> Self {
-            Self {
-                tokens: Mutex::new(Some(tokens)),
-            }
+        fn with_tokens(identity: &str, tokens: AuthTokens) -> Self {
+            let store = Self::empty();
+            store
+                .tokens
+                .lock()
+                .expect("should lock token store")
+                .insert(identity.to_string(), tokens);
+            store
         }
 
-        fn current(&self) -> Option<AuthTokens> {
-            self.tokens.lock().expect("should lock token store").clone()
+        fn current(&self, identity: &str) -> Option<AuthTokens> {
+            self.tokens
+                .lock()
+                .expect("should lock token store")
+                .get(identity)
+                .cloned()
         }
     }
 
     impl TokenStore for MemoryTokenStore {
-        fn load(&self, _identity: &str) -> io::Result<AuthTokens> {
-            self.current()
+        fn load(&self, identity: &str) -> io::Result<AuthTokens> {
+            self.current(identity)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no in-memory credentials"))
         }
 
-        fn save(&self, _identity: &str, tokens: &AuthTokens) -> io::Result<()> {
-            *self.tokens.lock().expect("should lock token store") = Some(tokens.clone());
+        fn save(&self, identity: &str, tokens: &AuthTokens) -> io::Result<()> {
+            self.tokens
+                .lock()
+                .expect("should lock token store")
+                .insert(identity.to_string(), tokens.clone());
             Ok(())
         }
     }
@@ -620,6 +1015,117 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
+    fn mock_server_disconnects_during_refresh() -> (String, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind mock GenHub");
+        let address = listener
+            .local_addr()
+            .expect("should read mock GenHub address");
+        let handle = thread::spawn(move || {
+            let (mut capability_stream, _) =
+                listener.accept().expect("should accept capability request");
+            let capability_request = read_request(&mut capability_stream);
+            let body = "{\"message\":\"expired\"}";
+            write!(
+                capability_stream,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should reject expired access token");
+
+            let (mut refresh_stream, _) = listener.accept().expect("should accept refresh request");
+            let refresh_request = read_request(&mut refresh_stream);
+            drop(refresh_stream);
+            vec![capability_request, refresh_request]
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn read_request_head(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .expect("should read request headers");
+            assert!(read > 0, "request should include its headers");
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return request;
+            }
+        }
+    }
+
+    fn strict_empty_post_server(request_count: usize) -> (String, JoinHandle<Vec<(String, u16)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind strict HTTP fixture");
+        let address = listener
+            .local_addr()
+            .expect("should read strict HTTP fixture address");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("should accept strict publication request");
+                let request = String::from_utf8(read_request_head(&mut stream))
+                    .expect("should decode request headers as UTF-8");
+                let forced_response = if request.starts_with("POST /reject-html?") {
+                    Some((411, "Length Required", "Content-Type: text/html\r\n"))
+                } else if request.starts_with("POST /reject-json?") {
+                    Some((
+                        502,
+                        "Bad Gateway",
+                        "Content-Type: application/problem+json\r\n",
+                    ))
+                } else if request.starts_with("POST /reject-other?") {
+                    Some((
+                        502,
+                        "Bad Gateway",
+                        "Content-Type: application/x-private; name=private-canary\r\n",
+                    ))
+                } else if request.starts_with("POST /reject-absent?") {
+                    Some((502, "Bad Gateway", ""))
+                } else {
+                    None
+                };
+                let header_end = request
+                    .as_bytes()
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .expect("should find the end of request headers");
+                let headers = request[..header_end].to_ascii_lowercase();
+                let content_lengths = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .filter(|(name, _)| name.trim() == "content-length")
+                    .map(|(_, value)| value.trim())
+                    .collect::<Vec<_>>();
+                let body = &request.as_bytes()[header_end + 4..];
+                let (status, reason, content_type, response_body) =
+                    if let Some((status, reason, content_type)) = forced_response {
+                        (status, reason, content_type, "response-body-canary")
+                    } else if content_lengths.as_slice() == ["0"] && body.is_empty() {
+                        (204, "No Content", "", "")
+                    } else {
+                        (
+                            411,
+                            "Length Required",
+                            "Content-Type: text/html\r\n",
+                            "length required",
+                        )
+                    };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .expect("should write strict publication response");
+                requests.push((request, status));
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
     fn capability_body(remote_url: &str) -> String {
         serde_json::json!({
             "remote_url": remote_url,
@@ -633,6 +1139,39 @@ mod tests {
     fn repository(origin: &str) -> RepositoryRemote {
         RepositoryRemote::parse(&format!("{origin}/api/repos/alice/example"))
             .expect("should parse mock repository")
+    }
+
+    fn assert_response_decode_context(
+        error: &RemoteClientError,
+        endpoint: &str,
+        response_body: &str,
+    ) {
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(endpoint),
+            "error should identify {endpoint}: {rendered}"
+        );
+        assert!(
+            rendered.contains("HTTP 200"),
+            "error should include status: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "declared Content-Length Some({})",
+                response_body.len()
+            )),
+            "error should include only the declared response length: {rendered}"
+        );
+        assert!(
+            !format!("{error:?}").contains("sensitive-canary"),
+            "error must not expose response-body contents"
+        );
+        assert!(
+            std::error::Error::source(error)
+                .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                .is_some(),
+            "response decoder error should retain its reqwest source"
+        );
     }
 
     fn no_interactive_login(_origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
@@ -711,16 +1250,133 @@ mod tests {
         assert_eq!(
             response,
             CapabilityResponse {
-                remote_url: expected_url.to_string(),
+                remote_url: Some(expected_url.to_string()),
                 expires_at: "2030-01-01T00:00:00Z"
                     .parse()
                     .expect("should parse capability expiry"),
                 default_branch: "main".to_string(),
                 transfer_id: TEST_TRANSFER_ID,
+                direct_push: None,
             }
         );
         assert!(!requests[0].to_ascii_lowercase().contains("x-api-key:"));
         assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[test]
+    fn test_push_capability_sends_idempotency_token_and_parses_direct_gcs_grant() {
+        let session_scope = SessionScope {
+            principal: "repository:repo-uuid".to_string(),
+            target_database: "default.db".to_string(),
+            operations: r#"["write","push","main",false]"#.to_string(),
+        };
+        let body = serde_json::json!({
+            "remote_url": null,
+            "expires_at": "2030-01-01T00:00:00Z",
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID,
+            "direct_push": {
+                "database_uri": "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&access_token=secret",
+                "token_expires_at": "2030-01-01T00:15:00Z",
+                "session_id": TEST_TRANSFER_ID,
+                "session_scope": {
+                    "principal": session_scope.principal.clone(),
+                    "target_database": session_scope.target_database.clone(),
+                    "operations": session_scope.operations.clone()
+                },
+                "publish_url": "https://genhub.bio/api/publish?token=secret"
+            }
+        })
+        .to_string();
+        let (origin, server) = mock_server(vec![(200, body)]);
+        let repository = repository(&origin);
+        let capability = acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            Some("test-api-key"),
+            &MemoryTokenStore::empty(),
+            no_interactive_login,
+        )
+        .expect("push should receive direct GCS capability");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
+        );
+        assert_eq!(capability.transfer_id, TEST_TRANSFER_ID);
+        assert_eq!(
+            capability.direct_push,
+            Some(DirectPushCapability {
+                database_uri: "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&access_token=secret".to_string(),
+                token_expires_at: "2030-01-01T00:15:00Z"
+                    .parse()
+                    .expect("should parse CAB token expiry"),
+                session_id: TEST_TRANSFER_ID,
+                session_scope,
+                publish_url: "https://genhub.bio/api/publish?token=secret".to_string(),
+            })
+        );
+        let debug = format!("{capability:?}");
+        assert!(!debug.contains("legacy-transfer"));
+        assert!(!debug.contains("access_token=secret"));
+        assert!(!debug.contains("token=secret"));
+    }
+
+    #[test]
+    fn test_capability_decode_error_has_safe_endpoint_context() {
+        let response_body =
+            r#"{"direct_push":{"database_uri":"gcs://bucket/?access_token=sensitive-canary""#;
+        let (origin, server) = mock_server(vec![(200, response_body.to_string())]);
+        let repository = repository(&origin);
+        let error = acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            Some("test-api-key"),
+            &MemoryTokenStore::empty(),
+            no_interactive_login,
+        )
+        .expect_err("malformed capability JSON should fail");
+        server.join().expect("mock GenHub should finish");
+
+        assert_response_decode_context(&error, "remote capability", response_body);
+    }
+
+    #[test]
+    fn test_asset_transfer_decode_error_has_safe_endpoint_context() {
+        let response_body =
+            r#"{"assets":[{"url":"https://storage.example/?token=sensitive-canary""#;
+        let (origin, server) = mock_server(vec![(200, response_body.to_string())]);
+        let repository = repository(&origin);
+        let request = AssetTransferRequest {
+            operation: RemoteOperation::Push,
+            branch: "main",
+            from_commit: None,
+            to_commit: None,
+        };
+        let error = send_asset_transfers(
+            &Client::new(),
+            &repository,
+            &request,
+            RequestAuthorization::ApiKey("test-api-key"),
+        )
+        .expect_err("malformed asset transfer JSON should fail");
+        server.join().expect("mock GenHub should finish");
+
+        assert_response_decode_context(&error, "asset transfers", response_body);
     }
 
     #[test]
@@ -783,7 +1439,9 @@ mod tests {
         )
         .expect("missing token should trigger login");
         let requests = server.join().expect("mock GenHub should finish");
-        let stored = store.current().expect("login tokens should be stored");
+        let stored = store
+            .current(repository.origin())
+            .expect("login tokens should be stored");
 
         assert!(login_attempted);
         assert!(requests[0].contains("authorization: Bearer login-access"));
@@ -801,10 +1459,13 @@ mod tests {
             ),
         ]);
         let repository = repository(&origin);
-        let store = MemoryTokenStore::with_tokens(AuthTokens {
-            jwt: "forbidden-access".to_string(),
-            refresh_token: "old-refresh".to_string(),
-        });
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: "forbidden-access".to_string(),
+                refresh_token: "old-refresh".to_string(),
+            },
+        );
         let mut login_attempted = false;
 
         acquire_capability_with_store(
@@ -827,7 +1488,9 @@ mod tests {
         )
         .expect("forbidden token should trigger login");
         let requests = server.join().expect("mock GenHub should finish");
-        let stored = store.current().expect("login tokens should be stored");
+        let stored = store
+            .current(repository.origin())
+            .expect("login tokens should be stored");
 
         assert!(login_attempted);
         assert!(requests[0].contains("authorization: Bearer forbidden-access"));
@@ -878,6 +1541,136 @@ mod tests {
     }
 
     #[test]
+    fn test_same_origin_remotes_share_rotated_tokens() {
+        let (origin, server) = mock_server(vec![
+            (401, "{\"message\":\"expired\"}".to_string()),
+            (
+                200,
+                serde_json::json!({
+                    "access_token": "rotated-access",
+                    "refresh_token": "rotated-refresh"
+                })
+                .to_string(),
+            ),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/first/default.db"),
+            ),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/second/default.db"),
+            ),
+        ]);
+        let first_remote = repository(&origin);
+        let second_remote = RepositoryRemote::parse(&format!("{origin}/api/repos/bob/another"))
+            .expect("should parse second repository on the same GenHub origin");
+        let store = MemoryTokenStore::with_tokens(
+            first_remote.origin(),
+            AuthTokens {
+                jwt: "expired-access".to_string(),
+                refresh_token: "old-refresh".to_string(),
+            },
+        );
+        let request = CapabilityRequest {
+            operation: RemoteOperation::Push,
+            branch: Some("main"),
+            force: false,
+        };
+
+        acquire_capability_with_store(
+            &Client::new(),
+            &first_remote,
+            &request,
+            None,
+            &store,
+            no_interactive_login,
+        )
+        .expect("first remote should rotate its shared origin tokens");
+        acquire_capability_with_store(
+            &Client::new(),
+            &second_remote,
+            &request,
+            None,
+            &store,
+            no_interactive_login,
+        )
+        .expect("second remote should reuse the rotated origin tokens");
+        let requests = server.join().expect("mock GenHub should finish");
+        let stored = store
+            .current(first_remote.origin())
+            .expect("rotated tokens should be stored for the GenHub origin");
+
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("authorization: Bearer expired-access"));
+        assert!(requests[1].starts_with("POST /api/auth/cli/token-refresh "));
+        assert!(requests[2].contains("authorization: Bearer rotated-access"));
+        assert!(requests[3].starts_with("POST /api/repos/bob/another/remote-capability "));
+        assert!(requests[3].contains("authorization: Bearer rotated-access"));
+        assert_eq!(stored.jwt, "rotated-access");
+        assert_eq!(stored.refresh_token, "rotated-refresh");
+    }
+
+    #[test]
+    fn test_tokens_for_another_origin_are_not_reused() {
+        let first_origin = "https://other.genhub.test";
+        let (second_origin, server) = mock_server(vec![(
+            200,
+            capability_body("http://127.0.0.1:9000/dolt/second-origin/default.db"),
+        )]);
+        assert_ne!(first_origin, second_origin);
+        let second_remote = repository(&second_origin);
+        let store = MemoryTokenStore::with_tokens(
+            first_origin,
+            AuthTokens {
+                jwt: "first-origin-access".to_string(),
+                refresh_token: "first-origin-refresh".to_string(),
+            },
+        );
+        let mut login_attempts = 0;
+
+        acquire_capability_with_store(
+            &Client::new(),
+            &second_remote,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            None,
+            &store,
+            |login_origin| {
+                login_attempts += 1;
+                assert_eq!(login_origin, second_remote.origin());
+                Ok(AuthTokens {
+                    jwt: "second-origin-access".to_string(),
+                    refresh_token: "second-origin-refresh".to_string(),
+                })
+            },
+        )
+        .expect("a different origin should use its own login");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert_eq!(login_attempts, 1);
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("authorization: Bearer second-origin-access"));
+        assert!(!requests[0].contains("first-origin-access"));
+        assert_eq!(
+            store
+                .current(first_origin)
+                .expect("first origin tokens should remain stored")
+                .jwt,
+            "first-origin-access"
+        );
+        assert_eq!(
+            store
+                .current(second_remote.origin())
+                .expect("second origin tokens should be stored")
+                .jwt,
+            "second-origin-access"
+        );
+    }
+
+    #[test]
     fn test_expired_access_token_refreshes_and_persists_rotated_tokens() {
         let (origin, server) = mock_server(vec![
             (404, "{\"message\":\"not found\"}".to_string()),
@@ -895,10 +1688,13 @@ mod tests {
             ),
         ]);
         let repository = repository(&origin);
-        let store = MemoryTokenStore::with_tokens(AuthTokens {
-            jwt: "old-access".to_string(),
-            refresh_token: "old-refresh".to_string(),
-        });
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: "old-access".to_string(),
+                refresh_token: "old-refresh".to_string(),
+            },
+        );
         acquire_capability_with_store(
             &Client::new(),
             &repository,
@@ -913,7 +1709,9 @@ mod tests {
         )
         .expect("expired access token should refresh");
         let requests = server.join().expect("mock GenHub should finish");
-        let stored = store.current().expect("rotated tokens should be stored");
+        let stored = store
+            .current(repository.origin())
+            .expect("rotated tokens should be stored");
 
         assert!(requests[0].contains("authorization: Bearer old-access"));
         assert!(requests[1].starts_with("POST /api/auth/cli/token-refresh "));
@@ -924,17 +1722,31 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_refresh_is_reported_without_overwriting_tokens() {
+    fn test_expired_jwt_refreshes_before_remote_capability_request() {
         let (origin, server) = mock_server(vec![
-            (401, "{\"message\":\"expired\"}".to_string()),
-            (400, "{\"error\":\"invalid_grant\"}".to_string()),
+            (
+                200,
+                serde_json::json!({
+                    "access_token": "refreshed-access",
+                    "refresh_token": "refreshed-token"
+                })
+                .to_string(),
+            ),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/write/default.db"),
+            ),
         ]);
         let repository = repository(&origin);
-        let store = MemoryTokenStore::with_tokens(AuthTokens {
-            jwt: "expired-access".to_string(),
-            refresh_token: "invalid-refresh".to_string(),
-        });
-        let error = acquire_capability_with_store(
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: test_jwt_with_expiration(Utc::now().timestamp() - 60),
+                refresh_token: "old-refresh".to_string(),
+            },
+        );
+
+        acquire_capability_with_store(
             &Client::new(),
             &repository,
             &CapabilityRequest {
@@ -946,18 +1758,642 @@ mod tests {
             &store,
             no_interactive_login,
         )
-        .expect_err("invalid refresh should fail");
-        server.join().expect("mock GenHub should finish");
-        let stored = store.current().expect("old tokens should remain stored");
+        .expect("expired JWT should refresh before requesting a capability");
+        let requests = server.join().expect("mock GenHub should finish");
+        let stored = store
+            .current(repository.origin())
+            .expect("refreshed tokens should be stored");
 
-        assert!(matches!(
-            error,
-            RemoteClientError::Http {
-                status: StatusCode::BAD_REQUEST,
-                ..
-            }
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /api/auth/cli/token-refresh "));
+        assert!(requests[0].contains("\"refresh_token\":\"old-refresh\""));
+        assert!(requests[1].contains("authorization: Bearer refreshed-access"));
+        assert_eq!(stored.jwt, "refreshed-access");
+        assert_eq!(stored.refresh_token, "refreshed-token");
+    }
+
+    #[test]
+    fn test_access_token_expiry_hint_ignores_malformed_and_opaque_tokens() {
+        let now = Utc::now();
+        for token in [
+            "opaque-access-token",
+            "header.payload.signature",
+            "e30.bm90LWpzb24.c2lnbmF0dXJl",
+            "e30.eyJleHAiOjF9.c2lnbmF0dXJl",
+        ] {
+            assert!(
+                !access_token_expired_hint(token, now),
+                "malformed or opaque access token should not trigger proactive refresh"
+            );
+        }
+        assert!(access_token_expired_hint(
+            &test_jwt_with_expiration(now.timestamp() - 1),
+            now
         ));
-        assert_eq!(stored.jwt, "expired-access");
-        assert_eq!(stored.refresh_token, "invalid-refresh");
+        assert!(!access_token_expired_hint(
+            &test_jwt_with_expiration(now.timestamp() + 60),
+            now
+        ));
+    }
+
+    #[test]
+    fn test_unexpired_jwt_forbidden_response_keeps_interactive_login_behavior() {
+        let (origin, server) = mock_server(vec![
+            (403, "{\"message\":\"permission denied\"}".to_string()),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/write/default.db"),
+            ),
+        ]);
+        let repository = repository(&origin);
+        let token = test_jwt_with_expiration(Utc::now().timestamp() + 3600);
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: token.clone(),
+                refresh_token: "old-refresh".to_string(),
+            },
+        );
+        let mut login_attempted = false;
+
+        acquire_capability_with_store(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            None,
+            &store,
+            |_| {
+                login_attempted = true;
+                Ok(AuthTokens {
+                    jwt: "login-access".to_string(),
+                    refresh_token: "login-refresh".to_string(),
+                })
+            },
+        )
+        .expect("valid-token authorization rejection should keep existing login behavior");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert!(login_attempted);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains(&format!("authorization: Bearer {token}")));
+        assert!(!requests[0].contains("token-refresh"));
+        assert!(requests[1].contains("authorization: Bearer login-access"));
+    }
+
+    #[test]
+    fn test_invalid_refresh_grant_logs_in_and_retries_with_same_idempotency_token() {
+        let (origin, server) = mock_server(vec![
+            (401, "{\"message\":\"expired\"}".to_string()),
+            (
+                400,
+                "{\"error\":\"invalid_grant\",\"error_description\":\"Invalid or expired refresh token\",\"error_uri\":null}".to_string(),
+            ),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/login/default.db"),
+            ),
+        ]);
+        let repository = repository(&origin);
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: "expired-access".to_string(),
+                refresh_token: "invalid-refresh".to_string(),
+            },
+        );
+        let request = CapabilityRequest {
+            operation: RemoteOperation::Push,
+            branch: Some("main"),
+            force: false,
+        };
+        let mut login_attempts = 0;
+
+        acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &request,
+            Some(TEST_TRANSFER_ID),
+            None,
+            &store,
+            |login_origin| {
+                login_attempts += 1;
+                assert_eq!(login_origin, repository.origin());
+                Ok(AuthTokens {
+                    jwt: "login-access".to_string(),
+                    refresh_token: "login-refresh".to_string(),
+                })
+            },
+        )
+        .expect("invalid refresh grant should recover through interactive login");
+        let requests = server.join().expect("mock GenHub should finish");
+        let stored = store
+            .current(repository.origin())
+            .expect("login tokens should be stored for the origin");
+        let expected_idempotency_header = format!("idempotency-token: {TEST_TRANSFER_ID}");
+
+        assert_eq!(login_attempts, 1);
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("authorization: Bearer expired-access"));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&expected_idempotency_header)
+        );
+        assert!(requests[1].starts_with("POST /api/auth/cli/token-refresh "));
+        assert!(requests[2].contains("authorization: Bearer login-access"));
+        assert!(
+            requests[2]
+                .to_ascii_lowercase()
+                .contains(&expected_idempotency_header)
+        );
+        assert_eq!(stored.jwt, "login-access");
+        assert_eq!(stored.refresh_token, "login-refresh");
+    }
+
+    #[test]
+    fn test_expired_jwt_with_invalid_refresh_grant_logs_in_before_capability_request() {
+        let (origin, server) = mock_server(vec![
+            (
+                400,
+                "{\"error\":\"invalid_grant\",\"error_description\":\"Invalid or expired refresh token\",\"error_uri\":null}".to_string(),
+            ),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/login/default.db"),
+            ),
+        ]);
+        let repository = repository(&origin);
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: test_jwt_with_expiration(Utc::now().timestamp() - 60),
+                refresh_token: "invalid-refresh".to_string(),
+            },
+        );
+        let mut login_attempts = 0;
+
+        acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            None,
+            &store,
+            |login_origin| {
+                login_attempts += 1;
+                assert_eq!(login_origin, repository.origin());
+                Ok(AuthTokens {
+                    jwt: "login-access".to_string(),
+                    refresh_token: "login-refresh".to_string(),
+                })
+            },
+        )
+        .expect("expired JWT and invalid refresh grant should recover through login");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert_eq!(login_attempts, 1);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /api/auth/cli/token-refresh "));
+        assert!(requests[1].contains("authorization: Bearer login-access"));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
+        );
+    }
+
+    #[test]
+    fn test_invalid_refresh_grant_with_failed_login_preserves_existing_tokens() {
+        let (origin, server) = mock_server(vec![
+            (401, "{\"message\":\"expired\"}".to_string()),
+            (400, "{\"error\":\"invalid_grant\"}".to_string()),
+        ]);
+        let repository = repository(&origin);
+        let original_tokens = AuthTokens {
+            jwt: "expired-access".to_string(),
+            refresh_token: "invalid-refresh".to_string(),
+        };
+        let store = MemoryTokenStore::with_tokens(repository.origin(), original_tokens.clone());
+        let mut login_attempts = 0;
+        let error = acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            None,
+            &store,
+            |_| {
+                login_attempts += 1;
+                Err("login did not complete".into())
+            },
+        )
+        .expect_err("failed interactive login should report authentication required");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert!(matches!(error, RemoteClientError::AuthenticationRequired));
+        assert_eq!(requests.len(), 2);
+        assert_eq!(login_attempts, 1);
+        let stored = store
+            .current(repository.origin())
+            .expect("old tokens should remain stored");
+        assert_eq!(stored.jwt, original_tokens.jwt);
+        assert_eq!(stored.refresh_token, original_tokens.refresh_token);
+    }
+
+    #[test]
+    fn test_failed_request_after_invalid_refresh_login_is_returned_once() {
+        let (origin, server) = mock_server(vec![
+            (401, "{\"message\":\"expired\"}".to_string()),
+            (400, "{\"error\":\"invalid_grant\"}".to_string()),
+            (401, "{\"message\":\"still unauthorized\"}".to_string()),
+        ]);
+        let repository = repository(&origin);
+        let store = MemoryTokenStore::with_tokens(
+            repository.origin(),
+            AuthTokens {
+                jwt: "expired-access".to_string(),
+                refresh_token: "invalid-refresh".to_string(),
+            },
+        );
+        let mut login_attempts = 0;
+        let error = acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            None,
+            &store,
+            |_| {
+                login_attempts += 1;
+                Ok(AuthTokens {
+                    jwt: "login-access".to_string(),
+                    refresh_token: "login-refresh".to_string(),
+                })
+            },
+        )
+        .expect_err("the single post-login retry error should be returned");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert!(
+            matches!(error, RemoteClientError::Http { status, .. } if status == StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(requests.len(), 3);
+        assert_eq!(login_attempts, 1);
+        assert!(requests[2].contains("authorization: Bearer login-access"));
+        assert!(
+            requests[2]
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
+        );
+    }
+
+    #[test]
+    fn test_refresh_transport_failure_propagates_without_logging_in() {
+        let (origin, server) = mock_server_disconnects_during_refresh();
+        let repository = repository(&origin);
+        let original_tokens = AuthTokens {
+            jwt: "expired-access".to_string(),
+            refresh_token: "refresh-token".to_string(),
+        };
+        let store = MemoryTokenStore::with_tokens(repository.origin(), original_tokens.clone());
+        let mut login_attempts = 0;
+        let error = acquire_capability_with_store(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            None,
+            &store,
+            |_| {
+                login_attempts += 1;
+                Ok(AuthTokens {
+                    jwt: "unexpected-login".to_string(),
+                    refresh_token: "unexpected-refresh".to_string(),
+                })
+            },
+        )
+        .expect_err("refresh transport failure should be returned");
+        let requests = server.join().expect("mock GenHub should finish");
+        let stored = store
+            .current(repository.origin())
+            .expect("original tokens should remain stored");
+
+        assert!(matches!(error, RemoteClientError::Request(_)));
+        assert_eq!(requests.len(), 2);
+        assert_eq!(login_attempts, 0);
+        assert_eq!(stored.jwt, original_tokens.jwt);
+        assert_eq!(stored.refresh_token, original_tokens.refresh_token);
+    }
+
+    #[test]
+    fn test_other_refresh_errors_propagate_without_logging_in() {
+        for (status, body) in [
+            (400, "{\"error\":\"invalid_request\"}"),
+            (400, "not an OAuth error response"),
+            (500, "{\"error\":\"invalid_grant\"}"),
+            (500, "{\"error\":\"temporarily_unavailable\"}"),
+        ] {
+            let (origin, server) = mock_server(vec![
+                (401, "{\"message\":\"expired\"}".to_string()),
+                (status, body.to_string()),
+            ]);
+            let repository = repository(&origin);
+            let store = MemoryTokenStore::with_tokens(
+                repository.origin(),
+                AuthTokens {
+                    jwt: "expired-access".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                },
+            );
+            let mut login_attempts = 0;
+            let error = acquire_capability_with_store(
+                &Client::new(),
+                &repository,
+                &CapabilityRequest {
+                    operation: RemoteOperation::Push,
+                    branch: Some("main"),
+                    force: false,
+                },
+                None,
+                &store,
+                |_| {
+                    login_attempts += 1;
+                    Ok(AuthTokens {
+                        jwt: "unexpected-login".to_string(),
+                        refresh_token: "unexpected-refresh".to_string(),
+                    })
+                },
+            )
+            .expect_err("only invalid_grant should start interactive login");
+            let requests = server.join().expect("mock GenHub should finish");
+            let stored = store
+                .current(repository.origin())
+                .expect("original tokens should remain stored");
+
+            assert!(
+                matches!(error, RemoteClientError::Http { status: actual, .. } if actual.as_u16() == status)
+            );
+            assert_eq!(requests.len(), 2);
+            assert_eq!(login_attempts, 0);
+            assert_eq!(stored.jwt, "expired-access");
+            assert_eq!(stored.refresh_token, "refresh-token");
+        }
+    }
+
+    #[test]
+    fn test_publish_direct_push_requires_explicit_zero_content_length() {
+        let (origin, server) = strict_empty_post_server(7);
+        let address = origin
+            .strip_prefix("http://")
+            .expect("should use HTTP/1.1 in the strict fixture");
+        let mut missing_length_request =
+            TcpStream::connect(address).expect("should connect to strict fixture");
+        write!(
+            missing_length_request,
+            "POST /publish HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("should send request without Content-Length");
+        let mut missing_length_rejection = String::new();
+        missing_length_request
+            .read_to_string(&mut missing_length_rejection)
+            .expect("should read missing Content-Length rejection");
+        assert!(
+            missing_length_rejection.starts_with("HTTP/1.1 411 Length Required\r\n"),
+            "strict fixture should reject missing Content-Length: {missing_length_rejection}"
+        );
+
+        let mut nonempty_length_request =
+            TcpStream::connect(address).expect("should connect to strict fixture");
+        write!(
+            nonempty_length_request,
+            "POST /publish HTTP/1.1\r\nHost: {address}\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"
+        )
+        .expect("should send nonzero-length request headers");
+        let mut rejection = String::new();
+        nonempty_length_request
+            .read_to_string(&mut rejection)
+            .expect("should read strict fixture rejection");
+        assert!(
+            rejection.starts_with("HTTP/1.1 411 Length Required\r\n"),
+            "strict fixture should reject nonzero Content-Length: {rejection}"
+        );
+
+        let capability = DirectPushCapability {
+            database_uri: "gcs://bucket/prefix?access_token=not-used".to_string(),
+            token_expires_at: "2030-01-01T00:00:00Z"
+                .parse()
+                .expect("should parse test token expiration"),
+            session_id: TEST_TRANSFER_ID,
+            session_scope: SessionScope {
+                principal: "alice".to_string(),
+                target_database: "example".to_string(),
+                operations: "commit".to_string(),
+            },
+            publish_url: format!("{origin}/publish?signature=publish-secret"),
+        };
+        let publish_result = publish_direct_push(&capability);
+
+        let rejection_cases = [
+            ("html", 411, "HTML"),
+            ("json", 502, "JSON"),
+            ("other", 502, "other"),
+            ("absent", 502, "absent"),
+        ];
+        let rejected_results = rejection_cases.map(|(body_type, _, _)| {
+            let rejected_capability = DirectPushCapability {
+                publish_url: format!("{origin}/reject-{body_type}?signature=publish-secret"),
+                ..capability.clone()
+            };
+            publish_direct_push(&rejected_capability)
+                .expect_err("should report forced publication rejection")
+                .to_string()
+        });
+        let requests = server.join().expect("should finish strict fixture");
+
+        assert_eq!(requests.len(), 7);
+        assert_eq!(
+            requests[0].1, 411,
+            "missing Content-Length should be rejected"
+        );
+        assert_eq!(
+            requests[1].1, 411,
+            "nonzero Content-Length should be rejected"
+        );
+        assert_eq!(
+            requests[2].1, 204,
+            "publisher should send Content-Length: 0 and no request body; captured request: {}",
+            requests[2].0
+        );
+        assert_eq!(requests[3].1, 411, "should return the HTML fixture status");
+        assert_eq!(requests[4].1, 502, "should return the JSON fixture status");
+        assert_eq!(requests[5].1, 502, "should return the other fixture status");
+        assert_eq!(
+            requests[6].1, 502,
+            "should return the absent fixture status"
+        );
+        assert!(
+            publish_result.is_ok(),
+            "empty manifest publication should be accepted: {publish_result:?}"
+        );
+        let request = &requests[2].0;
+        let (headers, body) = request
+            .split_once("\r\n\r\n")
+            .expect("should find captured publication request headers");
+        assert!(
+            headers.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length") && value.trim() == "0"
+                })
+            }),
+            "wire request should explicitly contain Content-Length: 0: {headers}"
+        );
+        assert!(
+            body.is_empty(),
+            "manifest publication request body should be empty"
+        );
+
+        for ((body_type, status, content_type), rendered_error) in
+            rejection_cases.into_iter().zip(rejected_results)
+        {
+            assert!(
+                rendered_error.contains(&format!("Remote endpoint returned HTTP {status}")),
+                "should identify the remote HTTP response for {body_type}: {rendered_error}"
+            );
+            assert!(
+                rendered_error.contains("direct GCS manifest publication failed"),
+                "should identify the failing publication stage: {rendered_error}"
+            );
+            assert!(
+                !rendered_error.contains("publish-secret")
+                    && !rendered_error.contains("response-body-canary")
+                    && !rendered_error.contains("private-canary")
+                    && !rendered_error.contains("HTTP/1.1")
+                    && !rendered_error.contains(content_type),
+                "default errors should hide signed URLs, response bodies, and transport diagnostics: {rendered_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stale_session_response_requires_bounded_exact_reason() {
+        let oversized_body = format!(
+            "{{\"reason\":\"stale_graph_session\",\"detail\":\"{}\"}}",
+            "x".repeat(MAX_DIRECT_PUSH_ERROR_BODY_BYTES as usize + 64)
+        );
+        let (origin, server) = mock_server(vec![
+            (
+                409,
+                r#"{"reason":"stale_graph_session","message":"safe"}"#.to_string(),
+            ),
+            (
+                409,
+                r#"{"reason":"another_conflict","message":"private-canary"}"#.to_string(),
+            ),
+            (
+                409,
+                r#"{"reason":"stale_graph_session","message":"safe"}"#.to_string(),
+            ),
+            (409, oversized_body),
+        ]);
+        let capability = DirectPushCapability {
+            database_uri: "gcs://bucket/prefix?access_token=not-used".to_string(),
+            token_expires_at: "2030-01-01T00:00:00Z"
+                .parse()
+                .expect("should parse test token expiration"),
+            session_id: TEST_TRANSFER_ID,
+            session_scope: SessionScope {
+                principal: "alice".to_string(),
+                target_database: "default.db".to_string(),
+                operations: "push".to_string(),
+            },
+            publish_url: format!("{origin}/publish?signature=publish-secret"),
+        };
+
+        assert!(
+            confirm_direct_push_session_stale(&capability)
+                .expect("should parse exact stale-session response")
+        );
+        let unrelated_conflict = confirm_direct_push_session_stale(&capability)
+            .expect_err("should reject an unrelated conflict as stale");
+        assert!(!unrelated_conflict.to_string().contains("private-canary"));
+        assert!(matches!(
+            publish_direct_push(&capability),
+            Err(RemoteClientError::StaleGraphSession)
+        ));
+        let oversized_conflict = confirm_direct_push_session_stale(&capability)
+            .expect_err("should reject an oversized stale response");
+        assert!(
+            !oversized_conflict
+                .to_string()
+                .contains("stale_graph_session")
+        );
+
+        let requests = server
+            .join()
+            .expect("should finish the mock GenHub request");
+        assert_eq!(requests.len(), 4);
+        for request in requests.iter().take(2).chain(requests.iter().skip(3)) {
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("x-gen-session-stale-check: 1")),
+                "stale verification should use the dedicated request header"
+            );
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("content-length: 0")),
+                "stale verification should have an empty request body"
+            );
+        }
+        assert!(
+            !requests[2]
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("x-gen-session-stale-check: 1")),
+            "normal manifest publication should not be sent as a stale probe"
+        );
+    }
+
+    #[test]
+    fn test_publish_response_diagnostic_labels_are_fixed() {
+        let cases = [
+            (Some("application/json; charset=utf-8"), "JSON"),
+            (Some("application/problem+json"), "JSON"),
+            (Some("text/html"), "HTML"),
+            (Some("application/xhtml+xml"), "HTML"),
+            (Some("application/octet-stream"), "other"),
+            (Some("not-a-media-type"), "other"),
+            (None, "absent"),
+        ];
+        for (value, expected) in cases {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    value.parse().expect("should parse test Content-Type"),
+                );
+            }
+            assert_eq!(response_content_type_label(&headers), expected);
+        }
+        assert_eq!(http_version_label(reqwest::Version::HTTP_11), "HTTP/1.1");
     }
 }
