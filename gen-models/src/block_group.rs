@@ -749,19 +749,6 @@ impl BlockGroup {
             }
         }
 
-        // A recorded path can preserve a traversal when graph node slices do not join
-        // into a route; ignore inherited paths made stale by newer block-group edges.
-        let latest_edge_created_on = edges
-            .iter()
-            .map(|edge| edge.created_on)
-            .max()
-            .unwrap_or_default();
-        for path in Path::select(conn).block_group_id(*block_group_id).load()? {
-            if path.created_on >= latest_edge_created_on {
-                sequences.insert(path.sequence(conn, workspace, None)?);
-            }
-        }
-
         Ok(sequences)
     }
 
