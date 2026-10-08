@@ -84,6 +84,10 @@ pub fn import_fasta(
     } else {
         None
     };
+
+    // We check is the remote is indexed because if it is not, sequence access would require a full download
+    // for any lookup. So if it is not indexed, we download it locally so we can index it properly for sequence
+    // access.
     let indexed_remote_parent = !is_local
         && compression_type == CompressionType::Bgzf
         && supplied_fai.is_some()
@@ -142,7 +146,7 @@ pub fn import_fasta(
         }
     };
 
-    // if there is no index present for the bgz compressed fasta, generatre it
+    // if there is no index present for the bgz compressed fasta, generate it
     let (gzi_location, gzi_bytes) = match supplied_gzi {
         Some((location, bytes)) => (location, bytes),
         None => {
