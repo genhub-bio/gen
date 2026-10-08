@@ -283,9 +283,9 @@ impl Path {
                     second_edge.source_node_id
                 )));
             }
-            if first_edge.target_coordinate >= second_edge.source_coordinate {
+            if first_edge.target_coordinate > second_edge.source_coordinate {
                 return Err(PathError::Invalid(format!(
-                    "source coordinate {} for edge {} is not after target coordinate {} for edge {}",
+                    "source coordinate {} for edge {} is before target coordinate {} for edge {}",
                     second_edge.source_coordinate,
                     second_edge.id_hash(),
                     first_edge.target_coordinate,
@@ -947,10 +947,21 @@ impl Path {
         deletion_start: i64,
         deletion_end: i64,
     ) -> Result<Path, PathError> {
-        // Omits edges inside the deletion interval without adding a bypass edge.
         let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
+        let start_offset = deletion_start - block_with_start.start;
+        let end_offset = deletion_end - block_with_end.start;
+        let node_deletion_start = if block_with_start.strand == Strand::Forward {
+            block_with_start.sequence_start + start_offset
+        } else {
+            block_with_start.sequence_end - start_offset
+        };
+        let node_deletion_end = if block_with_end.strand == Strand::Forward {
+            block_with_end.sequence_start + end_offset
+        } else {
+            block_with_end.sequence_end - end_offset
+        };
 
         let edges = Path::edges_for_path(conn, &self.id, None);
         let edges_by_source = edges
@@ -968,22 +979,42 @@ impl Path {
             .get(&(block_with_end.node_id, block_with_end.sequence_end))
             .unwrap();
 
-        let mut new_edge_ids = vec![];
-        let mut before_deletion = true;
-        let mut after_deletion = false;
-        for edge in &edges {
-            if before_deletion {
-                new_edge_ids.push(edge.id);
-                if edge.id == edge_before_deletion.id {
-                    before_deletion = false;
-                }
-            } else if after_deletion {
-                new_edge_ids.push(edge.id);
-            } else if edge.id == edge_after_deletion.id {
-                after_deletion = true;
-                new_edge_ids.push(edge.id);
-            }
-        }
+        let deletion_edge = Edge::select(conn)
+            .source_node_id(block_with_start.node_id)
+            .source_coordinate(node_deletion_start)
+            .target_node_id(block_with_end.node_id)
+            .target_coordinate(node_deletion_end)
+            .load()?
+            .into_iter()
+            .find(|edge| {
+                BlockGroupEdge::edges_for_block_group(conn, &self.block_group_id, None)
+                    .iter()
+                    .any(|augmented_edge| augmented_edge.edge.id == edge.id)
+            })
+            .ok_or_else(|| {
+                PathError::Query(QueryError::ResultsNotFound(format!(
+                    "Deletion edge not found from node {}:{} to node {}:{}",
+                    block_with_start.node_id,
+                    node_deletion_start,
+                    block_with_end.node_id,
+                    node_deletion_end
+                )))
+            })?;
+
+        let edge_before_index = edges
+            .iter()
+            .position(|edge| edge.id == edge_before_deletion.id)
+            .expect("should find the path edge before deletion");
+        let edge_after_index = edges
+            .iter()
+            .position(|edge| edge.id == edge_after_deletion.id)
+            .expect("should find the path edge after deletion");
+        let mut new_edge_ids = edges[..=edge_before_index]
+            .iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+        new_edge_ids.push(deletion_edge.id);
+        new_edge_ids.extend(edges[edge_after_index..].iter().map(|edge| edge.id));
 
         let new_name = format!(
             "{}-start-{}-end-{}-node-{}",
@@ -4530,7 +4561,7 @@ mod tests {
     #[test]
     #[should_panic]
     // Panic message is something like "Source coordinate 2 for edge 2 is before target coordinate 4 for edge 1"
-    fn test_consecutive_edges_must_have_different_coordinates_on_a_node() {
+    fn test_consecutive_edges_must_not_decrease_coordinates_on_a_node() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);

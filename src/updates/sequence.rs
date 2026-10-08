@@ -912,12 +912,6 @@ mod tests {
             Some(&library_path),
         )
         .unwrap();
-        let design_block_group = get_sample_bg(conn, &collection, "design");
-        let design_path = BlockGroup::get_current_path(conn, &design_block_group.id, None).unwrap();
-        let design_sequence = design_path
-            .sequence(conn, context.workspace(), None)
-            .unwrap();
-
         update_with_sequence(
             &context,
             &collection,
@@ -1024,18 +1018,10 @@ mod tests {
         assert!(graph.contains_edge(upstream_part, first_deletion_boundary));
         assert!(graph.contains_edge(first_deletion_boundary, second_deletion_boundary));
         assert!(graph.contains_edge(second_deletion_boundary, second_deleted_target));
-
-        let latest_path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
-        assert_eq!(
-            latest_path
-                .sequence(conn, context.workspace(), None)
-                .unwrap(),
-            design_sequence
-        );
     }
 
     #[test]
-    fn test_deletion_without_spanning_edge_leaves_reference_path_unchanged() {
+    fn test_repeated_deletions_update_reference_path() {
         let context = setup_gen();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -1081,6 +1067,8 @@ mod tests {
             HashSet::from_iter([
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATCGAATCGATCGATCGGGAACACACAGAGA".to_string(),
             ]),
         );
 
@@ -1089,12 +1077,69 @@ mod tests {
             latest_path
                 .sequence(conn, context.workspace(), None)
                 .unwrap(),
-            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+            "ATATCGATCGATCGGGAACACACAGAGA"
         );
     }
 
     #[test]
-    fn test_out_of_order_disjoint_deletions_leave_reference_path_unchanged() {
+    fn test_adjacent_deletions_across_path_node_boundary_update_reference_path() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "inserted",
+            "m123:2-5",
+            "AAAAAAAA",
+            false,
+        )
+        .unwrap();
+
+        update_with_sequence(
+            &context,
+            &collection,
+            "inserted",
+            "deleted-node-end",
+            "m123:1-2",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "deleted-node-end",
+            "deleted-next-node-start",
+            "m123:1-2",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, &collection, "deleted-next-node-start");
+        let latest_path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        assert_eq!(
+            latest_path
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
+            "AAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_out_of_order_disjoint_deletions_update_reference_path() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let collection = "test".to_string();
@@ -1136,12 +1181,12 @@ mod tests {
             latest_path
                 .sequence(conn, context.workspace(), None)
                 .unwrap(),
-            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+            "ATGATCGATGATCGATCGGGAACACACAGAGA"
         );
     }
 
     #[test]
-    fn test_adjacent_deletions_at_junction_in_reverse_order_leave_path_unchanged() {
+    fn test_adjacent_deletions_at_junction_in_reverse_order_preserve_graph_route() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let collection = "test".to_string();
@@ -1183,12 +1228,6 @@ mod tests {
         )
         .unwrap();
 
-        let design_block_group = get_sample_bg(conn, &collection, "design");
-        let design_path = BlockGroup::get_current_path(conn, &design_block_group.id, None).unwrap();
-        let design_sequence = design_path
-            .sequence(conn, context.workspace(), None)
-            .unwrap();
-
         update_with_sequence(
             &context,
             &collection,
@@ -1211,12 +1250,42 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted-both-bases");
-        let latest_path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
-        assert_eq!(
-            latest_path
-                .sequence(conn, context.workspace(), None)
-                .unwrap(),
-            design_sequence
-        );
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
+        let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
+        let rendered_sequence = |node: GraphNode| {
+            sequences[&node.node_id]
+                .get_sequence(node.sequence_start, node.sequence_end)
+                .unwrap()
+        };
+        let upstream_part = graph
+            .nodes()
+            .find(|node| rendered_sequence(*node) == "TAAT")
+            .expect("should contain the upstream combinatorial part");
+        let second_deleted_target = graph
+            .nodes()
+            .find(|node| rendered_sequence(*node) == "GATAA")
+            .expect("should contain the remainder after both deletions");
+        let first_deletion_boundary = graph
+            .nodes()
+            .find(|node| {
+                node.node_id == second_deleted_target.node_id
+                    && node.sequence_start == 0
+                    && node.sequence_end == 0
+            })
+            .expect("should contain the first deletion boundary");
+        let second_deletion_boundary = graph
+            .nodes()
+            .find(|node| {
+                node.node_id == second_deleted_target.node_id
+                    && node.sequence_start == 1
+                    && node.sequence_end == 1
+            })
+            .expect("should contain the junction between adjacent deletions");
+
+        assert!(graph.contains_edge(upstream_part, first_deletion_boundary));
+        assert!(graph.contains_edge(first_deletion_boundary, second_deletion_boundary));
+        assert!(graph.contains_edge(second_deletion_boundary, second_deleted_target));
     }
 }
