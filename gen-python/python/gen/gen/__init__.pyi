@@ -587,6 +587,8 @@ class Repository:
         filename: builtins.str,
         sample: typing.Optional[builtins.str] = None,
         collection: typing.Optional[builtins.str] = None,
+        fai: typing.Optional[builtins.str] = None,
+        gzi: typing.Optional[builtins.str] = None,
     ) -> Sample:
         r"""
         Import every record of a FASTA file into `sample` (default sample if omitted) and return the
@@ -595,12 +597,17 @@ class Repository:
 
         `filename` is a path string; a relative path is resolved against the current working
         directory. `collection` defaults to the default collection.
+
+        For a remote indexed BGZF FASTA, pass its `.fai` and `.gzi` files explicitly with `fai`
+        and `gzi`.
         """
     def import_reference_fasta(
         self,
         filename: builtins.str,
         reference: builtins.str,
         collection: typing.Optional[builtins.str] = None,
+        fai: typing.Optional[builtins.str] = None,
+        gzi: typing.Optional[builtins.str] = None,
     ) -> Sample:
         r"""
         Import a FASTA file as the reference sample `reference`, which other samples (for example
@@ -608,6 +615,9 @@ class Repository:
 
         `filename` is a path string; a relative path is resolved against the current working
         directory. `collection` defaults to the default collection.
+
+        For a remote indexed BGZF FASTA, pass its `.fai` and `.gzi` files explicitly with `fai`
+        and `gzi`.
         """
     def import_sequence(
         self,

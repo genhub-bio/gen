@@ -91,9 +91,11 @@ class HashHandlingTests(RepositoryTestCase):
         self.assertFalse(hasattr(stored, "segments"))
 
     def test_asset_ids_are_hash_ids(self):
-        [asset, *_] = self.repository.get_assets()
-        self.assertIsInstance(asset.id, gen.HashId)
-        self.assertEqual({asset: 1}[self.repository.get_assets()[0]], 1)
+        assets = self.repository.get_assets()
+        self.assertIsInstance(assets[0].id, gen.HashId)
+        by_asset = {asset: 1 for asset in assets}
+        for asset in self.repository.get_assets():
+            self.assertEqual(by_asset[asset], 1)
 
 
 class SampleAndGraphNamingTests(RepositoryTestCase):
@@ -243,8 +245,7 @@ class AssetTests(RepositoryTestCase):
 
     def test_imported_files_are_assets_too(self):
         self.repository.import_fasta(str(FIXTURES / "simple.fa"))
-        [asset] = self.repository.get_assets()
-        self.assertEqual(asset.name, "simple.fa")
+        [asset] = [asset for asset in self.repository.get_assets() if asset.name == "simple.fa"]
         self.assertIn(b">", gzip.decompress(asset.path.read_bytes()))
 
 

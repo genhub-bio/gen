@@ -544,8 +544,8 @@ mod python_tests {
 
     #[test]
     fn test_import_fasta_accepts_explicit_fai_and_gzi_keywords() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
