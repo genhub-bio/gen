@@ -1311,8 +1311,8 @@ mod tests {
             &fasta_path,
             collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_vcf(
@@ -1326,14 +1326,8 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            collection,
-            "SAMPLE1",
-            None,
-        )
-        .unwrap();
+        let gen_graph =
+            Sample::get_graph(conn, context.workspace(), collection, "SAMPLE1", None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -1374,14 +1368,14 @@ mod tests {
             &fasta_path,
             collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
         let gen_graph = Sample::get_graph(
             conn,
-            crate::test_helpers::test_workspace(),
+            context.workspace(),
             collection,
             Sample::DEFAULT_NAME,
             None,

@@ -288,8 +288,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let operation_summary = update_with_fasta(
@@ -318,13 +318,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -347,8 +342,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -410,8 +405,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -432,13 +427,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -468,8 +458,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -499,13 +489,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -535,8 +520,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -566,13 +551,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -608,8 +588,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -639,13 +619,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -675,8 +650,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -706,13 +681,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -740,8 +710,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -771,13 +741,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -795,8 +760,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "simple",
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -822,13 +787,8 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         let block_group = get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_group.id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap(),
             HashSet::from_iter([
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
@@ -858,8 +818,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -879,13 +839,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
 
@@ -920,8 +875,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -941,13 +896,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -974,8 +924,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(
@@ -995,13 +945,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }

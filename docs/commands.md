@@ -54,20 +54,10 @@ remove the cache. Local repository files and `.gen/assets` are not affected.
 
 # FASTA import
 
-Use `gen import fasta <path-or-uri> --shallow` to keep sequence data in an
-asset rather than the gen database. Local assets are read from their
-repository copy; remote assets remain remote. Supply known FASTA indices with a
-repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use both
-`--index reference.fa.gz.fai` and `--index reference.fa.gz.gzi`.
-
-# Archived inputs
-
-Uncompressed FASTA, VCF, GFA/GAF, GFF/BED, GenBank, and CSV inputs are stored in
-BGZF form and restored as their original plain bytes at their logical paths.
-Ordinary gzip selected text assets are normalized to BGZF, while existing BGZF
-bytes and compressed workspace paths are retained. Binary files and index files
-are retained unchanged. The asset checksum verifies archived bytes, while the
-materialized checksum verifies bytes restored at the logical path.
+Use `gen import fasta <path-or-uri>` to import a FASTA. BGZF-compressed inputs
+with FAI and GZI indexes are the most efficient for both local files and remote
+URLs. Pass the index locations explicitly with `--fai <path-or-uri>` and
+`--gzi <path-or-uri>`.
 
 # View diff
 

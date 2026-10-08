@@ -23,13 +23,14 @@ use crate::python_api::{
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample=None, shallow=false, collection=None))]
+    #[pyo3(signature = (filename, sample=None, collection=None, fai=None, gzi=None))]
     pub fn import_fasta(
         &self,
         filename: String,
         sample: Option<String>,
-        shallow: bool,
         collection: Option<String>,
+        fai: Option<String>,
+        gzi: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -41,8 +42,8 @@ impl PyRepository {
                     &filename,
                     &collection,
                     &sample,
-                    shallow,
-                    &[],
+                    fai.as_deref(),
+                    gzi.as_deref(),
                 )
                 .map_err(|e| match e {
                     FastaError::OperationError(OperationError::NoChanges) => {
@@ -64,13 +65,14 @@ impl PyRepository {
         )
     }
 
-    #[pyo3(signature = (filename, reference, shallow=false, collection=None))]
+    #[pyo3(signature = (filename, reference, collection=None, fai=None, gzi=None))]
     pub fn import_reference_fasta(
         &self,
         filename: String,
         reference: String,
-        shallow: bool,
         collection: Option<String>,
+        fai: Option<String>,
+        gzi: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
@@ -91,8 +93,8 @@ impl PyRepository {
                     &filename,
                     &collection,
                     &reference,
-                    shallow,
-                    &[],
+                    fai.as_deref(),
+                    gzi.as_deref(),
                 )
                 .map_err(|e| match e {
                     FastaError::OperationError(OperationError::NoChanges) => {

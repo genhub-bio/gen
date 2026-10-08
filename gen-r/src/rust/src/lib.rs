@@ -1139,22 +1139,25 @@ impl Repository {
         &self,
         filename: String,
         sample: String,
-        shallow: bool,
         collection: Nullable<String>,
+        fai: Nullable<String>,
+        gzi: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
+        let fai = nullable_string_to_option(fai);
+        let gzi = nullable_string_to_option(gzi);
         begin_transactions(&self.context).map_err(Error::Other)?;
         match r#gen::imports::fasta::import_fasta(
             &self.context,
             &filename,
             &collection_name,
             &sample,
-            shallow,
-            &[],
+            fai.as_deref(),
+            gzi.as_deref(),
         ) {
             Ok(operation_summary) => {
                 end_transactions(&self.context, &operation_summary).map_err(Error::Other)?;
@@ -1175,14 +1178,17 @@ impl Repository {
         &self,
         filename: String,
         reference: String,
-        shallow: bool,
         collection: Nullable<String>,
+        fai: Nullable<String>,
+        gzi: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
+        let fai = nullable_string_to_option(fai);
+        let gzi = nullable_string_to_option(gzi);
         begin_transactions(&self.context).map_err(Error::Other)?;
         if let Err(e) = Sample::get_or_create(
             self.context.graph().conn(),
@@ -1201,8 +1207,8 @@ impl Repository {
             &filename,
             &collection_name,
             &reference,
-            shallow,
-            &[],
+            fai.as_deref(),
+            gzi.as_deref(),
         ) {
             Ok(operation_summary) => {
                 end_transactions(&self.context, &operation_summary).map_err(Error::Other)?;

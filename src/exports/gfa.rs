@@ -580,8 +580,8 @@ mod tests {
             &fasta_path,
             collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(
@@ -610,13 +610,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, collection, "deleted");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {

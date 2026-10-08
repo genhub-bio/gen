@@ -1218,8 +1218,8 @@ mod tests {
             &fasta_path,
             collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_vcf(
@@ -1291,8 +1291,8 @@ mod tests {
             &fasta_path,
             collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let block_group = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);

@@ -19,6 +19,8 @@ enum FileType {
   gff3 @8;
   bed @9;
   tabix @10;
+  fastaIndex @11;
+  bgzfIndex @12;
 }
 
 # Core sequence and node models

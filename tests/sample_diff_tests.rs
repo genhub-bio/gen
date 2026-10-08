@@ -30,8 +30,8 @@ fn simple_vcf_sample_diff(query_name: &str, base_name: &str) -> (DbContext, Samp
         &fasta_path,
         collection_name,
         "reference",
-        false,
-        &[],
+        None,
+        None,
     )
     .expect("should import simple FASTA fixture");
     update_with_vcf(

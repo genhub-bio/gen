@@ -17,7 +17,7 @@ use r#gen::{
     patch::load_patches,
 };
 use gen_models::{
-    assets::AssetRef,
+    assets::{AssetRef, AssetRole},
     block_group::BlockGroup,
     collection::Collection,
     history::{
@@ -656,8 +656,9 @@ mod operation_history {
 
 mod patches {
     use super::{
-        BlockGroup, File, PathBuf, SampleLineage, Workspace, assert_success, fs, get_connection,
-        load_patches, operations_stdout, operations_stdout_for_branch, run_gen, tempdir,
+        AssetRole, BlockGroup, File, PathBuf, SampleLineage, Workspace, assert_success, asset_refs,
+        fs, get_connection, load_patches, operations_stdout, operations_stdout_for_branch, run_gen,
+        tempdir,
     };
 
     #[test]
@@ -893,6 +894,72 @@ mod patches {
         assert!(
             target_samples_stdout.contains("test-sample"),
             "patch apply should restore graph rows that make the imported sample visible: {target_samples_stdout}"
+        );
+
+        let target_assets = asset_refs(target_repo.path());
+        let fasta_asset = target_assets
+            .iter()
+            .find(|asset_ref| {
+                asset_ref.role == AssetRole::Input
+                    && asset_ref.file_type == "fasta"
+                    && asset_ref.name.as_deref() == Some("simple.fa")
+            })
+            .expect("patch apply should restore the FASTA asset reference");
+        assert!(
+            fasta_asset.uri.ends_with(".fa.bgz"),
+            "restored FASTA should reference the compressed archive: {fasta_asset:?}"
+        );
+        let sequence_indexes = target_assets
+            .iter()
+            .filter(|asset_ref| {
+                asset_ref.role == AssetRole::SequenceIndex
+                    && asset_ref.upstream_asset_ref_id == Some(fasta_asset.id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sequence_indexes.len(),
+            2,
+            "patch apply should restore the FASTA's linked index assets"
+        );
+        assert!(
+            sequence_indexes.iter().any(|asset_ref| asset_ref
+                .name
+                .as_deref()
+                .is_some_and(|name| name.ends_with(".fai"))),
+            "restored FASTA should have a linked .fai index: {sequence_indexes:?}"
+        );
+        assert!(
+            sequence_indexes.iter().any(|asset_ref| asset_ref
+                .name
+                .as_deref()
+                .is_some_and(|name| name.ends_with(".gzi"))),
+            "restored FASTA should have a linked .gzi index: {sequence_indexes:?}"
+        );
+
+        let export_path = target_repo.path().join("restored.fa");
+        let export_output = run_gen(
+            target_repo.path(),
+            &[
+                "export",
+                "fasta",
+                export_path.to_str().expect("should encode export path"),
+                "--collection",
+                "test-collection",
+                "--sample",
+                "test-sample",
+            ],
+        );
+        assert_success(
+            &export_output,
+            "export from the restored repo should load the FASTA sequence in a fresh process",
+        );
+        let expected_fasta =
+            fs::read_to_string(&fasta_path).expect("should read the simple FASTA fixture");
+        let restored_fasta =
+            fs::read_to_string(&export_path).expect("should read the restored FASTA export");
+        assert_eq!(
+            restored_fasta, expected_fasta,
+            "patch apply should restore the exact FASTA sequence content"
         );
     }
 
@@ -2918,7 +2985,7 @@ mod remotes {
         let mut assets = Assets::get_branch_assets(&connection, "main")
             .expect("should resolve materialized assets at main")
             .into_values()
-            .filter(|asset| LocalAssetUri::is_file_uri(&asset.uri))
+            .filter(|asset| LocalAssetUri::is_file_uri(&asset.uri) && asset.logical_path.is_some())
             .map(|asset| {
                 let logical_path = asset
                     .logical_path

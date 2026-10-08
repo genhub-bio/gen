@@ -27,6 +27,17 @@ graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 sample.plot()  # or sg.plot()
 ```
 
+For a remote indexed BGZF FASTA, pass its FASTA and BGZF index files explicitly:
+
+```python
+sample = repo.import_fasta(
+    "https://example.org/reference.fa.gz",
+    sample="reference",
+    fai="https://example.org/reference.fa.gz.fai",
+    gzi="https://example.org/reference.fa.gz.gzi",
+)
+```
+
 Clone and version-control repositories with the same object-oriented workflow:
 
 ```python

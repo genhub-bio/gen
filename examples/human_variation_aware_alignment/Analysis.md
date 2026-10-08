@@ -31,7 +31,7 @@ gunzip -c HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz | awk '/^#/ || /^chr1\t/' | 
 
 ```sh
 gen init
-gen import fasta ./chr1.fa.gz --reference hg38 --shallow
+gen import fasta ./chr1.fa.gz --reference hg38
 gen update vcf chr1.vcf.bgz  --parent-samples hg38
 gen export gfa hg38.gfa  --sample HG001
 ```

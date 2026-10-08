@@ -12,7 +12,8 @@ import_fasta(
   filename,
   name = NULL,
   sample = "sample",
-  shallow = FALSE
+  fai = NULL,
+  gzi = NULL
 )
 
 import_gfa(
@@ -61,7 +62,9 @@ import_library(
 
   \item{sample}{Sample name to import into.}
 
-  \item{shallow}{Whether to store FASTA sequence data by reference instead of inline.}
+  \item{fai}{Optional path or URI for the FASTA index file.}
+
+  \item{gzi}{Optional path or URI for the BGZF index file.}
 
   \item{library_name}{Library name for combinatorial library imports.}
 
@@ -77,7 +80,9 @@ Each function returns a character scalar confirming the import path taken.
 \description{
 These functions ingest external sequence representations into a Gen
 collection. Depending on the input format, they either create a new collection
-or add additional samples and paths to an existing collection.
+or add additional samples and paths to an existing collection. When importing
+a BGZF FASTA, pass its ".fai" and ".gzi" files explicitly with the \code{fai}
+and \code{gzi} arguments.
 }
 \examples{
 \dontrun{

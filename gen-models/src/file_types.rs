@@ -21,6 +21,10 @@ pub enum FileTypes {
     Bed,
     Tabix,
     None,
+    /// FASTA sidecar index stored in the FAI format.
+    FastaIndex,
+    /// BGZF sidecar index stored in the GZI format.
+    BgzfIndex,
 }
 
 impl AsRef<str> for FileTypes {
@@ -61,6 +65,8 @@ impl From<FileTypes> for gen_models_capnp::FileType {
             FileTypes::Bed => gen_models_capnp::FileType::Bed,
             FileTypes::Tabix => gen_models_capnp::FileType::Tabix,
             FileTypes::None => gen_models_capnp::FileType::None,
+            FileTypes::FastaIndex => gen_models_capnp::FileType::FastaIndex,
+            FileTypes::BgzfIndex => gen_models_capnp::FileType::BgzfIndex,
         }
     }
 }
@@ -79,6 +85,8 @@ impl From<gen_models_capnp::FileType> for FileTypes {
             gen_models_capnp::FileType::Bed => FileTypes::Bed,
             gen_models_capnp::FileType::Tabix => FileTypes::Tabix,
             gen_models_capnp::FileType::None => FileTypes::None,
+            gen_models_capnp::FileType::FastaIndex => FileTypes::FastaIndex,
+            gen_models_capnp::FileType::BgzfIndex => FileTypes::BgzfIndex,
         }
     }
 }
@@ -97,6 +105,8 @@ impl FileTypes {
             "bed" => FileTypes::Bed,
             "tabix" => FileTypes::Tabix,
             "none" => FileTypes::None,
+            "fai" => FileTypes::FastaIndex,
+            "gzi" => FileTypes::BgzfIndex,
             _ => FileTypes::None,
         }
     }
@@ -114,6 +124,8 @@ impl FileTypes {
             FileTypes::Bed => "bed",
             FileTypes::Tabix => "tabix",
             FileTypes::None => "none",
+            FileTypes::FastaIndex => "fai",
+            FileTypes::BgzfIndex => "gzi",
         }
     }
 
@@ -169,6 +181,8 @@ impl FileTypes {
             FileTypes::Bed => "bed",
             FileTypes::Tabix => "tbi",
             FileTypes::None => "none",
+            FileTypes::FastaIndex => "fai",
+            FileTypes::BgzfIndex => "gzi",
         };
 
         result.to_string()
@@ -187,6 +201,14 @@ mod tests {
             "tabix"
         );
         assert_eq!(<FileTypes as AsRef<str>>::as_ref(&FileTypes::None), "none");
+        assert_eq!(
+            <FileTypes as AsRef<str>>::as_ref(&FileTypes::FastaIndex),
+            "fai"
+        );
+        assert_eq!(
+            <FileTypes as AsRef<str>>::as_ref(&FileTypes::BgzfIndex),
+            "gzi"
+        );
     }
 
     #[test]

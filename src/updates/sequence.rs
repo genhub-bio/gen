@@ -330,8 +330,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "simple",
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -367,13 +367,8 @@ mod tests {
         );
         let block_group = get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_group.id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap(),
             HashSet::from_iter([
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
@@ -400,8 +395,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let operation_summary = update_with_sequence(
@@ -430,13 +425,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
         assert_eq!(
@@ -460,8 +450,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -520,8 +510,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -551,13 +541,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -581,8 +566,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -612,13 +597,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -648,8 +628,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -679,13 +659,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -709,8 +684,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -740,13 +715,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -770,8 +740,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -801,13 +771,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -830,8 +795,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -851,13 +816,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
 
@@ -888,8 +848,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(
@@ -924,13 +884,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
@@ -974,13 +929,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted2");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {

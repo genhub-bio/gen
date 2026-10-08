@@ -1209,8 +1209,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(
@@ -1584,8 +1584,8 @@ mod tests {
             &fasta_path,
             "test",
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .expect("should import FASTA");
         commit_operation_summary(&context, &operation_summary).expect("should commit FASTA");

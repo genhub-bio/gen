@@ -20,12 +20,12 @@ pub struct Command {
     /// Override the Dolt commit message
     #[arg(short = 'm', long)]
     message: Option<String>,
-    /// Don't store the sequence in the database, instead store a reference to an asset
-    #[arg(long, action)]
-    shallow: bool,
-    /// Index associated with the shallow FASTA. May be specified multiple times.
-    #[arg(long, requires = "shallow")]
-    index: Vec<String>,
+    /// FAI index associated with the FASTA
+    #[arg(long)]
+    fai: Option<String>,
+    /// GZI index associated with the FASTA
+    #[arg(long)]
+    gzi: Option<String>,
     /// The name of the collection to store the entry under
     #[arg(short = 'c', long)]
     collection: Option<String>,
@@ -72,8 +72,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path.clone(),
         collection_name,
         sample_name,
-        cmd.shallow,
-        &cmd.index,
+        cmd.fai.as_deref(),
+        cmd.gzi.as_deref(),
     ) {
         Ok(operation_summary) => {
             conn.execute("END TRANSACTION", [])?;
@@ -118,25 +118,26 @@ mod tests {
     }
 
     #[test]
-    fn test_accepts_multiple_remote_fasta_indexes() {
+    fn test_accepts_explicit_remote_fasta_indexes() {
         let cli = TestCli::try_parse_from([
             "test",
             "https://example.test/reference.fa.bgz",
-            "--shallow",
-            "--index",
-            "https://example.test/reference.fa.bgz.fai",
-            "--index",
-            "https://example.test/reference.fa.bgz.gzi",
+            "--fai",
+            "https://example.test/indexes/fasta-index",
+            "--gzi",
+            "https://example.test/indexes/bgzf-index",
         ])
-        .expect("should parse multiple shallow FASTA indexes");
+        .expect("should parse explicit FASTA indexes");
 
         assert_eq!(
-            cli.command.index,
-            [
-                "https://example.test/reference.fa.bgz.fai",
-                "https://example.test/reference.fa.bgz.gzi",
-            ],
-            "repeatable --index values should preserve every supplied URI"
+            cli.command.fai.as_deref(),
+            Some("https://example.test/indexes/fasta-index"),
+            "--fai should preserve an explicitly designated URI"
+        );
+        assert_eq!(
+            cli.command.gzi.as_deref(),
+            Some("https://example.test/indexes/bgzf-index"),
+            "--gzi should preserve an explicitly designated URI"
         );
     }
 }

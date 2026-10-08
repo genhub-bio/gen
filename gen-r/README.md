@@ -22,11 +22,23 @@ operations as methods on the returned environment.
 
 | Method | Description |
 |--------|-------------|
-| `import_fasta(filename, sample, shallow, collection)` | Import a FASTA file, returns a `gen_sample` |
+| `import_fasta(filename, sample, collection, fai, gzi)` | Import a FASTA file, returns a `gen_sample` |
+| `import_reference_fasta(filename, reference, collection, fai, gzi)` | Import a FASTA file into a reference sample, returns a `gen_sample` |
 | `import_gfa(filename, sample, collection)` | Import a GFA file, returns a `SequenceGraph` |
 | `import_genbank(filename, sample, collection)` | Import a GenBank file (plain or gzipped), returns a `gen_sample` |
 | `import_library(library_name, parts_list, seq_containers, sample, collection)` | Import a combinatorial sequence library, returns a `SequenceGraph` |
 | `import_library_files(library_name, parts, library, sample, collection)` | Import a library from parts/library CSV files, returns a `SequenceGraph` |
+
+For a remote indexed BGZF FASTA, pass its FASTA and BGZF index files explicitly:
+
+```r
+sample <- repo$import_fasta(
+  "https://example.org/reference.fa.gz",
+  sample = "reference",
+  fai = "https://example.org/reference.fa.gz.fai",
+  gzi = "https://example.org/reference.fa.gz.gzi"
+)
+```
 
 Every import call returns the sequence graph(s) it just created directly, so
 there's no need to follow up with `get_sequence_graphs()`. A `gen_sample` is a
