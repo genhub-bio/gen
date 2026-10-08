@@ -13,6 +13,7 @@ pub mod position;
 pub mod repository;
 pub mod sample;
 pub mod sequence;
+pub(crate) mod subgraph;
 pub mod translation;
 pub mod utils;
 

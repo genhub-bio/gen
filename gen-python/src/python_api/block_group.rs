@@ -13,7 +13,6 @@ use r#gen::{
     graphs::{
         NodePoint,
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
-        operators::derive_subgraph_between,
         translation::{
             TranslationError, translate_annotation, translate_block_group, translate_from_path,
         },
@@ -57,6 +56,7 @@ use super::{
     repository::run_context_operation_write,
     sample::PySample,
     sequence::PySequence,
+    subgraph::derive_subgraph_between,
     translation::build_translation_params,
     utils::{block_group_err_to_pyerr, distinct_sequences, export_all_sequences_fasta},
 };

@@ -30,10 +30,7 @@ pub fn block_group_err_to_pyerr(err: BlockGroupError) -> PyErr {
 }
 
 /// Every distinct sequence a path through the block group spells, sorted so repeated calls agree.
-pub fn distinct_sequences(
-    context: &DbContext,
-    block_group_id: &HashId,
-) -> PyResult<Vec<String>> {
+pub fn distinct_sequences(context: &DbContext, block_group_id: &HashId) -> PyResult<Vec<String>> {
     let mut sequences = BlockGroup::get_all_sequences(
         context.graph().conn(),
         context.workspace(),
@@ -70,7 +67,9 @@ pub fn export_all_sequences_fasta(
     }
     File::create(filename)
         .and_then(|mut file| file.write_all(records.concat().as_bytes()))
-        .map_err(|error| PyOSError::new_err(format!("Cannot write '{}': {error}", filename.display())))
+        .map_err(|error| {
+            PyOSError::new_err(format!("Cannot write '{}': {error}", filename.display()))
+        })
 }
 
 /// Resolves a file path given by the Python caller against the process's current working
