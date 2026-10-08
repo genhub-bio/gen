@@ -1300,8 +1300,8 @@ mod tests {
                 &fasta_path.to_string_lossy().into_owned(),
                 "test",
                 Sample::DEFAULT_NAME,
-                false,
-                &[],
+                None,
+                None,
             )
             .unwrap();
             Sample::get_or_create_child(
@@ -1480,8 +1480,8 @@ mod tests {
             &fasta_path.to_string_lossy().into_owned(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -2133,8 +2133,8 @@ mod tests {
             &fasta_path.to_string_lossy().into_owned(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .expect("should import benchmark reference");
 
