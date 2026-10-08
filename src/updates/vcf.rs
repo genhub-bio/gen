@@ -874,8 +874,8 @@ mod tests {
             &fasta_path,
             "test",
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .expect("should import reference");
         let conn = context.graph().conn();
@@ -931,8 +931,8 @@ mod tests {
             &fasta_path,
             "test",
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .expect("should import reference");
         for sample_name in ["sample_001", "custom"] {
@@ -1925,8 +1925,8 @@ mod tests {
             &fixtures.join("simple.fa").to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_vcf(
