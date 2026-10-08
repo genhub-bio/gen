@@ -5,7 +5,6 @@ use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace,
     is_end_node, is_start_node,
 };
-use gen_graph::GraphNode;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup, SubgraphBoundary},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
@@ -16,7 +15,7 @@ use gen_models::{
     region::{Region, resolve},
     sample::Sample,
 };
-use petgraph::algo::{is_cyclic_directed, kosaraju_scc};
+use petgraph::algo::is_cyclic_directed;
 use thiserror::Error;
 
 use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch};
@@ -609,35 +608,10 @@ fn validate_stitched_block_group_is_acyclic(
     workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<(), GraphOperationError> {
-    let mut graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)?;
-    // An insertion inside a node meets its own routing block again, a loop that reads no bases
-    // twice. Only cycles through sequence blocks come from stitching.
-    BlockGroup::contract_zero_width_blocks(&mut graph);
+    let graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)?;
     if is_cyclic_directed(&graph) {
-        let describe = |block: &GraphNode| {
-            format!(
-                "{}:{}-{}",
-                block.node_id, block.sequence_start, block.sequence_end
-            )
-        };
-        let cycle = kosaraju_scc(&graph)
-            .into_iter()
-            .find(|component| component.len() > 1)
-            .map(|component| {
-                graph
-                    .all_edges()
-                    .filter(|(source, target, _)| {
-                        component.contains(source) && component.contains(target)
-                    })
-                    .map(|(source, target, _)| {
-                        format!("{} -> {}", describe(&source), describe(&target))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            })
-            .unwrap_or_default();
         return Err(GraphOperationError::StitchedGraphCycle(format!(
-            "block group {block_group_id} is cyclic through {cycle}"
+            "block group {block_group_id} is cyclic"
         )));
     }
 
