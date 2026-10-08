@@ -947,30 +947,10 @@ impl Path {
         deletion_start: i64,
         deletion_end: i64,
     ) -> Result<Path, PathError> {
-        // Creates a new path from the current one by replacing all edges between deletion_start and
-        // deletion_end with a single edge spanning the deletion.
+        // Omits edges inside the deletion interval without adding a bypass edge.
         let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
-
-        let node_deletion_start = deletion_start - block_with_start.start;
-        let node_deletion_end = deletion_end - block_with_end.start;
-        let deletion_edge_result = Edge::select(conn)
-            .source_node_id(block_with_start.node_id)
-            .source_coordinate(node_deletion_start)
-            .target_node_id(block_with_end.node_id)
-            .target_coordinate(node_deletion_end)
-            .load()?;
-
-        if deletion_edge_result.is_empty() {
-            let error_string = format!(
-                "No edge found from node {}:{node_deletion_start} to node {}:{node_deletion_end}",
-                block_with_start.node_id, block_with_end.node_id
-            );
-            return Err(PathError::Query(QueryError::ResultsNotFound(error_string)));
-        }
-
-        let deletion_edge = deletion_edge_result[0].clone();
 
         let edges = Path::edges_for_path(conn, &self.id, None);
         let edges_by_source = edges
@@ -996,7 +976,6 @@ impl Path {
                 new_edge_ids.push(edge.id);
                 if edge.id == edge_before_deletion.id {
                     before_deletion = false;
-                    new_edge_ids.push(deletion_edge.id);
                 }
             } else if after_deletion {
                 new_edge_ids.push(edge.id);
