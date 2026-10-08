@@ -19,6 +19,7 @@ pub mod file_types;
 pub mod generated;
 pub mod graph;
 pub mod history;
+pub mod interval_tree;
 pub use generated::gen_models_capnp;
 pub mod lineage;
 pub mod locus;
@@ -34,5 +35,6 @@ pub mod sample_lineage;
 #[doc(hidden)]
 pub mod select;
 pub mod sequence;
+pub use interval_tree::IntervalTreeSource;
 #[cfg(test)]
 pub mod test_helpers;

@@ -4,9 +4,9 @@ use std::{
     io, str,
 };
 
-use gen_core::{HashId, NodeIntervalBlock, PathBlock, Strand};
+use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, PathCache},
+    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, IntervalTreeCache, PathCache},
     db::{DbContext, GraphConnection},
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
@@ -18,7 +18,6 @@ use gen_models::{
     sample::Sample,
     sequence::Sequence,
 };
-use intervaltree::IntervalTree;
 use noodles::{
     vcf,
     vcf::variant::{
@@ -666,8 +665,7 @@ pub fn update_with_vcf(
     ));
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
-    let mut tree_map: HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>> =
-        HashMap::new();
+    let mut tree_map = IntervalTreeCache::new();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(VCF_CHANGE_APPLY_CHUNK_SIZE) {
             if in_place {

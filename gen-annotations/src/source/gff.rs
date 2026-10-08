@@ -5,12 +5,16 @@
 //! established graph translator.  The record-based entry points are the seam for a future indexed
 //! lookup that can supply matches without scanning the source here.
 
-use std::io::{BufRead, Cursor, Read};
+use std::{
+    io::{BufRead, Cursor, Read},
+    sync::Arc,
+};
 
 use gen_core::{HashId, NodeIntervalBlock};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationExtra, GffAttribute, GffExtra},
+    interval_tree::IntervalTreeSource as _,
 };
 use intervaltree::IntervalTree;
 use noodles::gff;
@@ -80,6 +84,7 @@ where
         name: identifier,
         group: "gff".to_string(),
         accession_id: id,
+        cached_interval_tree: None,
         extra: Some(AnnotationExtra {
             gff: Some(gff),
             ..AnnotationExtra::default()
@@ -87,12 +92,14 @@ where
     })
 }
 
-/// Translate matching GFF records into the ordinary accession and cumulative node intervals.
+/// Translate matching GFF records and cache their graph intervals on the annotation.
+///
+/// Returns the associated accession.
 pub fn translate_gff_annotation<R>(
     context: &AnnotationTranslationContext<'_>,
-    annotation: &Annotation,
+    annotation: &mut Annotation,
     reader: R,
-) -> Result<(Accession, IntervalTree<i64, NodeIntervalBlock>), FileAnnotationError>
+) -> Result<Accession, FileAnnotationError>
 where
     R: Read + BufRead,
 {
@@ -106,12 +113,14 @@ where
     translate_gff_annotation_records(context, annotation, records)
 }
 
-/// Translate selected GFF records into the ordinary accession and cumulative node intervals.
+/// Translate selected GFF records and cache their graph intervals on the annotation.
+///
+/// Returns the associated accession.
 pub fn translate_gff_annotation_records<I>(
     context: &AnnotationTranslationContext<'_>,
-    annotation: &Annotation,
+    annotation: &mut Annotation,
     records: I,
-) -> Result<(Accession, IntervalTree<i64, NodeIntervalBlock>), FileAnnotationError>
+) -> Result<Accession, FileAnnotationError>
 where
     I: IntoIterator<Item = gff::feature::RecordBuf>,
 {
@@ -133,14 +142,17 @@ where
         &mut translated,
     )
     .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
-    let interval_tree = translated_gff_interval_tree(&translated)?;
-    let accession = Accession {
+    let interval_tree = Arc::new(translated_gff_interval_tree(&translated)?);
+    annotation.set_cached_interval_tree(Some(Arc::clone(&interval_tree)));
+    let mut accession = Accession {
         id: annotation.accession_id,
         name: annotation.name.clone(),
         block_group_id: context.block_group_id,
         parent_accession_id: None,
+        cached_interval_tree: None,
     };
-    Ok((accession, interval_tree))
+    accession.set_cached_interval_tree(Some(interval_tree));
+    Ok(accession)
 }
 
 fn matching_gff_record(record: &gff::feature::RecordBuf, identifier: &str) -> bool {
@@ -188,15 +200,11 @@ fn translated_gff_interval_tree(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::BufReader};
+    use std::{fs::File, io::BufReader, sync::Arc};
 
-    use gen_core::{
-        HashId,
-        region::{Region, normalize_user_search_region},
-    };
+    use gen_core::HashId;
     use gen_models::{
-        interval_tree::IntervalTreeCache,
-        region::{GenRegionError, ResolvedGenRegion, ResolvedRegionKind},
+        accession::Accession, interval_tree::IntervalTreeSource as _, region::ResolvedGenRegion,
         sample::Sample,
     };
 
@@ -219,7 +227,7 @@ mod tests {
             history_ref: None,
         };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.gff");
-        let annotation = parse_gff_annotation(
+        let mut annotation = parse_gff_annotation(
             "gene-a0001",
             BufReader::new(File::open(path).expect("should open simple GFF fixture")),
         )
@@ -239,48 +247,56 @@ mod tests {
             .expect("should preserve the GFF ID attribute");
         assert_eq!(first_attribute.key, "ID");
         assert_eq!(first_attribute.values, vec!["gene-a0001".to_string()]);
-        let tree = translate_gff_annotation(
+        let accession = translate_gff_annotation(
             &context,
-            &annotation,
+            &mut annotation,
             BufReader::new(File::open(path).expect("should reopen simple GFF fixture")),
         )
         .expect("should translate the matching GFF record");
-        let (accession, tree) = tree;
         assert_eq!(accession.id, annotation.accession_id);
-        assert_eq!(tree.iter().count(), 2);
-
-        let normalized_region = normalize_user_search_region(
-            &Region::parse("gene-a0001:13-16").expect("should parse a cross-slice range"),
-        );
-        let mut interval_tree_cache = IntervalTreeCache::new();
-        let missing_cache = IntervalTreeCache::new();
-        assert!(matches!(
-            ResolvedGenRegion::resolve_annotation_with_accession(
-                &normalized_region,
-                &conn,
-                &annotation,
-                &accession,
-                &missing_cache,
-            ),
-            Err(GenRegionError::MissingIntervalTree(id)) if id == accession.id
+        let annotation_tree = annotation
+            .intervaltree(&conn)
+            .expect("should get the cached GFF annotation tree");
+        let accession_tree = accession
+            .intervaltree(&conn)
+            .expect("should get the cached GFF accession tree");
+        assert!(Arc::ptr_eq(&annotation_tree, &accession_tree));
+        assert!(Arc::ptr_eq(
+            &annotation_tree,
+            annotation
+                .cached_interval_tree()
+                .expect("should find the cached GFF annotation tree")
         ));
-        interval_tree_cache.insert((accession.id, ResolvedRegionKind::Annotation), tree);
-        let resolved = ResolvedGenRegion::resolve_annotation_with_accession(
-            &normalized_region,
+        assert!(Arc::ptr_eq(
+            &accession_tree,
+            accession
+                .cached_interval_tree()
+                .expect("should find the cached GFF accession tree")
+        ));
+        assert_eq!(annotation_tree.iter().count(), 2);
+        assert_eq!(annotation.length(&conn).expect("should get GFF length"), 16);
+        assert!(
+            Accession::select(&conn)
+                .id(accession.id)
+                .load()
+                .expect("should query absent file accession")
+                .is_empty()
+        );
+
+        let mut accession_without_cache = accession.clone();
+        accession_without_cache.set_cached_interval_tree(None);
+        let resolved = ResolvedGenRegion::from_annotation(
             &conn,
             &annotation,
-            &accession,
-            &interval_tree_cache,
+            &accession_without_cache,
+            12,
+            15,
         )
-        .expect("should build a resolved GFF annotation region")
-        .find_graph_positions(
-            &conn,
-            crate::test_helpers::test_workspace(),
-            0,
-            0,
-            Some(&interval_tree_cache),
-        )
+        .expect("should resolve a cached GFF annotation without accession nodes")
+        .find_graph_positions(&conn, crate::test_helpers::test_workspace(), 0, 0)
         .expect("should resolve graph positions across translated slices");
+        assert_eq!(resolved.anchor_end, 16);
+        assert_eq!(resolved.feature_length, 16);
         assert_eq!(
             resolved
                 .start_anchors

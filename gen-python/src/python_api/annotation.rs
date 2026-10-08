@@ -55,6 +55,7 @@ impl PyAnnotation {
                 name: name.to_string(),
                 group: String::new(),
                 accession_id: HashId([0u8; 16]),
+                cached_interval_tree: None,
                 extra: None,
             },
             context: None,

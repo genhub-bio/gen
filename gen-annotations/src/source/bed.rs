@@ -4,12 +4,16 @@
 //! record-based functions accept records already selected by an upstream provider so an indexed
 //! lookup can replace a scan without changing annotation construction or translation.
 
-use std::io::{Cursor, Read};
+use std::{
+    io::{Cursor, Read},
+    sync::Arc,
+};
 
 use gen_core::{HashId, NodeIntervalBlock, Strand, is_terminal};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationExtra, BedExtra},
+    interval_tree::IntervalTreeSource as _,
 };
 use intervaltree::IntervalTree;
 use noodles::bed;
@@ -71,6 +75,7 @@ where
         name: identifier,
         group: "bed".to_string(),
         accession_id: id,
+        cached_interval_tree: None,
         extra: Some(AnnotationExtra {
             bed: Some(bed),
             ..AnnotationExtra::default()
@@ -78,12 +83,14 @@ where
     })
 }
 
-/// Translate matching BED records into the ordinary accession and cumulative node intervals.
+/// Translate matching BED records and cache their graph intervals on the annotation.
+///
+/// Returns the associated accession.
 pub fn translate_bed_annotation<R>(
     context: &AnnotationTranslationContext<'_>,
-    annotation: &Annotation,
+    annotation: &mut Annotation,
     reader: R,
-) -> Result<(Accession, IntervalTree<i64, NodeIntervalBlock>), FileAnnotationError>
+) -> Result<Accession, FileAnnotationError>
 where
     R: Read,
 {
@@ -98,12 +105,14 @@ where
     translate_bed_annotation_records(context, annotation, records)
 }
 
-/// Translate selected BED records into the ordinary accession and cumulative node intervals.
+/// Translate selected BED records and cache their graph intervals on the annotation.
+///
+/// Returns the associated accession.
 pub fn translate_bed_annotation_records<I>(
     context: &AnnotationTranslationContext<'_>,
-    annotation: &Annotation,
+    annotation: &mut Annotation,
     records: I,
-) -> Result<(Accession, IntervalTree<i64, NodeIntervalBlock>), FileAnnotationError>
+) -> Result<Accession, FileAnnotationError>
 where
     I: IntoIterator<Item = bed::Record<6>>,
 {
@@ -125,14 +134,17 @@ where
         &mut translated,
     )
     .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
-    let interval_tree = translated_bed_interval_tree(&translated)?;
-    let accession = Accession {
+    let interval_tree = Arc::new(translated_bed_interval_tree(&translated)?);
+    annotation.set_cached_interval_tree(Some(Arc::clone(&interval_tree)));
+    let mut accession = Accession {
         id: annotation.accession_id,
         name: annotation.name.clone(),
         block_group_id: context.block_group_id,
         parent_accession_id: None,
+        cached_interval_tree: None,
     };
-    Ok((accession, interval_tree))
+    accession.set_cached_interval_tree(Some(interval_tree));
+    Ok(accession)
 }
 
 fn matching_bed_record(record: &bed::Record<6>, identifier: &str) -> bool {
@@ -212,10 +224,10 @@ fn translated_bed_interval_tree(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
+    use std::{fs::File, sync::Arc};
 
-    use gen_core::HashId;
-    use gen_models::sample::Sample;
+    use gen_core::{HashId, Strand};
+    use gen_models::{interval_tree::IntervalTreeSource as _, sample::Sample};
 
     use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
 
@@ -236,7 +248,7 @@ mod tests {
             history_ref: None,
         };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
-        let annotation = parse_bed_annotation(
+        let mut annotation = parse_bed_annotation(
             "abc123.1",
             File::open(path).expect("should open simple BED fixture"),
         )
@@ -260,14 +272,103 @@ mod tests {
             metadata.block_starts.as_deref(),
             Some([0, 3508, 4691].as_slice())
         );
-        let tree = translate_bed_annotation(
+        let accession = translate_bed_annotation(
             &context,
-            &annotation,
+            &mut annotation,
             File::open(path).expect("should reopen simple BED fixture"),
         )
         .expect("should translate the matching BED record");
-        let (accession, tree) = tree;
         assert_eq!(accession.id, annotation.accession_id);
-        assert_eq!(tree.iter().count(), 1);
+        assert_eq!(
+            annotation
+                .intervaltree(&conn)
+                .expect("should get translated BED tree")
+                .iter()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_bed_annotation_preserves_negative_strand_coordinates() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find test block group");
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
+        let mut annotation = parse_bed_annotation(
+            "xyz.1",
+            File::open(path).expect("should open simple BED fixture"),
+        )
+        .expect("should parse the negative-strand BED record");
+        assert_eq!(annotation.name, "xyz.1");
+
+        let accession = translate_bed_annotation(
+            &context,
+            &mut annotation,
+            File::open(path).expect("should reopen simple BED fixture"),
+        )
+        .expect("should translate the negative-strand BED record");
+        assert_eq!(accession.name, "xyz.1");
+        let annotation_tree = annotation
+            .intervaltree(&conn)
+            .expect("should get the cached BED annotation tree");
+        let accession_tree = accession
+            .intervaltree(&conn)
+            .expect("should get the cached BED accession tree");
+        assert!(Arc::ptr_eq(&annotation_tree, &accession_tree));
+        assert!(Arc::ptr_eq(
+            &annotation_tree,
+            annotation
+                .cached_interval_tree()
+                .expect("should find the cached BED annotation tree")
+        ));
+        assert!(Arc::ptr_eq(
+            &accession_tree,
+            accession
+                .cached_interval_tree()
+                .expect("should find the cached BED accession tree")
+        ));
+        assert_eq!(accession.length(&conn).expect("should get BED length"), 3);
+        let cloned_annotation = annotation.clone();
+        assert!(Arc::ptr_eq(
+            &annotation_tree,
+            cloned_annotation
+                .cached_interval_tree()
+                .expect("should clone the cached BED annotation tree")
+        ));
+        let cloned_accession = accession.clone();
+        assert!(Arc::ptr_eq(
+            &accession_tree,
+            cloned_accession
+                .cached_interval_tree()
+                .expect("should clone the cached BED accession tree")
+        ));
+
+        let intervals: Vec<_> = annotation_tree.iter().collect();
+        assert_eq!(intervals.len(), 1, "should emit one node interval");
+
+        let interval = intervals[0];
+        assert_eq!(interval.range, 0..3);
+        assert_eq!(
+            interval.value.node_id,
+            HashId::try_from("b59698a422128d20462c44537b2d23ef")
+                .expect("should parse the translated node id")
+        );
+        assert_eq!(interval.value.start, 0);
+        assert_eq!(interval.value.end, 3);
+        assert_eq!(interval.value.sequence_start, 5);
+        assert_eq!(interval.value.sequence_end, 8);
+        assert_eq!(interval.value.strand, Strand::Reverse);
     }
 }
