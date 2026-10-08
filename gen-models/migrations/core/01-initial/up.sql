@@ -7,6 +7,15 @@ CREATE TABLE samples (
   is_reference INTEGER NOT NULL DEFAULT 0 CHECK (is_reference IN (0, 1))
 ) STRICT;
 
+CREATE TABLE sample_metadata (
+  hash BLOB PRIMARY KEY NOT NULL,
+  sample_name TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value BLOB NOT NULL,
+  FOREIGN KEY(sample_name) REFERENCES samples(name),
+  UNIQUE(sample_name, key)
+) STRICT;
+
 CREATE TABLE sequences (
   hash BLOB PRIMARY KEY NOT NULL,
   sequence_type TEXT NOT NULL,

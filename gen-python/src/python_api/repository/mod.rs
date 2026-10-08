@@ -88,22 +88,33 @@ where
     F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
     M: FnOnce(OperationError) -> PyErr,
 {
-    tx_begin(&repository.context)?;
+    run_context_operation_write(&repository.context, op, map_operation_error)
+}
 
-    let (value, operation_summary) = match op(&repository.context) {
+pub(crate) fn run_context_operation_write<F, T, M>(
+    context: &DbContext,
+    op: F,
+    map_operation_error: M,
+) -> PyResult<T>
+where
+    F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
+    M: FnOnce(OperationError) -> PyErr,
+{
+    tx_begin(context)?;
+
+    let (value, operation_summary) = match op(context) {
         Ok(value) => value,
         Err(err) => {
-            tx_rollback(&repository.context);
+            tx_rollback(context);
             return Err(err);
         }
     };
 
-    if let Err(err) = tx_commit(&repository.context) {
-        tx_rollback(&repository.context);
+    if let Err(err) = tx_commit(context) {
+        tx_rollback(context);
         return Err(err);
     }
-    commit_operation_summary(&repository.context, &operation_summary)
-        .map_err(map_operation_error)?;
+    commit_operation_summary(context, &operation_summary).map_err(map_operation_error)?;
 
     Ok(value)
 }
@@ -195,6 +206,7 @@ impl PyRepository {
             collection_name.to_string(),
             sample_name.to_string(),
             block_groups,
+            self.context.clone(),
         )
     }
 
@@ -314,6 +326,7 @@ impl PyRepository {
                     py_bg.collection_name.clone(),
                     py_bg.sample_name.clone(),
                     vec![py_bg],
+                    self.context.clone(),
                 )),
             }
         }

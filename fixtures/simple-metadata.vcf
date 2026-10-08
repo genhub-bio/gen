@@ -1,0 +1,13 @@
+##fileformat=VCFv4.2
+##source=generate_random_snps.py
+##contig=<ID=m123,length=34>
+##SAMPLE=<ID=sample_001,Score=90.68>
+##SAMPLE=<ID=sample_002,Score=27.79>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample_001	sample_002
+m123	5	.	A	C	.	PASS	.	GT	1	0
+m123	18	.	T	A	.	PASS	.	GT	0	1
+m123	25	.	C	G	.	PASS	.	GT	0	1
+m123	29	.	C	G	.	PASS	.	GT	1	0
+m123	30	.	A	C	.	PASS	.	GT	0	1
+m123	31	.	G	T	.	PASS	.	GT	1	0

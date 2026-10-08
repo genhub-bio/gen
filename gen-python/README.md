@@ -38,6 +38,18 @@ sample = repo.import_fasta(
 )
 ```
 
+Add and retrieve sample metadata using a `Sample` object:
+
+```python
+sample.add_metadata({"group": "control", "replicate": 1, "score": 0.95})
+metadata = sample.metadata  # -> dict
+```
+
+Keys must be strings. Values support strings, signed 64-bit integers, finite
+floats, and booleans; nested values are rejected. Adding metadata updates existing
+keys and preserves other keys, with the changes recorded in repository history.
+Samples without metadata return `{}`; samples absent from the current branch raise `ValueError`.
+
 Clone and version-control repositories with the same object-oriented workflow:
 
 ```python

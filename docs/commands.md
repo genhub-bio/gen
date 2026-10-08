@@ -21,6 +21,61 @@ gen import fasta reference.fa --sample reference -m "Import reference genome"
 gen update vcf variants.vcf --sample sample1 --message "Apply sample variants"
 ```
 
+With `--read-metadata`, VCF updates store fields from `##SAMPLE=<ID=sample1,Score=90.68>` header records
+as sample metadata. The ID identifies the sample; other field names become metadata keys.
+Metadata reading is off by default. Values are inferred as booleans (`true` or
+`false`), signed 64-bit integers, finite floating-point numbers, or text.
+A later update replaces an existing value for the same sample and key. Only samples
+updated by the operation receive metadata; a fixed sample receives fields only from a
+matching header ID.
+
+# Sample metadata import
+
+```sh
+gen import metadata metadata.tsv
+gen import metadata metadata.tsv --message "Update sample metadata"
+```
+
+Import TSV files with the same `sample_name`, `key`, `value_type`, and `value`
+columns and quoting as metadata exports. Supported types are `text`, `integer`,
+`float`, and `boolean`; booleans use `true` or `false`. Samples must already exist.
+Matching sample/key values are replaced; other metadata is preserved. Duplicate
+sample/key rows use the last value. Invalid rows reject the entire import.
+Changes are recorded in repository history. `import sample-metadata` is an alias.
+
+# Sample metadata export
+
+Export all sample metadata as TSV, or select a single sample:
+
+```sh
+gen export sample-metadata metadata.tsv
+gen export sample-metadata metadata.tsv --sample sample1
+gen export sample-metadata metadata.tsv --keys Score,Count
+gen export sample-metadata metadata.json --json
+gen export --ref HEAD sample-metadata metadata.tsv
+```
+
+The columns are `sample_name`, `key`, `value_type`, and `value`, with one row per
+sample/key pair, sorted by sample name and key. `value_type` is `text`, `integer`,
+`float`, or `boolean`, preserving the value types. Booleans export as `true` or
+`false`. Tabs, newlines, and quotes in fields use CSV-style quoting with a tab delimiter.
+`--keys` selects exact, case-sensitive keys from a comma-separated list and can
+be combined with `--sample`. Omit it to export all keys. Unknown keys are ignored.
+An empty selection produces only the header; an unknown sample is an error.
+Sample metadata belongs to samples across collections, so this command does not
+require a collection option. `--ref` uses the data at a given commit or branch.
+
+With `--json`, the output is an array of sample objects with `name` and `metadata`
+fields. Metadata maps keys to JSON strings, numbers, or booleans. The sample, key,
+and history filters apply to JSON exports too. Samples without matching metadata
+are omitted, and an empty selection produces `[]`. TSV remains the default.
+
+```json
+[
+  {"name": "sample1", "metadata": {"Score": 90.68, "Enabled": true}}
+]
+```
+
 # Branches
 
 Creating a new branch can be accomplished via `gen branch --create branch_name`.
