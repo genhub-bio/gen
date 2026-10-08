@@ -24,8 +24,8 @@ with `sed`/Biopython/string slicing and re-import: that loses history, annotatio
 alternatives. Biopython is fine for parsing records you then hand to `repo.import_sequence()`.
 
 A **sequence graph can hold many sequences**: after a library import, `stack=True` edit or
-VCF, one graph has many paths. `graph.all_sequences()` yields every path as a `Sequence`
-(`str(sequence)` is its bases). `locus.sequence` is the string for one region. A `Sample`
+VCF, one graph has many paths. `graph.all_sequences()` returns every distinct path as a `Sequence`
+(`str(sequence)` is its bases). It builds the whole list, so avoid it on very large libraries. `locus.sequence` is the string for one region. A `Sample`
 holds several graphs; a `Repository` holds samples, branches and history.
 
 Before using a method you have not used, check its real signature. Do not guess method

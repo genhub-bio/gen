@@ -34,7 +34,7 @@ use crate::python_api::{
     hash_id::PyHashId,
     sample::PySample,
     sequence::{PySequence, library_parts},
-    utils::{absolute_path_string, block_group_err_to_pyerr},
+    utils::{absolute_path_string, distinct_sequences},
 };
 
 /// Biopython `SeqRecord`s are recognised by shape (`id` and `seq`) so gen never imports Biopython.
@@ -170,16 +170,8 @@ impl PyRepository {
         }
         let graph = self.get_block_group(collection, sample, name)?;
         if exist_ok {
-            let mut sequences = BlockGroup::sequences_iter(
-                self.context.graph().conn(),
-                self.context.workspace(),
-                &graph.id,
-                None,
-            )
-            .map_err(block_group_err_to_pyerr)?;
-            let holds_requested_sequence =
-                sequences.next().as_ref() == Some(text) && sequences.next().is_none();
-            if holds_requested_sequence {
+            let sequences = distinct_sequences(&self.context, &graph.id)?;
+            if sequences.as_slice() == [text.clone()] {
                 return Ok(Some(graph));
             }
             return Err(PyRuntimeError::new_err(format!(

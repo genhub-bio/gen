@@ -21,7 +21,6 @@ __all__ = [
     "SampleIterator",
     "Sequence",
     "SequenceGraph",
-    "SequenceIterator",
     "SuperPosition",
     "clone",
 ]
@@ -1176,10 +1175,11 @@ class SequenceGraph:
         an argument to a widget's ``go_to()``. Raises ``ValueError`` if the region cannot be
         resolved in this sequence graph.
         """
-    def all_sequences(self) -> SequenceIterator:
+    def all_sequences(self) -> builtins.list[Sequence]:
         r"""
-        Lazily yields one `Sequence` per path through the graph; `str(sequence)` is its bases.
-        Distinct paths may yield identical sequences.
+        Every distinct sequence a path through the graph spells, as a list of `Sequence` sorted by
+        their bases; `str(sequence)` is its bases. Paths that spell the same bases appear once. The
+        list is built in full, so a graph with very many paths takes time and memory.
         """
     def build_index(
         self, sequence_kind: builtins.str = "dna", k: builtins.int = 16
@@ -1475,11 +1475,6 @@ class SequenceGraph:
         message : str, optional
             Commit message for the recorded operation.
         """
-
-@typing.final
-class SequenceIterator:
-    def __iter__(self) -> SequenceIterator: ...
-    def __next__(self) -> typing.Optional[Sequence]: ...
 
 @typing.final
 class SuperPosition:

@@ -266,8 +266,9 @@ full, with the file's name as their `group`.
 
 Exporting a graph to FASTA yields one linear sequence by default: the path that
 currently serves as its coordinate reference. Use `all_sequences=True` when
-exporting, or iterate over `SequenceGraph.all_sequences()`, to get all possible
-paths.
+exporting, or use `SequenceGraph.all_sequences()`, to get every distinct sequence
+the graph's paths spell. Both build the full list, so a graph with a very large
+number of paths takes time and memory.
 
 ## Architecture
 

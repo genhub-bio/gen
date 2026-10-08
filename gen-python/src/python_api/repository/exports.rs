@@ -6,6 +6,7 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::PyRepository;
+use crate::python_api::utils::export_all_sequences_fasta;
 
 #[gen_stub_pymethods]
 #[pymethods]
@@ -25,6 +26,14 @@ impl PyRepository {
     ) -> PyResult<()> {
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
+        if all_sequences {
+            return export_all_sequences_fasta(
+                &self.context,
+                &collection,
+                sample.as_deref(),
+                &PathBuf::from(&filename),
+            );
+        }
         export_fasta(
             conn,
             self.context.workspace(),
@@ -32,7 +41,6 @@ impl PyRepository {
             sample.as_deref(),
             &PathBuf::from(&filename),
             None,
-            all_sequences,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }

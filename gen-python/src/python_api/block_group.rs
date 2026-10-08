@@ -29,7 +29,7 @@ use gen_graph::GraphNode;
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroupSample},
-    block_group::{BlockGroup, SequenceIterator},
+    block_group::BlockGroup,
     db::DbContext,
     locus::GraphLocus,
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
@@ -56,7 +56,7 @@ use super::{
     sample::PySample,
     sequence::PySequence,
     translation::build_translation_params,
-    utils::block_group_err_to_pyerr,
+    utils::{block_group_err_to_pyerr, distinct_sequences, export_all_sequences_fasta},
 };
 
 pub(crate) fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
@@ -434,14 +434,15 @@ impl PySequenceGraph {
         )
     }
 
-    /// Lazily yields one `Sequence` per path through the graph; `str(sequence)` is its bases.
-    /// Distinct paths may yield identical sequences.
-    fn all_sequences(&self, py: Python<'_>) -> PyResult<Py<PySequenceIter>> {
+    /// Every distinct sequence a path through the graph spells, as a list of `Sequence` sorted by
+    /// their bases; `str(sequence)` is its bases. Paths that spell the same bases appear once. The
+    /// list is built in full, so a graph with very many paths takes time and memory.
+    fn all_sequences(&self) -> PyResult<Vec<PySequence>> {
         let context = self.require_context("all_sequences()")?;
-        let sequences =
-            BlockGroup::sequences_iter(context.graph().conn(), context.workspace(), &self.id, None)
-                .map_err(block_group_err_to_pyerr)?;
-        Py::new(py, PySequenceIter { sequences })
+        Ok(distinct_sequences(context, &self.id)?
+            .into_iter()
+            .map(PySequence::unnamed)
+            .collect())
     }
 
     /// IPython display hook — called when a cell ends with a SequenceGraph.
@@ -676,6 +677,14 @@ impl PySequenceGraph {
     #[pyo3(signature = (filename, all_sequences=false))]
     fn export_fasta(&self, filename: String, all_sequences: bool) -> PyResult<()> {
         let ctx = self.require_context("export_fasta()")?;
+        if all_sequences {
+            return export_all_sequences_fasta(
+                ctx,
+                &self.collection_name,
+                Some(&self.sample_name),
+                &PathBuf::from(&filename),
+            );
+        }
         let conn = ctx.graph().conn();
         export_fasta(
             conn,
@@ -684,7 +693,6 @@ impl PySequenceGraph {
             Some(&self.sample_name),
             &PathBuf::from(&filename),
             None,
-            all_sequences,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FASTA '{}': {e}", filename)))
     }
@@ -1390,24 +1398,6 @@ impl PySequenceGraph {
         insert_at_positions(self, &site, sequence, message, stack).map(|locus| {
             PyGraphLocus::with_context(locus, self.context.clone()).attached_to(Some(self.clone()))
         })
-    }
-}
-
-#[gen_stub_pyclass]
-#[pyclass(name = "SequenceIterator", unsendable)]
-struct PySequenceIter {
-    sequences: SequenceIterator,
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl PySequenceIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PySequence> {
-        slf.sequences.next().map(PySequence::unnamed)
     }
 }
 
