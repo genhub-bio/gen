@@ -128,7 +128,7 @@ pub fn update_with_sequence(
 
         if !disable_reference_path_update && resolved_region.kind == ResolvedRegionKind::Path {
             if node_id == HashId::convert_str("") {
-                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
+                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
             } else {
                 let edge_to_new_node = Edge::select(conn)
                     .target_node_id(node_id)
@@ -1018,5 +1018,44 @@ mod tests {
         assert!(graph.contains_edge(upstream_part, first_deletion_boundary));
         assert!(graph.contains_edge(first_deletion_boundary, second_deletion_boundary));
         assert!(graph.contains_edge(second_deletion_boundary, second_deleted_target));
+    }
+
+    #[test]
+    fn test_deletion_reference_path_failure_is_reported() {
+        let context = setup_gen();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-5",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let result = update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2-5",
+            "",
+            false,
+        );
+
+        assert!(matches!(result, Err(SequenceUpdateError::PathError(_))));
     }
 }

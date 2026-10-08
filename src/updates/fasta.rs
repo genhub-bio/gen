@@ -180,7 +180,7 @@ pub fn update_with_fasta(
             && let Some(path) = state.path
         {
             if node_id == HashId::convert_str("") {
-                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
+                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
             } else {
                 let edge_to_new_node = Edge::select(conn)
                     .target_node_id(node_id)
