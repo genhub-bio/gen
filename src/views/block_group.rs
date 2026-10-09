@@ -262,7 +262,7 @@ pub(crate) fn extract_viewport_node_ids(
 
 /// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
 /// in the current viewport, using the graph controller's viewport graph.
-pub(crate) fn current_view_coordinate_window(
+pub fn current_view_coordinate_window(
     controller: &GraphController<GenGraph, GenGraphNodeSizer>,
 ) -> Option<(i64, i64)> {
     use gen_core::{is_end_node, is_start_node};
@@ -285,7 +285,7 @@ pub(crate) fn current_view_coordinate_window(
     (start <= end).then_some((start, end))
 }
 
-pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+pub fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     let span = (window.1 - window.0).max(1);
     (window.0.saturating_sub(span), window.1.saturating_add(span))
 }

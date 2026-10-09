@@ -42,6 +42,27 @@ class GeneralApiTests(RepositoryTestCase):
         self.assertEqual(operation.committer, "gen")
         self.assertEqual(operation.email, "gen@genhub.bio")
 
+    def test_import_annotations_detects_format_and_index(self):
+        self.repository.import_fasta(str(FIXTURES / "simple.fa"))
+        annotation = self.root / "genes.gff"
+        annotation.write_bytes((FIXTURES / "simple.gff").read_bytes())
+        index = self.root / "genes.gff.tbi"
+        index.write_bytes(b"index fixture")
+        commit_hash = self.repository.import_annotations(
+            str(annotation), name="genes", message="Add genes"
+        )
+        self.assertEqual(self.repository.get_operations()[0].id, commit_hash)
+        self.assertEqual(self.repository.get_operations()[0].message, "Add genes")
+        asset_names = {asset.name for asset in self.repository.get_assets()}
+        self.assertIn("genes", asset_names)
+        self.assertIn(index.name, asset_names)
+
+    def test_import_annotations_accepts_explicit_format(self):
+        annotation = self.root / "genes"
+        annotation.write_bytes((FIXTURES / "simple.gff").read_bytes())
+        commit_hash = self.repository.import_annotations(str(annotation), format="gff3")
+        self.assertEqual(self.repository.get_operations()[0].id, commit_hash)
+
     def test_repository_rejects_empty_committer(self):
         with self.assertRaises(ValueError):
             gen.Repository(str(self.root / "empty-name"), committer="")
