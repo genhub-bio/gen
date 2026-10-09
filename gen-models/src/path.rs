@@ -283,9 +283,9 @@ impl Path {
                     second_edge.source_node_id
                 )));
             }
-            if first_edge.target_coordinate >= second_edge.source_coordinate {
+            if first_edge.target_coordinate > second_edge.source_coordinate {
                 return Err(PathError::Invalid(format!(
-                    "source coordinate {} for edge {} is not after target coordinate {} for edge {}",
+                    "source coordinate {} for edge {} is before target coordinate {} for edge {}",
                     second_edge.source_coordinate,
                     second_edge.id_hash(),
                     first_edge.target_coordinate,
@@ -952,9 +952,17 @@ impl Path {
         let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
+        let node_deletion_start = if block_with_start.strand == Strand::Forward {
+            block_with_start.sequence_start + deletion_start - block_with_start.start
+        } else {
+            block_with_start.sequence_end - deletion_start + block_with_start.start
+        };
+        let node_deletion_end = if block_with_end.strand == Strand::Forward {
+            block_with_end.sequence_start + deletion_end - block_with_end.start
+        } else {
+            block_with_end.sequence_end - deletion_end + block_with_end.start
+        };
 
-        let node_deletion_start = deletion_start - block_with_start.start;
-        let node_deletion_end = deletion_end - block_with_end.start;
         let deletion_edge_result = Edge::select(conn)
             .source_node_id(block_with_start.node_id)
             .source_coordinate(node_deletion_start)
@@ -4551,7 +4559,7 @@ mod tests {
     #[test]
     #[should_panic]
     // Panic message is something like "Source coordinate 2 for edge 2 is before target coordinate 4 for edge 1"
-    fn test_consecutive_edges_must_have_different_coordinates_on_a_node() {
+    fn test_consecutive_edges_must_not_decrease_coordinates_on_a_node() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
