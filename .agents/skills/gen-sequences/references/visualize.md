@@ -52,7 +52,7 @@ the interactive widget freely.
 
 ## Showing a plot to a user
 
-`TextWidget` is `TextGraphWidget`. When asked to show, plot, or compare graphs outside a live
+When asked to show, plot, or compare graphs outside a live
 Jupyter kernel, `print(widget)` and paste the output in a fenced code block. The first frame
 printed in a process starts with a `#` orientation header written for you: it explains that
 the graph is a population or library of sequences read left to right, with nodes as sequence

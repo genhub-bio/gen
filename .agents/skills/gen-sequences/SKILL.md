@@ -82,7 +82,7 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
 - Graph-level exports cover the **whole sample**, not only that graph.
 - Mutating calls record operations themselves; there is no transaction API. `repo.get_operations()`
   is the audit trail.
-- `graph.region()` and `sample.copy()` do not mutate. Inspect the return type before chaining:
+- `graph.region()` does not mutate. `sample.copy()` records an operation but leaves the original sample untouched. Inspect the return type before chaining:
   VCF updates return `list[Sample]`, most other updates return one `Sample`.
 - Cells that mutate fail when re-run ("already exists"). `import_sequence(..., exist_ok=True)` can
   reuse an existing graph only when its sequence matches. `sample.copy()` errors if its destination

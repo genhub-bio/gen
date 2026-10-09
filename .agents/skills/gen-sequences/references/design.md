@@ -147,11 +147,11 @@ translate path coordinates. Unions reject attached positions from different grap
 
 ```python
 graph.search(query, sequence_kind="dna")
-repo.search(query, bgs=None, sequence_kind="dna")
+repo.search(query, sgs=None, sequence_kind="dna")
 graph.build_index(sequence_kind="dna", k=16)
 repo.build_index(sequence_kind="dna", k=16)         # every sequence graph
 graph.clear_index()
-repo.clear_index(bgs=None)
+repo.clear_index(sgs=None)
 graph.all_sequences()
 graph.to_dict()
 graph.to_networkx()
@@ -159,16 +159,16 @@ graph.to_rustworkx()
 ```
 
 Graph search returns `list[Locus]`; repository search returns
-`list[(SequenceGraph, list[Locus])]`. `bgs` is a list of graph objects. Kinds: `"exact"`,
+`list[(SequenceGraph, list[Locus])]`. `sgs` is a list of graph objects to restrict the search to. Kinds: `"exact"`,
 `"dna"`, `"ssdna"`, `"protein"`. Exact is case-sensitive raw-byte matching without IUPAC
 expansion or reverse-complement search; DNA matches both strands with IUPAC support. Check
 result count and strand before choosing a target; a restriction site such as `GAATTC` can
 match more than once. Build an index for repeated large-graph searches.
 
 `locus.sequence` is a string in reading order; `str(locus)` also reads sequence.
-`all_sequences()` is an iterator of `Sequence` objects for the current graph alternatives
-(`str(sequence)` is the bases; they also compare, hash, slice and sort like that string);
-combinatorial enumeration can be exponential. `node.sequence` reads a `Node`'s bases.
+`all_sequences()` is a list of distinct `Sequence` objects, one per different spelling of the
+graph's paths, sorted by bases (`str(sequence)` is the bases; they also compare, hash and slice
+like that string). It is built in full, and combinatorial enumeration can be exponential. `node.sequence` reads a `Node`'s bases.
 Repository and graph handles cannot cross threads; open a repository in the worker and
 retrieve the graph by its typed id instead. NetworkX/rustworkx conversions need their
 optional packages and return `DiGraph`/`PyDiGraph`, respectively.
@@ -200,15 +200,15 @@ graph.replace(promoter, "TTGACA")        # edit the feature by name, not by coor
 ## Cutting out and joining pieces
 
 ```python
-graph.subgraph(new_sample, locus)            # or (new_sample, start_position, end_position)
-graph.subgraph(new_sample, start, end)       # integer path coordinates
+graph.subgraph(new_sample, locus.start(), locus.end())   # two Positions
+graph.subgraph(new_sample, start, end)                    # integer path coordinates
 graph.chunks(new_sample, breakpoints=None, chunk_size=None)
 repo.stitch(parts, new_sample, new_region)
 ```
 
-`graph.subgraph()` takes a `Locus` (only its first and last positions are used, so a locus
-from another graph works if both are still in this one), two `Position`s, or two integer path
-coordinates, keeps every variant route between the ends, and returns a `SequenceGraph` in
+`graph.subgraph()` takes two forward-strand `Position`s (the first and last base to include,
+so for a `Locus` pass `locus.start()` and `locus.end()`; the locus itself is rejected) or two
+integer path coordinates (0-based, end exclusive), keeps every variant route between the ends, and returns a `SequenceGraph` in
 `new_sample` (with a current path when this graph's path runs from start to end);
 `graph.chunks()` returns `list[SequenceGraph]`. Breakpoints are a list of integer
 coordinates. Use `subgraph` to extract a part (an insert, a cassette) and `chunks` to split

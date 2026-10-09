@@ -134,5 +134,5 @@ have no Python binding; use the Gen CLI for them.
 - Exporting a FASTA "as a backup" before editing. History already holds every prior state.
 - Calling `checkout()` and then continuing with handles obtained on the other branch.
 - Merging or resetting without being asked to adopt or discard work.
-- Re-running a cell that creates a branch or copy without `exist_ok=True`.
+- Re-running a cell that creates a branch without `exist_ok=True`, or a `sample.copy()` to a name that already exists (`copy` has no `exist_ok`).
 - Switching to the CLI after a `TypeError`; check the signature in the stub instead.

@@ -26,8 +26,8 @@ updating a sample from a file; keeping other files; exports; mistakes to avoid.
 ## Imports and return types
 
 ```python
-repo.import_fasta(filename, sample=None, collection=None)
-repo.import_reference_fasta(filename, reference, collection=None)
+repo.import_fasta(filename, sample=None, collection=None, fai=None, gzi=None)
+repo.import_reference_fasta(filename, reference, collection=None, fai=None, gzi=None)
 repo.import_genbank(filename, sample=None, collection=None)
 repo.import_gfa(filename, sample=None, collection=None)
 repo.import_sequence(sequence, name=None, sample=None, circular=False, collection=None, *, exist_ok=False)
@@ -42,6 +42,7 @@ repo.import_library_files(library_name, parts, library, sample=None, collection=
 | GFA, library, library files | `SequenceGraph` |
 | sequence, reference sequence | `SequenceGraph` |
 
+`fai` and `gzi` are only for a remote indexed BGZF FASTA, where both index files are passed explicitly.
 There is no Python `shallow=` argument on FASTA imports. GenBank imports load
 features automatically, accessible through `graph.annotations`. `import_fasta()` fails if the
 same contents were already imported, so a re-run in a notebook needs a guard or a fresh
