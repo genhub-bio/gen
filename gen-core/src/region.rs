@@ -50,6 +50,24 @@ pub trait RegionResolver: Sized {
 }
 
 impl Region {
+    /// Resolve this region against an existing feature's internal coordinate bounds.
+    ///
+    /// The returned pair is zero-based and half-open. A name-only region selects the complete
+    /// feature; a start-only region selects from its relative start through its end. Exact points
+    /// remain exact points so callers can preserve model-backed point semantics.
+    pub fn resolve_relative_bounds(
+        &self,
+        anchor_start: i64,
+        anchor_end: i64,
+    ) -> Result<(i64, i64), RegionParseError> {
+        match (self.start, self.end) {
+            (None, None) => Ok((anchor_start, anchor_end)),
+            (Some(start), None) => Ok((anchor_start + start, anchor_end)),
+            (Some(start), Some(end)) => Ok((anchor_start + start, anchor_start + end)),
+            (None, Some(_)) => Err(RegionParseError::InvalidSyntax),
+        }
+    }
+
     /// Parse a region string.
     ///
     /// Supported forms:
@@ -157,6 +175,20 @@ impl Region {
     }
 }
 
+/// Normalize a user-facing search region exactly once before internal resolution.
+///
+/// Positive starts are one-based and become zero-based. Zero and negative starts use relative
+/// search coordinates and are preserved unchanged. The end is always unchanged.
+pub fn normalize_user_search_region(region: &Region) -> Region {
+    Region {
+        name: region.name.clone(),
+        start: region
+            .start
+            .map(|start| if start > 0 { start - 1 } else { start }),
+        end: region.end,
+    }
+}
+
 impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.start, self.end) {
@@ -171,7 +203,7 @@ impl std::fmt::Display for Region {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Region, RegionParseError, normalize_user_search_region};
 
     #[test]
     fn test_parse_valid_region() {
@@ -290,5 +322,85 @@ mod tests {
         let (start, end) = region.require_coordinates().unwrap();
         let slice = &string[start as usize..end as usize];
         assert_eq!(slice, "ba");
+    }
+
+    #[test]
+    fn test_normalize_user_search_region_converts_positive_starts_only() {
+        assert_eq!(
+            normalize_user_search_region(
+                &Region::parse("gene:5-20").expect("should parse positive range")
+            ),
+            Region::parse("gene:4-20").expect("should parse normalized positive range")
+        );
+        assert_eq!(
+            normalize_user_search_region(
+                &Region::parse("gene:5").expect("should parse positive point")
+            ),
+            Region::parse("gene:4-5").expect("should parse normalized positive point")
+        );
+        assert_eq!(
+            normalize_user_search_region(
+                &Region::parse("gene:0-5").expect("should parse zero-start range")
+            ),
+            Region::parse("gene:0-5").expect("should preserve zero-start range")
+        );
+        assert_eq!(
+            normalize_user_search_region(
+                &Region::parse("gene:0").expect("should parse zero point")
+            ),
+            Region::parse("gene:0").expect("should preserve zero point")
+        );
+        assert_eq!(
+            normalize_user_search_region(
+                &Region::parse("gene:-3--1").expect("should parse negative range")
+            ),
+            Region::parse("gene:-3--1").expect("should preserve negative range")
+        );
+        assert_eq!(
+            normalize_user_search_region(
+                &Region::parse("gene:-3").expect("should parse negative point")
+            ),
+            Region::parse("gene:-3").expect("should preserve negative point")
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_bounds_preserves_point_and_open_range_semantics() {
+        assert_eq!(
+            Region::parse("gene")
+                .expect("should parse whole-feature region")
+                .resolve_relative_bounds(10, 20),
+            Ok((10, 20))
+        );
+        assert_eq!(
+            Region::parse("gene:3")
+                .expect("should parse relative point")
+                .resolve_relative_bounds(10, 20),
+            Ok((13, 13))
+        );
+        assert_eq!(
+            Region::parse("gene:3-7")
+                .expect("should parse relative range")
+                .resolve_relative_bounds(10, 20),
+            Ok((13, 17))
+        );
+        assert_eq!(
+            Region::parse("gene:3..")
+                .expect("should parse open-ended relative range")
+                .resolve_relative_bounds(10, 20),
+            Ok((13, 20))
+        );
+        assert_eq!(
+            Region::parse("gene:-3--1")
+                .expect("should parse negative relative range")
+                .resolve_relative_bounds(10, 20),
+            Ok((7, 9))
+        );
+        assert_eq!(
+            Region::parse("gene:..5")
+                .expect("should parse end-only relative range")
+                .resolve_relative_bounds(10, 20),
+            Err(RegionParseError::InvalidSyntax)
+        );
     }
 }

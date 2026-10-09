@@ -154,7 +154,7 @@ mod tests {
     use noodles::gff;
     use tempfile::tempdir;
 
-    use super::propagate_gff;
+    use super::{gff_attribute_value_to_string, propagate_gff};
     use crate::test_helpers::{get_connection, test_workspace};
 
     fn create_block_group(conn: &GraphConnection) {
@@ -363,5 +363,57 @@ mod tests {
                 assert_eq!(record.end().get(), 15);
             }
         }
+    }
+
+    #[test]
+    fn test_propagate_gff_preserves_negative_strand_coordinates() {
+        let conn = get_connection();
+        create_block_group(&conn);
+        apply_child_sample_update_from_aa_fasta(&conn);
+
+        let temp_dir = tempdir().expect("should create temp directory");
+        let input_path = temp_dir.path().join("input.gff");
+        let output_path = temp_dir.path().join("output.gff");
+        std::fs::write(
+            &input_path,
+            "##gff-version 3\nm123\tgen-test\tGene\t5\t20\t.\t-\t.\tID=reverse-gene\n",
+        )
+        .expect("should write negative-strand GFF fixture");
+
+        propagate_gff(
+            &conn,
+            "test",
+            Sample::DEFAULT_NAME,
+            "child sample",
+            input_path
+                .to_str()
+                .expect("should convert input path to UTF-8"),
+            output_path
+                .to_str()
+                .expect("should convert output path to UTF-8"),
+        )
+        .expect("should propagate negative-strand GFF feature");
+
+        let mut reader = File::open(output_path)
+            .map(BufReader::new)
+            .map(gff::io::Reader::new)
+            .expect("should read output file");
+        let records = reader
+            .record_bufs()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("should parse output GFF records");
+        assert_eq!(records.len(), 1, "should propagate exactly one feature");
+
+        let record = &records[0];
+        assert_eq!(record.reference_sequence_name(), "m123");
+        assert_eq!(record.source(), "gen-test");
+        assert_eq!(record.ty(), "Gene");
+        assert_eq!(record.start().get(), 5);
+        assert_eq!(record.end().get(), 15);
+        assert_eq!(record.strand(), gff::feature::record::Strand::Reverse);
+        assert_eq!(
+            gff_attribute_value_to_string(record.attributes(), "ID").as_deref(),
+            Some("reverse-gene")
+        );
     }
 }

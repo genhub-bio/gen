@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
+    sync::Arc,
 };
 
 use gen_core::{
@@ -22,6 +23,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::interval_tree::IntervalTreeSource;
 use crate::{
     Direction, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionSpan, NewAccession},
@@ -182,16 +184,8 @@ pub struct BlockGroupChange {
     pub preserve_edge: bool,
 }
 
-pub trait IntervalTreeSource {
-    fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-        workspace: &Workspace,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError>;
-}
-
 pub type IntervalTreeCache =
-    HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>>;
+    HashMap<(HashId, ResolvedRegionKind), Arc<IntervalTree<i64, NodeIntervalBlock>>>;
 
 pub struct PathCache<'a> {
     pub cache: HashMap<PathData, Path>,
@@ -823,10 +817,13 @@ impl BlockGroup {
             if !tree_map.contains_key(&cache_key) {
                 tree_map.insert(
                     cache_key,
-                    IntervalTreeSource::intervaltree(&change.region, conn, workspace)?,
+                    change
+                        .region
+                        .intervaltree(conn, workspace)
+                        .map_err(|error| BlockGroupError::ChangeOutOfBounds(error.to_string()))?,
                 );
             }
-            let tree = tree_map.get(&cache_key);
+            let tree = tree_map.get(&cache_key).map(Arc::as_ref);
             let new_augmented_edges = change.region.plan_edges(conn, workspace, change, tree)?;
             new_augmented_edges_by_block_group
                 .entry(change.region.block_group.id)
@@ -2354,6 +2351,7 @@ mod tests {
                 name: "test".to_string(),
                 block_group_id: path.block_group_id,
                 parent_accession_id: None,
+                cached_interval_tree: None,
             }]
         );
 
