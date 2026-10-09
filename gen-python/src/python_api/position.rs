@@ -237,7 +237,7 @@ fn canonical(mut positions: Vec<Position>) -> Vec<Position> {
 /// attaches it to another sequence graph, such as a copy of the sample. ``a | b`` combines a
 /// position with another position or a ``SuperPosition`` into a ``SuperPosition``.
 #[gen_stub_pyclass]
-#[pyclass(name = "Position", unsendable)]
+#[pyclass(name = "Position", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PyPosition {
     /// The point by node coordinate, which later edits leave unchanged.
@@ -484,7 +484,7 @@ fn canonical_positions(mut positions: Vec<PyPosition>) -> Vec<PyPosition> {
 /// Pass a superposition as ``after`` or ``before`` to ``SequenceGraph.insert()`` to insert at
 /// every position it covers.
 #[gen_stub_pyclass]
-#[pyclass(name = "SuperPosition", unsendable)]
+#[pyclass(name = "SuperPosition", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PySuperPosition {
     pub(crate) positions: Vec<PyPosition>,

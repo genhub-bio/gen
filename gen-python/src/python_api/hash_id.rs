@@ -7,7 +7,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 ///
 /// Use it as a dict key or compare it with `==`. `str(hash_id)` gives the hex digest.
 #[gen_stub_pyclass]
-#[pyclass(name = "HashId")]
+#[pyclass(name = "HashId", from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PyHashId {
     bytes: HashBytes,

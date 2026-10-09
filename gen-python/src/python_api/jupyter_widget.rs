@@ -1162,7 +1162,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, name: &str) {
 /// header and the frontend's pager arrows hidden (see `page_count`). Pages
 /// beyond the first are built lazily on first visit, since a `Sample` may
 /// hold many sequence graphs that most viewing sessions never page through.
-#[pyclass(name = "GraphWidget")]
+#[pyclass(name = "GraphWidget", from_py_object)]
 #[derive(Clone)]
 pub struct PyGraphController {
     pages: Vec<Page>,

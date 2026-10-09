@@ -18,7 +18,7 @@ use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus, hash_id::P
 /// ``SequenceGraph.search()``. To persist it in the repository, use
 /// ``SequenceGraph.add_annotation(locus, name)``.
 #[gen_stub_pyclass]
-#[pyclass(name = "Annotation", unsendable)]
+#[pyclass(name = "Annotation", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PyAnnotation {
     pub inner: Annotation,

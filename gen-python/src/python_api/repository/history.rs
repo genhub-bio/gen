@@ -35,7 +35,7 @@ fn history_err_to_pyerr(error: impl ToString) -> PyErr {
 
 /// A repository branch and its current head operation.
 #[gen_stub_pyclass]
-#[pyclass(name = "Branch")]
+#[pyclass(name = "Branch", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyBranch {
     /// Branch name.
@@ -94,7 +94,7 @@ impl PyBranch {
 
 /// A committed Gen operation in repository history.
 #[gen_stub_pyclass]
-#[pyclass(name = "Operation")]
+#[pyclass(name = "Operation", from_py_object)]
 #[derive(Clone)]
 pub struct PyOperation {
     pub id: DoltHashId,
@@ -177,7 +177,7 @@ impl PyOperation {
 /// stored copy, which may be compressed, and `.save_as()` writes the original, readable file under
 /// any name you choose. Treat the stored copy as read-only.
 #[gen_stub_pyclass]
-#[pyclass(name = "Asset", unsendable)]
+#[pyclass(name = "Asset", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PyAsset {
     asset: AssetRef,

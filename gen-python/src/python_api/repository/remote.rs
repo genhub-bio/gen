@@ -11,7 +11,7 @@ use super::{PyRepository, history::branch_name};
 
 /// A configured Gen repository remote.
 #[gen_stub_pyclass]
-#[pyclass(name = "Remote")]
+#[pyclass(name = "Remote", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyRemote {
     /// Remote name, such as `origin`.
