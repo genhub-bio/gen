@@ -947,6 +947,8 @@ impl Path {
         deletion_start: i64,
         deletion_end: i64,
     ) -> Result<Path, PathError> {
+        // Creates a new path from the current one by replacing all edges between deletion_start and
+        // deletion_end with a single edge spanning the deletion.
         let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
@@ -960,22 +962,6 @@ impl Path {
         } else {
             block_with_end.sequence_end - deletion_end + block_with_end.start
         };
-
-        let edges = Path::edges_for_path(conn, &self.id, None);
-        let edges_by_source = edges
-            .iter()
-            .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
-            .collect::<HashMap<(_, i64), &Edge>>();
-        let edges_by_target = edges
-            .iter()
-            .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
-            .collect::<HashMap<(_, i64), &Edge>>();
-        let edge_before_deletion = edges_by_target
-            .get(&(block_with_start.node_id, block_with_start.sequence_start))
-            .unwrap();
-        let edge_after_deletion = edges_by_source
-            .get(&(block_with_end.node_id, block_with_end.sequence_end))
-            .unwrap();
 
         let deletion_edge_result = Edge::select(conn)
             .source_node_id(block_with_start.node_id)
@@ -993,6 +979,22 @@ impl Path {
         }
 
         let deletion_edge = deletion_edge_result[0].clone();
+
+        let edges = Path::edges_for_path(conn, &self.id, None);
+        let edges_by_source = edges
+            .iter()
+            .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
+            .collect::<HashMap<(_, i64), &Edge>>();
+        let edges_by_target = edges
+            .iter()
+            .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
+            .collect::<HashMap<(_, i64), &Edge>>();
+        let edge_before_deletion = edges_by_target
+            .get(&(block_with_start.node_id, block_with_start.sequence_start))
+            .unwrap();
+        let edge_after_deletion = edges_by_source
+            .get(&(block_with_end.node_id, block_with_end.sequence_end))
+            .unwrap();
 
         let mut new_edge_ids = vec![];
         let mut before_deletion = true;
