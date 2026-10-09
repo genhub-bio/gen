@@ -11,8 +11,8 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use petgraph::algo::kosaraju_scc;
-use rusqlite::{ToSql, params, types::Value};
+use petgraph::{Direction, algo::kosaraju_scc};
+use rusqlite::{ToSql, named_params, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -166,6 +166,20 @@ impl GroupBlock {
                 start,
                 end,
             }
+        }
+    }
+
+    /// A block that carries only its coordinates. `build_graph` reads nothing else, so a lazy
+    /// crawl that carves a handful of slices around one port can build their topology without
+    /// loading the backing node's sequence. Calling [`Self::sequence`] on it panics.
+    pub(crate) fn without_sequence(id: i64, node_id: HashId, start: i64, end: i64) -> Self {
+        GroupBlock {
+            id,
+            node_id,
+            sequence: None,
+            external_sequence: None,
+            start,
+            end,
         }
     }
 
@@ -393,6 +407,153 @@ impl Edge {
         }
 
         Ok(edges)
+    }
+
+    /// The edges in `block_group_id` that leave (`Direction::Outgoing`) or arrive at
+    /// (`Direction::Incoming`) the port at `coordinate` on `node_id`.
+    ///
+    /// A lazily crawled viewer uses this to learn one port at a time instead of every edge that
+    /// touches a node, which for a chromosome-length node carrying a VCF can be hundreds of
+    /// thousands. The lookup is served by the `(node_id, coordinate)` edge indexes; the
+    /// `CROSS JOIN` keeps SQLite from starting at `block_group_edges`, which would scan the
+    /// whole block group.
+    pub fn edges_at_port_direction(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+        coordinate: i64,
+        direction: Direction,
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
+        let side = match direction {
+            Direction::Outgoing => "source",
+            Direction::Incoming => "target",
+        };
+        let query = format!(
+            "\
+            SELECT
+                e.id,
+                e.source_node_id,
+                e.source_coordinate,
+                e.source_strand,
+                e.target_node_id,
+                e.target_coordinate,
+                e.target_strand,
+                bge.chromosome_index,
+                bge.phased,
+                bge.created_on
+            FROM {edges} e
+            CROSS JOIN {block_group_edges} bge
+            WHERE e.{side}_node_id = :node_id
+              AND e.{side}_coordinate = :coordinate
+              AND bge.block_group_id = :block_group_id
+              AND bge.edge_id = e.id;",
+            edges = Self::table_name_with_history_ref(None),
+            block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+        );
+        let mut statement = conn.prepare_cached(&query)?;
+        let rows = statement.query_map(
+            named_params! {
+                ":node_id": node_id,
+                ":coordinate": coordinate,
+                ":block_group_id": block_group_id,
+            },
+            |row| {
+                Ok(AugmentedEdge {
+                    edge: Edge {
+                        id: row.get(0)?,
+                        source_node_id: row.get(1)?,
+                        source_coordinate: row.get(2)?,
+                        source_strand: row.get(3)?,
+                        target_node_id: row.get(4)?,
+                        target_coordinate: row.get(5)?,
+                        target_strand: row.get(6)?,
+                    },
+                    chromosome_index: row.get(7)?,
+                    phased: row.get(8)?,
+                    created_on: row.get(9)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(EdgeError::from)
+    }
+
+    /// A scalar subquery for the closest edge endpoint coordinate on `:node_id` in one
+    /// direction. Source and target endpoints are seeked through their own indexes and merged,
+    /// so a port lookup stays bounded even on chromosome-length nodes.
+    fn nearest_port_subquery(comparison: &str, order: &str, aggregate: &str) -> String {
+        let candidates = ["source", "target"]
+            .map(|side| {
+                format!(
+                    "SELECT * FROM (
+                        SELECT e.{side}_coordinate AS coordinate FROM {edges} e
+                        CROSS JOIN {block_group_edges} bge
+                        WHERE e.{side}_node_id = :node_id
+                          AND e.{side}_coordinate {comparison} :coordinate
+                          AND bge.block_group_id = :block_group_id
+                          AND bge.edge_id = e.id
+                        ORDER BY e.{side}_coordinate {order} LIMIT 1
+                    )",
+                    edges = Self::table_name_with_history_ref(None),
+                    block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+                )
+            })
+            .join(" UNION ALL ");
+        format!("(SELECT {aggregate}(coordinate) FROM ({candidates}))")
+    }
+
+    /// The closest coordinate with any edge endpoint on this node.
+    pub(crate) fn nearest_port_coordinate(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+        coordinate: i64,
+        direction: Direction,
+        include_current: bool,
+    ) -> Result<Option<i64>, EdgeError> {
+        let (comparison, order, aggregate) = match (direction, include_current) {
+            (Direction::Outgoing, false) => (">", "ASC", "MIN"),
+            (Direction::Outgoing, true) => (">=", "ASC", "MIN"),
+            (Direction::Incoming, false) => ("<", "DESC", "MAX"),
+            (Direction::Incoming, true) => ("<=", "DESC", "MAX"),
+        };
+        let query = format!(
+            "SELECT {}",
+            Self::nearest_port_subquery(comparison, order, aggregate)
+        );
+        let mut statement = conn.prepare_cached(&query)?;
+        Ok(statement.query_row(
+            named_params! {
+                ":node_id": node_id,
+                ":coordinate": coordinate,
+                ":block_group_id": block_group_id,
+            },
+            |row| row.get::<_, Option<i64>>(0),
+        )?)
+    }
+
+    /// The ports directly before and after a coordinate on this node, in one statement. A
+    /// crawl needs both to bound the slices next to a port and to know whether the port is the
+    /// first or last on its node.
+    pub(crate) fn neighboring_port_coordinates(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Result<(Option<i64>, Option<i64>), EdgeError> {
+        let query = format!(
+            "SELECT {}, {}",
+            Self::nearest_port_subquery("<", "DESC", "MAX"),
+            Self::nearest_port_subquery(">", "ASC", "MIN"),
+        );
+        let mut statement = conn.prepare_cached(&query)?;
+        Ok(statement.query_row(
+            named_params! {
+                ":node_id": node_id,
+                ":coordinate": coordinate,
+                ":block_group_id": block_group_id,
+            },
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
     }
 
     /// Converts input edge coordinates for one backing node into the sequence slices represented
@@ -756,7 +917,7 @@ impl Edge {
     /// `block_connections` uses this structural property when connecting blocks around a junction.
     /// Whether the edge is a real path choice or a reference-healing edit-site marker remains
     /// separate chromosome-index metadata on `AugmentedEdge`.
-    fn is_same_coordinate_edge(&self) -> bool {
+    pub(crate) fn is_same_coordinate_edge(&self) -> bool {
         self.source_node_id == self.target_node_id
             && self.source_coordinate == self.target_coordinate
     }
@@ -873,7 +1034,7 @@ impl Edge {
     ///       |                                         |
     ///       +-- reference --> (2,2) -- delete C ------+--> [G]
     /// ```
-    fn block_connections<'a>(
+    pub(crate) fn block_connections<'a>(
         &self,
         source_blocks: &[&'a GroupBlock],
         target_blocks: &[&'a GroupBlock],
