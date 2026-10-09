@@ -184,8 +184,8 @@ fn insert_sequence_change(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_core::NO_CHROMOSOME_INDEX;
-    use gen_graph::GraphNode;
+    use gen_core::{NO_CHROMOSOME_INDEX, PATH_START_NODE_ID, is_terminal};
+    use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
@@ -193,6 +193,7 @@ mod tests {
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
+        port_crawl::PortCrawler,
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
     };
@@ -374,6 +375,118 @@ mod tests {
                 "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
             ])
         );
+    }
+
+    /// Insert at 4, then inside that insertion, through real updates on child samples.
+    fn nested_insertion_block_group(context: &DbContext) -> BlockGroup {
+        let conn = context.graph().conn();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            context,
+            &fasta_path.to_str().unwrap().to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_sequence(
+            context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "outer",
+            "m123:4-4",
+            "GGGG",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            context, "test", "outer", "nested", "m123:6-6", "CCCC", false,
+        )
+        .unwrap();
+        get_sample_bg(conn, "test", "nested")
+    }
+
+    /// The crawl has no edge the eager graph lacks. It may omit the eager builder's loop-exit
+    /// shortcuts, but only where the same walk exists through a junction.
+    fn assert_lazy_matches_eager_up_to_junction_shortcuts(lazy: &GenGraph, eager: &GenGraph) {
+        let lazy_nodes: HashSet<GraphNode> = lazy.nodes().collect();
+        let eager_nodes: HashSet<GraphNode> = eager.nodes().collect();
+        assert_eq!(
+            lazy_nodes, eager_nodes,
+            "the crawl should represent every node"
+        );
+        let edge_ids = |graph: &GenGraph| -> HashSet<HashId> {
+            graph
+                .all_edges()
+                .flat_map(|(_, _, graph_edges)| graph_edges.iter().map(|edge| edge.edge_id))
+                .collect()
+        };
+        assert_eq!(
+            edge_ids(lazy),
+            edge_ids(eager),
+            "the crawl should carry every stored edge"
+        );
+        for (source, target, _) in lazy.all_edges() {
+            assert!(
+                eager.contains_edge(source, target),
+                "the crawl drew an edge the eager graph lacks: {source:?} -> {target:?}"
+            );
+        }
+        for (source, target, _) in eager.all_edges() {
+            let is_shortcut =
+                lazy.neighbors_directed(source, Direction::Outgoing)
+                    .any(|junction| {
+                        !is_terminal(junction.node_id)
+                            && junction.sequence_start == junction.sequence_end
+                            && lazy.contains_edge(junction, target)
+                    });
+            assert!(
+                lazy.contains_edge(source, target) || is_shortcut,
+                "the crawl lacks {source:?} -> {target:?} and no junction carries the same walk"
+            );
+        }
+    }
+
+    /// A second insertion inside the first splits the first insertion at an internal port, so the
+    /// loop through the junction at its reference position spans more than the two stored edges.
+    #[test]
+    fn test_crawl_matches_eager_graph_up_to_junction_shortcuts_after_nested_insertions() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let block_group = nested_insertion_block_group(&context);
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        for prune in [false, true] {
+            let mut eager =
+                BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+            if prune {
+                BlockGroup::prune_graph(&mut eager);
+            }
+            let mut crawler = PortCrawler::new(block_group.id, prune);
+            let mut lazy = GenGraph::new();
+            lazy.add_node(start);
+            loop {
+                let incomplete: Vec<(GraphNode, Direction)> = lazy
+                    .nodes()
+                    .flat_map(|node| [(node, Direction::Outgoing), (node, Direction::Incoming)])
+                    .filter(|(node, direction)| !crawler.is_complete(node, *direction))
+                    .collect();
+                if incomplete.is_empty() {
+                    break;
+                }
+                for (node, direction) in incomplete {
+                    crawler
+                        .expand(conn, &mut lazy, &[node], direction, usize::MAX)
+                        .unwrap();
+                }
+            }
+
+            assert_lazy_matches_eager_up_to_junction_shortcuts(&lazy, &eager);
+        }
     }
 
     #[test]
