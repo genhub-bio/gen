@@ -190,11 +190,10 @@ mod tests {
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
         block_group::{BlockGroup, BlockGroupChange, PathCache},
-        block_group_edge::BlockGroupEdge,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
-        port_crawl::{CrawlStart, PortCrawler, crawl_graph},
+        port_crawl::PortCrawler,
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
     };
@@ -456,64 +455,38 @@ mod tests {
         let context = setup_gen();
         let conn = context.graph().conn();
         let block_group = nested_insertion_block_group(&context);
-        let eager =
-            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
-        let reference_node_id = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
-            .iter()
-            .find(|augmented_edge| augmented_edge.edge.source_node_id == PATH_START_NODE_ID)
-            .expect("should have an edge out of the start node")
-            .edge
-            .target_node_id;
-
-        let lazy = crawl_graph(
-            conn,
-            block_group.id,
-            CrawlStart::Node {
-                node_id: reference_node_id,
-                coordinate: 0,
-            },
-            1_000,
-        )
-        .unwrap()
-        .expect("should find a block at the start of the reference");
-
-        assert_lazy_matches_eager_up_to_junction_shortcuts(&lazy, &eager);
-    }
-
-    #[test]
-    fn test_pruned_crawl_matches_pruned_eager_graph_up_to_junction_shortcuts() {
-        let context = setup_gen();
-        let conn = context.graph().conn();
-        let block_group = nested_insertion_block_group(&context);
-        let mut eager =
-            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
-        BlockGroup::prune_graph(&mut eager);
-
         let start = GraphNode {
             node_id: PATH_START_NODE_ID,
             sequence_start: 0,
             sequence_end: 0,
         };
-        let mut crawler = PortCrawler::new(block_group.id, true);
-        let mut lazy = GenGraph::new();
-        lazy.add_node(start);
-        loop {
-            let incomplete: Vec<(GraphNode, Direction)> = lazy
-                .nodes()
-                .flat_map(|node| [(node, Direction::Outgoing), (node, Direction::Incoming)])
-                .filter(|(node, direction)| !crawler.is_complete(node, *direction))
-                .collect();
-            if incomplete.is_empty() {
-                break;
+        for prune in [false, true] {
+            let mut eager =
+                BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+            if prune {
+                BlockGroup::prune_graph(&mut eager);
             }
-            for (node, direction) in incomplete {
-                crawler
-                    .expand(conn, &mut lazy, &[node], direction, usize::MAX)
-                    .unwrap();
+            let mut crawler = PortCrawler::new(block_group.id, prune);
+            let mut lazy = GenGraph::new();
+            lazy.add_node(start);
+            loop {
+                let incomplete: Vec<(GraphNode, Direction)> = lazy
+                    .nodes()
+                    .flat_map(|node| [(node, Direction::Outgoing), (node, Direction::Incoming)])
+                    .filter(|(node, direction)| !crawler.is_complete(node, *direction))
+                    .collect();
+                if incomplete.is_empty() {
+                    break;
+                }
+                for (node, direction) in incomplete {
+                    crawler
+                        .expand(conn, &mut lazy, &[node], direction, usize::MAX)
+                        .unwrap();
+                }
             }
-        }
 
-        assert_lazy_matches_eager_up_to_junction_shortcuts(&lazy, &eager);
+            assert_lazy_matches_eager_up_to_junction_shortcuts(&lazy, &eager);
+        }
     }
 
     #[test]
