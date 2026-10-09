@@ -38,6 +38,9 @@ pub struct Command {
     /// Read SAMPLE header fields as sample metadata
     #[arg(long)]
     read_metadata: bool,
+    /// Require a path for new samples; fail if calls or parent paths are ambiguous.
+    #[arg(long)]
+    create_homozygous_paths: bool,
 }
 
 #[cfg_attr(feature = "profiling", tracing::instrument(skip(cli_context, cmd)))]
@@ -65,12 +68,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &cmd.path,
         collection_name,
-        cmd.genotype.clone().unwrap_or("".to_string()),
-        cmd.sample.as_deref(),
-        cmd.parent_samples.clone(),
         VcfUpdateOptions {
+            fixed_genotype: cmd.genotype.clone().unwrap_or_default(),
+            fixed_sample: cmd.sample.clone(),
+            parent_samples: cmd.parent_samples.clone(),
             in_place: cmd.in_place,
             read_metadata: cmd.read_metadata,
+            create_homozygous_paths: cmd.create_homozygous_paths,
         },
     ) {
         Ok((operation_summary, _output_samples)) => {

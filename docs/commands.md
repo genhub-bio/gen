@@ -114,6 +114,31 @@ with FAI and GZI indexes are the most efficient for both local files and remote
 URLs. Pass the index locations explicitly with `--fai <path-or-uri>` and
 `--gzi <path-or-uri>`.
 
+# VCF update
+
+`gen update vcf` applies the variants in a VCF file to sample graphs and records
+the update as an operation. It uses genotypes from the VCF, or a genotype
+provided with `--genotype`; use `--sample` when assigning calls from a VCF without
+sample columns. Use `--parent-samples` to choose the sample or samples that
+provide the reference coordinates for new samples.
+
+By default, variant positions are interpreted in the parent sample's reference
+coordinates. Use `--inplace` to interpret them against the sample's existing
+graph instead.
+
+For a newly created sample, `--create-homozygous-paths` also records a sample
+path when its calls are homozygous and unambiguous. The update returns an error
+if a path cannot be inferred, including ambiguous calls, conflicting variants,
+or unsupported parent paths. Without the flag, the graph
+is updated while the stored path remains inherited. Use the VCF header's sample
+name with `gen export fasta --sample`.
+
+# FASTA export
+
+`gen export fasta <path> --sample <sample>` exports the sample's current path
+sequence for each block group. Exports with a revision selection use the current
+path at that revision.
+
 # View diff
 
 Compare one sequence graph between two samples with:
