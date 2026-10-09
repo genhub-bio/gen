@@ -69,38 +69,8 @@ pub fn clone_repository(
     Ok(repository)
 }
 
-fn tx_begin(context: &DbContext) -> PyResult<()> {
-    let conn = context.graph().conn();
-    conn.execute("BEGIN TRANSACTION", [])
-        .map_err(sqlite_err_to_pyerr)?;
-    Ok(())
-}
-
-fn tx_commit(context: &DbContext) -> PyResult<()> {
-    context
-        .graph()
-        .conn()
-        .execute("END TRANSACTION", [])
-        .map_err(sqlite_err_to_pyerr)?;
-    Ok(())
-}
-
-fn tx_rollback(context: &DbContext) {
-    context.graph().conn().execute("ROLLBACK", []).ok();
-}
-
-pub(crate) fn run_operation_write<F, T, M>(
-    repository: &PyRepository,
-    op: F,
-    map_operation_error: M,
-) -> PyResult<T>
-where
-    F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
-    M: FnOnce(OperationError) -> PyErr,
-{
-    run_context_operation_write(&repository.context, op, map_operation_error)
-}
-
+/// Runs `op` in one graph transaction and records it as one operation.
+///
 pub(crate) fn run_context_operation_write<F, T, M>(
     context: &DbContext,
     op: F,
@@ -110,20 +80,14 @@ where
     F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
     M: FnOnce(OperationError) -> PyErr,
 {
-    tx_begin(context)?;
-
-    let (value, operation_summary) = match op(context) {
-        Ok(value) => value,
-        Err(err) => {
-            tx_rollback(context);
-            return Err(err);
-        }
-    };
-
-    if let Err(err) = tx_commit(context) {
-        tx_rollback(context);
-        return Err(err);
-    }
+    // dolt_commit seals the SQL transaction after recording the operation. Keep
+    // the guard alive until then so failures also roll back the graph mutations.
+    let _transaction = context
+        .graph()
+        .conn()
+        .unchecked_transaction()
+        .map_err(sqlite_err_to_pyerr)?;
+    let (value, operation_summary) = op(context)?;
     commit_operation_summary(context, &operation_summary).map_err(map_operation_error)?;
 
     Ok(value)
