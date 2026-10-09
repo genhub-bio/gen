@@ -1,6 +1,7 @@
 """The public names, types and hash handling that make the API predictable for agents."""
 
 import gzip
+import os
 
 import gen
 
@@ -217,7 +218,10 @@ class AssetTests(RepositoryTestCase):
         self.assertTrue(asset.path.is_file())
         self.assertNotEqual(asset.path.name, "README.txt")
         self.assertEqual(gzip.decompress(asset.path.read_bytes()), b"notes for the design")
-        self.assertIn(self.repository.gen_dir.resolve(), asset.path.resolve().parents)
+        # samefile ignores how the platform spells the path (Windows short names, \\?\ prefixes).
+        self.assertTrue(
+            any(os.path.samefile(parent, self.repository.gen_dir) for parent in asset.path.parents)
+        )
 
     def test_save_as_copies_under_a_chosen_name(self):
         readme = self.root / "README.txt"
