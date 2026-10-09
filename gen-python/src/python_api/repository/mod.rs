@@ -19,10 +19,7 @@ use super::{
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     sample::PySample,
-    utils::{
-        block_group_err_to_pyerr, normalize_file_path, path_to_py_path, py_query,
-        sqlite_err_to_pyerr,
-    },
+    utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
 
 pub mod exports;
@@ -244,7 +241,7 @@ impl PyRepository {
     #[pyo3(signature = (path = Option::<String>::None))]
     fn new(path: Option<String>) -> PyResult<Self> {
         let workspace = match path {
-            Some(path_str) => Workspace::new(normalize_file_path(path_str)),
+            Some(path_str) => Workspace::new(path_str),
             None => Workspace::from_current_dir(),
         };
 
@@ -428,17 +425,11 @@ mod python_tests {
                 &format!(
                     r#"
                     repo = repository("{path}")
-                    try:
-                        assert hasattr(repo, "gen_dir")
-                        assert hasattr(repo, "db_path")
-                    finally:
-                        del repo
+                    assert hasattr(repo, "gen_dir")
+                    assert hasattr(repo, "db_path")
                     "#
                 )
             );
-            tmp_dir
-                .close()
-                .expect("should remove closed repository directory");
         });
     }
 

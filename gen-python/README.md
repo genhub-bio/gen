@@ -27,10 +27,6 @@ graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 sample.plot()  # or sg.plot()
 ```
 
-On Windows, repository paths and import, update, and export filenames normalize
-backslash separators to forward slashes before processing. URLs and extended
-Windows paths retain their original syntax.
-
 For a remote indexed BGZF FASTA, pass its FASTA and BGZF index files explicitly:
 
 ```python

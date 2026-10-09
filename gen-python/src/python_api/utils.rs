@@ -8,22 +8,6 @@ use pyo3::{
 };
 use rusqlite::{Connection, types::ValueRef};
 
-/// Normalizes Windows file separators before paths reach import and export code.
-///
-/// Verbatim and device paths retain their native syntax because Windows does not
-/// interpret forward slashes as separators for those paths.
-pub(crate) fn normalize_file_path(path: String) -> String {
-    if cfg!(windows)
-        && !path.contains("://")
-        && !path.starts_with(r"\\?\")
-        && !path.starts_with(r"\\.\")
-    {
-        path.replace('\\', "/")
-    } else {
-        path
-    }
-}
-
 /// Helper function to convert SQLite errors to Python exceptions
 pub fn sqlite_err_to_pyerr(err: rusqlite::Error) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(format!("SQLite error: {err}"))
@@ -68,38 +52,4 @@ pub fn py_query(py: Python<'_>, conn: &Connection, query: &str) -> PyResult<Vec<
     }
 
     Ok(rows)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_file_path;
-
-    #[test]
-    fn test_normalize_file_path_separators() {
-        for (path, windows_path) in [
-            (
-                r"C:\Users\runner\fixtures\input.gfa",
-                "C:/Users/runner/fixtures/input.gfa",
-            ),
-            (r"..\fixtures/input.fa", "../fixtures/input.fa"),
-            (r"\\server\share\input.gbk", "//server/share/input.gbk"),
-        ] {
-            let expected = if cfg!(windows) { windows_path } else { path };
-            assert_eq!(normalize_file_path(path.to_string()), expected);
-        }
-    }
-
-    #[test]
-    fn test_normalize_file_path_preserves_special_paths() {
-        for path in [
-            r"\\?\C:\fixtures\input.fa",
-            r"\\?\UNC\server\share\input.fa",
-            r"\\.\device",
-            "/tmp/fixtures/input.fa",
-            "fixtures/input.fa",
-            "https://example.org/reference.fa.gz",
-        ] {
-            assert_eq!(normalize_file_path(path.to_string()), path);
-        }
-    }
 }
