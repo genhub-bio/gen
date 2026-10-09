@@ -1031,8 +1031,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_sequence(
@@ -1092,8 +1092,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_sequence(
@@ -1149,8 +1149,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1203,8 +1203,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(
