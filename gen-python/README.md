@@ -206,10 +206,6 @@ both the edit and its operation record. Every editing method accepts an
 optional `message` used as the operation's commit message; when omitted, a
 description of the edit is generated instead. `stack=True` adds the edit as an
 alternative next to what is already there and leaves the active path unchanged.
-`keep_reference_path=True` writes an edit's routes but also leaves the active path
-unchanged; use it when an edit that adjoins an earlier edit fails with
-`Invalid path ... is not after ...`. `all_sequences()` shows the edit, while
-`export_fasta()` keeps the sequence from before it.
 
 At a join or fork, `delete` and `replace` reconnect every route at the target's
 boundary. This also applies immediately downstream of a heterozygous call;

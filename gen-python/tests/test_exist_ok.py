@@ -27,8 +27,8 @@ class ExistOkTests(RepositoryTestCase):
 
     @unittest.skip(
         "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; "
-        "that relaxation is a separate PR. Re-enable when it lands. keep_reference_path=True "
-        "does not help: the test reads the edit back through region(), which follows the path."
+        "that relaxation is a separate PR. Re-enable when it lands. The test reads the edit back "
+        "through region(), which follows the path."
     )
     def test_copy_exist_ok_returns_the_existing_sample_unchanged(self):
         graph = self.repository.import_sequence("AAAACCCC", name="v", sample="p")

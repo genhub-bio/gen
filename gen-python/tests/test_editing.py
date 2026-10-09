@@ -43,12 +43,10 @@ class EditingTestCase(unittest.TestCase):
 
     def is_editable(self, sequence_graph, locus):
         """Whether an edit can still target ``locus``, probed on a copy of the sample."""
-        copy = sequence_graph.sample.copy(
-            f"probe{len(self.repository.samples)}"
-        )
+        copy = sequence_graph.sample.copy(f"probe{len(self.repository.samples)}")
         try:
             next(graph for graph in copy if graph.name == sequence_graph.name).delete(
-                locus, keep_reference_path=True
+                locus
             )
         except ValueError:
             return False
@@ -70,9 +68,7 @@ class SimpleGraphEditingTests(EditingTestCase):
         self.assertEqual(locus.start() + 3, locus.slice(3, 4).start())
         self.assertEqual(locus.end() - 3, locus.slice(4, 5).start())
         self.assertEqual(locus[5] + 1, locus[6])
-        self.assertEqual(
-            self.graph.region("m123:20-28").start().graph.name, "m123"
-        )
+        self.assertEqual(self.graph.region("m123:20-28").start().graph.name, "m123")
 
     def test_positions_from_an_edit_and_an_annotation_step_without_attaching_a_graph(
         self,
@@ -565,7 +561,7 @@ class LibraryGraphEditingTests(EditingTestCase):
         self.assertFalse(self.is_editable(self.graph, self.alternative))
 
     def test_stacked_replace_leaves_every_alternative_live(self):
-        self.graph.replace(self.alternative, "GGGGGG", stack=True, keep_reference_path=True)
+        self.graph.replace(self.alternative, "GGGGGG", stack=True)
 
         self.assertTrue(self.contains(self.graph, self.LEFT + "GGGGGG" + self.RIGHT))
         self.assertTrue(self.contains(self.graph, self.LEFT + self.FIRST + self.RIGHT))
@@ -597,7 +593,7 @@ class GfaMotifEditingTests(EditingTestCase):
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxxIJKL", "ABEFxxIJKL"])
 
     def test_substituting_the_first_base_of_a_node_changes_every_route_into_it(self):
-        self.graph.replace(self.nodes["E"].slice(0, 1), "x", keep_reference_path=True)
+        self.graph.replace(self.nodes["E"].slice(0, 1), "x")
 
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxJKL", "ABEFxJKL"])
 
@@ -647,36 +643,32 @@ class GfaMotifDuplicatedNodeTests(EditingTestCase):
         )
 
 
-class KeepReferencePathTests(EditingTestCase):
-    """``keep_reference_path=True`` edits the routes but leaves the current path as it was."""
-
+class PathUpdateTests(EditingTestCase):
     def setUp(self):
         super().setUp()
-        self.graph = self.repository.import_sequence("AAAACCCCGGGG", name="v", sample="p")
+        self.graph = self.repository.import_sequence(
+            "AAAACCCCGGGG", name="v", sample="p"
+        )
         self.graph.delete("v:4-8")
 
     def sequences(self):
         return sorted({str(sequence) for sequence in self.graph.all_sequences()})
 
-    def test_an_edit_next_to_an_earlier_deletion_is_refused_by_default(self):
-        with self.assertRaisesRegex(RuntimeError, "is not after"):
-            self.graph.delete("v:4-6")
-        self.assertEqual(self.sequences(), ["AAAAGGGG"])
-
-    def test_keep_reference_path_edits_the_routes_and_not_the_path(self):
-        self.graph.delete("v:4-6", keep_reference_path=True)
+    def test_edit_next_to_an_earlier_deletion_updates_the_path(self):
+        self.graph.delete("v:4-6")
 
         self.assertEqual(self.sequences(), ["AAAAGG"])
-        self.assertEqual(self.export_sequence(self.graph), "AAAAGGGG")
+        self.assertEqual(self.export_sequence(self.graph), "AAAAGG")
 
-    def test_keep_reference_path_on_an_edit_that_worked_leaves_the_path_alone(self):
+    def test_successful_edit_updates_the_path(self):
         graph = self.repository.import_sequence("AAAACCCCGGGG", name="w", sample="q")
-        graph.replace("w:4-8", "TT", keep_reference_path=True)
+        graph.replace("w:4-8", "TT")
 
         self.assertEqual(
-            sorted({str(sequence) for sequence in graph.all_sequences()}), ["AAAATTGGGG"]
+            sorted({str(sequence) for sequence in graph.all_sequences()}),
+            ["AAAATTGGGG"],
         )
-        self.assertEqual(self.export_sequence(graph), "AAAACCCCGGGG")
+        self.assertEqual(self.export_sequence(graph), "AAAATTGGGG")
 
 
 if __name__ == "__main__":

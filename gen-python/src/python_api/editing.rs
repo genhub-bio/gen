@@ -179,10 +179,7 @@ pub(crate) fn insert_at_positions(
     message: Option<&str>,
     mode: EditMode,
 ) -> PyResult<GraphLocus> {
-    let EditMode {
-        stack,
-        keep_reference_path,
-    } = mode;
+    let EditMode { stack } = mode;
     if sequence.is_empty() {
         return Err(PyValueError::new_err("insert needs a non-empty sequence"));
     }
@@ -202,7 +199,7 @@ pub(crate) fn insert_at_positions(
             let plan = insertion_plan(&graph, &stored, &connections.pairs, stack);
 
             // Capture the path before writing the edited routes.
-            let path_before = if stack || keep_reference_path {
+            let path_before = if stack {
                 None
             } else {
                 current_path(conn, &block_group.id)?
@@ -790,16 +787,12 @@ pub(crate) struct EditRequest<'a> {
     pub mode: EditMode,
 }
 
-/// The two switches every editing method takes, which shape an edit independently: `stack` decides
-/// how the edit is routed, `keep_reference_path` only whether the current path follows it.
+/// The switch every editing method takes to choose how an edit is routed.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EditMode {
     /// Add the edit as an alternative next to the target instead of superseding it. The
     /// current path is left unchanged.
     pub stack: bool,
-    /// Write the edit's routes but leave the current path as it was, for edits whose path update
-    /// would be refused because the spliced path has two edges meeting at one coordinate.
-    pub keep_reference_path: bool,
 }
 
 /// The resolved attachment points of an edit in the destination graph.
@@ -878,7 +871,7 @@ fn apply_edit(
             let span = locate_span(&graph, &canonical)?;
 
             // Capture the path before writing the edited routes.
-            let path_before = if request.mode.stack || request.mode.keep_reference_path {
+            let path_before = if request.mode.stack {
                 None
             } else {
                 current_path(conn, &source.id)?
@@ -1551,14 +1544,7 @@ mod tests {
             sequence: &str,
             stack: bool,
         ) -> PyResult<GraphLocus> {
-            self.insert_with(
-                site,
-                sequence,
-                EditMode {
-                    stack,
-                    keep_reference_path: false,
-                },
-            )
+            self.insert_with(site, sequence, EditMode { stack })
         }
 
         fn insert_with(
@@ -1619,10 +1605,7 @@ mod tests {
                         kind: EditKind::Replace,
                         sequence,
                         message: None,
-                        mode: EditMode {
-                            stack: true,
-                            keep_reference_path: false,
-                        },
+                        mode: EditMode { stack: true },
                     },
                 )
                 .map(|inserted| inserted.expect("should return the replacement"))
@@ -1997,11 +1980,11 @@ graph.insert('C', after=inserted.end())
                 r#"
 annotation = next(item for item in graph.annotations if item.name == 'reverse')
 assert annotation.locus.strand == '-'
-inserted = graph.replace(annotation, 'AGT', keep_reference_path=True)
+inserted = graph.replace(annotation, 'AGT')
 assert inserted.strand == '-'
 assert inserted.start().offset == 2
 assert inserted.end().offset == 0
-graph.delete(inserted.slice(0, 1), keep_reference_path=True)
+graph.delete(inserted.slice(0, 1))
 "#,
                 "AAACCCGGGTTTAAAACGGGTTT",
             );
@@ -2066,12 +2049,12 @@ assert child[0].search('AAAGGGTTT', sequence_kind='exact')
             run_edit_test(
                 r#"
 [whole] = graph.search('AAACCCGGGTTTAAACCCGGGTTT', sequence_kind='exact')
-graph.delete(whole.slice(3, 6), keep_reference_path=True)
-graph.delete(whole.slice(6, 9), keep_reference_path=True)
-graph.delete(whole.slice(0, 3), keep_reference_path=True)
-graph.delete(whole.slice(21, 24), keep_reference_path=True)
-graph.insert('AG', before=whole.slice(9, 10).start(), keep_reference_path=True)
-graph.insert('TC', after=whole.slice(20, 21).start(), keep_reference_path=True)
+graph.delete(whole.slice(3, 6))
+graph.delete(whole.slice(6, 9))
+graph.delete(whole.slice(0, 3))
+graph.delete(whole.slice(21, 24))
+graph.insert('AG', before=whole.slice(9, 10).start())
+graph.insert('TC', after=whole.slice(20, 21).start())
 "#,
                 "AGTTTAAACCCGGGTC",
             );
@@ -2098,7 +2081,7 @@ assert len(repo.get_operations()) == count
         }
 
         #[test]
-        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands. keep_reference_path=True does not help: later targets are regions, which resolve against the current path."]
+        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands. later targets are regions, which resolve against the current path."]
         fn test_edit_bases_next_to_an_earlier_deletion() {
             run_edit_test(
                 r#"
@@ -2275,10 +2258,7 @@ assert len(repo.get_operations()) == count
                             kind,
                             sequence: replacement,
                             message: None,
-                            mode: EditMode {
-                                stack,
-                                keep_reference_path: false,
-                            },
+                            mode: EditMode { stack },
                         },
                     )
                     .unwrap_or_else(|error| panic!("{}", error_message(error)));
@@ -2871,10 +2851,7 @@ assert len(repo.get_operations()) == count
                     slice(&fixture, "MNOP", 0, 2),
                     EditKind::Delete,
                     "",
-                    EditMode {
-                        stack: false,
-                        keep_reference_path: true,
-                    },
+                    EditMode { stack: false },
                 )
                 .unwrap_or_else(|error| panic!("{}", error_message(error)));
             let graph = super::super::current_graph(&fixture.context, &fixture.graph.id)
@@ -3974,81 +3951,6 @@ assert len(inserted) == 2
                 fixture.sequences(),
                 strings(&["ABCDWZEFGHXYMNOP", "ABCDWZIJKLXYMNOP"])
             );
-        }
-    }
-
-    /// `keep_reference_path` writes an edit's routes without splicing the current path.
-    mod keep_reference_path {
-        use gen_core::Strand;
-        use gen_graph::{GraphNode, GraphNodeSlice};
-        use gen_models::locus::GraphLocus;
-
-        use super::{END, Fixture, START, error_message, fixture, strings};
-        use crate::python_api::editing::{EditKind, EditMode};
-
-        const NODE: &str = "AAAACCCCGGGG";
-
-        const KEEP: EditMode = EditMode {
-            stack: false,
-            keep_reference_path: true,
-        };
-
-        fn slice(fixture: &Fixture, start: usize, end: usize) -> GraphLocus {
-            GraphLocus {
-                slices: vec![GraphNodeSlice {
-                    block: GraphNode {
-                        node_id: fixture.nodes[NODE],
-                        sequence_start: 0,
-                        sequence_end: NODE.len() as i64,
-                    },
-                    start,
-                    end,
-                    strand: Strand::Forward,
-                }],
-            }
-        }
-
-        /// A graph whose first deletion leaves a zero-width block that the next deletion adjoins.
-        fn graph_with_a_deletion() -> Fixture {
-            let fixture = fixture(&[(START, NODE, 0), (NODE, END, 0)], &[NODE]);
-            fixture
-                .edit(slice(&fixture, 4, 8), EditKind::Delete, "")
-                .unwrap_or_else(|error| panic!("{}", error_message(error)));
-            fixture
-        }
-
-        #[test]
-        fn test_an_adjoining_edit_is_refused_by_default() {
-            let fixture = graph_with_a_deletion();
-            let error = fixture
-                .edit(slice(&fixture, 8, 10), EditKind::Delete, "")
-                .expect_err("should refuse the path update");
-            assert!(
-                error_message(error).contains("is not after"),
-                "should report the path validation error"
-            );
-            assert_eq!(fixture.sequences(), strings(&["AAAAGGGG"]));
-        }
-
-        #[test]
-        fn test_an_adjoining_edit_succeeds_and_leaves_the_path_unchanged() {
-            let fixture = graph_with_a_deletion();
-            assert_eq!(fixture.path_sequence(), "AAAAGGGG");
-            fixture
-                .edit_with(slice(&fixture, 8, 10), EditKind::Delete, "", KEEP)
-                .unwrap_or_else(|error| panic!("{}", error_message(error)));
-            assert_eq!(fixture.sequences(), strings(&["AAAAGG"]));
-            assert_eq!(fixture.path_sequence(), "AAAAGGGG");
-        }
-
-        #[test]
-        fn test_keeping_the_path_on_an_edit_that_worked_leaves_the_path_unchanged() {
-            let fixture = fixture(&[(START, NODE, 0), (NODE, END, 0)], &[NODE]);
-            fixture
-                .edit_with(slice(&fixture, 4, 8), EditKind::Replace, "TT", KEEP)
-                .unwrap_or_else(|error| panic!("{}", error_message(error)));
-            assert_eq!(fixture.sequences(), strings(&["AAAATTGGGG"]));
-            assert_eq!(fixture.path_sequence(), NODE);
         }
     }
 }

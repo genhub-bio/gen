@@ -26,9 +26,9 @@ methods; only the number of calls differs. Never leave Gen to edit a string.
 
 ```python
 sample.copy(new_name, message=None)
-graph.replace(target, sequence, message=None, stack=False, keep_reference_path=False)
-graph.delete(target, message=None, stack=False, keep_reference_path=False)
-graph.insert(sequence, before=None, after=None, message=None, stack=False, keep_reference_path=False)
+graph.replace(target, sequence, message=None, stack=False)
+graph.delete(target, message=None, stack=False)
+graph.insert(sequence, before=None, after=None, message=None, stack=False)
 ```
 
 `copy()` returns a new `Sample` in the same collection, retaining the parent's
@@ -89,11 +89,6 @@ current paths. Use all-path reads/exports to inspect stacked alternatives; defau
 alone will still show the original path. Use `stack=True` when the user wants to compare
 variants or pool options in one graph, and the default when they want the edit to become the
 sequence.
-
-`keep_reference_path=True` writes the edit's routes but leaves the current path as it was. Use it
-only when an edit next to an earlier edit raises `Invalid path ... is not after ...`. The edit
-shows in `all_sequences()` and the all-sequences export, while default FASTA and region reads
-keep the pre-edit sequence.
 
 ## Loci and positions
 
