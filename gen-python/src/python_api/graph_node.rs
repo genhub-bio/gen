@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 /// An opaque handle to a graph node, usable as a dict key in Python.
 /// Used to ensure consistent hashing when used as dictionary keys in Python.
-#[pyclass(name = "Node")] // pyclass includes  #[derive(IntoPyObject)]
+#[pyclass(name = "Node", from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyGraphNode {
     pub node_id: HashId,
@@ -76,7 +76,7 @@ impl PyGraphNode {
 }
 
 /// A slice of a single graph block with local byte offsets and strand.
-#[pyclass(name = "NodeSlice")]
+#[pyclass(name = "NodeSlice", from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyGraphNodeSlice {
     pub inner: GraphNodeSlice,

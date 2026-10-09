@@ -10,7 +10,7 @@ use super::graph_node::{PyGraphNode, PyGraphNodeSlice};
 ///
 /// Returned by `Locus.start()` and `Locus.end()`.
 /// Pass directly to `GraphWidget.go_to()`.
-#[pyclass(name = "Position")]
+#[pyclass(name = "Position", from_py_object)]
 #[derive(Clone)]
 pub struct PyGraphPos {
     pub inner: GraphPos,

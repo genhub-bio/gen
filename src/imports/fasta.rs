@@ -1203,20 +1203,36 @@ mod tests {
 
     #[test]
     fn test_add_remote_shallow_fasta_with_multiple_remote_indexes() {
-        let fasta_contents = fs::read(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz"),
-        )
-        .expect("should read BGZF FASTA fixture");
+        // Put the indexed sequence in a later BGZF block so lookup requires a nonzero seek.
+        // Readers can stream a block at byte zero without sending a Range header.
+        let padding = b">padding\nA\n";
+        let mut writer = bgzf::io::Writer::new(Vec::new());
+        writer
+            .write_all(padding)
+            .expect("should write padding block");
+        writer.flush().expect("should flush padding block");
+        let mut fasta_contents = writer.into_inner();
+        let compressed_offset = fasta_contents.len() as u64;
+        fasta_contents.extend(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz"),
+            )
+            .expect("should read BGZF FASTA fixture"),
+        );
+        let mut gzip_index = Vec::new();
+        gzi::io::Writer::new(&mut gzip_index)
+            .write_index(&gzi::Index::from(vec![(
+                compressed_offset,
+                padding.len() as u64,
+            )]))
+            .expect("should write gzip index for the second block");
         let server = TestHttpServer::new(HashMap::from([
             ("/reference.fa.gz".to_string(), fasta_contents),
             (
                 "/indexes/fasta-index".to_string(),
-                b"m123\t34\t6\t34\t35\n".to_vec(),
+                format!("m123\t34\t{}\t34\t35\n", padding.len() + 6).into_bytes(),
             ),
-            (
-                "/indexes/bgzf-index".to_string(),
-                0_u64.to_le_bytes().to_vec(),
-            ),
+            ("/indexes/bgzf-index".to_string(), gzip_index),
         ]));
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
@@ -1313,7 +1329,7 @@ mod tests {
                 request.starts_with("GET /reference.fa.gz ")
                     && request.to_ascii_lowercase().contains("\r\nrange: bytes=")
             }),
-            "indexed remote lookup should use a byte-range request"
+            "indexed remote lookup should use a byte-range request; requests: {requests:?}"
         );
     }
 

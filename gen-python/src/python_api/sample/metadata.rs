@@ -129,8 +129,8 @@ mod tests {
 
     #[test]
     fn test_sample_metadata_python_round_trip() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let context = setup_gen_on_disk();
             for name in ["sample", "other"] {
                 Sample::create(

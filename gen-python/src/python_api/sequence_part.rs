@@ -1,6 +1,6 @@
 use pyo3::{prelude::*, pyclass};
 
-#[pyclass(name = "SequencePart")]
+#[pyclass(name = "SequencePart", from_py_object)]
 #[derive(Clone)]
 pub struct PySequencePart {
     pub name: String,

@@ -103,7 +103,7 @@ where
 ///         sg = r.get_sequence_graph_by_id(sg_id)
 ///         ...
 // unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
-#[pyclass(name = "SequenceGraph", unsendable)]
+#[pyclass(name = "SequenceGraph", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PySequenceGraph {
     pub id: HashId,
@@ -200,9 +200,9 @@ impl PySequenceGraph {
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
-        colors: Option<PyObject>,
+        colors: Option<Py<PyAny>>,
         show_history: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow(), show_history)?;
         if let Some(node_detail) = detail {
@@ -365,7 +365,7 @@ impl PySequenceGraph {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
-    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_dict()")?;
         let conn = context.graph().conn();
         let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
@@ -402,7 +402,7 @@ impl PySequenceGraph {
         Ok(dict.into_pyobject(py)?.into_any().unbind())
     }
 
-    fn to_rustworkx(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_rustworkx(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_rustworkx()")?;
         let conn = context.graph().conn();
         let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
@@ -445,7 +445,7 @@ impl PySequenceGraph {
         }
     }
 
-    fn to_networkx(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_networkx(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_networkx()")?;
         let conn = context.graph().conn();
         let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)

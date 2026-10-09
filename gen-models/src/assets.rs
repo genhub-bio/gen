@@ -1007,10 +1007,17 @@ impl OpenDalLocation {
     }
 
     fn reader(self) -> Result<blocking::StdReader, FileAdditionError> {
+        // Validate access before returning a lazy reader so remote credential fallback can run.
+        // The known length also bounds range requests and seeks to the object.
+        let content_length = self
+            .operator
+            .stat(&self.path)
+            .map_err(opendal_file_addition_error)?
+            .content_length();
         self.operator
             .reader(&self.path)
             .map_err(opendal_file_addition_error)?
-            .into_std_read(..)
+            .into_std_read(0..content_length)
             .map_err(opendal_file_addition_error)
     }
 }
