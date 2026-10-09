@@ -217,7 +217,7 @@ class AssetTests(RepositoryTestCase):
         self.assertTrue(asset.path.is_file())
         self.assertNotEqual(asset.path.name, "README.txt")
         self.assertEqual(gzip.decompress(asset.path.read_bytes()), b"notes for the design")
-        self.assertIn(self.repository.gen_dir, asset.path.parents)
+        self.assertIn(self.repository.gen_dir.resolve(), asset.path.resolve().parents)
 
     def test_save_as_copies_under_a_chosen_name(self):
         readme = self.root / "README.txt"
