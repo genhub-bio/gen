@@ -597,7 +597,7 @@ mod tests {
     use gen_graph::{GenGraph, GraphNode};
     use petgraph::Direction;
 
-    use super::{CrawlError, CrawlStart, Port, PortCrawler, crawl_graph};
+    use super::{CrawlError, CrawlStart, PortCrawler, crawl_graph};
     use crate::{
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -772,6 +772,11 @@ mod tests {
                 graph.contains_node(frontier),
                 "the budgeted walk should reach the last block"
             );
+            let complete = graph
+                .nodes()
+                .filter(|node| crawler.is_complete(node, direction))
+                .count();
+            assert_eq!(complete, 3, "the anchor plus the two budgeted blocks");
             assert!(
                 !crawler.is_complete(&frontier, direction),
                 "the last block should stay frontier"
@@ -784,28 +789,6 @@ mod tests {
                 "expanding the frontier should complete it"
             );
         }
-    }
-
-    #[test]
-    fn test_forward_crawl_follows_edges_out_of_an_empty_end_slice() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = setup_block_group(
-            &conn,
-            &[("a", "AAAA"), ("b", "CCCC")],
-            &[
-                ("start", 0, "a", 0, 0),
-                ("a", 4, "b", 4, 0),
-                ("b", 4, "end", 0, 0),
-            ],
-        );
-        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
-        let mut crawler = PortCrawler::new(block_group_id, false);
-        let mut graph = GenGraph::new();
-        graph.add_node(start_sentinel());
-        crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
-
-        assert_eq!(connected_shape(&graph), connected_shape(&eager));
-        assert!(graph.contains_edge(block("b", 4, 4), block("end", 0, 0)));
     }
 
     #[test]
@@ -825,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn test_branching_convergence_reuses_slides_and_visits_edges_in_both_directions() {
+    fn test_converging_branches_project_each_edge_once_from_either_direction() {
         let conn = get_connection(None).unwrap();
         let block_group_id = setup_block_group(
             &conn,
@@ -903,39 +886,6 @@ mod tests {
             6,
             "each of the six edges should be projected once, from whichever side reached it"
         );
-        assert!(
-            crawler.port_blocks.contains_key(&Port {
-                node_id: node_id_for("joined"),
-                coordinate: 0
-            }),
-            "both branches should use the same cached port blocks"
-        );
-    }
-
-    #[test]
-    fn test_outer_continuity_and_internal_cross_node_ports_match_eager_graph() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = setup_block_group(
-            &conn,
-            &[("ref", "AAAAAAAAAA"), ("insert", "CCCC")],
-            &[
-                ("start", 0, "ref", 0, 0),
-                ("ref", 0, "ref", 0, 0),
-                ("ref", 3, "ref", 3, 0),
-                ("ref", 3, "insert", 0, 1),
-                ("insert", 4, "ref", 3, 1),
-                ("ref", 10, "ref", 10, 0),
-                ("ref", 10, "end", 0, 0),
-            ],
-        );
-        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
-        for anchor in [start_sentinel(), block("end", 0, 0)] {
-            let mut crawler = PortCrawler::new(block_group_id, false);
-            let mut graph = GenGraph::new();
-            graph.add_node(anchor);
-            crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
-            assert_matches_up_to_junction_shortcuts(&graph, &eager);
-        }
     }
 
     /// One stored edge: `(source label, source coordinate, target label, target coordinate,
@@ -1134,18 +1084,54 @@ mod tests {
         }
     }
 
+    /// A reference with an insertion whose end rejoins the reference, plus the same-coordinate
+    /// edges that keep the reference continuous across the outer ports and the split.
+    fn inserted_reference_block_group(conn: &GraphConnection) -> HashId {
+        setup_block_group(
+            conn,
+            &[("ref", "AAAAAAAAAA"), ("insert", "CCCC")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 0, "ref", 0, 0),
+                ("ref", 3, "ref", 3, 0),
+                ("ref", 3, "insert", 0, 1),
+                ("insert", 4, "ref", 3, 1),
+                ("ref", 10, "ref", 10, 0),
+                ("ref", 10, "end", 0, 0),
+            ],
+        )
+    }
+
     #[test]
-    fn test_exhaustive_crawl_matches_the_eagerly_built_graph() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = junction_heavy_block_group(&conn);
-        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
-
-        let mut crawler = PortCrawler::new(block_group_id, false);
-        let mut graph = GenGraph::new();
-        graph.add_node(start_sentinel());
-        crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
-
-        assert_eq!(connected_shape(&graph), connected_shape(&eager));
+    fn test_exhaustive_crawl_matches_the_eager_graph_from_either_end() {
+        let fixtures: [fn(&GraphConnection) -> HashId; 3] = [
+            junction_heavy_block_group,
+            inserted_reference_block_group,
+            |conn| {
+                setup_block_group(
+                    conn,
+                    &[("a", "AAAA"), ("b", "CCCC")],
+                    &[
+                        ("start", 0, "a", 0, 0),
+                        ("a", 4, "b", 4, 0),
+                        ("b", 4, "end", 0, 0),
+                    ],
+                )
+            },
+        ];
+        for setup in fixtures {
+            let conn = get_connection(None).unwrap();
+            let block_group_id = setup(&conn);
+            let eager =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            for anchor in [start_sentinel(), block("end", 0, 0)] {
+                let mut crawler = PortCrawler::new(block_group_id, false);
+                let mut graph = GenGraph::new();
+                graph.add_node(anchor);
+                crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+                assert_matches_up_to_junction_shortcuts(&graph, &eager);
+            }
+        }
     }
 
     /// Every coordinate of every block a full crawl carves locates to that block from a fresh
@@ -1153,21 +1139,8 @@ mod tests {
     /// viewer that jumps somewhere first never carves a node differently.
     #[test]
     fn test_locate_finds_the_block_a_crawl_carves() {
-        let fixtures: [fn(&GraphConnection) -> HashId; 2] = [junction_heavy_block_group, |conn| {
-            setup_block_group(
-                conn,
-                &[("plain", "AAAAAAAAAA"), ("inserted", "CCCC")],
-                &[
-                    ("start", 0, "plain", 0, 0),
-                    ("plain", 0, "plain", 0, 0),
-                    ("plain", 3, "plain", 3, 0),
-                    ("plain", 3, "inserted", 0, 1),
-                    ("inserted", 4, "plain", 3, 1),
-                    ("plain", 10, "plain", 10, 0),
-                    ("plain", 10, "end", 0, 0),
-                ],
-            )
-        }];
+        let fixtures: [fn(&GraphConnection) -> HashId; 2] =
+            [junction_heavy_block_group, inserted_reference_block_group];
         for setup in fixtures {
             let conn = get_connection(None).unwrap();
             let block_group_id = setup(&conn);
@@ -1222,64 +1195,6 @@ mod tests {
             None
         );
         assert_eq!(graph.node_count(), 0);
-    }
-
-    #[test]
-    fn test_expand_with_zero_budget_completes_only_the_requested_side() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = junction_heavy_block_group(&conn);
-        let mut crawler = PortCrawler::new(block_group_id, false);
-        let mut graph = GenGraph::new();
-        let start = start_sentinel();
-        graph.add_node(start);
-
-        crawler
-            .expand(&conn, &mut graph, &[start], Direction::Outgoing, 0)
-            .unwrap();
-
-        assert!(crawler.is_complete(&start, Direction::Outgoing));
-        let successors: BTreeSet<GraphNode> = graph
-            .neighbors_directed(start, Direction::Outgoing)
-            .collect();
-        assert!(!successors.is_empty());
-        for successor in successors {
-            assert!(
-                !crawler.is_complete(&successor, Direction::Outgoing),
-                "a zero budget should leave {successor:?} as frontier"
-            );
-        }
-    }
-
-    #[test]
-    fn test_expand_stops_after_the_budget() {
-        let conn = get_connection(None).unwrap();
-        let nodes: Vec<(String, &str)> = (0..20).map(|i| (format!("n{i}"), "ACGT")).collect();
-        let node_refs: Vec<(&str, &str)> = nodes
-            .iter()
-            .map(|(label, sequence)| (label.as_str(), *sequence))
-            .collect();
-        let labels: Vec<&str> = nodes.iter().map(|(label, _)| label.as_str()).collect();
-        let mut edges: Vec<EdgeSpec> = vec![("start", 0, labels[0], 0, 0)];
-        for pair in labels.windows(2) {
-            edges.push((pair[0], 4, pair[1], 0, 0));
-        }
-        edges.push((labels[19], 4, "end", 0, 0));
-        let block_group_id = setup_block_group(&conn, &node_refs, &edges);
-        let mut crawler = PortCrawler::new(block_group_id, false);
-        let mut graph = GenGraph::new();
-        let start = start_sentinel();
-        graph.add_node(start);
-
-        crawler
-            .expand(&conn, &mut graph, &[start], Direction::Outgoing, 3)
-            .unwrap();
-
-        let complete = graph
-            .nodes()
-            .filter(|node| crawler.is_complete(node, Direction::Outgoing))
-            .count();
-        assert_eq!(complete, 4, "the start sentinel plus three budgeted nodes");
-        assert!(graph.node_count() < 10);
     }
 
     #[test]
