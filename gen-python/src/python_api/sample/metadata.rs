@@ -151,32 +151,17 @@ mod tests {
             .expect("should create Python repository");
             let sample = Py::new(
                 python,
-                PySample::new(
-                    "default".to_string(),
-                    "sample".to_string(),
-                    vec![],
-                    context.clone(),
-                ),
+                PySample::new("default".to_string(), "sample".to_string(), context.clone()),
             )
             .expect("should create Python sample");
             let other = Py::new(
                 python,
-                PySample::new(
-                    "default".to_string(),
-                    "other".to_string(),
-                    vec![],
-                    context.clone(),
-                ),
+                PySample::new("default".to_string(), "other".to_string(), context.clone()),
             )
             .expect("should create other Python sample");
             let missing = Py::new(
                 python,
-                PySample::new(
-                    "default".to_string(),
-                    "missing".to_string(),
-                    vec![],
-                    context,
-                ),
+                PySample::new("default".to_string(), "missing".to_string(), context),
             )
             .expect("should create missing Python sample");
             py_run!(python, repository sample other missing, r#"

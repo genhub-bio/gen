@@ -1,7 +1,5 @@
 """Re-running a notebook cell: `exist_ok=True` reuses what the first run created."""
 
-import unittest
-
 from test_api import RepositoryTestCase
 
 
@@ -24,22 +22,6 @@ class ExistOkTests(RepositoryTestCase):
         self.repository.import_sequence("AAAACCCC", name="v", sample="p")
         with self.assertRaisesRegex(RuntimeError, "exist_ok=True"):
             self.repository.import_sequence("AAAACCCC", name="v", sample="p")
-
-    @unittest.skip(
-        "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; "
-        "that relaxation is a separate PR. Re-enable when it lands. The test reads the edit back "
-        "through region(), which follows the path."
-    )
-    def test_copy_exist_ok_returns_the_existing_sample_unchanged(self):
-        graph = self.repository.import_sequence("AAAACCCC", name="v", sample="p")
-        source = next(s for s in self.repository.samples if s.name == "p")
-        design = source.copy("design")
-        design[0].replace("v:0-4", "GGGG")
-        again = source.copy("design", exist_ok=True)
-        self.assertEqual(again[0].region("v:0-4").sequence, "GGGG")
-        self.assertEqual(graph.region("v:0-4").sequence, "AAAA")
-        with self.assertRaisesRegex(ValueError, "exist_ok=True"):
-            source.copy("design")
 
     def test_checkout_create_exist_ok_switches_to_the_existing_branch(self):
         self.repository.checkout("work", create=True)

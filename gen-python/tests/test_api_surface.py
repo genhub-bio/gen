@@ -65,7 +65,9 @@ class HashHandlingTests(RepositoryTestCase):
         self.assertEqual(len(operation.id.to_bytes()), 20)
         self.assertEqual(self.repository.current_branch.head, operation.id)
         self.assertEqual(hash(self.repository.current_branch.head), hash(operation.id))
-        self.assertEqual({operation: "head"}[self.repository.get_operations()[0]], "head")
+        self.assertEqual(
+            {operation: "head"}[self.repository.get_operations()[0]], "head"
+        )
         self.assertEqual(str(operation), str(operation.id))
 
     def test_operation_hash_ids_are_accepted_as_references(self):
@@ -130,7 +132,9 @@ class SampleAndGraphNamingTests(RepositoryTestCase):
     def test_remotes_is_a_property(self):
         self.assertEqual(self.repository.remotes, [])
         self.repository.add_remote("origin", "https://example.com/r")
-        self.assertEqual([remote.name for remote in self.repository.remotes], ["origin"])
+        self.assertEqual(
+            [remote.name for remote in self.repository.remotes], ["origin"]
+        )
 
 
 class NodeAndPositionTests(RepositoryTestCase):
@@ -217,10 +221,15 @@ class AssetTests(RepositoryTestCase):
         asset = self.repository.add_file(str(readme))
         self.assertTrue(asset.path.is_file())
         self.assertNotEqual(asset.path.name, "README.txt")
-        self.assertEqual(gzip.decompress(asset.path.read_bytes()), b"notes for the design")
+        self.assertEqual(
+            gzip.decompress(asset.path.read_bytes()), b"notes for the design"
+        )
         # samefile ignores how the platform spells the path (Windows short names, \\?\ prefixes).
         self.assertTrue(
-            any(os.path.samefile(parent, self.repository.gen_dir) for parent in asset.path.parents)
+            any(
+                os.path.samefile(parent, self.repository.gen_dir)
+                for parent in asset.path.parents
+            )
         )
 
     def test_save_as_copies_under_a_chosen_name(self):
@@ -249,15 +258,21 @@ class AssetTests(RepositoryTestCase):
 
     def test_imported_files_are_assets_too(self):
         self.repository.import_fasta(str(FIXTURES / "simple.fa"))
-        [asset] = [asset for asset in self.repository.get_assets() if asset.name == "simple.fa"]
+        [asset] = [
+            asset for asset in self.repository.get_assets() if asset.name == "simple.fa"
+        ]
         self.assertIn(b">", gzip.decompress(asset.path.read_bytes()))
 
 
 class StitchTests(RepositoryTestCase):
     def setUp(self):
         super().setUp()
-        self.left = self.repository.import_sequence("AAAACCCCGGGGTTTT", name="left", sample="s")
-        self.right = self.repository.import_sequence("ACGTACGTAC", name="right", sample="s")
+        self.left = self.repository.import_sequence(
+            "AAAACCCCGGGGTTTT", name="left", sample="s"
+        )
+        self.right = self.repository.import_sequence(
+            "ACGTACGTAC", name="right", sample="s"
+        )
 
     def sequences(self, graph):
         return sorted(str(sequence) for sequence in graph.all_sequences())
@@ -291,15 +306,15 @@ class StitchTests(RepositoryTestCase):
             "joined",
             "variants",
         )
-        self.assertEqual(
-            self.sequences(stitched), ["CCCCGGGGAC", "CCTTGGGGAC"]
-        )
+        self.assertEqual(self.sequences(stitched), ["CCCCGGGGAC", "CCTTGGGGAC"])
 
     def test_stitching_a_multi_node_locus_keeps_a_current_path(self):
         edited = self.left.sample.copy("edited")[0]
         edited.replace("left:6-8", "TT")
         stitched = self.repository.stitch(
-            [edited.region("left:4-12"), self.right.region("right:0-2")], "joined", "edited"
+            [edited.region("left:4-12"), self.right.region("right:0-2")],
+            "joined",
+            "edited",
         )
         self.assertEqual(self.sequences(stitched), ["CCTTGGGGAC"])
         path = self.root / "stitched.fa"
@@ -342,15 +357,16 @@ class SubgraphAndCoordinateTests(RepositoryTestCase):
     def sequences(self, graph):
         return sorted(str(sequence) for sequence in graph.all_sequences())
 
-    def test_subgraph_from_a_locus_uses_its_start_and_end(self):
-        child = self.graph.subgraph("sub", self.graph.locus(4, 12))
+    def test_subgraph_from_locus_positions_uses_its_start_and_end(self):
+        locus = self.graph.locus(4, 12)
+        child = self.graph.subgraph("sub", locus.start(), locus.end())
         self.assertEqual(self.sequences(child), ["CCCCGGGG"])
         self.assertEqual(child.sample.name, "sub")
 
     def test_subgraph_from_a_locus_of_another_graph(self):
         locus = self.graph.locus(2, 10)
         self.copy.replace("seq:5-7", "TTT")
-        child = self.copy.subgraph("sub", locus)
+        child = self.copy.subgraph("sub", locus.start(), locus.end())
         self.assertEqual(self.sequences(child), ["AACTTTCGG"])
 
     def test_subgraph_from_positions_keeps_every_variant(self):
@@ -358,22 +374,21 @@ class SubgraphAndCoordinateTests(RepositoryTestCase):
         variant = self.copy
         variant.replace("seq:6-8", "TT", stack=True)
         child = variant.subgraph("sub", locus.start(), locus.end())
-        self.assertEqual(
-            self.sequences(child), ["AACCCCGGGGTT", "AACCTTGGGGTT"]
-        )
+        self.assertEqual(self.sequences(child), ["AACCCCGGGGTT", "AACCTTGGGGTT"])
 
     def test_subgraph_by_coordinates_still_works(self):
         self.assertEqual(self.sequences(self.graph.subgraph("sub", 4, 8)), ["CCCC"])
 
-    def test_subgraph_from_a_reverse_locus(self):
-        child = self.graph.subgraph("sub", self.graph.locus(4, 12).reverse_complement())
-        self.assertEqual(self.sequences(child), ["CCCCGGGG"])
+    def test_subgraph_rejects_reverse_strand_locus_positions(self):
+        locus = self.graph.locus(4, 12).reverse_complement()
+        with self.assertRaises(ValueError):
+            self.graph.subgraph("sub", locus.start(), locus.end())
 
     def test_subgraph_fails_when_a_position_is_gone(self):
         locus = self.graph.locus(2, 10)
         self.copy.delete("seq:8-12")
         with self.assertRaises(ValueError):
-            self.copy.subgraph("sub", locus)
+            self.copy.subgraph("sub", locus.start(), locus.end())
 
     def test_subgraph_fails_when_the_end_cannot_be_reached(self):
         locus = self.graph.locus(2, 10)
@@ -381,12 +396,12 @@ class SubgraphAndCoordinateTests(RepositoryTestCase):
             self.graph.subgraph("sub", locus.end(), locus.start())
         other = self.repository.import_sequence("TTTTTTTT", name="other", sample="o")
         with self.assertRaises(ValueError):
-            other.subgraph("sub", locus)
+            other.subgraph("sub", locus.start(), locus.end())
 
     def test_subgraph_rejects_other_argument_shapes(self):
         locus = self.graph.locus(2, 10)
         with self.assertRaises(TypeError):
-            self.graph.subgraph("sub", locus, 4)
+            self.graph.subgraph("sub", locus)
         with self.assertRaises(TypeError):
             self.graph.subgraph("sub", "seq:2-10")
 
@@ -407,13 +422,16 @@ class SubgraphAndCoordinateTests(RepositoryTestCase):
         """A subgraph from a position off the current path, so it has no path of its own."""
         variant = self.graph.sample.copy(new_sample + "_source")[0]
         inserted = variant.insert("GG", after=variant.locus(4, 6).start(), stack=True)
-        return variant.subgraph(new_sample, inserted.start(), variant.locus(8, 10).end())
+        return variant.subgraph(
+            new_sample, inserted.start(), variant.locus(8, 10).end()
+        )
 
     def test_a_graph_without_a_current_path_cannot_be_stitched(self):
         pathless = self.pathless_subgraph("loose")
         self.assertEqual(self.sequences(pathless), ["GGCCCGG"])
         self.assertIsNone(self.export_path(pathless))
-        last = self.graph.subgraph("last", self.graph.locus(12, 16))
+        locus = self.graph.locus(12, 16)
+        last = self.graph.subgraph("last", locus.start(), locus.end())
         for parts in ([pathless], [last, pathless], [pathless, last]):
             with self.subTest(order=[part.sample.name for part in parts]):
                 with self.assertRaises(RuntimeError) as raised:

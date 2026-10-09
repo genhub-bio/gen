@@ -32,9 +32,9 @@ graph.insert(sequence, before=None, after=None, message=None, stack=False)
 ```
 
 `copy()` returns a new `Sample` in the same collection, retaining the parent's
-graphs and annotations for independent editing; an existing sample name fails (pass
-`exist_ok=True` to reuse the earlier copy, which returns it as it is now, including any
-edits). Replace/delete targets are region strings, loci, or annotations. These methods
+graphs and annotations for independent editing; an existing sample name fails. A `Sample` is a
+live view: its list accessors query current membership, and a new iteration sees graphs added since
+the handle was created. Replace/delete targets are region strings, loci, or annotations. These methods
 edit the graph's existing sample, not a new sample, so copy first when the original matters.
 Replace and insert return the new sequence's `Locus`; delete returns `None`. Each edit
 records an operation, using `message` when supplied. Replacement/insertion require nonempty

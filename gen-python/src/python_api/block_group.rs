@@ -227,19 +227,9 @@ impl PySequenceGraph {
     #[getter]
     fn sample(&self) -> PyResult<PySample> {
         let context = self.require_context("sample")?;
-        let sequence_graphs = Sample::get_block_groups(
-            context.graph().conn(),
-            &self.collection_name,
-            &self.sample_name,
-            None,
-        )
-        .into_iter()
-        .map(|block_group| self.to_py_block_group(block_group))
-        .collect();
         Ok(PySample::new(
             self.collection_name.clone(),
             self.sample_name.clone(),
-            sequence_graphs,
             context.clone(),
         ))
     }
@@ -1029,44 +1019,27 @@ impl PySequenceGraph {
         Ok(self.to_py_block_group(found))
     }
 
-    /// The node points bounding a `Locus`, or a first and last `Position`, in this graph. The end
-    /// point is just past the last base, as the locus' last position names an included base.
+    /// The node points bounding a first and last `Position` in this graph. The end point is just
+    /// past the last base, as the last position names an included base.
     fn subgraph_points(
         &self,
         ctx: &DbContext,
         start: &Bound<'_, PyAny>,
         end: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(NodePoint, NodePoint)> {
-        let (first, last) = if let Ok(locus) = start.extract::<PyRef<PyGraphLocus>>() {
-            if end.is_some() {
-                return Err(PyTypeError::new_err(
-                    "subgraph() takes a Locus alone, or a start and an end",
-                ));
-            }
-            let forward = match locus.strand() {
-                "+" => locus.clone(),
-                "-" => locus.reverse_complement(),
-                "mixed" => {
-                    return Err(PyValueError::new_err(
-                        "a locus that reads on both strands has no single span to derive",
-                    ));
-                }
-                _ => return Err(PyValueError::new_err("Locus is empty")),
-            };
-            (forward.start()?, forward.end()?)
-        } else if let (Ok(first), Some(Ok(last))) = (
+        let (first, last) = if let (Ok(first), Some(Ok(last))) = (
             start.extract::<PyRef<PyPosition>>(),
             end.map(|end| end.extract::<PyRef<PyPosition>>()),
         ) {
             if first.strand() != "+" || last.strand() != "+" {
                 return Err(PyValueError::new_err(
-                    "subgraph() takes forward-strand positions; use a Locus for a reverse span",
+                    "subgraph() takes forward-strand positions",
                 ));
             }
             (first.clone(), last.clone())
         } else {
             return Err(PyTypeError::new_err(
-                "subgraph() takes a Locus, two Positions, or two integer coordinates",
+                "subgraph() takes two Positions or two integer coordinates",
             ));
         };
 
@@ -1112,7 +1085,7 @@ impl PySequenceGraph {
         })
     }
 
-    /// Wraps a raw `BlockGroup` model with this sequence graph's database context.
+    /// Wraps a sequence graph model with this sequence graph's database context.
     fn to_py_block_group(&self, bg: BlockGroup) -> Self {
         PySequenceGraph {
             id: bg.id,
@@ -1130,16 +1103,14 @@ impl PySequenceGraph {
     /// Derive a subgraph of this sequence graph into a new sample, holding every variant route
     /// between two points.
     ///
-    /// The span can be given three ways:
+    /// The span can be given two ways:
     ///
-    /// - a `Locus`: `graph.subgraph("mcs", graph.region("pUC19:390-460"))`. Only its first and last
-    ///   positions are used, so a locus from another graph works as long as both are still in
-    ///   this one;
-    /// - two `Position`s, the first and last base to include: `graph.subgraph("mcs", first, last)`;
+    /// - two `Position`s, the first and last base to include. For a `Locus`, pass
+    ///   `locus.start()` and `locus.end()`;
     /// - two integers, path coordinates along the current path (0-based, end exclusive):
     ///   `graph.subgraph("mcs", 390, 460)`.
     ///
-    /// A `Locus` may read on either strand; two `Position`s must be forward-strand. Raises
+    /// Positions must be forward-strand. Raises
     /// `ValueError` if a position is not in this graph, the span is empty or reversed, or the end
     /// cannot be reached from the start. The new graph gets a current path when this
     /// graph's current path runs from start to end.
@@ -1147,29 +1118,30 @@ impl PySequenceGraph {
     /// Parameters
     /// new_sample : str
     ///     Sample name for the derived sequence graph.
-    /// start : Locus, Position or int
-    ///     The locus, or the first position (or path coordinate) of the span.
-    /// end : Position or int, optional
-    ///     The last position (or exclusive path coordinate); omit when `start` is a `Locus`.
+    /// start : Position or int
+    ///     The first position (or path coordinate) of the span.
+    /// end : Position or int
+    ///     The last position (or exclusive path coordinate) of the span.
     // Integer coordinates follow the current path. A `backbone` argument naming another path to
     // count along can be added once named paths are supported.
-    #[pyo3(signature = (new_sample, start, end=None))]
+    #[pyo3(signature = (new_sample, start, end))]
     fn subgraph(
         &self,
         new_sample: String,
-        #[gen_stub(override_type(type_repr = "Locus | Position | int", imports = ()))]
-        start: &Bound<'_, PyAny>,
-        #[gen_stub(override_type(type_repr = "Position | int | None", imports = ()))] end: Option<
-            &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "Position | int", imports = ()))] start: &Bound<
+            '_,
+            PyAny,
+        >,
+        #[gen_stub(override_type(type_repr = "Position | int", imports = ()))] end: &Bound<
+            '_,
+            PyAny,
         >,
     ) -> PyResult<PySequenceGraph> {
         let ctx = self.require_context("subgraph()")?;
-        if let (Ok(start), Some(Ok(end))) =
-            (start.extract::<i64>(), end.map(|end| end.extract::<i64>()))
-        {
+        if let (Ok(start), Ok(end)) = (start.extract::<i64>(), end.extract::<i64>()) {
             return self.subgraph_by_coordinates(ctx, new_sample, start, end);
         }
-        let (start_point, end_point) = self.subgraph_points(ctx, start, end)?;
+        let (start_point, end_point) = self.subgraph_points(ctx, start, Some(end))?;
         let child = run_context_operation_write(
             ctx,
             |context| {
@@ -1421,7 +1393,7 @@ mod tests {
     use super::PySequenceGraph;
     use crate::python_api::locus::GraphLocusExt as _;
 
-    /// Wraps `block_group_id` as the `PySequenceGraph` a `Repository` would hand back.
+    /// Wraps `sequence_graph_id` as the `PySequenceGraph` a `Repository` would hand back.
     fn sequence_graph(context: &DbContext, block_group_id: HashId, name: &str) -> PySequenceGraph {
         PySequenceGraph {
             id: block_group_id,

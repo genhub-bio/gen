@@ -2,6 +2,8 @@
 
 Python bindings to the Gen version control system for genetic sequences.
 
+For the complete API organized by workflow, see the [Python API overview](API.md).
+
 The package installs the `gen` command-line client and exposes the full Gen data
 model — repositories, sequence graphs, import/export pipelines — from Python and
 Jupyter notebooks. An optional Jupyter widget provides interactive graph
@@ -11,8 +13,9 @@ extra or outside a live Jupyter kernel, including terminal and AI REPL sessions.
 ## Quick start
 
 `Repository` import/update/query methods return live `Sample` or `SequenceGraph`
-objects directly. Each sample can hold multiple sequence graphs that can be
-accessed as a list. If you don't specify `sample=`, imports go into the
+objects directly. A `Sample` is a named view over the graphs in a collection;
+its list accessors query current membership, so an existing handle sees graphs
+added later. If you don't specify `sample=`, imports go into the
 repository's default sample, named `"reference"`:
 
 ```python

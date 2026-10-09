@@ -65,21 +65,21 @@ impl PyRepository {
     /// contains at least one match. Each `Locus` can be passed to `widget.go_to()` or to an editing
     /// method such as `graph.replace()`.
     ///
-    /// If `bgs` is None or empty, searches all sequence graphs. If a seed index was previously
+    /// If `sgs` is None or empty, searches all sequence graphs. If a seed index was previously
     /// built with `build_index()`, it is loaded automatically to speed the search up. Falls back to
     /// a full scan when no index is found. `sequence_kind` is as in `SequenceGraph.search()`.
-    #[pyo3(signature = (query, bgs=None, sequence_kind="dna"))]
+    #[pyo3(signature = (query, sgs=None, sequence_kind="dna"))]
     pub fn search(
         &self,
         query: &str,
-        bgs: Option<Vec<PySequenceGraph>>,
+        sgs: Option<Vec<PySequenceGraph>>,
         sequence_kind: &str,
     ) -> PyResult<Vec<(PySequenceGraph, Vec<PyGraphLocus>)>> {
         let kind = parse_sequence_kind(sequence_kind)?;
         let conn = self.context.graph().conn();
 
-        let bgs: Vec<_> = match bgs {
-            Some(bgs) if !bgs.is_empty() => bgs,
+        let sequence_graphs: Vec<_> = match sgs {
+            Some(sequence_graphs) if !sequence_graphs.is_empty() => sequence_graphs,
             _ => BlockGroup::select(conn)
                 .load()
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
@@ -90,9 +90,9 @@ impl PyRepository {
 
         let query_bytes = query.as_bytes();
         let mut results = Vec::new();
-        for block_group in bgs {
+        for sequence_graph in sequence_graphs {
             let graph =
-                BlockGroup::get_graph(conn, self.context.workspace(), &block_group.id, None)
+                BlockGroup::get_graph(conn, self.context.workspace(), &sequence_graph.id, None)
                     .map_err(block_group_err_to_pyerr)?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(
                 conn,
@@ -103,7 +103,7 @@ impl PyRepository {
 
             let index_path = self.context.workspace().find_gen_dir().map(|d| {
                 d.join("search_index")
-                    .join(format!("{}.bin", block_group.id))
+                    .join(format!("{}.bin", sequence_graph.id))
             });
             let index = index_path
                 .and_then(|p| fs::read(p).ok())
@@ -122,10 +122,10 @@ impl PyRepository {
                     .into_iter()
                     .map(|locus| {
                         PyGraphLocus::with_context(locus, Some(self.context.clone()))
-                            .attached_to(Some(block_group.clone()))
+                            .attached_to(Some(sequence_graph.clone()))
                     })
                     .collect();
-                results.push((block_group, loci));
+                results.push((sequence_graph, loci));
             }
         }
 
@@ -134,10 +134,10 @@ impl PyRepository {
 
     /// Clear the search index cache.
     ///
-    /// If `bgs` is None or empty, clears all indices in `.gen/search_index/`. Otherwise, clears
+    /// If `sgs` is None or empty, clears all indices in `.gen/search_index/`. Otherwise, clears
     /// only the indices of the given sequence graphs.
-    #[pyo3(signature = (bgs=None))]
-    pub fn clear_index(&self, bgs: Option<Vec<PySequenceGraph>>) -> PyResult<()> {
+    #[pyo3(signature = (sgs=None))]
+    pub fn clear_index(&self, sgs: Option<Vec<PySequenceGraph>>) -> PyResult<()> {
         let index_dir = self
             .context
             .workspace()
@@ -149,10 +149,10 @@ impl PyRepository {
             return Ok(());
         }
 
-        match bgs {
-            Some(bgs) if !bgs.is_empty() => {
-                for bg in bgs {
-                    let path = index_dir.join(format!("{}.bin", bg.id));
+        match sgs {
+            Some(sequence_graphs) if !sequence_graphs.is_empty() => {
+                for sequence_graph in sequence_graphs {
+                    let path = index_dir.join(format!("{}.bin", sequence_graph.id));
                     if path.exists() {
                         fs::remove_file(&path).map_err(|e| {
                             PyRuntimeError::new_err(format!("Failed to delete index: {e}"))

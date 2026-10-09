@@ -213,19 +213,9 @@ impl PyRepository {
         collection_name: &str,
         sample_name: &str,
     ) -> PySample {
-        let block_groups = Sample::get_block_groups(
-            self.context.graph().conn(),
-            collection_name,
-            sample_name,
-            None,
-        )
-        .into_iter()
-        .map(|bg| self.to_py_block_group(bg))
-        .collect();
         PySample::new(
             collection_name.to_string(),
             sample_name.to_string(),
-            block_groups,
             self.context.clone(),
         )
     }
@@ -355,6 +345,43 @@ impl PyRepository {
         Ok(self.to_py_block_group(block_group))
     }
 
+    /// Return a sample view when sequence graphs exist in this collection.
+    ///
+    /// `collection` defaults to the repository's default collection.
+    #[pyo3(signature = (name, collection=None))]
+    fn get_sample(&self, name: &str, collection: Option<&str>) -> PyResult<PySample> {
+        let collection = collection
+            .map(str::to_string)
+            .unwrap_or_else(|| self.get_default_collection());
+        let sample = self.block_groups_in_sample(&collection, name);
+        if Sample::get_block_groups(self.context.graph().conn(), &collection, name, None).is_empty()
+        {
+            return Err(PyValueError::new_err(format!(
+                "sample '{name}' has no sequence graphs in collection '{collection}'"
+            )));
+        }
+        Ok(sample)
+    }
+
+    /// Return a sample view for this repository and collection, whether or not graphs exist yet.
+    ///
+    /// The handle scopes sequence graphs by sample name and collection; creating it does not
+    /// change repository data. Use it with `import_sequence` or another graph creation method.
+    /// `collection` defaults to the repository's default collection.
+    #[pyo3(signature = (name, collection=None))]
+    fn sample(&self, name: &str, collection: Option<&str>) -> PyResult<PySample> {
+        if name.is_empty() {
+            return Err(PyValueError::new_err("sample name must not be empty"));
+        }
+        Ok(PySample::new(
+            collection
+                .map(str::to_string)
+                .unwrap_or_else(|| self.get_default_collection()),
+            name.to_string(),
+            self.context.clone(),
+        ))
+    }
+
     /// Return the sequence graphs in the repository, across all samples and collections. Pass
     /// `name`, `sample` (a name or a `Sample`) and `collection` to keep only the matching ones.
     #[pyo3(signature = (name=None, sample=None, collection=None))]
@@ -405,17 +432,15 @@ impl PyRepository {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
         {
             let py_bg = self.to_py_block_group(bg);
-            match samples.iter_mut().find(|sample| {
+            if !samples.iter().any(|sample| {
                 sample.collection_name == py_bg.collection_name
                     && sample.sample_name == py_bg.sample_name
             }) {
-                Some(sample) => sample.sequence_graphs.push(py_bg),
-                None => samples.push(PySample::new(
+                samples.push(PySample::new(
                     py_bg.collection_name.clone(),
                     py_bg.sample_name.clone(),
-                    vec![py_bg],
                     self.context.clone(),
-                )),
+                ));
             }
         }
         Ok(samples)

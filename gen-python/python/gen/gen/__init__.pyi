@@ -734,6 +734,24 @@ class Repository:
         Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use
         it to rebuild a graph handle in another Repository object, for example in a worker thread.
         """
+    def get_sample(
+        self, name: builtins.str, collection: typing.Optional[builtins.str] = None
+    ) -> Sample:
+        r"""
+        Return a sample view when sequence graphs exist in this collection.
+
+        `collection` defaults to the repository's default collection.
+        """
+    def sample(
+        self, name: builtins.str, collection: typing.Optional[builtins.str] = None
+    ) -> Sample:
+        r"""
+        Return a sample view for this repository and collection, whether or not graphs exist yet.
+
+        The handle scopes sequence graphs by sample name and collection; creating it does not
+        change repository data. Use it with `import_sequence` or another graph creation method.
+        `collection` defaults to the repository's default collection.
+        """
     def get_sequence_graphs(
         self,
         name: typing.Optional[builtins.str] = None,
@@ -797,7 +815,7 @@ class Repository:
     def search(
         self,
         query: builtins.str,
-        bgs: typing.Optional[typing.Sequence[SequenceGraph]] = None,
+        sgs: typing.Optional[typing.Sequence[SequenceGraph]] = None,
         sequence_kind: builtins.str = "dna",
     ) -> builtins.list[tuple[SequenceGraph, builtins.list[Locus]]]:
         r"""
@@ -807,17 +825,17 @@ class Repository:
         contains at least one match. Each `Locus` can be passed to `widget.go_to()` or to an editing
         method such as `graph.replace()`.
 
-        If `bgs` is None or empty, searches all sequence graphs. If a seed index was previously
+        If `sgs` is None or empty, searches all sequence graphs. If a seed index was previously
         built with `build_index()`, it is loaded automatically to speed the search up. Falls back to
         a full scan when no index is found. `sequence_kind` is as in `SequenceGraph.search()`.
         """
     def clear_index(
-        self, bgs: typing.Optional[typing.Sequence[SequenceGraph]] = None
+        self, sgs: typing.Optional[typing.Sequence[SequenceGraph]] = None
     ) -> None:
         r"""
         Clear the search index cache.
 
-        If `bgs` is None or empty, clears all indices in `.gen/search_index/`. Otherwise, clears
+        If `sgs` is None or empty, clears all indices in `.gen/search_index/`. Otherwise, clears
         only the indices of the given sequence graphs.
         """
     def update_with_fasta(
@@ -934,10 +952,14 @@ class Repository:
 @typing.final
 class Sample:
     r"""
-    The sequence graphs of one sample, such as the records of an imported FASTA file.
+    A repository-bound view of sequence graphs sharing a sample name and collection.
 
-    Acts like a read-only list of ``SequenceGraph``: index it, iterate it, or
-    call ``len()`` on it. Indexing out of range raises ``IndexError``.
+    Create a handle with ``Repository.sample`` or retrieve an existing one with
+    ``Repository.get_sample``. A handle can exist before any matching sequence graph does; it does
+    not create repository data by itself. It queries the repository whenever its graphs are
+    accessed, so the membership stays current. Acts like a read-only list of ``SequenceGraph``:
+    index it, iterate it, or call ``len()`` on it. Each iteration uses the graphs present when that
+    iteration starts. Indexing out of range raises ``IndexError``.
     """
     @property
     def collection(self) -> builtins.str:
@@ -987,18 +1009,12 @@ class Sample:
         """
     def __repr__(self) -> builtins.str: ...
     def copy(
-        self,
-        new_name: builtins.str,
-        message: typing.Optional[builtins.str] = None,
-        *,
-        exist_ok: builtins.bool = False,
+        self, new_name: builtins.str, message: typing.Optional[builtins.str] = None
     ) -> Sample:
         r"""
         Copy this sample into a new sample with the same sequence graphs.
 
-        The destination name must not already exist, unless `exist_ok=True`, which returns the
-        existing sample as it is now (including any edits) instead of copying again; use that in
-        notebook cells that may be run more than once. The returned sample is
+        The destination name must not already exist. The returned sample is
         ready for explicit in-place edits on its sequence graphs. `new_name` is the name of the
         copy. The copy is
         recorded as its own operation, using ``message`` as the operation's
@@ -1329,25 +1345,20 @@ class SequenceGraph:
             NCBI codon table ID. Default: 1 (Standard).
         """
     def subgraph(
-        self,
-        new_sample: builtins.str,
-        start: Locus | Position | int,
-        end: Position | int | None = None,
+        self, new_sample: builtins.str, start: Position | int, end: Position | int
     ) -> SequenceGraph:
         r"""
         Derive a subgraph of this sequence graph into a new sample, holding every variant route
         between two points.
 
-        The span can be given three ways:
+        The span can be given two ways:
 
-        - a `Locus`: `graph.subgraph("mcs", graph.region("pUC19:390-460"))`. Only its first and last
-          positions are used, so a locus from another graph works as long as both are still in
-          this one;
-        - two `Position`s, the first and last base to include: `graph.subgraph("mcs", first, last)`;
+        - two `Position`s, the first and last base to include. For a `Locus`, pass
+          `locus.start()` and `locus.end()`;
         - two integers, path coordinates along the current path (0-based, end exclusive):
           `graph.subgraph("mcs", 390, 460)`.
 
-        A `Locus` may read on either strand; two `Position`s must be forward-strand. Raises
+        Positions must be forward-strand. Raises
         `ValueError` if a position is not in this graph, the span is empty or reversed, or the end
         cannot be reached from the start. The new graph gets a current path when this
         graph's current path runs from start to end.
@@ -1355,10 +1366,10 @@ class SequenceGraph:
         Parameters
         new_sample : str
             Sample name for the derived sequence graph.
-        start : Locus, Position or int
-            The locus, or the first position (or path coordinate) of the span.
-        end : Position or int, optional
-            The last position (or exclusive path coordinate); omit when `start` is a `Locus`.
+        start : Position or int
+            The first position (or path coordinate) of the span.
+        end : Position or int
+            The last position (or exclusive path coordinate) of the span.
         """
     def chunks(
         self,

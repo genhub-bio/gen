@@ -26,7 +26,9 @@ alternatives. Biopython is fine for parsing records you then hand to `repo.impor
 A **sequence graph can hold many sequences**: after a library import, `stack=True` edit or
 VCF, one graph has many paths. `graph.all_sequences()` returns every distinct path as a `Sequence`
 (`str(sequence)` is its bases). It builds the whole list, so avoid it on very large libraries. `locus.sequence` is the string for one region. A `Sample`
-holds several graphs; a `Repository` holds samples, branches and history.
+is a repository-bound, live view of graphs sharing a sample name and collection. Its list accessors
+query current membership; each iteration uses the graphs present when it starts. A `Repository`
+holds graph data, collections, branches and history.
 
 Before using a method you have not used, check its real signature. Do not guess method
 names, argument names or return types.
@@ -82,8 +84,9 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
   is the audit trail.
 - `graph.region()` and `sample.copy()` do not mutate. Inspect the return type before chaining:
   VCF updates return `list[Sample]`, most other updates return one `Sample`.
-- Cells that mutate fail when re-run ("already exists"). In notebooks pass `exist_ok=True` to
-  `import_sequence`, `sample.copy` and `checkout(..., create=True)` to reuse the earlier result.
+- Cells that mutate fail when re-run ("already exists"). `import_sequence(..., exist_ok=True)` can
+  reuse an existing graph only when its sequence matches. `sample.copy()` errors if its destination
+  name already exists; `checkout(..., create=True, exist_ok=True)` switches to the existing branch.
 - Don't switch to the CLI after a `TypeError`; check the signature with `help()` or the stub.
 - Python is the default. Use the CLI only for what Python lacks (`gen diff`, `gen view-diff`,
   patches, `gen transform`, `gen propagate-annotations`), or when the user wants shell
