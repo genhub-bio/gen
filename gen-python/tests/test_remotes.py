@@ -21,8 +21,8 @@ def archived_asset_bytes_by_id(repository):
             "SELECT lower(hex(id)), uri, checksum FROM gen_asset_refs"
         )
     }
-    reachable_asset_ids = {asset.id for asset in repository.get_assets()}
-    asset_directory = Path(repository.db_path).parent / "assets"
+    reachable_asset_ids = {str(asset.id) for asset in repository.get_assets()}
+    asset_directory = repository.gen_dir / "assets"
     archived_assets = {}
 
     for asset_id in reachable_asset_ids:
@@ -109,7 +109,7 @@ class RemoteTests(unittest.TestCase):
         origin = self.repository.add_remote("origin", (self.root / "upstream").as_uri())
         backup = self.repository.add_remote("backup", (self.root / "backup").as_uri())
         self.assertEqual(
-            [remote.name for remote in self.repository.get_remotes()],
+            [remote.name for remote in self.repository.remotes],
             ["backup", "origin"],
         )
         self.repository.set_default_remote(origin)
@@ -185,6 +185,21 @@ class RemoteTests(unittest.TestCase):
                     self.assertTrue((destination / ".gen").is_dir())
         with self.assertRaises(TypeError):
             gen.clone(remote_url, path=42)
+
+    @unittest.skipIf(
+        os.name == "nt", "native file remote workflows are currently tested on Unix"
+    )
+    def test_clone_reuses_freshly_initialized_destination(self):
+        self.import_sequence(self.repository, "base")
+        destination = self.root / "initialized-first"
+        gen.Repository(str(destination))
+        cloned = gen.clone((self.root / "local").as_uri(), path=str(destination))
+        self.assertEqual(len(cloned.get_sequence_graphs()), 1)
+
+        used = self.root / "initialized-and-used"
+        self.import_sequence(gen.Repository(str(used)), "other")
+        with self.assertRaisesRegex(RuntimeError, "not an empty directory"):
+            gen.clone((self.root / "local").as_uri(), path=str(used))
 
     @unittest.skipIf(
         os.name == "nt", "native file remote workflows are currently tested on Unix"

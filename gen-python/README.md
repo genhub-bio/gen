@@ -2,6 +2,8 @@
 
 Python bindings to the Gen version control system for genetic sequences.
 
+For the complete API organized by workflow, see the [Python API overview](API.md).
+
 The package installs the `gen` command-line client and exposes the full Gen data
 model — repositories, sequence graphs, import/export pipelines — from Python and
 Jupyter notebooks. An optional Jupyter widget provides interactive graph
@@ -11,8 +13,10 @@ extra or outside a live Jupyter kernel, including terminal and AI REPL sessions.
 ## Quick start
 
 `Repository` import/update/query methods return live `Sample` or `SequenceGraph`
-objects directly — never bare ids or names — so you can chain calls instead of
-looking things up afterward:
+objects directly. A `Sample` is a named view over the graphs in a collection;
+its list accessors query current membership, so an existing handle sees graphs
+added later. If you don't specify `sample=`, imports go into the
+repository's default sample, named `"reference"`:
 
 ```python
 import gen
@@ -21,6 +25,8 @@ repo = gen.Repository("path/to/.gen")
 
 sample = repo.import_fasta("path/to.fa")     # -> Sample
 sg = sample[0]                               # -> SequenceGraph
+part = repo.import_sequence("ATG", "codon")  # -> SequenceGraph
+
 samples = repo.samples                       # -> list[Sample]
 graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 
@@ -84,7 +90,7 @@ asset transfer, and conflict behavior as the command-line client:
 
 ```python
 # Arguments may be names or the corresponding Remote/Branch objects.
-origin = repo.get_remotes()[0]
+origin = repo.remotes[0]
 main = repo.current_branch
 
 repo.push(remote=origin, branch=main)
@@ -98,7 +104,7 @@ Repositories opened with `gen.Repository(...)` can configure remotes directly:
 origin = repo.add_remote("origin", "file:///path/to/another/repository")
 repo.set_default_remote(origin)  # available as repo.default_remote
 repo.set_branch_remote(origin)  # omit the argument to clear branch tracking
-remotes = repo.get_remotes()
+remotes = repo.remotes
 repo.remove_remote(origin)
 ```
 
@@ -259,6 +265,14 @@ files are read for the part of the graph in view and reloaded as you scroll.
 `SequenceGraph.annotations` includes the features of every imported file, read in
 full, with the file's name as their `group`.
 
+## Enumerating sequences
+
+Exporting a graph to FASTA yields one linear sequence by default: the path that
+currently serves as its coordinate reference. Use `all_sequences=True` when
+exporting, or use `SequenceGraph.all_sequences()`, to get every distinct sequence
+the graph's paths spell. Both build the full list, so a graph with a very large
+number of paths takes time and memory.
+
 ## Architecture
 
 The package is built from three layers:
@@ -283,8 +297,11 @@ layer owns:
   objects.
 - **`Branch`, `Operation`, `Remote`** — typed version-control values accepted
   directly by the corresponding `Repository` methods.
-- **`Node`, `NodeSlice`, `HashId`, `Annotation`, `SequencePart`** — typed
-  wrappers around internal objects so Python code can work with them safely.
+- **`Node`, `HashId`, `Annotation`, `Sequence`** — typed wrappers around internal
+  objects so Python code can work with them safely. `HashId` identifies sequence
+  graphs, annotations, operations and branch heads alike, and is hashable.
+  `Asset` is a file kept in the repository (`Repository.add_file()`). `Sequence` is a named sequence (library parts, `SequenceGraph.all_sequences()`)
+  that reads like a `str`.
 - **`PyGraphController`** — wraps the GraphController and owns the ratatui render loop for the Jupyter widget. On each
   frame request it renders the graph into a ratatui `Buffer` and serialises the
   result to a JSON structure that the frontend can paint.
@@ -292,8 +309,10 @@ layer owns:
 ### Python (`python/gen/`)
 
 A thin layer on top of the compiled extension. `__init__.py` re-exports everything
-from the native module at the package level. `jupyter_widget.py` contains `GraphWidget`,
-an [anywidget](https://anywidget.dev) subclass that:
+from the native module at the package level and keeps `dir(gen)` to the public names.
+`jupyter_widget.py` contains `GraphWidget`, an [anywidget](https://anywidget.dev) subclass
+returned by `plot()` in a live Jupyter kernel (`text_widget.TextGraphWidget` elsewhere, with the
+same methods and `rows`/`cols`/`page_index`/`page_count`/`frame` attributes). It:
 
 - holds an internal Rust graph controller and requests rendered frames from it,
 - syncs frames to the browser frontend via the `frame` traitlet (plus `page_count`/
@@ -348,7 +367,9 @@ cd gen-python && make test           # all three
 `Sample.plot()` / `SequenceGraph.plot()` return a `TextGraphWidget` in plain
 Python, including AI REPLs, even when `gen[jupyter]` is installed. Drive and
 inspect it without a browser or JS; use `repr(widget)` to see the current state
-as ASCII.
+as ASCII (`print(widget)` works too). The first frame printed starts with a `#`
+orientation header meant for the agent; when showing a graph to a user, omit it and paste
+only the frame in a fenced code block.
 
 - A widget from `sample.plot()` pages through every sequence graph in the
   sample; one from `sg.plot()` shows just that one graph (one page).
@@ -368,7 +389,7 @@ import gen
 repo = gen.Repository("path/to/.gen")
 sample = repo.import_fasta("path/to.fa")  # or repo.samples[0], etc.
 
-widget = sample.plot()       # GraphWidget; pages through the sample's sequence graphs
+widget = sample.plot()       # pages through the sample's sequence graphs
 print(repr(widget))          # plain-text fallback, e.g. "[1/20] <name> ..."
 
 widget.next_page()           # switch graphs: next_page() / prev_page()

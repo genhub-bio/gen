@@ -1,6 +1,7 @@
 //! Read-only graph projection and region resolution shared by navigation and editing.
 
 use core::ops::Range;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
@@ -13,6 +14,7 @@ use gen_models::{
     locus::GraphLocus,
     region::{Region, ResolvedRegionKind, resolve},
 };
+use petgraph::Direction::Outgoing;
 use pyo3::{
     PyResult,
     exceptions::{PyRuntimeError, PyValueError},
@@ -135,4 +137,35 @@ pub(crate) fn forward_edge(graph: &GenGraph, source: GraphNode, target: GraphNod
             edge.source_strand == Strand::Forward && edge.target_strand == Strand::Forward
         })
     })
+}
+
+/// The fewest-block forward route from `start` to `end`, both included, if `end` can be reached.
+pub(crate) fn shortest_route(
+    graph: &GenGraph,
+    start: GraphNode,
+    end: GraphNode,
+) -> Option<Vec<GraphNode>> {
+    let mut parents: HashMap<GraphNode, GraphNode> = HashMap::new();
+    let mut queue = VecDeque::from([start]);
+    let mut seen = HashSet::from([start]);
+    while let Some(block) = queue.pop_front() {
+        if block == end {
+            let mut route = vec![end];
+            while let Some(parent) = parents.get(route.last()?) {
+                route.push(*parent);
+            }
+            route.reverse();
+            return Some(route);
+        }
+        for successor in graph.neighbors_directed(block, Outgoing) {
+            if !is_terminal(successor.node_id)
+                && forward_edge(graph, block, successor)
+                && seen.insert(successor)
+            {
+                parents.insert(successor, block);
+                queue.push_back(successor);
+            }
+        }
+    }
+    None
 }

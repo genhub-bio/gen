@@ -5,11 +5,7 @@ import tempfile
 import unittest
 
 import gen
-
-try:
-    import networkx
-except ImportError:
-    networkx = None
+from test_api import RepositoryTestCase
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -26,34 +22,13 @@ def read_fasta(path):
     )
 
 
-def all_routes(graph):
-    """Every sequence a route from the start to the end of the graph reads."""
-    routes = graph.to_networkx()
-    starts = [node for node in routes if routes.in_degree(node) == 0]
-    ends = [node for node in routes if routes.out_degree(node) == 0]
-    # An edit retires the edges it replaces by marking them with chromosome index -2.
-    routes.remove_edges_from(
-        [
-            (source, target)
-            for source, target, data in routes.edges(data=True)
-            if any(weight["chromosome_index"] == -2 for weight in data["attr_dict"])
-        ]
-    )
-    return sorted(
-        {
-            "".join(graph.get_node_sequence(node) for node in route)
-            for start in starts
-            for end in ends
-            for route in networkx.all_simple_paths(routes, start, end)
-        }
-    )
-
-
 class EditingTestCase(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.repository = gen.Repository(str(self.root / "repository"))
+
+    node_runs = RepositoryTestCase.node_runs
 
     def operation_count(self):
         return len(self.repository.get_operations())
@@ -66,16 +41,9 @@ class EditingTestCase(unittest.TestCase):
         sequence_graph.export_fasta(str(path))
         return read_fasta(path)
 
-    def sample_named(self, name):
-        return next(
-            sample for sample in self.repository.samples if sample.sample_name == name
-        )
-
     def is_editable(self, sequence_graph, locus):
         """Whether an edit can still target ``locus``, probed on a copy of the sample."""
-        copy = self.sample_named(sequence_graph.sample_name).copy(
-            f"probe{len(self.repository.samples)}"
-        )
+        copy = sequence_graph.sample.copy(f"probe{len(self.repository.samples)}")
         try:
             next(graph for graph in copy if graph.name == sequence_graph.name).delete(
                 locus
@@ -100,9 +68,7 @@ class SimpleGraphEditingTests(EditingTestCase):
         self.assertEqual(locus.start() + 3, locus.slice(3, 4).start())
         self.assertEqual(locus.end() - 3, locus.slice(4, 5).start())
         self.assertEqual(locus[5] + 1, locus[6])
-        self.assertEqual(
-            self.graph.region("m123:20-28").start().sequence_graph.name, "m123"
-        )
+        self.assertEqual(self.graph.region("m123:20-28").start().graph.name, "m123")
 
     def test_positions_from_an_edit_and_an_annotation_step_without_attaching_a_graph(
         self,
@@ -114,14 +80,14 @@ class SimpleGraphEditingTests(EditingTestCase):
 
         self.assertEqual(inserted.start() + 1, inserted.end())
         self.assertEqual(replaced.start() + 1, replaced.end())
-        self.assertEqual(inserted.slice(0, 1).start().sequence_graph.name, "m123")
+        self.assertEqual(inserted.slice(0, 1).start().graph.name, "m123")
 
     def test_an_annotation_made_from_a_locus_keeps_the_loci_graph(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
 
         annotation = gen.Annotation(locus, "site")
 
-        self.assertEqual(annotation.locus.start().sequence_graph.name, "m123")
+        self.assertEqual(annotation.locus.start().graph.name, "m123")
         self.assertEqual(annotation.locus.start() + 3, locus.slice(3, 4).start())
         self.assertEqual(annotation.locus.sequence, locus.sequence)
 
@@ -133,7 +99,7 @@ class SimpleGraphEditingTests(EditingTestCase):
 
         self.assertEqual(combined, gen.SuperPosition(first, second))
         self.assertEqual(combined.positions, [first, second])
-        self.assertEqual(combined.sequence_graph.name, "m123")
+        self.assertEqual(combined.graph.name, "m123")
 
     def test_superposition_or_accepts_positions_on_either_side(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
@@ -167,7 +133,7 @@ class SimpleGraphEditingTests(EditingTestCase):
 
         moved = locus.start().on(other)
 
-        self.assertEqual(moved.sequence_graph.sample_name, "other")
+        self.assertEqual(moved.graph.sample.name, "other")
         self.assertEqual(moved, locus.start())
         self.assertEqual(moved + 1, locus.slice(1, 2).start().on(other))
 
@@ -269,7 +235,7 @@ class SimpleGraphEditingTests(EditingTestCase):
     def test_delete_locus_crossing_an_earlier_edit(self):
         self.graph.replace("m123:20-22", "TT")
         [locus] = self.graph.search("CGTTAAC", sequence_kind="exact")
-        self.assertEqual(len(locus.slices), 3)
+        self.assertEqual(len(self.node_runs(locus)), 3)
 
         self.graph.delete(locus)
 
@@ -542,7 +508,7 @@ class LibraryGraphEditingTests(EditingTestCase):
 
     def setUp(self):
         super().setUp()
-        part = gen.SequencePart
+        part = gen.Sequence
         self.graph = self.repository.import_library(
             "lib",
             [
@@ -594,7 +560,6 @@ class LibraryGraphEditingTests(EditingTestCase):
         self.assertEqual(self.path_count(), 1)
         self.assertFalse(self.is_editable(self.graph, self.alternative))
 
-    @unittest.skip("Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands.")
     def test_stacked_replace_leaves_every_alternative_live(self):
         self.graph.replace(self.alternative, "GGGGGG", stack=True)
 
@@ -604,7 +569,6 @@ class LibraryGraphEditingTests(EditingTestCase):
         self.assertTrue(self.is_editable(self.graph, self.alternative))
 
 
-@unittest.skipIf(networkx is None, "networkx is not installed")
 class GfaMotifEditingTests(EditingTestCase):
     """``B`` reads into ``D`` and ``E``, but ``C`` reads only into ``E``: not a combinatorial
     layer, so one side of an insertion reaches only the routes that really meet there."""
@@ -618,7 +582,7 @@ class GfaMotifEditingTests(EditingTestCase):
         }
 
     def sequences(self):
-        return all_routes(self.graph)
+        return sorted({str(sequence) for sequence in self.graph.all_sequences()})
 
     def test_the_motif_has_every_route(self):
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDIJKL", "ABEFIJKL"])
@@ -628,14 +592,12 @@ class GfaMotifEditingTests(EditingTestCase):
 
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxxIJKL", "ABEFxxIJKL"])
 
-    @unittest.skip("Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands.")
     def test_substituting_the_first_base_of_a_node_changes_every_route_into_it(self):
         self.graph.replace(self.nodes["E"].slice(0, 1), "x")
 
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxJKL", "ABEFxJKL"])
 
 
-@unittest.skipIf(networkx is None, "networkx is not installed")
 class GfaMotifDuplicatedNodeTests(EditingTestCase):
     """The motif with ``E`` duplicated per route into it (``Eb`` after ``B``, ``Ec`` after ``C``),
     which scopes an edit to one route by giving each route its own node and ports."""
@@ -645,7 +607,7 @@ class GfaMotifDuplicatedNodeTests(EditingTestCase):
         return graph
 
     def sequences(self, graph):
-        return all_routes(graph)
+        return sorted({str(sequence) for sequence in graph.all_sequences()})
 
     def after(self, graph, locus):
         """The ``IJ`` node that reads directly after ``locus``."""
@@ -679,6 +641,34 @@ class GfaMotifDuplicatedNodeTests(EditingTestCase):
             self.sequences(graph),
             ["ABCDGGIJKL", "ABCDGHKL", "ABCDxyKL", "ABEFIJKL"],
         )
+
+
+class PathUpdateTests(EditingTestCase):
+    def setUp(self):
+        super().setUp()
+        self.graph = self.repository.import_sequence(
+            "AAAACCCCGGGG", name="v", sample="p"
+        )
+        self.graph.delete("v:4-8")
+
+    def sequences(self):
+        return sorted({str(sequence) for sequence in self.graph.all_sequences()})
+
+    def test_edit_next_to_an_earlier_deletion_updates_the_path(self):
+        self.graph.delete("v:4-6")
+
+        self.assertEqual(self.sequences(), ["AAAAGG"])
+        self.assertEqual(self.export_sequence(self.graph), "AAAAGG")
+
+    def test_successful_edit_updates_the_path(self):
+        graph = self.repository.import_sequence("AAAACCCCGGGG", name="w", sample="q")
+        graph.replace("w:4-8", "TT")
+
+        self.assertEqual(
+            sorted({str(sequence) for sequence in graph.all_sequences()}),
+            ["AAAATTGGGG"],
+        )
+        self.assertEqual(self.export_sequence(graph), "AAAATTGGGG")
 
 
 if __name__ == "__main__":

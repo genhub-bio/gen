@@ -5,15 +5,19 @@ use gen_models::{
     operations::{Defaults, Remote as ModelRemote, RemoteBranch},
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{PyRepository, history::branch_name};
 
 /// A configured Gen repository remote.
+#[gen_stub_pyclass]
 #[pyclass(name = "Remote")]
 #[derive(Clone, Debug)]
 pub struct PyRemote {
+    /// Remote name, such as `origin`.
     #[pyo3(get)]
     pub name: String,
+    /// Remote URL.
     #[pyo3(get)]
     pub url: String,
 }
@@ -27,6 +31,7 @@ impl From<ModelRemote> for PyRemote {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRemote {
     fn __str__(&self) -> &str {
@@ -72,9 +77,11 @@ impl PyRepository {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Returns every configured remote, ordered by name.
+    /// Every configured remote, ordered by name.
+    #[getter(remotes)]
     fn get_remotes(&self) -> Vec<PyRemote> {
         ModelRemote::list_all(self.context.config().conn())
             .into_iter()
@@ -92,7 +99,8 @@ impl PyRepository {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
-    /// Adds a named repository remote.
+    /// Adds a named repository remote. `name` is how you refer to it afterwards (for example
+    /// `origin`) and `url` is where it lives.
     fn add_remote(&self, name: &str, url: &str) -> PyResult<PyRemote> {
         ModelRemote::create(self.context.config().conn(), name, url)
             .map(PyRemote::from)
@@ -100,7 +108,13 @@ impl PyRepository {
     }
 
     /// Removes a configured remote and clears references to it.
-    fn remove_remote(&self, remote: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn remove_remote(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Remote", imports = ()))] remote: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<()> {
         let name = remote_name(remote)?;
         r#gen::commands::remote::remove_remote(self.context.config().conn(), &name)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -108,7 +122,12 @@ impl PyRepository {
 
     /// Sets the repository default remote, or clears it when omitted.
     #[pyo3(signature = (remote=None))]
-    fn set_default_remote(&self, remote: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    fn set_default_remote(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+    ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         Defaults::set_default_remote(self.context.config().conn(), remote.as_deref())
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -116,7 +135,12 @@ impl PyRepository {
 
     /// Associates a remote with the current branch, or clears it when omitted.
     #[pyo3(signature = (remote=None))]
-    fn set_branch_remote(&self, remote: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    fn set_branch_remote(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+    ) -> PyResult<()> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let branch = history_store
             .current_branch()
@@ -132,18 +156,25 @@ impl PyRepository {
     }
 
     /// Pushes a local branch using the same remote workflow as the Gen CLI.
+    ///
+    /// `force=True` overwrites the remote branch even when its history has diverged; it
+    /// discards remote work, so use it only when asked.
     #[pyo3(signature = (remote=None, branch=None, force=false))]
     fn push(
         &mut self,
         python: Python<'_>,
-        remote: Option<&Bound<'_, PyAny>>,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
         force: bool,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_push(
                 &workspace,
                 remote.as_deref(),
@@ -160,13 +191,17 @@ impl PyRepository {
     fn pull(
         &mut self,
         python: Python<'_>,
-        remote: Option<&Bound<'_, PyAny>>,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_pull(
                 &workspace,
                 remote.as_deref(),
@@ -182,13 +217,17 @@ impl PyRepository {
     fn fetch(
         &mut self,
         python: Python<'_>,
-        remote: Option<&Bound<'_, PyAny>>,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_fetch(
                 &workspace,
                 remote.as_deref(),
@@ -204,7 +243,7 @@ impl PyRepository {
 mod tests {
     use std::path::Path;
 
-    use gen_core::{BranchName, config::Workspace};
+    use gen_core::{BranchName, DoltHashId, config::Workspace};
     use gen_models::{
         collection::Collection,
         history::{
@@ -241,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_remote_configuration_accepts_remote_objects() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let repository_dir = tempdir().expect("should create repository directory");
             let repository = create_repository(repository_dir.path());
             let remote = repository
@@ -312,8 +351,8 @@ mod tests {
 
     #[test]
     fn test_file_remote_push_pull_and_fetch_refresh_repository_connection() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let remote_dir = tempdir().expect("should create remote directory");
             let mut remote_repository = create_repository(remote_dir.path());
             commit_collection(&remote_repository, "base");
@@ -333,7 +372,7 @@ mod tests {
                 .expect("clone should configure origin");
             let branch = PyBranch {
                 name: "main".to_string(),
-                head: String::new(),
+                head: DoltHashId::default(),
                 remote: Some("origin".to_string()),
                 is_current: true,
                 dirty: false,
@@ -379,7 +418,7 @@ mod tests {
 
             let feature = PyBranch {
                 name: "feature".to_string(),
-                head: String::new(),
+                head: DoltHashId::default(),
                 remote: Some("origin".to_string()),
                 is_current: false,
                 dirty: false,

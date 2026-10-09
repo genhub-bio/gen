@@ -19,6 +19,7 @@ use pyo3::{
     pyclass, pymethods,
     types::{PyAnyMethods as _, PyTuple, PyTupleMethods as _},
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{
     block_group::PySequenceGraph,
@@ -222,19 +223,20 @@ fn canonical(mut positions: Vec<Position>) -> Vec<Position> {
     positions
 }
 
-/// A position in a sequence graph: a node slice, an offset within it, and the strand it is read on.
+/// A position in a sequence graph: a node, an offset within it, and the strand it is read on.
 ///
 /// Returned by ``Locus.start()`` and ``Locus.end()``, which name the first and last position of the
 /// locus in reading order. Two positions are equal when they name the same point of the same node,
 /// even if later edits split that node so their ``node`` and ``offset`` differ. Pass a position to
-/// ``GraphWidget.go_to()``, as ``after`` or ``before`` to ``SequenceGraph.insert()``, or to
+/// ``widget.go_to()``, as ``after`` or ``before`` to ``SequenceGraph.insert()``, or to
 /// ``SuperPosition()`` to step from it.
 ///
-/// A position taken from a ``Locus`` is attached to the sequence graph that locus came from, and can
-/// step with ``pos + n`` and ``pos - n``: the result stays a ``Position`` while the step lands on a
+/// A position taken from a ``Locus`` is attached to the sequence graph that locus came from, and
+/// can step with ``pos + n`` and ``pos - n``: the result stays a ``Position`` while the step lands on a
 /// single point, and becomes a ``SuperPosition`` once the step lands at a fork. ``pos.on(sg)``
 /// attaches it to another sequence graph, such as a copy of the sample. ``a | b`` combines a
 /// position with another position or a ``SuperPosition`` into a ``SuperPosition``.
+#[gen_stub_pyclass]
 #[pyclass(name = "Position", unsendable)]
 #[derive(Clone)]
 pub struct PyPosition {
@@ -276,7 +278,7 @@ impl PyPosition {
     }
 
     /// `position` in the block of `graph` holding it.
-    fn located(graph: &GenGraph, position: Position) -> PyResult<Self> {
+    pub(crate) fn located(graph: &GenGraph, position: Position) -> PyResult<Self> {
         Ok(Self {
             position,
             block: require_blocks(graph, &[position])?[0],
@@ -332,15 +334,21 @@ impl PyPosition {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyPosition {
-    /// The node slice this position is in.
+    /// The node this position is in.
     #[getter]
     fn node(&self) -> PyGraphNode {
         PyGraphNode::new(
             self.block.node_id,
             self.block.sequence_start,
             self.block.sequence_end,
+        )
+        .with_context(
+            self.sequence_graph
+                .as_ref()
+                .and_then(|sequence_graph| sequence_graph.context.clone()),
         )
     }
 
@@ -352,20 +360,22 @@ impl PyPosition {
 
     /// Strand this position is read on: ``"+"`` or ``"-"``.
     #[getter]
-    fn strand(&self) -> &'static str {
+    pub(crate) fn strand(&self) -> &'static str {
         if self.position.is_reverse() { "-" } else { "+" }
     }
 
     /// The sequence graph this position steps through, or ``None`` when unattached.
-    #[getter]
-    fn sequence_graph(&self) -> Option<PySequenceGraph> {
+    #[getter(graph)]
+    fn py_graph(&self) -> Option<PySequenceGraph> {
         self.sequence_graph.clone()
     }
 
-    /// This position attached to ``sequence_graph``.
+    /// This position attached to ``graph``.
     ///
     /// Raises ``ValueError`` if the position is not reachable in that sequence graph.
-    fn on(&self, sequence_graph: PyRef<'_, PySequenceGraph>) -> PyResult<Self> {
+    #[pyo3(signature = (graph))]
+    fn on(&self, graph: PyRef<'_, PySequenceGraph>) -> PyResult<Self> {
+        let sequence_graph = graph;
         let context = sequence_graph.require_context("Position.on")?;
         let graph = current_graph(context, &sequence_graph.id)?;
         let mut located = Self::located(&graph, self.position)?;
@@ -463,14 +473,17 @@ fn canonical_positions(mut positions: Vec<PyPosition>) -> Vec<PyPosition> {
 ///
 /// Build one from positions with ``SuperPosition(pos, ...)`` or ``a | b``. Where the graph holds
 /// several variants a superposition can cover a position on each of them, and ``a | b`` combines
-/// the positions of two superpositions, or of a superposition and a position. ``sp + n`` steps a single position along its strand, splitting
-/// it across every route leaving a fork, and ``sp - n`` steps back the same way. A superposition
-/// that already covers several positions does not step, so a walk splits only on its last step.
+/// the positions of two superpositions, or of a superposition and a position. ``sp + n`` steps a
+/// single position along its strand, splitting it across every route leaving a fork, and
+/// ``sp - n`` steps back the same way. A superposition that already covers several positions does
+/// not step, so a walk splits only on its last step.
 ///
 /// Stepping needs a sequence graph. A superposition of positions from one locus, or from loci of
 /// one sequence graph, is attached to it already; ``sp.on(sg)`` attaches it to another sequence
-/// graph that shares its nodes, and is invalid there only if one of its positions is not reachable. Pass a superposition as ``after`` or ``before`` to
-/// ``SequenceGraph.insert()`` to insert at every position it covers.
+/// graph that shares its nodes, and is invalid there only if one of its positions is not reachable.
+/// Pass a superposition as ``after`` or ``before`` to ``SequenceGraph.insert()`` to insert at
+/// every position it covers.
+#[gen_stub_pyclass]
 #[pyclass(name = "SuperPosition", unsendable)]
 #[derive(Clone)]
 pub struct PySuperPosition {
@@ -571,8 +584,10 @@ impl PySuperPosition {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySuperPosition {
+    /// Combine positions into one superposition (same as `position_a | position_b`).
     #[new]
     #[pyo3(signature = (*positions))]
     fn new(positions: &Bound<'_, PyTuple>) -> PyResult<Self> {
@@ -603,15 +618,17 @@ impl PySuperPosition {
     }
 
     /// The sequence graph this superposition steps through, or ``None`` when unattached.
-    #[getter]
-    fn sequence_graph(&self) -> Option<PySequenceGraph> {
+    #[getter(graph)]
+    fn py_graph(&self) -> Option<PySequenceGraph> {
         self.sequence_graph.clone()
     }
 
-    /// This superposition attached to ``sequence_graph``.
+    /// This superposition attached to ``graph``.
     ///
     /// Raises ``ValueError`` if any of its positions is not reachable in that sequence graph.
-    fn on(&self, sequence_graph: PyRef<'_, PySequenceGraph>) -> PyResult<Self> {
+    #[pyo3(signature = (graph))]
+    fn on(&self, graph: PyRef<'_, PySequenceGraph>) -> PyResult<Self> {
+        let sequence_graph = graph;
         let context = sequence_graph.require_context("SuperPosition.on")?;
         let graph = current_graph(context, &sequence_graph.id)?;
         Ok(Self {
@@ -693,7 +710,7 @@ mod tests {
         path::Path,
         sequence::Sequence,
     };
-    use pyo3::{Python, prepare_freethreaded_python};
+    use pyo3::Python;
 
     use super::{Position, PyPosition, PySuperPosition, current_graph};
     use crate::python_api::block_group::PySequenceGraph;
@@ -788,11 +805,11 @@ mod tests {
 
     #[test]
     fn test_position_add_without_fork_stays_a_position() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         let position = last_position(&context, &sequence_graph, &nodes, "ABCD", 0);
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let stepped = position
                 .__add__(python, 1)
                 .expect("should step within a node");
@@ -820,12 +837,12 @@ mod tests {
 
     #[test]
     fn test_position_add_at_fork_becomes_a_superposition() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         // The last position of ABCD steps into the first position of both EFGH and IJKL.
         let position = last_position(&context, &sequence_graph, &nodes, "ABCD", 3);
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let stepped = position
                 .__add__(python, 1)
                 .expect("should step to the fork");
@@ -846,12 +863,12 @@ mod tests {
 
     #[test]
     fn test_position_add_without_sequence_graph_raises_value_error() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         let mut position = last_position(&context, &sequence_graph, &nodes, "ABCD", 0);
         position.sequence_graph = None;
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let error = position
                 .__add__(python, 1)
                 .expect_err("stepping an unattached position should fail");
@@ -864,11 +881,11 @@ mod tests {
 
     #[test]
     fn test_position_add_past_terminal_raises_index_error() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         let position = last_position(&context, &sequence_graph, &nodes, "MNOP", 3);
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let error = position
                 .__add__(python, 1)
                 .expect_err("stepping past the end of the graph should fail");

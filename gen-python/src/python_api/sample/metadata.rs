@@ -8,6 +8,7 @@ use pyo3::{
     prelude::*,
     types::{PyBool, PyDict, PyFloat, PyInt, PyString},
 };
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::PySample;
 use crate::python_api::repository::run_context_operation_write;
@@ -54,6 +55,7 @@ impl PySample {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySample {
     /// Add metadata to this sample.
@@ -61,6 +63,7 @@ impl PySample {
     /// Keys must be strings; values must be strings, signed 64-bit integers,
     /// finite floats, or booleans. Existing keys are updated and other keys are preserved.
     /// The entire dictionary is validated before any values are written.
+    /// The update is recorded in operation history and follows branch checkout and reset.
     fn add_metadata(&self, metadata: &Bound<'_, PyDict>) -> PyResult<()> {
         let sample_name = &self.sample_name;
         let existing = self.sample_metadata(sample_name)?;
@@ -129,8 +132,8 @@ mod tests {
 
     #[test]
     fn test_sample_metadata_python_round_trip() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let context = setup_gen_on_disk();
             for name in ["sample", "other"] {
                 Sample::create(
@@ -151,32 +154,17 @@ mod tests {
             .expect("should create Python repository");
             let sample = Py::new(
                 python,
-                PySample::new(
-                    "default".to_string(),
-                    "sample".to_string(),
-                    vec![],
-                    context.clone(),
-                ),
+                PySample::new("default".to_string(), "sample".to_string(), context.clone()),
             )
             .expect("should create Python sample");
             let other = Py::new(
                 python,
-                PySample::new(
-                    "default".to_string(),
-                    "other".to_string(),
-                    vec![],
-                    context.clone(),
-                ),
+                PySample::new("default".to_string(), "other".to_string(), context.clone()),
             )
             .expect("should create other Python sample");
             let missing = Py::new(
                 python,
-                PySample::new(
-                    "default".to_string(),
-                    "missing".to_string(),
-                    vec![],
-                    context,
-                ),
+                PySample::new("default".to_string(), "missing".to_string(), context),
             )
             .expect("should create missing Python sample");
             py_run!(python, repository sample other missing, r#"

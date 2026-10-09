@@ -1,14 +1,15 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
-use gen_core::config::Workspace;
+use gen_core::{HashId, config::Workspace};
 use gen_models::{
     block_group::BlockGroup,
-    collection::Collection,
     db::DbContext,
     errors::OperationError,
-    history::dolt::{set_commit_author_email, set_commit_author_name},
-    node::Node,
+    history::{
+        HistoryStore,
+        dolt::{DoltHistoryStore, set_commit_author_email, set_commit_author_name},
+    },
     operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
@@ -16,12 +17,11 @@ use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 use super::{
     block_group::PySequenceGraph,
-    graph_node::PyGraphNode,
     hash_id::PyHashId,
-    jupyter_widget::{PyGraphController, build_widget},
     sample::PySample,
     utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
@@ -32,6 +32,7 @@ pub mod history;
 pub mod imports;
 pub mod remote;
 pub mod search;
+pub mod stitch;
 pub mod updates;
 
 /// Clones a remote Gen repository and opens it.
@@ -40,7 +41,9 @@ pub mod updates;
 /// current directory. When supplied, `path` is the exact destination and accepts
 /// strings or Python path-like objects. The destination may be an empty directory.
 /// `committer` and `email`, when given, become the committer identity recorded on operations
-/// made in this repository from now on.
+/// made in this repository from now on. A destination that only holds a freshly initialized,
+/// still-empty `.gen` workspace (for example from an earlier `Repository(path)`) is reused.
+#[gen_stub_pyfunction]
 #[pyfunction(name = "clone")]
 #[pyo3(signature = (url, path=None, committer=None, email=None))]
 pub fn clone_repository(
@@ -60,13 +63,53 @@ pub fn clone_repository(
             Workspace::new(destination)
         }
     };
-    python.allow_threads(|| {
+    discard_untouched_workspace(&workspace)?;
+    python.detach(|| {
         r#gen::commands::clone::clone_to_workspace(url, &workspace)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     })?;
     let repository = PyRepository::open_workspace(workspace)?;
     repository.set_committer(committer, email)?;
     Ok(repository)
+}
+
+const INITIALIZATION_OPERATION_COUNT: usize = 2;
+
+/// Removes a destination's `.gen` directory when it is the only entry and holds no graph data or
+/// operations, so agents that opened `Repository(path)` before cloning do not hit a spurious
+/// "not an empty directory" error. Anything with content is left for the clone to reject.
+fn discard_untouched_workspace(workspace: &Workspace) -> PyResult<()> {
+    let destination = workspace.base_dir();
+    let Ok(mut entries) = fs::read_dir(destination) else {
+        return Ok(());
+    };
+    let only_gen_dir = match (entries.next(), entries.next()) {
+        (Some(Ok(entry)), None) => entry.file_name() == ".gen",
+        _ => false,
+    };
+    if !only_gen_dir {
+        return Ok(());
+    }
+    let untouched = {
+        let repository = PyRepository::open_workspace(Workspace::new(destination))?;
+        let conn = repository.context.graph().conn();
+        let has_graphs = !BlockGroup::select(conn)
+            .load()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .is_empty();
+        // Initialization itself records the schema-migration and repository-init operations.
+        let has_user_operations = DoltHistoryStore::new(conn)
+            .log(Some(INITIALIZATION_OPERATION_COUNT + 1))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .len()
+            > INITIALIZATION_OPERATION_COUNT;
+        !has_graphs && !has_user_operations
+    };
+    if untouched {
+        fs::remove_dir_all(destination.join(".gen"))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Runs `op` in one graph transaction and records it as one operation.
@@ -95,8 +138,11 @@ where
 
 /// The main entry point for the gen Python module.
 ///
-/// This class manages the database connection and provides methods for
-/// querying and manipulating the database.
+/// `Repository(path)` opens, or creates, the repository at `path`. Import sequences into samples
+/// with the `import_*` methods, then edit and read them through the returned `Sample` and
+/// `SequenceGraph` objects. The repository itself holds history (branches and operations), remotes
+/// and search.
+#[gen_stub_pyclass]
 #[pyclass(name = "Repository", unsendable)]
 pub struct PyRepository {
     pub context: DbContext,
@@ -167,19 +213,9 @@ impl PyRepository {
         collection_name: &str,
         sample_name: &str,
     ) -> PySample {
-        let block_groups = Sample::get_block_groups(
-            self.context.graph().conn(),
-            collection_name,
-            sample_name,
-            None,
-        )
-        .into_iter()
-        .map(|bg| self.to_py_block_group(bg))
-        .collect();
         PySample::new(
             collection_name.to_string(),
             sample_name.to_string(),
-            block_groups,
             self.context.clone(),
         )
     }
@@ -209,7 +245,8 @@ impl PyRepository {
     }
 
     /// Sets the Dolt commit identity for operations recorded from now on. It applies to this
-    /// repository only, not to the `gen defaults` config, so it is set once at construction or clone.
+    /// repository only, not to the `gen defaults` config, so it is set once at construction or
+    /// clone.
     fn set_committer(&self, committer: Option<&str>, email: Option<&str>) -> PyResult<()> {
         if let Some(committer) = committer {
             if committer.is_empty() {
@@ -229,8 +266,13 @@ impl PyRepository {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Open the workspace at `path`, creating it if it does not exist. `path` may be the workspace
+    /// or its `.gen` directory; when omitted the workspace is discovered from the current
+    /// directory. `committer` and `email` become the identity recorded on operations made through
+    /// this object.
     #[new]
     #[pyo3(signature = (path = Option::<String>::None, committer = None, email = None))]
     fn new(path: Option<String>, committer: Option<&str>, email: Option<&str>) -> PyResult<Self> {
@@ -244,13 +286,17 @@ impl PyRepository {
         Ok(repository)
     }
 
+    /// Path of the `.gen` directory holding this repository's databases and assets.
     #[getter]
-    fn get_gen_dir(&self, py: Python<'_>) -> PyResult<PyObject> {
+    #[gen_stub(override_return_type(type_repr = "pathlib.Path", imports = ("pathlib")))]
+    fn get_gen_dir(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         path_to_py_path(py, &self.context.workspace().ensure_gen_dir())
     }
 
-    #[getter]
-    fn get_db_path(&self, py: Python<'_>) -> PyResult<PyObject> {
+    /// Path of the graph database file.
+    #[getter(_db_path)]
+    #[gen_stub(skip)]
+    fn get_db_path(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let path = self
             .context
             .workspace()
@@ -261,6 +307,9 @@ impl PyRepository {
 
     // Raw database access
 
+    /// Run raw SQL against the graph database. Low-level: prefer the editing and import APIs, which
+    /// record operations.
+    #[gen_stub(skip)]
     fn execute(&self, query: &str) -> PyResult<()> {
         self.context
             .graph()
@@ -270,36 +319,105 @@ impl PyRepository {
         Ok(())
     }
 
-    fn query(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
+    /// Run raw SQL against the graph database and return rows. Low-level: prefer `graph.search()`,
+    /// `graph.region()` and the typed getters.
+    #[gen_stub(skip)]
+    fn query(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Vec<Py<PyAny>>>> {
         py_query(py, self.context.graph().conn(), query)
     }
 
     // SequenceGraph queries
 
-    fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
+    /// Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use
+    /// it to rebuild a graph handle in another Repository object, for example in a worker thread.
+    fn get_sequence_graph(
+        &self,
+        #[gen_stub(override_type(type_repr = "HashId | str", imports = ()))] id: &Bound<'_, PyAny>,
+    ) -> PyResult<PySequenceGraph> {
+        let hash_id = match id.extract::<PyRef<PyHashId>>() {
+            Ok(hash_id) => hash_id.gen_hash_id()?,
+            Err(_) => HashId::try_from(id.extract::<&str>()?)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        };
         let conn = self.context.graph().conn();
         let block_group =
-            BlockGroup::get_by_id(conn, &id.hash_id, None).map_err(block_group_err_to_pyerr)?;
+            BlockGroup::get_by_id(conn, &hash_id, None).map_err(block_group_err_to_pyerr)?;
         Ok(self.to_py_block_group(block_group))
     }
 
-    fn get_sequence_graphs(&self) -> PyResult<Vec<PySequenceGraph>> {
+    /// Return a sample view when sequence graphs exist in this collection.
+    ///
+    /// `collection` defaults to the repository's default collection.
+    #[pyo3(signature = (name, collection=None))]
+    fn get_sample(&self, name: &str, collection: Option<&str>) -> PyResult<PySample> {
+        let collection = collection
+            .map(str::to_string)
+            .unwrap_or_else(|| self.get_default_collection());
+        let sample = self.block_groups_in_sample(&collection, name);
+        if Sample::get_block_groups(self.context.graph().conn(), &collection, name, None).is_empty()
+        {
+            return Err(PyValueError::new_err(format!(
+                "sample '{name}' has no sequence graphs in collection '{collection}'"
+            )));
+        }
+        Ok(sample)
+    }
+
+    /// Return a sample view for this repository and collection, whether or not graphs exist yet.
+    ///
+    /// The handle scopes sequence graphs by sample name and collection; creating it does not
+    /// change repository data. Use it with `import_sequence` or another graph creation method.
+    /// `collection` defaults to the repository's default collection.
+    #[pyo3(signature = (name, collection=None))]
+    fn sample(&self, name: &str, collection: Option<&str>) -> PyResult<PySample> {
+        if name.is_empty() {
+            return Err(PyValueError::new_err("sample name must not be empty"));
+        }
+        Ok(PySample::new(
+            collection
+                .map(str::to_string)
+                .unwrap_or_else(|| self.get_default_collection()),
+            name.to_string(),
+            self.context.clone(),
+        ))
+    }
+
+    /// Return the sequence graphs in the repository, across all samples and collections. Pass
+    /// `name`, `sample` (a name or a `Sample`) and `collection` to keep only the matching ones.
+    #[pyo3(signature = (name=None, sample=None, collection=None))]
+    fn get_sequence_graphs(
+        &self,
+        name: Option<&str>,
+        #[gen_stub(override_type(type_repr = "str | Sample | None", imports = ()))] sample: Option<
+            &Bound<'_, PyAny>,
+        >,
+        collection: Option<&str>,
+    ) -> PyResult<Vec<PySequenceGraph>> {
+        let (sample_name, sample_collection) = match sample {
+            Some(sample) => match sample.extract::<PyRef<PySample>>() {
+                Ok(sample) => (
+                    Some(sample.sample_name.clone()),
+                    Some(sample.collection_name.clone()),
+                ),
+                Err(_) => (Some(sample.extract::<String>()?), None),
+            },
+            None => (None, None),
+        };
+        let collection = collection.map(str::to_string).or(sample_collection);
         let conn = self.context.graph().conn();
         Ok(BlockGroup::select(conn)
             .load()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
             .into_iter()
-            .map(|bg| self.to_py_block_group(bg))
-            .collect())
-    }
-
-    fn get_sequence_graphs_by_collection(
-        &self,
-        collection_name: &str,
-    ) -> PyResult<Vec<PySequenceGraph>> {
-        let conn = self.context.graph().conn();
-        Ok(Collection::get_block_groups(conn, collection_name, None)
-            .into_iter()
+            .filter(|bg| {
+                name.is_none_or(|name| bg.name == name)
+                    && sample_name
+                        .as_ref()
+                        .is_none_or(|sample| bg.sample_name == *sample)
+                    && collection
+                        .as_ref()
+                        .is_none_or(|collection| bg.collection_name == *collection)
+            })
             .map(|bg| self.to_py_block_group(bg))
             .collect())
     }
@@ -314,67 +432,18 @@ impl PyRepository {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
         {
             let py_bg = self.to_py_block_group(bg);
-            match samples.iter_mut().find(|sample| {
+            if !samples.iter().any(|sample| {
                 sample.collection_name == py_bg.collection_name
                     && sample.sample_name == py_bg.sample_name
             }) {
-                Some(sample) => sample.sequence_graphs.push(py_bg),
-                None => samples.push(PySample::new(
+                samples.push(PySample::new(
                     py_bg.collection_name.clone(),
                     py_bg.sample_name.clone(),
-                    vec![py_bg],
                     self.context.clone(),
-                )),
+                ));
             }
         }
         Ok(samples)
-    }
-
-    // Plot
-
-    /// show_history : bool, optional
-    ///     Keep retired edit-site and pruned edges in the graph, dimmed,
-    ///     instead of removing them along with the nodes only they reach.
-    ///     Defaults to ``False``.
-    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None, show_history=false))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors plot()'s Python signature"
-    )]
-    fn plot(
-        &self,
-        py: Python<'_>,
-        sequence_graph: &PySequenceGraph,
-        rows: Option<u32>,
-        cols: Option<u32>,
-        detail: Option<&str>,
-        colors: Option<PyObject>,
-        show_history: bool,
-    ) -> PyResult<PyObject> {
-        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph, show_history)?;
-        if let Some(node_detail) = detail {
-            ctrl.set_detail(node_detail)?;
-        }
-        let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols, colors)
-    }
-
-    fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
-        let sequences_by_node_id = Node::get_sequences_by_node_ids(
-            self.context.graph().conn(),
-            self.context.workspace(),
-            &[node_key.node_id],
-            None,
-        );
-        let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Node with id {:?} not found",
-                node_key.node_id
-            ))
-        })?;
-        sequence
-            .get_sequence(node_key.sequence_start, node_key.sequence_end)
-            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
     }
 }
 
@@ -408,8 +477,8 @@ mod python_tests {
 
     #[test]
     fn test_repository_creation() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let tmp_dir = tempdir().unwrap();
             // Escape backslashes so a Windows path (e.g. `C:\Users\...`) survives
             // interpolation into a double-quoted Python string literal; otherwise
@@ -423,7 +492,7 @@ mod python_tests {
                     r#"
                     repo = repository("{path}")
                     assert hasattr(repo, "gen_dir")
-                    assert hasattr(repo, "db_path")
+                    assert hasattr(repo, "_db_path")
                     "#
                 )
             );
@@ -433,8 +502,8 @@ mod python_tests {
     #[cfg(unix)]
     #[test]
     fn test_clone_returns_open_repository() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let source = make_repo(py);
             let fasta_dir = tempdir().unwrap();
             let fasta = write_fasta(&fasta_dir, "test.fa", "chr1", "ACGTACGT");
@@ -457,7 +526,7 @@ mod python_tests {
             let cloned = clone_repository(py, &remote_url, Some(destination), None, None)
                 .expect("should clone and open repository");
 
-            let block_groups = cloned.get_sequence_graphs().unwrap();
+            let block_groups = cloned.get_sequence_graphs(None, None, None).unwrap();
             assert_eq!(
                 block_groups.len(),
                 1,
@@ -472,8 +541,8 @@ mod python_tests {
 
     #[test]
     fn test_import_fasta_creates_block_group() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
@@ -489,7 +558,10 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             assert_eq!(block_groups.len(), 1);
             assert_eq!(block_groups[0].name, "chr1");
         });
@@ -497,8 +569,8 @@ mod python_tests {
 
     #[test]
     fn test_import_fasta_accepts_explicit_fai_and_gzi_keywords() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
@@ -542,8 +614,8 @@ mod python_tests {
 
     #[test]
     fn test_import_fasta_duplicate_gives_specific_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
@@ -572,9 +644,134 @@ mod python_tests {
     }
 
     #[test]
+    fn test_import_sequence_returns_graph_and_builds_sample_in_a_loop() {
+        Python::initialize();
+        Python::attach(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                first = py_repo.import_sequence("ACGTACGT", "chr1", sample="wt")
+                assert first.name == "chr1" and first.sample.name == "wt"
+                wt = next(sample for sample in py_repo.samples if sample.name == "wt")
+                second = py_repo.import_sequence("TTTT", "chr2", sample=wt)
+                assert second.sample.name == "wt"
+                third = py_repo.import_sequence("GGGG", "chr3", sample="wt")
+                samples = {sample.name: sample for sample in py_repo.samples}
+                assert sorted(graph.name for graph in samples["wt"]) == ["chr1", "chr2", "chr3"]
+                other = py_repo.import_sequence("GGGG", "chrA", sample="other")
+                assert len(py_repo.get_sequence_graphs()) == 4
+                for not_a_sample in (42, first):
+                    try:
+                        py_repo.import_sequence("ACGT", "x", sample=not_a_sample)
+                    except TypeError as error:
+                        assert "sample must be" in str(error), str(error)
+                    else:
+                        raise AssertionError(f"expected TypeError for {not_a_sample!r}")
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_rejects_bad_input() {
+        Python::initialize();
+        Python::attach(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                for args, message in [
+                    (("ACGT",), "name is required"),
+                    (("ACGT", ""), "must not be empty"),
+                    (("", "chr1"), "is empty"),
+                    ((42, "chr1"), "must be a string"),
+                ]:
+                    try:
+                        py_repo.import_sequence(*args)
+                    except ValueError as error:
+                        assert message in str(error), str(error)
+                    else:
+                        raise AssertionError(f"expected ValueError for {args!r}")
+                assert len(py_repo.get_sequence_graphs(None, None, None)) == 0
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_duplicate_gives_specific_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                py_repo.import_sequence("ACGT", "chr1", sample="a")
+                try:
+                    py_repo.import_sequence("ACGT", "chr1", sample="a")
+                except RuntimeError as error:
+                    assert "already exist" in str(error), str(error)
+                else:
+                    raise AssertionError("expected duplicate import to fail")
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_reusing_a_name_with_new_contents_fails() {
+        Python::initialize();
+        Python::attach(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                py_repo.import_sequence("ACGT", "chr1", sample="a")
+                try:
+                    py_repo.import_sequence("TTTT", "chr1", sample="a")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("expected reusing a name in a sample to fail")
+                assert len(py_repo.get_sequence_graphs(None, None, None)) == 1
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_circular_and_reference() {
+        Python::initialize();
+        Python::attach(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                graph = py_repo.import_sequence("ACGTAC", "plasmid", circular=True)
+                assert graph.name == "plasmid"
+                reference = py_repo.import_reference_sequence("GGCC", "ref", name="ring", circular=True)
+                assert reference.name == "ring" and reference.sample.name == "ref"
+                try:
+                    py_repo.import_reference_sequence("TTTT", "ref", name="ring")
+                except RuntimeError as error:
+                    assert "already exists" in str(error), str(error)
+                else:
+                    raise AssertionError("expected reusing a name in a reference sample to fail")
+                "#
+            );
+        });
+    }
+
+    #[test]
     fn test_search_finds_exact_match() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -600,8 +797,8 @@ mod python_tests {
 
     #[test]
     fn test_search_no_match() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -624,8 +821,8 @@ mod python_tests {
 
     #[test]
     fn test_build_index_creates_file() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -641,10 +838,13 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             let bg = &block_groups[0];
 
-            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4).unwrap();
 
             let index_dir = py_repo
                 .borrow(py)
@@ -662,8 +862,8 @@ mod python_tests {
 
     #[test]
     fn test_search_with_index_finds_match() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -679,7 +879,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4).unwrap();
             let hits = py_repo.borrow(py).search("ACGT", None, "dna").unwrap();
             assert!(!hits.is_empty(), "Expected match when searching with index");
         });
@@ -687,8 +887,8 @@ mod python_tests {
 
     #[test]
     fn test_clear_index_removes_file() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -704,10 +904,13 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             let bg = &block_groups[0];
 
-            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4).unwrap();
             let index_dir = py_repo
                 .borrow(py)
                 .context
@@ -727,8 +930,8 @@ mod python_tests {
 
     #[test]
     fn test_blockgroup_build_and_clear_index() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -744,7 +947,10 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             let bg = &block_groups[0];
             let bg_id = bg.id;
 

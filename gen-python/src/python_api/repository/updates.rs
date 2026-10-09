@@ -1,24 +1,39 @@
+use std::path::Path;
+
 use r#gen::{
     fasta::FastaError,
-    graphs::combinatorial_library::{SequencePart, parse_library},
+    graphs::combinatorial_library::parse_library,
     updates::{
         fasta::update_with_fasta,
         gaf::update_with_gaf,
         genbank::update_with_genbank,
         gfa::update_with_gfa,
         library::update_with_library,
-        sequence::update_with_sequence,
         vcf::{VcfError, update_with_vcf},
     },
 };
 use gen_models::{errors::OperationError, sample::Sample};
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3::{
+    exceptions::{PyFileNotFoundError, PyRuntimeError},
+    prelude::*,
+};
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::{PyRepository, run_context_operation_write};
-use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
+use crate::python_api::{
+    sample::PySample,
+    sequence::{PySequence, library_parts},
+    utils::absolute_path_string,
+};
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Replace the region `region_name` of `sample` with the sequence in a FASTA file, storing the
+    /// result as `new_sample`. Returns the new `Sample`.
+    ///
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample, new_sample, region_name, collection=None))]
     fn update_with_fasta(
         &self,
@@ -28,6 +43,7 @@ impl PyRepository {
         region_name: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -66,6 +82,11 @@ impl PyRepository {
         )
     }
 
+    /// Apply the graph in a GFA file to `sample`, storing the result as `new_sample`. Returns the
+    /// new `Sample`.
+    ///
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample, new_sample, collection=None))]
     fn update_with_gfa(
         &self,
@@ -74,6 +95,7 @@ impl PyRepository {
         new_sample: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -96,6 +118,11 @@ impl PyRepository {
         )
     }
 
+    /// Apply a GAF alignment file with its CSV of replacement sequences, writing the result to
+    /// `sample` (derived from `parent_sample` when given). Returns that `Sample`.
+    ///
+    /// `filename` and `csv` are path strings; a relative path is resolved against the current
+    /// working directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, csv, sample, parent_sample=None, collection=None))]
     fn update_with_gaf(
         &self,
@@ -105,6 +132,8 @@ impl PyRepository {
         parent_sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
+        let csv = absolute_path_string(&csv)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -129,16 +158,32 @@ impl PyRepository {
         )
     }
 
+    /// Apply variants from a VCF file to the `reference` sample (a name or list of names), creating
+    /// one `Sample` per VCF sample column (or only `sample`). With `in_place=True` the reference is
+    /// edited instead. Returns the list of `Sample` objects.
+    ///
+    /// `genotype` (for example `"0/1"`) is the genotype to assign when the VCF has no genotype data
+    /// of its own. `filename` is a path string; a relative path is resolved against the current
+    /// working directory. `collection` defaults to the default collection. A contig name that
+    /// differs from the graph's name needs `add_reference_alias()`.
     #[pyo3(signature = (filename, reference=None, genotype=None, sample=None, in_place=false, collection=None))]
     fn update_with_vcf(
         &self,
         filename: String,
+        #[gen_stub(override_type(type_repr = "str | list[str] | None", imports = ()))]
         reference: Option<Bound<'_, PyAny>>,
         genotype: Option<String>,
         sample: Option<String>,
         in_place: bool,
         collection: Option<String>,
     ) -> PyResult<Vec<PySample>> {
+        let filename = absolute_path_string(&filename)?;
+        // The VCF reader unwraps a failed open and would panic instead of raising.
+        if !Path::new(&filename).is_file() {
+            return Err(PyFileNotFoundError::new_err(format!(
+                "no file at '{filename}'"
+            )));
+        }
         let parent_samples = match reference {
             None => vec![],
             Some(ref obj) => {
@@ -190,6 +235,11 @@ impl PyRepository {
         )
     }
 
+    /// Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
+    /// allows graphs not yet in the sample. Returns the updated `Sample`.
+    ///
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample, create_missing=false, collection=None))]
     fn update_with_genbank(
         &self,
@@ -198,6 +248,7 @@ impl PyRepository {
         create_missing: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
@@ -234,63 +285,23 @@ impl PyRepository {
         )
     }
 
-    #[pyo3(signature = (sequence, sample, new_sample, region_name, no_reference_path_update=false, collection=None))]
-    fn update_with_sequence(
-        &self,
-        sequence: String,
-        sample: String,
-        new_sample: String,
-        region_name: String,
-        no_reference_path_update: bool,
-        collection: Option<String>,
-    ) -> PyResult<PySample> {
-        let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_context_operation_write(
-            &self.context,
-            |ctx| {
-                let operation_summary = update_with_sequence(
-                    ctx,
-                    &collection,
-                    &sample,
-                    &new_sample,
-                    &region_name,
-                    &sequence,
-                    no_reference_path_update,
-                )
-                .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
-                Ok((
-                    self.block_groups_in_sample(&collection, &new_sample),
-                    operation_summary,
-                ))
-            },
-            |err| PyRuntimeError::new_err(format!("Update failed: {err}")),
-        )
-    }
-
+    /// Replace the region `path_name` of `sample` with a combinatorial library built from
+    /// `parts_list` (columns of named `Sequence` alternatives), storing the result as
+    /// `new_sample_name`. Returns the new `Sample`.
+    ///
+    /// `collection` defaults to the default collection.
     #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
     fn update_with_library(
         &self,
         sample: Option<String>,
         new_sample_name: String,
         path_name: String,
-        parts_list: Vec<Vec<PySequencePart>>,
+        parts_list: Vec<Vec<PySequence>>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        let rust_parts_list: Vec<Vec<SequencePart>> = parts_list
-            .iter()
-            .map(|parts| {
-                parts
-                    .iter()
-                    .map(|p| SequencePart {
-                        name: p.name.clone(),
-                        sequence: p.sequence.clone(),
-                        sequence_length: p.sequence_length,
-                    })
-                    .collect()
-            })
-            .collect();
+        let rust_parts_list = library_parts(&parts_list)?;
         run_context_operation_write(
             &self.context,
             |ctx| {
@@ -314,6 +325,13 @@ impl PyRepository {
         )
     }
 
+    /// Like `update_with_library`, with the parts given as a named-parts FASTA (`parts`) and a
+    /// headerless CSV (`library`). Returns the new `Sample`.
+    ///
+    /// `sample` is the sample to update, `new_sample` the sample created for the result, and
+    /// `path_name` the region of `sample` that the library replaces. `parts` and `library` are path
+    /// strings; a relative path is resolved against the current working directory. `collection`
+    /// defaults to the default collection.
     #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
     fn update_with_library_files(
         &self,
@@ -324,6 +342,8 @@ impl PyRepository {
         parts: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let parts = absolute_path_string(&parts)?;
+        let library = absolute_path_string(&library)?;
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());

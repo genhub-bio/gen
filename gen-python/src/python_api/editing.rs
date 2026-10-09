@@ -177,8 +177,9 @@ pub(crate) fn insert_at_positions(
     site: &InsertSite<'_>,
     sequence: &str,
     message: Option<&str>,
-    stack: bool,
+    mode: EditMode,
 ) -> PyResult<GraphLocus> {
+    let EditMode { stack } = mode;
     if sequence.is_empty() {
         return Err(PyValueError::new_err("insert needs a non-empty sequence"));
     }
@@ -783,6 +784,12 @@ pub(crate) struct EditRequest<'a> {
     pub kind: EditKind,
     pub sequence: &'a str,
     pub message: Option<&'a str>,
+    pub mode: EditMode,
+}
+
+/// The switch every editing method takes to choose how an edit is routed.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct EditMode {
     /// Add the edit as an alternative next to the target instead of superseding it. The
     /// current path is left unchanged.
     pub stack: bool,
@@ -864,7 +871,7 @@ fn apply_edit(
             let span = locate_span(&graph, &canonical)?;
 
             // Capture the path before writing the edited routes.
-            let path_before = if request.stack {
+            let path_before = if request.mode.stack {
                 None
             } else {
                 current_path(conn, &source.id)?
@@ -872,7 +879,7 @@ fn apply_edit(
 
             let stored = stored_sequence(request.sequence, span.is_reverse);
             let existing = BlockGroupEdge::edges_for_block_group(conn, &source.id, None);
-            let lone = if request.stack {
+            let lone = if request.mode.stack {
                 None
             } else {
                 lone_insertion(&existing, &span)
@@ -905,9 +912,9 @@ fn apply_edit(
                     .filter(|port| !is_terminal(port.node_id))
                     .collect(),
                 cut_ports: BTreeSet::new(),
-                stack: request.stack,
+                stack: request.mode.stack,
             };
-            if !request.stack {
+            if !request.mode.stack {
                 plan.cut_ports = plan.split_ports.clone();
             }
             let mut removed = None;
@@ -1494,11 +1501,13 @@ mod tests {
         sample::{NewSample, Sample},
         sequence::Sequence,
     };
-    use pyo3::{Py, PyErr, PyResult, Python, prepare_freethreaded_python};
+    use pyo3::{Py, PyErr, PyResult, Python};
 
     use crate::python_api::{
         block_group::PySequenceGraph,
-        editing::{EditKind, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions},
+        editing::{
+            EditKind, EditMode, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions,
+        },
         graph_search::PyGraphLocus,
         position::Position,
     };
@@ -1535,8 +1544,17 @@ mod tests {
             sequence: &str,
             stack: bool,
         ) -> PyResult<GraphLocus> {
-            prepare_freethreaded_python();
-            insert_at_positions(&self.graph, &site, sequence, None, stack)
+            self.insert_with(site, sequence, EditMode { stack })
+        }
+
+        fn insert_with(
+            &self,
+            site: InsertSite<'_>,
+            sequence: &str,
+            mode: EditMode,
+        ) -> PyResult<GraphLocus> {
+            Python::initialize();
+            insert_at_positions(&self.graph, &site, sequence, None, mode)
         }
 
         /// Replaces or deletes the sequence of `locus`, passed in as a Python `Locus`.
@@ -1546,8 +1564,19 @@ mod tests {
             kind: EditKind,
             sequence: &str,
         ) -> PyResult<Option<GraphLocus>> {
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            self.edit_with(locus, kind, sequence, EditMode::default())
+        }
+
+        /// Like `edit`, with the stacking and path switches given.
+        fn edit_with(
+            &self,
+            locus: GraphLocus,
+            kind: EditKind,
+            sequence: &str,
+            mode: EditMode,
+        ) -> PyResult<Option<GraphLocus>> {
+            Python::initialize();
+            Python::attach(|python| {
                 let locus = Py::new(python, PyGraphLocus::from_locus(locus))
                     .expect("should wrap the locus");
                 edit_sequence_graph(
@@ -1557,7 +1586,7 @@ mod tests {
                         kind,
                         sequence,
                         message: None,
-                        stack: false,
+                        mode,
                     },
                 )
             })
@@ -1565,8 +1594,8 @@ mod tests {
 
         /// Replaces the sequence of `locus` as a stacked alternative.
         fn edit_stacked(&self, locus: GraphLocus, sequence: &str) -> PyResult<GraphLocus> {
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let locus = Py::new(python, PyGraphLocus::from_locus(locus))
                     .expect("should wrap the locus");
                 edit_sequence_graph(
@@ -1576,7 +1605,7 @@ mod tests {
                         kind: EditKind::Replace,
                         sequence,
                         message: None,
-                        stack: true,
+                        mode: EditMode { stack: true },
                     },
                 )
                 .map(|inserted| inserted.expect("should return the replacement"))
@@ -1607,8 +1636,8 @@ mod tests {
     }
 
     fn error_message(error: PyErr) -> String {
-        prepare_freethreaded_python();
-        Python::with_gil(|python| error.value(python).to_string())
+        Python::initialize();
+        Python::attach(|python| error.value(python).to_string())
     }
 
     fn setup_sample(context: &DbContext) {
@@ -1625,7 +1654,8 @@ mod tests {
     }
 
     /// Builds sequence graph `name` from `edges`, each joining the last position of one node to
-    /// the first position of the next on a chromosome index. The current path reads the nodes in `path`.
+    /// the first position of the next on a chromosome index. The current path reads the nodes in
+    /// `path`.
     fn build_graph(
         context: &DbContext,
         name: &str,
@@ -1814,15 +1844,15 @@ mod tests {
         use r#gen::test_helpers::setup_gen_on_disk;
         use gen_models::{block_group::BlockGroup, db::DbContext};
         use pyo3::{
-            Py, PyRef, Python, prepare_freethreaded_python,
+            Py, PyRef, Python,
             types::{PyDict, PyDictMethods as _},
         };
 
         use crate::python_api::{block_group::PySequenceGraph, repository::PyRepository};
 
         fn run_edit_test(script: &str, expected: &str) {
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let context = setup_gen_on_disk();
                 let repository = Py::new(
                     python,
@@ -1892,10 +1922,8 @@ assert len(annotations) == 3
 for annotation in annotations:
     assert annotation.locus is not None
     assert len(annotation.locus) == len(annotation) == 3
-    for segment, part in zip(annotation.segments, annotation.locus.slices):
-        assert len(graph.get_node_sequence(part.node)) == segment['end'] - segment['start']
-        assert part.strand == segment['strand']
-        assert part.start == 0 and part.end == 3
+    assert len(annotation.locus.sequence) == 3
+    assert len(annotation.locus.start().node.sequence) >= 3
 assert any(annotation.metadata for annotation in annotations)
 "#,
                 "AAACCCGGGTTTAAACCCGGGTTT",
@@ -1907,12 +1935,12 @@ assert any(annotation.metadata for annotation in annotations)
             run_edit_test(
                 r#"
 annotation = next(item for item in graph.annotations if item.name == 'second')
-before = annotation.segments
+before = annotation.locus
 locus = annotation.locus
 [whole] = graph.search('AAACCCGGGTTTAAACCCGGGTTT', sequence_kind='exact')
 graph.insert('AG', after=whole.start())
-assert annotation.segments == before
-assert next(item for item in graph.annotations if item.id == annotation.id).segments == before
+assert annotation.locus == before
+assert next(item for item in graph.annotations if item.id == annotation.id).locus == before
 graph.delete(locus)
 "#,
                 "AAGAACCCGGGAAACCCGGGTTT",
@@ -1947,7 +1975,6 @@ graph.insert('C', after=inserted.end())
         }
 
         #[test]
-        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands."]
         fn test_edit_reverse_strand_targets() {
             run_edit_test(
                 r#"
@@ -2018,7 +2045,6 @@ assert child[0].search('AAAGGGTTT', sequence_kind='exact')
         }
 
         #[test]
-        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands."]
         fn test_edit_adjacent_deletions_and_terminal_insertions() {
             run_edit_test(
                 r#"
@@ -2055,7 +2081,7 @@ assert len(repo.get_operations()) == count
         }
 
         #[test]
-        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands."]
+        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands. later targets are regions, which resolve against the current path."]
         fn test_edit_bases_next_to_an_earlier_deletion() {
             run_edit_test(
                 r#"
@@ -2089,7 +2115,7 @@ assert len(repo.get_operations()) == count + 6
 [whole] = graph.search('AAACCCGGGTTTAAACCCGGGTTT', sequence_kind='exact')
 graph.insert('AG', after=whole.slice(2, 3).start())
 target = graph.search('AAGCC', sequence_kind='exact')[0]
-assert len(target.slices) == 3
+assert len({target[index].node for index in range(len(target))}) == 3
 inserted = graph.replace(target.reverse_complement(), 'TCA')
 assert len(inserted) == 3
 "#,
@@ -2144,7 +2170,7 @@ assert len(repo.get_operations()) == count
 
         use super::{END, Fixture, START, dna_bubble, error_message, fixture, strings};
         use crate::python_api::{
-            editing::{EditKind, EditRequest, InsertSite, apply_edit},
+            editing::{EditKind, EditMode, EditRequest, InsertSite, apply_edit},
             locus::GraphLocusExt as _,
         };
 
@@ -2232,7 +2258,7 @@ assert len(repo.get_operations()) == count
                             kind,
                             sequence: replacement,
                             message: None,
-                            stack,
+                            mode: EditMode { stack },
                         },
                     )
                     .unwrap_or_else(|error| panic!("{}", error_message(error)));
@@ -2504,7 +2530,7 @@ assert len(repo.get_operations()) == count
 
         use super::{END, Fixture, START, bubble, error_message, fixture, strings};
         use crate::python_api::{
-            editing::{EditKind, InsertSite},
+            editing::{EditKind, EditMode, InsertSite},
             position::{Neighbor, Position, neighbors, step},
         };
 
@@ -2818,11 +2844,15 @@ assert len(repo.get_operations()) == count
         }
 
         #[test]
-        #[ignore = "Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands."]
         fn test_stepping_crosses_routing_blocks_without_consuming_bases() {
             let fixture = bubble();
             fixture
-                .edit(slice(&fixture, "MNOP", 0, 2), EditKind::Delete, "")
+                .edit_with(
+                    slice(&fixture, "MNOP", 0, 2),
+                    EditKind::Delete,
+                    "",
+                    EditMode { stack: false },
+                )
                 .unwrap_or_else(|error| panic!("{}", error_message(error)));
             let graph = super::super::current_graph(&fixture.context, &fixture.graph.id)
                 .unwrap_or_else(|error| panic!("{}", error_message(error)));
@@ -3023,7 +3053,7 @@ assert len(repo.get_operations()) == count
             sequence::reverse_complement,
         };
         use pyo3::{
-            Py, Python, prepare_freethreaded_python,
+            Py, Python,
             types::{PyDict, PyDictMethods as _},
         };
 
@@ -3095,7 +3125,8 @@ assert len(repo.get_operations()) == count
         }
 
         /// `ABCD` reads into `MNOP` directly as well as through `EFGH`, so one step from `ABCD`
-        /// lands on the first position of `EFGH` and on the first position of `MNOP`, which `EFGH` reads
+        /// lands on the first position of `EFGH` and on the first position of `MNOP`, which `EFGH`
+        /// reads
         /// into.
         #[test]
         fn test_step_past_a_skipped_arm_covers_the_arm_and_the_base_after_it() {
@@ -3855,8 +3886,8 @@ assert len(repo.get_operations()) == count
         #[test]
         fn test_python_position_arithmetic_and_insert() {
             let fixture = bubble();
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let graph = Py::new(python, fixture.graph.clone()).expect("should wrap graph");
                 let locals = PyDict::new(python);
                 locals.set_item("graph", &graph).expect("should bind graph");
@@ -3866,7 +3897,7 @@ assert len(repo.get_operations()) == count
                 let script = r#"
 [abcd] = graph.search('ABCD', sequence_kind='exact')
 last = SuperPosition(abcd.end())
-assert len(last) == 1 and last.sequence_graph is not None
+assert len(last) == 1 and last.graph is not None
 assert last + 1 == last.on(graph) + 1
 last = last.on(graph)
 fork = last + 1
@@ -3885,7 +3916,7 @@ join = SuperPosition(efgh.end()).on(graph) + 1
 assert join == SuperPosition(ijkl.end()).on(graph) + 1
 assert len(join) == 1
 arm_ends = SuperPosition(efgh.end(), ijkl.end())
-assert arm_ends.sequence_graph is not None
+assert arm_ends.graph is not None
 assert arm_ends == SuperPosition(efgh.end()) | SuperPosition(ijkl.end())
 assert arm_ends == efgh.end() | ijkl.end()
 assert efgh.end() + 1 == ijkl.end() + 1

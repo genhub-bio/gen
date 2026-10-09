@@ -10,7 +10,9 @@ publish = false
 
 [lib]
 name = "gen_python"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+# Docstrings hold Python examples for the generated stubs, not Rust doctests.
+doctest = false
 
 [features]
 default = []
@@ -28,20 +30,21 @@ gen-models = { path = "../gen-models", version = "0.3.1" }
 gen-tui = { path = "../gen-tui", version = "0.3.1", default-features = false }
 log = "0.4.26"
 petgraph = "0.6.5"
+pyo3-stub-gen = "0.23"
 ratatui = { version = "0.30.0", default-features = false }
 rusqlite = { package = "rusqdoltlite", version = "0.40.20", features = ["bundled", "array", "limits", "fallible_uint"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 
 [dependencies.pyo3]
-version = "0.25.1"
+version = "0.27"
 features = ["multiple-pymethods", "generate-import-lib"]
 
 [dev-dependencies]
 tempfile = "3"
 
 [build-dependencies]
-pyo3-build-config = "0.25"
+pyo3-build-config = "0.27"
 
 [workspace]
 members = ["."]

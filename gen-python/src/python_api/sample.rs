@@ -9,6 +9,7 @@ use pyo3::{
     exceptions::{PyIndexError, PyRuntimeError, PyValueError},
     prelude::*,
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::python_api::{
     block_group::PySequenceGraph,
@@ -19,65 +20,84 @@ use crate::python_api::{
 
 mod metadata;
 
-/// The sequence graphs produced by a single import/update/derive call, all
-/// within one sample.
+/// A repository-bound view of sequence graphs sharing a sample name and collection.
 ///
-/// Acts like a read-only list of ``SequenceGraph``: index it, iterate it, or
-/// call ``len()`` on it. Indexing out of range raises ``IndexError``.
+/// Create a handle with ``Repository.sample`` or retrieve an existing one with
+/// ``Repository.get_sample``. A handle can exist before any matching sequence graph does; it does
+/// not create repository data by itself. It queries the repository whenever its graphs are
+/// accessed, so the membership stays current. Acts like a read-only list of ``SequenceGraph``:
+/// index it, iterate it, or call ``len()`` on it. Each iteration uses the graphs present when that
+/// iteration starts. Indexing out of range raises ``IndexError``.
+#[gen_stub_pyclass]
 #[pyclass(name = "Sample", unsendable)]
 #[derive(Clone)]
 pub struct PySample {
-    #[pyo3(get)]
+    /// Collection this sample belongs to.
+    #[pyo3(get, name = "collection")]
     pub collection_name: String,
-    #[pyo3(get)]
+    /// Name of the sample.
+    #[pyo3(get, name = "name")]
     pub sample_name: String,
-    #[pyo3(get)]
-    pub sequence_graphs: Vec<PySequenceGraph>,
     pub(crate) context: DbContext,
 }
 
 impl PySample {
-    pub fn new(
-        collection_name: String,
-        sample_name: String,
-        sequence_graphs: Vec<PySequenceGraph>,
-        context: DbContext,
-    ) -> Self {
+    pub fn new(collection_name: String, sample_name: String, context: DbContext) -> Self {
         PySample {
             collection_name,
             sample_name,
-            sequence_graphs,
             context,
         }
     }
+
+    fn load_sequence_graphs(&self) -> Vec<PySequenceGraph> {
+        Sample::get_block_groups(
+            self.context.graph().conn(),
+            &self.collection_name,
+            &self.sample_name,
+            None,
+        )
+        .into_iter()
+        .map(|block_group| PySequenceGraph {
+            id: block_group.id,
+            collection_name: block_group.collection_name,
+            sample_name: block_group.sample_name,
+            name: block_group.name,
+            context: Some(self.context.clone()),
+        })
+        .collect()
+    }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySample {
     /// All sequence graphs held by this sample.
     #[getter]
     fn sequence_graphs(&self) -> Vec<PySequenceGraph> {
-        self.sequence_graphs.clone()
+        self.load_sequence_graphs()
     }
 
     fn __len__(&self) -> usize {
-        self.sequence_graphs.len()
+        self.load_sequence_graphs().len()
     }
 
     fn __getitem__(&self, index: isize) -> PyResult<PySequenceGraph> {
-        let len = self.sequence_graphs.len() as isize;
+        let sequence_graphs = self.load_sequence_graphs();
+        let len = sequence_graphs.len() as isize;
         let i = if index < 0 { index + len } else { index };
         if i < 0 || i >= len {
             return Err(PyIndexError::new_err("Sample index out of range"));
         }
-        Ok(self.sequence_graphs[i as usize].clone())
+        Ok(sequence_graphs[i as usize].clone())
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<PySampleIter>> {
+        let sequence_graphs = slf.load_sequence_graphs();
         Py::new(
             slf.py(),
             PySampleIter {
-                block_groups: slf.sequence_graphs.clone(),
+                block_groups: sequence_graphs,
                 index: 0,
             },
         )
@@ -107,16 +127,18 @@ impl PySample {
         slf: &Bound<'_, PySample>,
         rows: Option<u32>,
         cols: Option<u32>,
-        colors: Option<PyObject>,
+        colors: Option<Py<PyAny>>,
         show_history: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let ctrl = PyGraphController::for_sample(&slf.borrow().sequence_graphs, show_history)?;
+        let sequence_graphs = slf.borrow().load_sequence_graphs();
+        let ctrl = PyGraphController::for_sample(&sequence_graphs, show_history)?;
         let ctrl = Py::new(py, ctrl)?;
         build_widget(py, ctrl, rows, cols, colors)
     }
 
     /// IPython display hook — called when a cell ends with a Sample.
+    #[gen_stub(skip)]
     fn _ipython_display_(slf: &Bound<'_, PySample>) -> PyResult<()> {
         let py = slf.py();
         let widget = slf.call_method0("plot")?;
@@ -125,18 +147,15 @@ impl PySample {
     }
 
     fn __repr__(&self) -> String {
+        let sequence_graphs = self.load_sequence_graphs();
         let mut lines = vec![format!(
             "Sample({:?}, collection={:?}, {} sequence graph{}):",
             self.sample_name,
             self.collection_name,
-            self.sequence_graphs.len(),
-            if self.sequence_graphs.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
+            sequence_graphs.len(),
+            if sequence_graphs.len() == 1 { "" } else { "s" }
         )];
-        for (i, sequence_graph) in self.sequence_graphs.iter().enumerate() {
+        for (i, sequence_graph) in sequence_graphs.iter().enumerate() {
             lines.push(format!("  {}: {}", i, sequence_graph.name));
         }
         lines.join("\n")
@@ -145,18 +164,19 @@ impl PySample {
     /// Copy this sample into a new sample with the same sequence graphs.
     ///
     /// The destination name must not already exist. The returned sample is
-    /// ready for explicit in-place edits on its sequence graphs. The copy is
+    /// ready for explicit in-place edits on its sequence graphs. `new_name` is the name of the
+    /// copy. The copy is
     /// recorded as its own operation, using ``message`` as the operation's
     /// commit message when given, or a generated description otherwise.
     #[pyo3(signature = (new_name, message=None))]
     fn copy(&self, new_name: String, message: Option<&str>) -> PyResult<PySample> {
-        let context = self
-            .sequence_graphs
-            .first()
-            .and_then(|sequence_graph| sequence_graph.context.as_ref())
-            .ok_or_else(|| {
-                PyRuntimeError::new_err("copy() requires a sample with sequence graphs")
-            })?;
+        let context = &self.context;
+        let sequence_graphs = self.load_sequence_graphs();
+        if sequence_graphs.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "copy() requires a sample with sequence graphs",
+            ));
+        }
         if new_name.is_empty() || new_name == self.sample_name {
             return Err(PyValueError::new_err(
                 "copy() requires a different, non-empty sample name",
@@ -176,11 +196,13 @@ impl PySample {
                 )
                 .map_err(|error| match error {
                     SampleError::Duplicate(_) => {
-                        PyValueError::new_err(format!("sample '{new_name}' already exists"))
+                        PyValueError::new_err(format!(
+                            "sample '{new_name}' already exists; fetch it with repo.get_sample() or choose another name"
+                        ))
                     }
                     other => PyRuntimeError::new_err(format!("cannot copy sample: {other}")),
                 })?;
-                for sequence_graph in &self.sequence_graphs {
+                for sequence_graph in &sequence_graphs {
                     BlockGroup::get_or_create_sample_block_groups(
                         conn,
                         &self.collection_name,
@@ -194,22 +216,10 @@ impl PySample {
                     |error| PyRuntimeError::new_err(format!("cannot copy sample: {error}")),
                 )?;
 
-                let copied_block_groups =
-                    Sample::get_block_groups(conn, &self.collection_name, &new_name, None)
-                        .into_iter()
-                        .map(|block_group| PySequenceGraph {
-                            id: block_group.id,
-                            collection_name: block_group.collection_name,
-                            sample_name: block_group.sample_name,
-                            name: block_group.name,
-                            context: Some(context.clone()),
-                        })
-                        .collect();
                 let copied_sample = PySample::new(
                     self.collection_name.clone(),
                     new_name.clone(),
-                    copied_block_groups,
-                    context.clone(),
+                    self.context.clone(),
                 );
                 let summary = OperationSummary::new(
                     OperationInfo {
@@ -228,12 +238,14 @@ impl PySample {
     }
 }
 
-#[pyclass(unsendable)]
+#[gen_stub_pyclass]
+#[pyclass(name = "SampleIterator", unsendable)]
 pub struct PySampleIter {
     block_groups: Vec<PySequenceGraph>,
     index: usize,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySampleIter {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

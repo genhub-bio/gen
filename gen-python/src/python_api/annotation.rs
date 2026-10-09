@@ -4,9 +4,10 @@ use gen_core::{HashId, range::Range};
 use gen_graph::{GraphNode, GraphNodeSlice};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
 
-use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus};
+use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus, hash_id::PyHashId};
 
 /// A named genomic annotation.
 ///
@@ -16,6 +17,7 @@ use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus};
 /// ``Annotation(locus, name)`` where *locus* is a ``Locus`` returned by
 /// ``SequenceGraph.search()``. To persist it in the repository, use
 /// ``SequenceGraph.add_annotation(locus, name)``.
+#[gen_stub_pyclass]
 #[pyclass(name = "Annotation", unsendable)]
 #[derive(Clone)]
 pub struct PyAnnotation {
@@ -69,6 +71,7 @@ impl PyAnnotation {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyAnnotation {
     /// Create an annotation object from a search-result locus.
@@ -122,20 +125,14 @@ impl PyAnnotation {
 
     /// Hash ID of this annotation.
     #[getter]
-    fn id(&self) -> String {
-        self.inner.id.to_string()
+    fn id(&self) -> PyHashId {
+        PyHashId::new(self.inner.id)
     }
 
     /// Human-readable annotation name.
     #[getter]
     fn name(&self) -> &str {
         &self.inner.name
-    }
-
-    /// Annotation group this annotation belongs to.
-    #[getter]
-    fn group(&self) -> &str {
-        &self.inner.group
     }
 
     /// Track (annotation group) this annotation was loaded from, or ``None`` for
@@ -187,31 +184,33 @@ impl PyAnnotation {
         Ok(Some(py.import("json")?.call_method1("loads", (json_str,))?))
     }
 
-    /// Genomic segments covered by this annotation.
-    ///
-    /// Each segment is a dict with keys ``node_id`` (str), ``start`` (int),
-    /// ``end`` (int), and ``strand`` (``"+"`` or ``"-"``).
-    #[getter]
-    fn segments<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, pyo3::types::PyDict>> {
-        self.ann_segments
-            .iter()
-            .map(|s| {
-                let d = pyo3::types::PyDict::new(py);
-                d.set_item("node_id", s.node_id.to_string()).unwrap();
-                d.set_item("start", s.range.start).unwrap();
-                d.set_item("end", s.range.end).unwrap();
-                d.set_item("strand", s.strand.to_string()).unwrap();
-                d
-            })
-            .collect()
-    }
-
-    /// Total length of the annotation in base pairs (sum across all segments).
+    /// Length of the annotation in bases.
     fn __len__(&self) -> usize {
         self.ann_segments
             .iter()
             .map(|s| (s.range.end - s.range.start) as usize)
             .sum()
+    }
+
+    fn __hash__(&self) -> isize {
+        PyHashId::new(self.inner.id).__hash__()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other.extract::<PyRef<PyAnnotation>>().is_ok_and(|other| {
+            self.inner.id == other.inner.id
+                && self.ann_segments.len() == other.ann_segments.len()
+                && self
+                    .ann_segments
+                    .iter()
+                    .zip(&other.ann_segments)
+                    .all(|(left, right)| {
+                        left.node_id == right.node_id
+                            && left.range.start == right.range.start
+                            && left.range.end == right.range.end
+                            && left.strand == right.strand
+                    })
+        })
     }
 
     fn __repr__(&self) -> String {

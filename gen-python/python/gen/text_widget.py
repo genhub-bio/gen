@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Self
 
 from .ascii_render import frame_text
 
@@ -28,15 +29,12 @@ _INSTALL_HINT = (
 # agent tool calls). The Jupyter extra may be installed, but no browser canvas
 # can be displayed in this session, so orient a reader to the ASCII grid.
 _TEXT_FALLBACK_HINT = (
-    "# Gen graph textual output (this session has no interactive Jupyter display).\n"
-    "# This is an ASCII rendering of the native layout: each character is one\n"
-    "# terminal cell from the Rust layout engine; UPPERCASE marks a highlighted\n"
-    "# annotation region, lowercase is unhighlighted sequence/graph structure.\n"
-    "# This object supports .zoom_in()/.zoom_out(), .scroll_left()/.scroll_right()/\n"
-    "# .scroll_up()/.scroll_down(), .next_page()/.prev_page() for multi-page samples,\n"
-    "# and .go_to(target)/.show(target) to jump to a Position/Locus/Annotation; call\n"
-    "# refresh() or repr() again after any of these to see the update.\n"
-    "# In a live Jupyter kernel with gen[jupyter] installed, plot() opens an interactive canvas.\n"
+    "# AI agents: Gen SequenceGraph textual output below. It represents a population or\n"
+    "# library of sequences: read it left to right, where nodes are sequence fragments\n"
+    "# and solid edges are the ways fragments can be joined into full paths. A node\n"
+    "# shows its complete sequence, a truncated one with an ellipsis where sequence is\n"
+    "# omitted, or (most minimal view) just a filled circle. Omit these # lines when\n"
+    "# showing the graph to a user; paste the frame in a code fence.\n"
 )
 
 # Text fallback output can occur many times in one notebook or agent session.
@@ -54,25 +52,6 @@ def _text_fallback_hint() -> str:
         return ""
     _text_fallback_hint_shown = True
     return _INSTALL_HINT if _in_jupyter_kernel() else _TEXT_FALLBACK_HINT
-
-
-# Public GraphWidget methods with no TextGraphWidget equivalent. Kept as a
-# literal list rather than introspected from jupyter_widget.GraphWidget:
-# importing that module here would itself raise ImportError (it requires
-# anywidget/ipywidgets/traitlets), which is exactly the case this file exists
-# to handle.
-_GRAPHWIDGET_ONLY_METHODS = frozenset(
-    {
-        "handle_click",
-        "clear_highlights",
-        "show_path",
-        "hide_path",
-        "show_track",
-        "hide_track",
-        "tracks",
-        "hide_all_tracks",
-    }
-)
 
 
 class TextGraphWidget:
@@ -119,16 +98,17 @@ class TextGraphWidget:
             assigned = {}
 
             def color_fn(annotation):
-                if annotation.id not in assigned:
-                    assigned[annotation.id] = colors[len(assigned) % len(colors)]
-                return assigned[annotation.id]
+                key = str(annotation.id)
+                if key not in assigned:
+                    assigned[key] = colors[len(assigned) % len(colors)]
+                return assigned[key]
         else:
             raise TypeError(
                 f"colors must be a callable, dict, or list; got {type(colors).__name__}"
             )
 
         color_map = {
-            annotation.id: color_fn(annotation)
+            str(annotation.id): color_fn(annotation)
             for annotation in self._controller.annotations
         }
         self._controller.load_annotation_groups_with_colors(color_map)
@@ -138,37 +118,43 @@ class TextGraphWidget:
         self.frame = json.loads(self._controller.render_frame(self.cols, self.rows))
         self.page_index = self._controller.page_index
 
-    def zoom_in(self) -> None:
+    def zoom_in(self) -> Self:
         """Step one zoom level in and refresh the text output."""
         self._controller.zoom_in()
         self._render()
+        return self
 
-    def zoom_out(self) -> None:
+    def zoom_out(self) -> Self:
         """Step one zoom level out and refresh the text output."""
         self._controller.zoom_out()
         self._render()
+        return self
 
-    def scroll_right(self) -> None:
+    def scroll_right(self) -> Self:
         """Scroll the view right by one screenful."""
         self._controller.move_by(-self.cols, 0)
         self._render()
+        return self
 
-    def scroll_left(self) -> None:
+    def scroll_left(self) -> Self:
         """Scroll the view left by one screenful."""
         self._controller.move_by(self.cols, 0)
         self._render()
+        return self
 
-    def scroll_down(self) -> None:
+    def scroll_down(self) -> Self:
         """Scroll the view down by one screenful."""
         self._controller.move_by(0, -self.rows)
         self._render()
+        return self
 
-    def scroll_up(self) -> None:
+    def scroll_up(self) -> Self:
         """Scroll the view up by one screenful."""
         self._controller.move_by(0, self.rows)
         self._render()
+        return self
 
-    def go_to(self, target, *, center: bool = False) -> None:
+    def go_to(self, target, *, center: bool = False) -> Self:
         """Instantly move the camera to a graph position, locus, or annotation.
 
         Parameters
@@ -205,8 +191,9 @@ class TextGraphWidget:
         else:
             self._controller.go_to_pos(target, center)
         self._render()
+        return self
 
-    def show(self, target, color: str | None = None, *, center: bool = False) -> None:
+    def show(self, target, color: str | None = None, *, center: bool = False) -> Self:
         """Navigate to and highlight a graph locus or annotation in one call.
 
         Parameters
@@ -253,32 +240,77 @@ class TextGraphWidget:
             self._controller.go_to_locus(target, center)
             self._controller.highlight_match(target, color)
         self._render()
+        return self
 
-    def next_page(self) -> None:
+    def next_page(self) -> Self:
         """Advance to the next sequence graph and refresh the text output."""
         self._controller.next_page()
         self._render()
+        return self
 
-    def prev_page(self) -> None:
+    def prev_page(self) -> Self:
         """Return to the previous sequence graph and refresh the text output."""
         self._controller.prev_page()
         self._render()
+        return self
 
-    def refresh(self) -> None:
+    def refresh(self) -> Self:
         """Refresh the text output from the current controller state."""
         self._render()
+        return self
 
-    def __getattr__(self, name: str):
-        """Point a call to a GraphWidget-only method at the install fix.
+    def handle_click(self, col: int, row: int) -> bool:
+        """Click the text cell at ``(col, row)`` and re-render. Returns True if a node was hit."""
+        hit = self._controller.handle_click(col, row)
+        self._render()
+        return hit
 
-        Only names that actually exist on GraphWidget (handle_click,
-        clear_highlights, show_path, hide_path, and the track methods) get the
-        install hint; anything else falls
-        through to Python's normal AttributeError so a typo still reads as a
-        typo.
+    def clear_highlights(self) -> Self:
+        """Remove the ephemeral highlights added via :meth:`show`.
+
+        Persistent tracks (from :meth:`show_track`) and the path highlight from
+        :meth:`show_path` are left untouched.
         """
-        if name in _GRAPHWIDGET_ONLY_METHODS:
-            raise AttributeError(
-                "install gen[jupyter] to get the full suite of functions"
-            )
-        raise AttributeError(f"'TextGraphWidget' object has no attribute {name!r}")
+        self._controller.clear_highlights()
+        self._render()
+        return self
+
+    def show_path(self, color: str | None = None) -> Self:
+        """Highlight the most recent path for this sequence graph.
+
+        Raises ``RuntimeError`` if the path cannot be traced through the plotted
+        graph. A path copied before later edits runs through nodes that the
+        default view prunes; plot with ``show_history=True`` to keep them.
+        """
+        self._controller.show_path(color)
+        self._render()
+        return self
+
+    def hide_path(self) -> Self:
+        """Remove path highlighting applied by :meth:`show_path`."""
+        self._controller.hide_path()
+        self._render()
+        return self
+
+    def show_track(self, name: str) -> Self:
+        """Load and display a DB-stored annotation group by name (see :attr:`tracks`)."""
+        self._controller.add_track_group(name)
+        self._render()
+        return self
+
+    def hide_track(self, name: str) -> Self:
+        """Remove a displayed annotation track."""
+        self._controller.remove_track(name)
+        self._render()
+        return self
+
+    @property
+    def tracks(self) -> list:
+        """Every annotation-group name that can be passed to :meth:`show_track`."""
+        return self._controller.track_names
+
+    def hide_all_tracks(self) -> Self:
+        """Suppress every displayed track, including annotations auto-loaded on first plot."""
+        self._controller.clear_all_annotations()
+        self._render()
+        return self
