@@ -13,7 +13,7 @@ use super::graph_search::PyGraphLocus;
 ///
 /// **From a search result** — create with ``Annotation(locus, name)``
 /// where *locus* is a ``Locus`` returned by ``SequenceGraph.search()``.
-#[pyclass(name = "Annotation", unsendable)]
+#[pyclass(name = "Annotation", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PyAnnotation {
     pub inner: Annotation,

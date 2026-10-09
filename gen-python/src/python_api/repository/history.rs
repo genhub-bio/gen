@@ -15,7 +15,7 @@ fn history_err_to_pyerr(error: impl ToString) -> PyErr {
 }
 
 /// A repository branch and its current head operation.
-#[pyclass(name = "Branch")]
+#[pyclass(name = "Branch", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyBranch {
     #[pyo3(get)]
@@ -61,7 +61,7 @@ impl PyBranch {
 }
 
 /// A committed Gen operation in repository history.
-#[pyclass(name = "Operation")]
+#[pyclass(name = "Operation", from_py_object)]
 #[derive(Clone)]
 pub struct PyOperation {
     #[pyo3(get)]
@@ -110,7 +110,7 @@ impl PyOperation {
 /// Every file import is tracked as an asset for provenance, independent of whether its content is
 /// stored inline in the graph. A custom GenHub-compatible server needs this inventory to answer
 /// asset-transfer requests for clone, push, pull, and fetch.
-#[pyclass(name = "Asset")]
+#[pyclass(name = "Asset", from_py_object)]
 #[derive(Clone)]
 pub struct PyAsset {
     #[pyo3(get)]
@@ -349,8 +349,8 @@ mod tests {
 
     #[test]
     fn test_branch_merge_and_reset_workflow() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let repository = make_repository();
             Collection::create(repository.context.graph().conn(), "base")
                 .expect("should create base collection");

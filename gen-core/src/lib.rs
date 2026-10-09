@@ -158,7 +158,7 @@ impl TryFrom<&[u8]> for DoltHashId {
     }
 }
 
-#[cfg_attr(feature = "python-bindings", pyclass)]
+#[cfg_attr(feature = "python-bindings", pyclass(from_py_object))]
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 /// A 128-bit Gen domain identifier, normally derived with XXH3-128.
 pub struct HashId(pub [u8; HASH_ID_SIZE]);

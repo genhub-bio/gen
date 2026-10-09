@@ -9,7 +9,7 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
 use super::{PyRepository, history::branch_name};
 
 /// A configured Gen repository remote.
-#[pyclass(name = "Remote")]
+#[pyclass(name = "Remote", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyRemote {
     #[pyo3(get)]
@@ -143,7 +143,7 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_push(
                 &workspace,
                 remote.as_deref(),
@@ -166,7 +166,7 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_pull(
                 &workspace,
                 remote.as_deref(),
@@ -188,7 +188,7 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_fetch(
                 &workspace,
                 remote.as_deref(),
@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn test_remote_configuration_accepts_remote_objects() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let repository_dir = tempdir().expect("should create repository directory");
             let repository = create_repository(repository_dir.path());
             let remote = repository
@@ -312,8 +312,8 @@ mod tests {
 
     #[test]
     fn test_file_remote_push_pull_and_fetch_refresh_repository_connection() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let remote_dir = tempdir().expect("should create remote directory");
             let mut remote_repository = create_repository(remote_dir.path());
             commit_collection(&remote_repository, "base");

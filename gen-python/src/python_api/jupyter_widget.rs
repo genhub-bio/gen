@@ -1187,7 +1187,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, name: &str) {
 /// header and the frontend's pager arrows hidden (see `page_count`). Pages
 /// beyond the first are built lazily on first visit, since a `Sample` may
 /// hold many sequence graphs that most viewing sessions never page through.
-#[pyclass(name = "GraphWidget")]
+#[pyclass(name = "GraphWidget", from_py_object)]
 #[derive(Clone)]
 pub struct PyGraphController {
     pages: Vec<Page>,
@@ -1587,7 +1587,7 @@ mod tests {
 
     #[test]
     fn test_widget_keeps_branch_for_annotations_and_lazy_pages() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let context = setup_gen_on_disk();
         let history_store = DoltHistoryStore::new(context.graph().conn());
         let branch = BranchName("design".to_string());
@@ -1651,9 +1651,9 @@ mod tests {
 
     #[test]
     fn test_detail_invalid_raises_value_error() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         let result = make_controller(Some("bad"));
-        Python::with_gil(|py| match result {
+        Python::attach(|py| match result {
             Ok(_) => panic!("expected a PyValueError for invalid detail value"),
             Err(e) => assert!(e.is_instance_of::<PyValueError>(py)),
         });
@@ -1669,8 +1669,8 @@ mod tests {
 
     #[test]
     fn test_render_frame_returns_valid_json() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|_py| {
+        Python::initialize();
+        Python::attach(|_py| {
             let mut ctrl = make_controller(None).unwrap();
             let json_str = ctrl
                 .render_frame(80, 24)
@@ -1705,8 +1705,8 @@ pub fn build_widget(
     ctrl: Py<PyGraphController>,
     rows: Option<u32>,
     cols: Option<u32>,
-    colors: Option<PyObject>,
-) -> PyResult<PyObject> {
+    colors: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let gen_module = py.import("gen")?;
     let widget_cls = gen_module.getattr("GraphWidget")?;
     let kwargs = PyDict::new(py);

@@ -13,7 +13,7 @@ mod metadata;
 ///
 /// Acts like a read-only list of ``SequenceGraph``: index it, iterate it, or
 /// call ``len()`` on it. Indexing out of range raises ``IndexError``.
-#[pyclass(name = "Sample", unsendable)]
+#[pyclass(name = "Sample", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PySample {
     #[pyo3(get)]
@@ -90,9 +90,9 @@ impl PySample {
         slf: &Bound<'_, PySample>,
         rows: Option<u32>,
         cols: Option<u32>,
-        colors: Option<PyObject>,
+        colors: Option<Py<PyAny>>,
         show_history: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups, show_history)?;
         let ctrl = Py::new(py, ctrl)?;

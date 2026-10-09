@@ -19,7 +19,7 @@ pub fn block_group_err_to_pyerr(err: BlockGroupError) -> PyErr {
 }
 
 /// Helper function to convert a Rust path to a Python pathlib.Path object
-pub fn path_to_py_path(py: Python<'_>, path: &Path) -> PyResult<PyObject> {
+pub fn path_to_py_path(py: Python<'_>, path: &Path) -> PyResult<Py<PyAny>> {
     let pathlib = PyModule::import(py, "pathlib")?;
     let path_class = pathlib.getattr("Path")?;
     let py_path = path_class.call1((path.to_str().unwrap(),))?;
@@ -27,7 +27,7 @@ pub fn path_to_py_path(py: Python<'_>, path: &Path) -> PyResult<PyObject> {
 }
 
 /// Helper function return sqlite query results as a list of lists of Python objects
-pub fn py_query(py: Python<'_>, conn: &Connection, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
+pub fn py_query(py: Python<'_>, conn: &Connection, query: &str) -> PyResult<Vec<Vec<Py<PyAny>>>> {
     let mut stmt = conn.prepare(query).map_err(sqlite_err_to_pyerr)?;
     let column_count = stmt.column_count();
     let mut rows = Vec::new();
@@ -36,7 +36,7 @@ pub fn py_query(py: Python<'_>, conn: &Connection, query: &str) -> PyResult<Vec<
     while let Some(row) = row_iter.next().map_err(sqlite_err_to_pyerr)? {
         let mut row_data = Vec::with_capacity(column_count);
         for i in 0..column_count {
-            let value: PyObject = match row.get_ref(i).map_err(sqlite_err_to_pyerr)? {
+            let value: Py<PyAny> = match row.get_ref(i).map_err(sqlite_err_to_pyerr)? {
                 ValueRef::Null => py.None(),
                 ValueRef::Integer(i) => i.into_pyobject(py)?.into(),
                 ValueRef::Real(f) => f.into_pyobject(py)?.into(),
