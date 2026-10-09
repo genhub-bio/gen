@@ -1,0 +1,15 @@
+LOCUS       edits                     24 bp    DNA     linear   SYN 01-JAN-2000
+DEFINITION  Minimal sequence editing fixture.
+ACCESSION   edits
+VERSION     edits
+FEATURES             Location/Qualifiers
+     gene            4..6
+                     /gene="first"
+                     /note="keep this metadata"
+     gene            10..12
+                     /gene="second"
+     gene            complement(16..18)
+                     /gene="reverse"
+ORIGIN
+        1 AAACCCGGGT TTAAACCCGG GTTT
+//
