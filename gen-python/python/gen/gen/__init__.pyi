@@ -976,6 +976,14 @@ class Sample:
         r"""
         All sequence graphs held by this sample.
         """
+    @property
+    def metadata(self) -> dict:
+        r"""
+        Return a fresh metadata dictionary for this sample.
+
+        Values retain their string, integer, float, or boolean types. A sample without
+        metadata returns an empty dictionary; an unknown sample raises ValueError.
+        """
     def __len__(self) -> builtins.int: ...
     def __getitem__(self, index: builtins.int) -> SequenceGraph: ...
     def __iter__(self) -> SampleIterator: ...
@@ -1019,6 +1027,15 @@ class Sample:
         copy. The copy is
         recorded as its own operation, using ``message`` as the operation's
         commit message when given, or a generated description otherwise.
+        """
+    def add_metadata(self, metadata: dict) -> None:
+        r"""
+        Add metadata to this sample.
+
+        Keys must be strings; values must be strings, signed 64-bit integers,
+        finite floats, or booleans. Existing keys are updated and other keys are preserved.
+        The entire dictionary is validated before any values are written.
+        The update is recorded in operation history and follows branch checkout and reset.
         """
 
 @typing.final

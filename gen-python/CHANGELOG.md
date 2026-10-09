@@ -1,6 +1,6 @@
 # Python API changelog
 
-Changes on `restack/py-agent-editor` relative to `main`.
+Changes since the latest release, `v0.3.1`.
 
 ## Breaking changes
 
@@ -87,6 +87,9 @@ Changes on `restack/py-agent-editor` relative to `main`.
 - `Repository.add_reference_alias` declares equivalent sequence names (RefSeq, GenBank, Ensembl, UCSC and so on) so VCF and annotation files in another naming scheme still match.
 - `SequenceGraph.all_sequences()` lists every path sequence as `Sequence` objects.
 - `SequenceGraph.export_fasta(filename, all_sequences=True)` writes every path.
+- `Sample.add_metadata(metadata)` stores string, signed 64-bit integer, finite float, and boolean
+  values on a sample; `Sample.metadata` returns a fresh dictionary with the stored values. Updates
+  are recorded in operation history and follow branch checkout and reset.
 
 ### Other additions
 

@@ -8,6 +8,7 @@ use pyo3::{
     prelude::*,
     types::{PyBool, PyDict, PyFloat, PyInt, PyString},
 };
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::PySample;
 use crate::python_api::repository::run_context_operation_write;
@@ -54,6 +55,7 @@ impl PySample {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySample {
     /// Add metadata to this sample.
@@ -61,6 +63,7 @@ impl PySample {
     /// Keys must be strings; values must be strings, signed 64-bit integers,
     /// finite floats, or booleans. Existing keys are updated and other keys are preserved.
     /// The entire dictionary is validated before any values are written.
+    /// The update is recorded in operation history and follows branch checkout and reset.
     fn add_metadata(&self, metadata: &Bound<'_, PyDict>) -> PyResult<()> {
         let sample_name = &self.sample_name;
         let existing = self.sample_metadata(sample_name)?;

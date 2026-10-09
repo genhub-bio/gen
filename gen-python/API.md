@@ -88,6 +88,11 @@ iterate over it, or read `sample.sequence_graphs`. Each access fetches current m
 repository; an active iterator uses the graphs it found when iteration began. `sample.name` and
 `sample.collection` identify its scope. `sample.copy(new_name, message=None)` creates a child sample
 with matching graphs, ready for edits, and errors if the destination name already exists.
+`sample.add_metadata({...})` stores string, signed 64-bit integer, finite float, and boolean values.
+`sample.metadata` returns a fresh dictionary, or `{}` when no metadata is stored. Adding metadata
+updates matching keys while preserving others; the update is recorded in operation history and
+follows branch checkout and reset. Metadata keys must be strings, and nested or non-finite values
+are rejected.
 
 ## 3. Read, search, and inspect graphs
 
