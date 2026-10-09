@@ -927,6 +927,23 @@ impl Read for ChecksummedReader {
 
 impl OpenDalLocation {
     fn new_fs(root: &Path, path: &Path) -> Result<Self, opendal::Error> {
+        let (root, path) = if cfg!(windows) && path.is_absolute() {
+            let root = path.parent().ok_or_else(|| {
+                opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    "absolute path has no parent",
+                )
+            })?;
+            let path = path.file_name().ok_or_else(|| {
+                opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    "absolute path has no filename",
+                )
+            })?;
+            (root, Path::new(path))
+        } else {
+            (root, path)
+        };
         let path = path
             .strip_prefix(Path::new("/"))
             .unwrap_or(path)
@@ -2987,6 +3004,22 @@ mod tests {
         writer.close_write().unwrap();
 
         assert_eq!(fs::read_to_string(path).unwrap(), "updated");
+    }
+
+    #[test]
+    fn test_absolute_asset_path_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absolute.fa");
+        fs::write(&path, b">sequence\nACGT\n").unwrap();
+
+        let mut reader = OpenDalLocation::from_absolute_path(&path)
+            .unwrap()
+            .reader()
+            .unwrap();
+        let mut contents = Vec::new();
+        reader.read_to_end(&mut contents).unwrap();
+
+        assert_eq!(contents, b">sequence\nACGT\n");
     }
 
     #[test]
