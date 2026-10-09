@@ -31,7 +31,7 @@ use super::{
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     translation::build_translation_params,
-    utils::block_group_err_to_pyerr,
+    utils::{block_group_err_to_pyerr, normalize_file_path},
 };
 
 pub(crate) fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
@@ -505,6 +505,7 @@ impl PySequenceGraph {
     /// filename : str
     ///     Output file path.
     fn export_fasta(&self, filename: String) -> PyResult<()> {
+        let filename = normalize_file_path(filename);
         let ctx = self.require_context("export_fasta()")?;
         let conn = ctx.graph().conn();
         export_fasta(
@@ -527,6 +528,7 @@ impl PySequenceGraph {
     ///     Maximum node sequence length before splitting.
     #[pyo3(signature = (filename, node_max=None))]
     fn export_gfa(&self, filename: String, node_max: Option<i64>) -> PyResult<()> {
+        let filename = normalize_file_path(filename);
         let ctx = self.require_context("export_gfa()")?;
         let conn = ctx.graph().conn();
         export_gfa(
@@ -547,6 +549,7 @@ impl PySequenceGraph {
     /// filename : str
     ///     Output file path.
     fn export_genbank(&self, filename: String) -> PyResult<()> {
+        let filename = normalize_file_path(filename);
         let ctx = self.require_context("export_genbank()")?;
         let conn = ctx.graph().conn();
         let writer = fs::File::create(&filename).map_err(|e| {

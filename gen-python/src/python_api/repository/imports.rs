@@ -19,6 +19,7 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use super::{PyRepository, run_operation_write};
 use crate::python_api::{
     block_group::PySequenceGraph, sample::PySample, sequence_part::PySequencePart,
+    utils::normalize_file_path,
 };
 
 #[pymethods]
@@ -32,6 +33,9 @@ impl PyRepository {
         fai: Option<String>,
         gzi: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
+        let fai = fai.map(normalize_file_path);
+        let gzi = gzi.map(normalize_file_path);
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_operation_write(
@@ -74,6 +78,9 @@ impl PyRepository {
         fai: Option<String>,
         gzi: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
+        let fai = fai.map(normalize_file_path);
+        let gzi = gzi.map(normalize_file_path);
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
@@ -123,6 +130,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
+        let filename = normalize_file_path(filename);
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_operation_write(
@@ -161,6 +169,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -278,6 +287,8 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
+        let parts = normalize_file_path(parts);
+        let library = normalize_file_path(library);
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| PyRuntimeError::new_err(format!("Problem parsing library files: {e}")))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());

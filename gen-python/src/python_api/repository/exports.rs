@@ -5,6 +5,7 @@ use gen_models::sample::Sample;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;
+use crate::python_api::utils::normalize_file_path;
 
 #[pymethods]
 impl PyRepository {
@@ -15,6 +16,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<()> {
+        let filename = normalize_file_path(filename);
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         export_fasta(
@@ -36,6 +38,7 @@ impl PyRepository {
         node_max: Option<i64>,
         collection: Option<String>,
     ) -> PyResult<()> {
+        let filename = normalize_file_path(filename);
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -58,6 +61,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<()> {
+        let filename = normalize_file_path(filename);
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());

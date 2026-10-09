@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     defaults:
       run:
-        shell: bash
+        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,18 +35,33 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install capnproto
       - name: Set venv bin dir
+        if: runner.os == 'Linux'
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            echo "VENV_BIN=.venv/Scripts" >> "$GITHUB_ENV"
-          else
-            echo "VENV_BIN=.venv/bin" >> "$GITHUB_ENV"
-          fi
+          echo "VENV_BIN=.venv/bin" >> "$GITHUB_ENV"
+      - name: Set venv bin dir (Windows)
+        if: runner.os == 'Windows'
+        run: '"VENV_BIN=.venv/Scripts" >> $env:GITHUB_ENV'
       - name: Build and install gen package
+        if: runner.os == 'Linux'
         run: |
           python -m venv .venv
           "$VENV_BIN/python" -m pip install maturin
           "$VENV_BIN/maturin" develop
+      - name: Build and install gen package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -m venv .venv
+          & "$env:VENV_BIN/python" -m pip install maturin
+          & "$env:VENV_BIN/maturin" develop
       - name: Install notebook test dependencies
+        if: runner.os == 'Linux'
         run: $VENV_BIN/python -m pip install pytest nbmake anywidget traitlets
+      - name: Install notebook test dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: '& "$env:VENV_BIN/python" -m pip install pytest nbmake anywidget traitlets'
       - name: Test notebooks
+        if: runner.os == 'Linux'
         run: $VENV_BIN/pytest --nbmake --nbmake-timeout=120 .
+      - name: Test notebooks (Windows)
+        if: runner.os == 'Windows'
+        run: '& "$env:VENV_BIN/pytest" --nbmake --nbmake-timeout=120 .'

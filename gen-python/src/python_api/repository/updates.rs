@@ -15,7 +15,9 @@ use gen_models::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{PyRepository, run_operation_write};
-use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
+use crate::python_api::{
+    sample::PySample, sequence_part::PySequencePart, utils::normalize_file_path,
+};
 
 #[pymethods]
 impl PyRepository {
@@ -28,6 +30,7 @@ impl PyRepository {
         region_name: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
@@ -74,6 +77,7 @@ impl PyRepository {
         new_sample: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
@@ -105,6 +109,8 @@ impl PyRepository {
         parent_sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
+        let csv = normalize_file_path(csv);
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
@@ -139,6 +145,7 @@ impl PyRepository {
         in_place: bool,
         collection: Option<String>,
     ) -> PyResult<Vec<PySample>> {
+        let filename = normalize_file_path(filename);
         let parent_samples = match reference {
             None => vec![],
             Some(ref obj) => {
@@ -198,6 +205,7 @@ impl PyRepository {
         create_missing: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = normalize_file_path(filename);
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
@@ -324,6 +332,8 @@ impl PyRepository {
         parts: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let parts = normalize_file_path(parts);
+        let library = normalize_file_path(library);
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
