@@ -1,17 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
-    io::{BufReader, Cursor},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 
 use r#gen::views::{
     annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
-    annotation_track::{AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus},
-    annotations::{
-        AnnotationFileTrackRequest, load_annotation_file_track, parse_translated_bed,
-        parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
-    },
+    annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
+    annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
     gen_graph_controller::{AnnotationDisplay, ClickOutcome, GenGraphController},
     graph_database::GraphDatabase,
     graph_overlay::{
@@ -19,14 +14,9 @@ use r#gen::views::{
         set_path_overlay,
     },
 };
-use gen_annotations::{
-    projection::annotation_segments,
-    translate::{bed::translate_bed, gff::translate_gff},
-};
+use gen_annotations::projection::annotation_segments;
 use gen_core::{HashId, Workspace, is_terminal};
-use gen_models::{
-    annotations::Annotation, block_group::BlockGroup, db::GraphConnection, sample::Sample,
-};
+use gen_models::{annotations::Annotation, block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{LineStyle, layout::VisualDetail, plotter::PathStyle, theme::current_theme};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 use ratatui::{
@@ -644,105 +634,6 @@ impl GraphPage {
         Ok(())
     }
 
-    /// Add a list of `Annotation` objects as inline graph overlays grouped under `name`.
-    pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
-        let spans = annotations
-            .iter()
-            .map(|annotation| annotation_to_span(annotation))
-            .collect();
-        self.push_track(name, spans);
-    }
-
-    /// Load annotations from a GFF3 or BED file and render them as
-    /// inline graph highlights with floating labels.
-    ///
-    /// Accepts both standard files (chromosome/contig names as reference) and
-    /// pre-translated files (node hash-IDs as reference).  Standard files are
-    /// translated in-memory against `from_sample` before parsing.  If
-    /// translation produces no output the file is parsed as-is, so
-    /// pre-translated files work without specifying `from_sample`.
-    pub fn add_track_file(
-        &mut self,
-        file_path: &str,
-        display_name: Option<&str>,
-        from_sample: Option<&str>,
-    ) -> PyResult<()> {
-        let name = display_name.unwrap_or(file_path);
-        let node_ids = self.controller.loaded_node_ids();
-        let sample = from_sample.unwrap_or(Sample::DEFAULT_NAME);
-
-        let spans = match self.controller.block_group().cloned() {
-            Some(block_group) => {
-                let workspace = self.controller.database_mut().workspace().clone();
-                let conn = self
-                    .controller
-                    .database_mut()
-                    .connection()
-                    .map_err(runtime_error)?;
-                let extension = Path::new(file_path)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                let mut buffer: Vec<u8> = Vec::new();
-                let translate_result: Result<(), String> = match extension.as_str() {
-                    "gff" | "gff3" => {
-                        let reader = BufReader::new(File::open(file_path).map_err(runtime_error)?);
-                        translate_gff(
-                            conn,
-                            &workspace,
-                            &block_group.collection_name,
-                            sample,
-                            None,
-                            reader,
-                            &mut buffer,
-                        )
-                    }
-                    .map_err(|error| error.to_string()),
-                    "bed" => {
-                        let reader = File::open(file_path).map_err(runtime_error)?;
-                        translate_bed(
-                            conn,
-                            &workspace,
-                            &block_group.collection_name,
-                            sample,
-                            None,
-                            reader,
-                            &mut buffer,
-                        )
-                    }
-                    .map_err(|error| error.to_string()),
-                    other => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
-                        )));
-                    }
-                };
-                translate_result.map_err(PyRuntimeError::new_err)?;
-
-                if buffer.is_empty() {
-                    // Translation found no matching sequences, so the file may already be in
-                    // translated (hash-ID) format.
-                    load_track_from_file(file_path, name, &node_ids)
-                        .map_err(runtime_error)?
-                        .annotations
-                } else if matches!(extension.as_str(), "gff" | "gff3") {
-                    parse_translated_gff(Cursor::new(buffer), &node_ids, name, HashMap::new())
-                } else {
-                    parse_translated_bed(Cursor::new(buffer), &node_ids, name, HashMap::new())
-                }
-            }
-            None => {
-                load_track_from_file(file_path, name, &node_ids)
-                    .map_err(runtime_error)?
-                    .annotations
-            }
-        };
-        self.push_track(name, spans);
-        Ok(())
-    }
-
     /// Navigate to an `Annotation` object.
     pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) {
         // The locus carries absolute node coordinates, so the controller locates the target
@@ -811,28 +702,6 @@ impl GraphPage {
             .collect())
     }
 
-    /// Return a JSON list of the tracks currently drawn: annotation groups by name, then
-    /// tracks from `add_track_annotations` and `add_track_file`.
-    pub fn get_track_names(&self) -> PyResult<String> {
-        let entries = self.controller.annotation_group_entries();
-        let mut seen = HashSet::new();
-        let names: Vec<&str> = self
-            .controller
-            .overlays()
-            .iter()
-            .filter_map(|overlay| match &overlay.source {
-                OverlaySource::Track(key) => Some(
-                    key.strip_prefix("group:")
-                        .and_then(|group_id| entries.iter().find(|entry| entry.id == group_id))
-                        .map_or(key.as_str(), |entry| entry.name.as_str()),
-                ),
-                OverlaySource::Adhoc | OverlaySource::Path | OverlaySource::Search => None,
-            })
-            .filter(|name| seen.insert(*name))
-            .collect();
-        serde_json::to_string(&names).map_err(runtime_error)
-    }
-
     /// Remove the track `name`: an annotation group stays hidden for later batches too, until
     /// `add_track_group` shows it again.
     pub fn remove_track(&mut self, name: &str) {
@@ -869,51 +738,6 @@ impl GraphPage {
         self.controller
             .overlays_mut()
             .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
-    }
-
-    /// Add annotations rendered directly on the graph canvas.
-    /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_annotation(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        track_name: Option<String>,
-    ) {
-        let existing_color = track_name.as_deref().and_then(|name| {
-            self.controller
-                .overlays()
-                .iter()
-                .find_map(|overlay| match &overlay.source {
-                    OverlaySource::Track(existing) if existing == name => Some(overlay.style.color),
-                    _ => None,
-                })
-        });
-        let color =
-            existing_color.unwrap_or_else(|| self.controller.view_state_mut().next_accent_color());
-        let source = match &track_name {
-            Some(name) => OverlaySource::Track(name.clone()),
-            None => OverlaySource::Adhoc,
-        };
-        let overlays = self.controller.overlays_mut();
-        overlays.extend(annotations.iter().map(|annotation| GraphOverlay {
-            content: OverlayContent::Span(annotation_to_span(annotation)),
-            source: source.clone(),
-            style: annotation_style(color),
-        }));
-    }
-
-    /// Return a JSON list of annotation names currently loaded (from
-    /// `add_annotation`; annotations loaded as part of a track keep their own
-    /// name here too, separately from the track's name).
-    pub fn get_annotation_names(&self) -> PyResult<String> {
-        let mut seen = HashSet::new();
-        let names: Vec<&str> = self
-            .controller
-            .overlays()
-            .iter()
-            .filter_map(|overlay| overlay.span().map(|span| span.name.as_str()))
-            .filter(|name| !name.is_empty() && seen.insert(*name))
-            .collect();
-        serde_json::to_string(&names).map_err(runtime_error)
     }
 
     /// Remove all overlays whose annotation name matches `name`, regardless of
@@ -1070,34 +894,6 @@ impl GraphPage {
         }
         reloaded
     }
-}
-
-/// Parse a translated GFF3 or BED file into an `AnnotationTrack`.
-///
-/// The file must use node hash-ID strings as reference names (i.e. the
-/// "translated" format produced by gen's GFF/BED translation step).
-fn load_track_from_file(
-    file_path: &str,
-    display_name: &str,
-    node_filter: &HashSet<HashId>,
-) -> Result<AnnotationTrack, Box<dyn std::error::Error>> {
-    let path = std::path::Path::new(file_path);
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let spans = match ext.as_str() {
-        "gff" | "gff3" => parse_translated_gff_file(path, node_filter, display_name)?,
-        "bed" => parse_translated_bed_file(path, node_filter, display_name)?,
-        other => {
-            return Err(format!(
-                "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
-            )
-            .into());
-        }
-    };
-    Ok(AnnotationTrack::new(display_name.to_string(), spans))
 }
 
 /// The database handle a `PySequenceGraph`'s widget reads through, pinned to the branch it
