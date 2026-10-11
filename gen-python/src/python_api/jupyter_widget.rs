@@ -7,10 +7,7 @@ use std::{
 
 use r#gen::views::{
     annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
-    annotation_track::{
-        AnnotationSpan, AnnotationTrack, LoadedNodeSlices, annotation_span_from_graph_locus,
-        graph_locus_from_annotation_span,
-    },
+    annotation_track::{AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus},
     annotations::{
         AnnotationFileTrackRequest, load_annotation_file_track, parse_translated_bed,
         parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
@@ -354,17 +351,6 @@ impl GraphPage {
         self.controller
             .block_group()
             .map(|block_group| block_group.id)
-    }
-
-    fn navigate_to_span(&mut self, span: &AnnotationSpan, center: bool) {
-        let loaded = LoadedNodeSlices::new(self.controller.engine().graph());
-        let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
-            return;
-        };
-        let Some(position) = PyGraphLocus::from_locus(locus).target_position(center) else {
-            return;
-        };
-        self.go_to_pos(&position, center);
     }
 
     /// Draw the graph, its annotation flags and floating labels into `graph_area`.
@@ -759,8 +745,10 @@ impl GraphPage {
 
     /// Navigate to an `Annotation` object.
     pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) {
-        let span = annotation_to_span(annotation);
-        self.navigate_to_span(&span, center);
+        // The locus carries absolute node coordinates, so the controller locates the target
+        // itself and nodes outside the loaded window are reachable.
+        let locus = PyGraphLocus::with_context(annotation.graph_locus(), None);
+        self.go_to_locus(&locus, center);
     }
 
     /// Highlight an `Annotation` on the graph without a label. The highlight gets its own id,
@@ -1548,13 +1536,25 @@ mod tests {
             graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
         },
     };
-    use gen_core::{BranchName, HashId, Strand, is_end_node, is_start_node};
+    use gen_annotations::projection::AnnotationSegment as ProjectedSegment;
+    use gen_core::{
+        BranchName, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node,
+        is_start_node, range::Range,
+    };
     use gen_models::{
-        block_group::BlockGroup,
+        annotations::Annotation,
+        block_group::{BlockGroup, NewBlockGroup},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        collection::Collection,
+        db::GraphConnection,
+        edge::Edge,
         history::{
             HistoryStore as _,
             dolt::{DoltHistoryStore, active_branch},
         },
+        node::Node,
+        sample::{NewSample, Sample},
+        sequence::Sequence,
     };
     use gen_tui::plotter::PathStyle;
     use pyo3::{exceptions::PyValueError, prelude::*};
@@ -1562,7 +1562,7 @@ mod tests {
     use serde_json::Value;
 
     use super::{PlotOptions, PyGraphController, current_theme};
-    use crate::python_api::block_group::PySequenceGraph;
+    use crate::python_api::{annotation::PyAnnotation, block_group::PySequenceGraph};
 
     #[test]
     fn test_widget_keeps_branch_for_annotations_and_lazy_pages() {
@@ -1753,6 +1753,128 @@ mod tests {
         let text = rendered_text(&mut controller);
         assert!(!text.contains('═'), "should remove annotation bars");
         assert!(!text.contains("gene"), "should remove the annotation label");
+    }
+
+    /// A `start -> n0 -> ... -> n79 -> end` chain of 5-base nodes, long enough that the first
+    /// render crawls only the head of it.
+    fn setup_long_chain(conn: &GraphConnection) -> HashId {
+        Collection::get_or_create(conn, "test").expect("should create the collection");
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .expect("should create the sample");
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "chr1",
+                ..Default::default()
+            },
+        )
+        .expect("should create the block group");
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAAA")
+            .save(conn)
+            .expect("should save the sequence");
+        let node_ids: Vec<HashId> = (0..80)
+            .map(|index| {
+                Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("n{index}")),
+                )
+                .expect("should create a chain node")
+            })
+            .collect();
+        let mut links = vec![(PATH_START_NODE_ID, 0, node_ids[0])];
+        links.extend(node_ids.windows(2).map(|pair| (pair[0], 5, pair[1])));
+        links.push((node_ids[79], 5, PATH_END_NODE_ID));
+        let edges: Vec<BlockGroupEdgeData> = links
+            .into_iter()
+            .map(|(source, source_coordinate, target)| {
+                let edge = Edge::create(
+                    conn,
+                    source,
+                    source_coordinate,
+                    Strand::Forward,
+                    target,
+                    0,
+                    Strand::Forward,
+                )
+                .expect("should create a chain edge");
+                BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }
+            })
+            .collect();
+        BlockGroupEdge::bulk_create(conn, &edges);
+        block_group.id
+    }
+
+    #[test]
+    fn test_go_to_annotation_reaches_a_node_the_crawl_has_not() {
+        Python::initialize();
+        let context = setup_gen_on_disk();
+        let block_group_id = setup_long_chain(context.graph().conn());
+        let mut controller = PyGraphController::new(context.graph().conn(), block_group_id)
+            .expect("should create a controller");
+        controller
+            .render_frame(40, 12)
+            .expect("should render the first batch");
+        let far_node_id = HashId::convert_str("n75");
+        let loaded_before = controller
+            .active()
+            .expect("should have an active page")
+            .controller
+            .engine()
+            .graph()
+            .nodes()
+            .any(|node| node.node_id == far_node_id);
+        assert!(!loaded_before, "the first batch should not reach n75");
+        let annotation = PyAnnotation {
+            inner: Annotation {
+                id: HashId::convert_str("far"),
+                name: "far".to_string(),
+                group: String::new(),
+                accession_id: HashId([0u8; 16]),
+                extra: None,
+            },
+            context: None,
+            ann_segments: vec![ProjectedSegment {
+                node_id: far_node_id,
+                range: Range { start: 1, end: 4 },
+                strand: Strand::Forward,
+            }],
+            source_block_group_id: None,
+            locus: None,
+            sequence_graph: None,
+        };
+
+        controller
+            .go_to_annotation_obj(&annotation, true)
+            .expect("should navigate to the annotation");
+        controller
+            .render_frame(40, 12)
+            .expect("should render the target batch");
+
+        let page = controller.active().expect("should have an active page");
+        let in_active_batch = page
+            .controller
+            .engine()
+            .active_world()
+            .expect("should have an active batch")
+            .members()
+            .any(|node| node.node_id == far_node_id);
+        assert!(in_active_batch, "should open the batch holding n75");
     }
 
     fn rendered_text(controller: &mut PyGraphController) -> String {
