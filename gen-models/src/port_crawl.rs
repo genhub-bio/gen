@@ -692,7 +692,7 @@ impl PortCrawler {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
 
     use gen_core::{
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
@@ -1536,6 +1536,170 @@ mod tests {
                 graph.add_node(anchor);
                 crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
                 assert_matches_up_to_junction_shortcuts(&graph, &eager);
+            }
+        }
+    }
+
+    const ADJACENT_EDIT_BASE: &str = "ATCGATCGATCGATCG";
+
+    /// A stacked substitution of base 5 beside one of base 6: both edit sites share the junction
+    /// at 6, and the crawl must carry `G -> junction -> A` as well as the other three routes.
+    fn adjacent_substitutions() -> (
+        Vec<(&'static str, &'static str)>,
+        Vec<EdgeSpec<'static>>,
+        Vec<&'static str>,
+    ) {
+        (
+            vec![("ref", ADJACENT_EDIT_BASE), ("G", "G"), ("A", "A")],
+            vec![
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 5, "ref", 5, 0),
+                ("ref", 5, "G", 0, -3),
+                ("ref", 6, "A", 0, -3),
+                ("ref", 6, "ref", 6, 0),
+                ("ref", 7, "ref", 7, 0),
+                ("G", 1, "ref", 6, -3),
+                ("A", 1, "ref", 7, -3),
+            ],
+            vec![
+                "ATCGAGAGATCGATCG",
+                "ATCGAGCGATCGATCG",
+                "ATCGATAGATCGATCG",
+                "ATCGATCGATCGATCG",
+            ],
+        )
+    }
+
+    /// A stacked deletion of bases 5..7 beside a substitution of base 7.
+    fn deletion_beside_substitution() -> (
+        Vec<(&'static str, &'static str)>,
+        Vec<EdgeSpec<'static>>,
+        Vec<&'static str>,
+    ) {
+        (
+            vec![("ref", ADJACENT_EDIT_BASE), ("A", "A")],
+            vec![
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 5, "ref", 5, 0),
+                ("ref", 5, "ref", 7, -3),
+                ("ref", 7, "A", 0, -3),
+                ("ref", 7, "ref", 7, 0),
+                ("ref", 8, "ref", 8, 0),
+                ("A", 1, "ref", 8, -3),
+            ],
+            vec![
+                "ATCGAAATCGATCG",
+                "ATCGAGATCGATCG",
+                "ATCGATCAATCGATCG",
+                "ATCGATCGATCGATCG",
+            ],
+        )
+    }
+
+    /// A stacked insertion at 7 beside a replacement of bases 7..9.
+    fn insertion_beside_replacement() -> (
+        Vec<(&'static str, &'static str)>,
+        Vec<EdgeSpec<'static>>,
+        Vec<&'static str>,
+    ) {
+        (
+            vec![("ref", ADJACENT_EDIT_BASE), ("GG", "GG"), ("TT", "TT")],
+            vec![
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 7, "ref", 7, 0),
+                ("ref", 7, "GG", 0, -3),
+                ("ref", 7, "TT", 0, -3),
+                ("ref", 9, "ref", 9, 0),
+                ("GG", 2, "ref", 7, -3),
+                ("GG", 2, "TT", 0, -3),
+                ("TT", 2, "ref", 9, -3),
+            ],
+            vec![
+                "ATCGATCGATCGATCG",
+                "ATCGATCGGGATCGATCG",
+                "ATCGATCGGTTTCGATCG",
+                "ATCGATCTTTCGATCG",
+            ],
+        )
+    }
+
+    /// Every sequence of the stored graph reads along some left-to-right walk of the crawl.
+    fn spellings(graph: &GenGraph, sequences: &HashMap<HashId, &str>) -> BTreeSet<String> {
+        fn walk(
+            graph: &GenGraph,
+            sequences: &HashMap<HashId, &str>,
+            node: GraphNode,
+            on_walk: &mut Vec<GraphNode>,
+            text: &mut String,
+            spelled: &mut BTreeSet<String>,
+        ) {
+            if node.node_id == PATH_END_NODE_ID {
+                spelled.insert(text.clone());
+                return;
+            }
+            let length_before = text.len();
+            if !is_terminal(node.node_id) {
+                let sequence = sequences[&node.node_id];
+                text.push_str(&sequence[node.sequence_start as usize..node.sequence_end as usize]);
+            }
+            on_walk.push(node);
+            let mut successors: Vec<GraphNode> = graph
+                .neighbors_directed(node, Direction::Outgoing)
+                .collect();
+            successors.sort();
+            for successor in successors {
+                if !on_walk.contains(&successor) {
+                    walk(graph, sequences, successor, on_walk, text, spelled);
+                }
+            }
+            on_walk.pop();
+            text.truncate(length_before);
+        }
+        let mut spelled = BTreeSet::new();
+        walk(
+            graph,
+            sequences,
+            start_sentinel(),
+            &mut Vec::new(),
+            &mut String::new(),
+            &mut spelled,
+        );
+        spelled
+    }
+
+    /// Edits at neighbouring positions meet at a zero-width junction. The crawl must route every
+    /// way into it to every way out of it, or a combination of the edits has no walk.
+    #[test]
+    fn test_adjacent_edits_keep_every_spelling_walkable_in_the_crawl() {
+        let cases = [
+            adjacent_substitutions(),
+            deletion_beside_substitution(),
+            insertion_beside_replacement(),
+        ];
+        for (nodes, edges, expected) in cases {
+            let conn = get_connection(None).unwrap();
+            let block_group_id = setup_block_group(&conn, &nodes, &edges);
+            let sequences: HashMap<HashId, &str> = nodes
+                .iter()
+                .map(|(label, sequence)| (node_id_for(label), *sequence))
+                .collect();
+            let eager =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            let mut crawler = PortCrawler::new(block_group_id, false);
+            let mut lazy = GenGraph::new();
+            lazy.add_node(start_sentinel());
+            crawl_to_exhaustion(&conn, &mut crawler, &mut lazy);
+
+            assert_matches_up_to_junction_shortcuts(&lazy, &eager);
+            let spelled = spellings(&lazy, &sequences);
+            for sequence in expected {
+                assert!(
+                    spelled.contains(sequence),
+                    "the crawl has no left-to-right walk spelling {sequence}"
+                );
             }
         }
     }
