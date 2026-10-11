@@ -40,7 +40,7 @@ use r#gen::{
         },
         gen_graph_widget::{
             self, AnnotationLabels, ZoomLevels, create_gen_graph_engine, draw_annotation_labels,
-            highlight_match_range, locus_midpoint, reapply_overlays,
+            highlight_match_range, reapply_overlays,
         },
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource},
     },
@@ -978,7 +978,8 @@ fn graph_locus_record(locus: &GraphLocus) -> Robj {
     };
     // center = TRUE targets the span's true midpoint (computed here) rather than its start,
     // so the match sits balanced in the viewport instead of against the edge.
-    let midpoint = locus_midpoint(locus)
+    let midpoint = locus
+        .midpoint()
         .map(|(slice, offset)| {
             position_record(
                 slice.block.node_id,

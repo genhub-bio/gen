@@ -25,7 +25,6 @@ use crate::views::{
         AnnotationSegment, AnnotationSpan, LoadedNodeSlices, annotation_span_from_resolved_region,
         graph_locus_from_annotation_span,
     },
-    gen_graph_widget::locus_midpoint,
     graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
 };
 #[cfg(test)]
@@ -171,7 +170,8 @@ pub(super) fn activate_search_match(
         graph_locus_from_annotation_span(&span, &loaded)
             .ok_or_else(|| "region did not map to a graph position".to_string())?
     };
-    let (midpoint_slice, midpoint_offset) = locus_midpoint(&locus)
+    let (midpoint_slice, midpoint_offset) = locus
+        .midpoint()
         .ok_or_else(|| "region did not map to a graph position".to_string())?;
     let node_length = midpoint_slice.block.length();
     let fraction = if node_length == 0 {

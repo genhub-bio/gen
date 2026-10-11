@@ -107,29 +107,25 @@ impl PyGraphLocus {
 
     /// The position to navigate to: the midpoint in reading order when centered, else the first.
     pub(crate) fn target_position(&self, center: bool) -> Option<PyPosition> {
-        let offset = if center { self.__len__() / 2 } else { 0 };
+        let offset = if center {
+            self.presentation.len() / 2
+        } else {
+            0
+        };
         self.position_at(offset).ok()
     }
 
     /// Resolve a reading-order offset while retaining the block used to display the position.
-    pub(crate) fn position_at(&self, mut offset: usize) -> PyResult<PyPosition> {
-        for slice in &self.presentation.slices {
-            let length = slice.end - slice.start;
-            if offset < length {
-                let local_offset = if slice.strand == Strand::Reverse {
-                    slice.end - 1 - offset
-                } else {
-                    slice.start + offset
-                };
-                // in_block adds sequence_start to obtain the stable node coordinate.
-                return Ok(
-                    PyPosition::in_block(slice.block, local_offset, slice.strand)
-                        .attached_to(self.sequence_graph.clone()),
-                );
-            }
-            offset -= length;
-        }
-        Err(PyIndexError::new_err("Locus index out of range"))
+    pub(crate) fn position_at(&self, offset: usize) -> PyResult<PyPosition> {
+        let (slice, local_offset) = self
+            .presentation
+            .slice_at(offset)
+            .ok_or_else(|| PyIndexError::new_err("Locus index out of range"))?;
+        // in_block adds sequence_start to obtain the stable node coordinate.
+        Ok(
+            PyPosition::in_block(slice.block, local_offset, slice.strand)
+                .attached_to(self.sequence_graph.clone()),
+        )
     }
 }
 

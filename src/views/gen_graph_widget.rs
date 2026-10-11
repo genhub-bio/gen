@@ -1551,30 +1551,6 @@ where
     )
 }
 
-/// The slice and local offset (0-based, within that slice's block) at the
-/// midpoint of a locus's total sequence length. `None` for an empty locus.
-pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
-    let total: usize = locus
-        .slices
-        .iter()
-        .map(|slice| slice.end - slice.start)
-        .sum();
-    if total == 0 {
-        return None;
-    }
-    let half = total / 2;
-    let mut consumed = 0;
-    for (index, slice) in locus.slices.iter().enumerate() {
-        let len = slice.end - slice.start;
-        let is_last = index == locus.slices.len() - 1;
-        if consumed + len > half || is_last {
-            return Some((*slice, slice.start + (half - consumed)));
-        }
-        consumed += len;
-    }
-    None
-}
-
 /// Compute the screen-space bounding corners of the matched region in a `GraphLocus`,
 /// against the placed-node rects of the most recently rendered `GraphView` frame.
 ///
