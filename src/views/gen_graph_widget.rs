@@ -1784,7 +1784,7 @@ pub fn reapply_overlays<R, S>(
         -(span
             .segments
             .iter()
-            .map(|segment| segment.end - segment.start)
+            .map(|segment| segment.range.end - segment.range.start)
             .sum::<i64>())
     });
 
@@ -1963,7 +1963,7 @@ impl AnnotationLabels {
             -(span
                 .segments
                 .iter()
-                .map(|segment| segment.end - segment.start)
+                .map(|segment| segment.range.end - segment.range.start)
                 .sum::<i64>())
         });
 
@@ -2053,7 +2053,8 @@ pub fn draw_annotation_labels(
 mod tests {
     use std::path::PathBuf;
 
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_annotations::projection::AnnotationSegment;
+    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
     use gen_graph::GraphEdge;
     use gen_models::{block_group::BlockGroup, sample::Sample};
     use gen_tui::{
@@ -2068,9 +2069,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        imports::gfa::import_gfa,
-        test_helpers::setup_gen,
-        views::{annotation_track::AnnotationSegment, graph_overlay::OverlayContent},
+        imports::gfa::import_gfa, test_helpers::setup_gen, views::graph_overlay::OverlayContent,
     };
 
     /// The truncated-sequence step, which the snapshots of whole graphs are drawn at.
@@ -3137,8 +3136,10 @@ mod tests {
                     .into_iter()
                     .map(|(node, start, end, strand)| AnnotationSegment {
                         node_id: node.node_id,
-                        start: node.sequence_start + start,
-                        end: node.sequence_start + end,
+                        range: Range {
+                            start: node.sequence_start + start,
+                            end: node.sequence_start + end,
+                        },
                         strand,
                     })
                     .collect(),
@@ -3784,7 +3785,11 @@ mod tests {
                     .filter_map(GraphOverlay::span)
                     .any(|span| {
                         span.segments.iter().any(|segment| {
-                            !membership.covers(segment.node_id, segment.start, segment.end)
+                            !membership.covers(
+                                segment.node_id,
+                                segment.range.start,
+                                segment.range.end,
+                            )
                         })
                     }),
                 "should annotate nodes outside the current path"

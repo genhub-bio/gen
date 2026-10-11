@@ -1,17 +1,10 @@
 use std::collections::HashMap;
 
-use gen_core::{HashId, Strand, Workspace};
+use gen_annotations::projection::AnnotationSegment;
+use gen_core::{HashId, Strand, Workspace, range::Range};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, region::ResolvedGenRegion};
 use petgraph::visit::IntoNodeIdentifiers;
-
-#[derive(Clone, Debug)]
-pub struct AnnotationSegment {
-    pub node_id: HashId,
-    pub start: i64,
-    pub end: i64,
-    pub strand: Strand,
-}
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSpan {
@@ -61,14 +54,18 @@ pub fn annotation_span_from_resolved_region(
     Ok(span)
 }
 
-fn annotation_segments_from_graph_locus(locus: &GraphLocus) -> Vec<AnnotationSegment> {
+/// The absolute node-coordinate segments a locus covers, the one conversion every viewer and
+/// binding uses to turn a locus into annotation segments.
+pub fn annotation_segments_from_graph_locus(locus: &GraphLocus) -> Vec<AnnotationSegment> {
     locus
         .slices
         .iter()
         .map(|slice| AnnotationSegment {
             node_id: slice.block.node_id,
-            start: slice.block.sequence_start + slice.start as i64,
-            end: slice.block.sequence_start + slice.end as i64,
+            range: Range {
+                start: slice.block.sequence_start + slice.start as i64,
+                end: slice.block.sequence_start + slice.end as i64,
+            },
             strand: slice.strand,
         })
         .collect()
@@ -107,8 +104,8 @@ pub fn graph_locus_from_annotation_span(
         let mut segment_slices = candidates
             .iter()
             .filter_map(|block| {
-                let start = segment.start.max(block.sequence_start);
-                let end = segment.end.min(block.sequence_end);
+                let start = segment.range.start.max(block.sequence_start);
+                let end = segment.range.end.min(block.sequence_end);
                 (start < end).then_some(GraphNodeSlice {
                     block: *block,
                     start: (start - block.sequence_start) as usize,
@@ -179,7 +176,9 @@ pub fn span_covered_by_later(
     'outer: for seg in &span.segments {
         for later_span in &all_spans[idx + 1..] {
             for other in &later_span.segments {
-                if other.node_id == seg.node_id && other.start <= seg.start && other.end >= seg.end
+                if other.node_id == seg.node_id
+                    && other.range.start <= seg.range.start
+                    && other.range.end >= seg.range.end
                 {
                     continue 'outer;
                 }
@@ -228,8 +227,8 @@ mod tests {
         assert_eq!(span.segments.len(), 1);
         let seg = &span.segments[0];
         assert_eq!(seg.node_id, node.node_id);
-        assert_eq!(seg.start, 105); // sequence_start + slice.start
-        assert_eq!(seg.end, 115); // sequence_start + slice.end
+        assert_eq!(seg.range.start, 105); // sequence_start + slice.start
+        assert_eq!(seg.range.end, 115); // sequence_start + slice.end
         assert_eq!(seg.strand, Strand::Forward);
     }
 
@@ -358,8 +357,7 @@ mod tests {
     fn make_segment(node_id: &str, start: i64, end: i64, strand: Strand) -> AnnotationSegment {
         AnnotationSegment {
             node_id: HashId::convert_str(node_id),
-            start,
-            end,
+            range: Range { start, end },
             strand,
         }
     }

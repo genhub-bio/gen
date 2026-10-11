@@ -19,11 +19,12 @@ use r#gen::{
     },
     views::{
         annotation_files::load_annotation_file_entries,
+        annotation_track::annotation_segments_from_graph_locus,
         annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
     },
 };
-use gen_annotations::projection::{AnnotationSegment, annotation_segments};
-use gen_core::{Strand, is_end_node, is_start_node, range::Range};
+use gen_annotations::projection::annotation_segments;
+use gen_core::{Strand, is_end_node, is_start_node};
 use gen_graph::GraphNode;
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
@@ -813,18 +814,7 @@ impl PySequenceGraph {
             ));
         }
         let context = self.require_context("add_annotation()")?;
-        let annotation_segments: Vec<AnnotationSegment> = target_locus
-            .slices
-            .iter()
-            .map(|slice| AnnotationSegment {
-                node_id: slice.block.node_id,
-                range: Range {
-                    start: slice.block.sequence_start + slice.start as i64,
-                    end: slice.block.sequence_start + slice.end as i64,
-                },
-                strand: slice.strand,
-            })
-            .collect();
+        let annotation_segments = annotation_segments_from_graph_locus(&target_locus);
 
         run_context_operation_write(
             context,

@@ -204,20 +204,10 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
 }
 
 fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
-    use r#gen::views::annotation_track::AnnotationSegment as ViewSegment;
     AnnotationSpan {
         id: annotation.inner.id,
         name: annotation.inner.name.clone(),
-        segments: annotation
-            .ann_segments
-            .iter()
-            .map(|s| ViewSegment {
-                node_id: s.node_id,
-                start: s.range.start,
-                end: s.range.end,
-                strand: s.strand,
-            })
-            .collect(),
+        segments: annotation.ann_segments.clone(),
     }
 }
 
@@ -226,7 +216,7 @@ fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
     -span
         .segments
         .iter()
-        .map(|segment| segment.end - segment.start)
+        .map(|segment| segment.range.end - segment.range.start)
         .sum::<i64>()
 }
 
@@ -1328,11 +1318,11 @@ mod tests {
     use r#gen::{
         test_helpers::{setup_block_group, setup_gen_on_disk},
         views::{
-            annotation_track::{AnnotationSegment, AnnotationSpan},
+            annotation_track::AnnotationSpan,
             graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
         },
     };
-    use gen_annotations::projection::AnnotationSegment as ProjectedSegment;
+    use gen_annotations::projection::AnnotationSegment;
     use gen_core::{
         BranchName, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node,
         is_start_node, range::Range,
@@ -1511,8 +1501,10 @@ mod tests {
                     .iter()
                     .map(|node| AnnotationSegment {
                         node_id: node.node_id,
-                        start: node.sequence_start,
-                        end: node.sequence_end,
+                        range: Range {
+                            start: node.sequence_start,
+                            end: node.sequence_end,
+                        },
                         strand: Strand::Forward,
                     })
                     .collect(),
@@ -1645,7 +1637,7 @@ mod tests {
                 extra: None,
             },
             context: None,
-            ann_segments: vec![ProjectedSegment {
+            ann_segments: vec![AnnotationSegment {
                 node_id: far_node_id,
                 range: Range { start: 1, end: 4 },
                 strand: Strand::Forward,

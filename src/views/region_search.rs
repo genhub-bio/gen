@@ -1,7 +1,8 @@
 #[cfg(test)]
 use std::path::PathBuf;
 
-use gen_core::{HashId, Strand, Workspace, region::Region};
+use gen_annotations::projection::AnnotationSegment;
+use gen_core::{HashId, Strand, Workspace, range::Range, region::Region};
 use gen_graph::{GenGraph, GraphNode};
 #[cfg(test)]
 use gen_models::db::DbContext;
@@ -22,7 +23,7 @@ use ratatui::style::Color;
 
 use crate::views::{
     annotation_track::{
-        AnnotationSegment, AnnotationSpan, LoadedNodeSlices, annotation_span_from_resolved_region,
+        AnnotationSpan, LoadedNodeSlices, annotation_span_from_resolved_region,
         graph_locus_from_annotation_span,
     },
     graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
@@ -141,8 +142,7 @@ fn fallback_locus_for_empty_span(
             name: String::new(),
             segments: vec![AnnotationSegment {
                 node_id: position.graph_node.node_id,
-                start,
-                end,
+                range: Range { start, end },
                 strand: Strand::Forward,
             }],
         };
@@ -296,8 +296,8 @@ mod tests {
         assert_eq!(path_match.label, "chr1:20-30 (path)");
         let path_span = span_for_match(&request, &path_match);
         assert_eq!(path_span.segments.len(), 1);
-        assert_eq!(path_span.segments[0].start, 19);
-        assert_eq!(path_span.segments[0].end, 30);
+        assert_eq!(path_span.segments[0].range.start, 19);
+        assert_eq!(path_span.segments[0].range.end, 30);
 
         let mut view_state = GraphViewState::default();
         let mut overlays = Vec::new();
@@ -323,44 +323,44 @@ mod tests {
         let path_slice_match = match_for_query(&request, "chr1:5-10");
         let path_slice_span = span_for_match(&request, &path_slice_match);
         assert_eq!(path_slice_span.segments.len(), 1);
-        assert_eq!(path_slice_span.segments[0].start, 4);
-        assert_eq!(path_slice_span.segments[0].end, 10);
+        assert_eq!(path_slice_span.segments[0].range.start, 4);
+        assert_eq!(path_slice_span.segments[0].range.end, 10);
 
         let single_base_match = match_for_query(&request, "chr1:5-5");
         let single_base_span = span_for_match(&request, &single_base_match);
         assert_eq!(single_base_span.segments.len(), 1);
-        assert_eq!(single_base_span.segments[0].start, 4);
-        assert_eq!(single_base_span.segments[0].end, 5);
+        assert_eq!(single_base_span.segments[0].range.start, 4);
+        assert_eq!(single_base_span.segments[0].range.end, 5);
 
         let model_match = match_for_query(&request, "model-gene:5-10");
         assert_eq!(model_match.label, "model-gene:5-10 (model annotation)");
         let model_span = span_for_match(&request, &model_match);
         assert_eq!(model_span.segments.len(), 1);
-        assert_eq!(model_span.segments[0].start, 9);
-        assert_eq!(model_span.segments[0].end, 15);
+        assert_eq!(model_span.segments[0].range.start, 9);
+        assert_eq!(model_span.segments[0].range.end, 15);
 
         let model_slice_match = match_for_query(&request, "model-gene:1-4");
         let model_slice_span = span_for_match(&request, &model_slice_match);
         assert_eq!(model_slice_span.segments.len(), 1);
-        assert_eq!(model_slice_span.segments[0].start, 5);
-        assert_eq!(model_slice_span.segments[0].end, 9);
+        assert_eq!(model_slice_span.segments[0].range.start, 5);
+        assert_eq!(model_slice_span.segments[0].range.end, 9);
 
         let model_single_base_match = match_for_query(&request, "model-gene:5-5");
         let model_single_base_span = span_for_match(&request, &model_single_base_match);
-        assert_eq!(model_single_base_span.segments[0].start, 9);
-        assert_eq!(model_single_base_span.segments[0].end, 10);
+        assert_eq!(model_single_base_span.segments[0].range.start, 9);
+        assert_eq!(model_single_base_span.segments[0].range.end, 10);
 
         let block_group_match = match_for_query(&request, "m123:20-30");
         assert_eq!(block_group_match.label, "m123:20-30 (block group)");
         let block_group_span = span_for_match(&request, &block_group_match);
         assert_eq!(block_group_span.segments.len(), 1);
-        assert_eq!(block_group_span.segments[0].start, 19);
-        assert_eq!(block_group_span.segments[0].end, 30);
+        assert_eq!(block_group_span.segments[0].range.start, 19);
+        assert_eq!(block_group_span.segments[0].range.end, 30);
 
         let zero_match = match_for_query(&request, "chr1:0-1");
         let zero_span = span_for_match(&request, &zero_match);
-        assert_eq!(zero_span.segments[0].start, 0);
-        assert_eq!(zero_span.segments[0].end, 1);
+        assert_eq!(zero_span.segments[0].range.start, 0);
+        assert_eq!(zero_span.segments[0].range.end, 1);
     }
 
     #[test]

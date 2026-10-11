@@ -31,8 +31,7 @@ use r#gen::{
     views::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
         annotation_track::{
-            AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
-            LoadedNodeSlices, graph_locus_from_annotation_span,
+            AnnotationSpan, AnnotationTrack, LoadedNodeSlices, graph_locus_from_annotation_span,
         },
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
@@ -211,15 +210,7 @@ fn annotation_record(
     let span = AnnotationSpan {
         id: annotation.id,
         name: annotation.name.clone(),
-        segments: segments
-            .iter()
-            .map(|s| ViewAnnotationSegment {
-                node_id: s.node_id,
-                start: s.range.start,
-                end: s.range.end,
-                strand: s.strand,
-            })
-            .collect(),
+        segments: segments.clone(),
     };
     let locus_robj: Robj = match graph_locus_from_annotation_span(&span, loaded) {
         Some(locus) => graph_locus_record(&locus),

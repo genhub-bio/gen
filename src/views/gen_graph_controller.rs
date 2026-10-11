@@ -547,8 +547,8 @@ impl GenGraphController {
             .flat_map(|span| &span.segments)
             .flat_map(|segment| {
                 graph.nodes().filter_map(move |node| {
-                    let start = segment.start.max(node.sequence_start);
-                    let end = segment.end.min(node.sequence_end);
+                    let start = segment.range.start.max(node.sequence_start);
+                    let end = segment.range.end.min(node.sequence_end);
                     (node.node_id == segment.node_id && start < end).then_some((node, start))
                 })
             })
@@ -1228,7 +1228,8 @@ mod tests {
     /// A chain of five-base nodes at full detail with annotations on some of them, the way
     /// either viewer shows a block group's annotation groups.
     mod annotated_chain {
-        use gen_core::{HashId, PATH_START_NODE_ID, Strand};
+        use gen_annotations::projection::AnnotationSegment;
+        use gen_core::{HashId, PATH_START_NODE_ID, Strand, range::Range};
         use gen_graph::GraphNode;
         use gen_models::db::GraphConnection;
         use gen_tui::{
@@ -1241,7 +1242,7 @@ mod tests {
 
         use super::*;
         use crate::views::{
-            annotation_track::{AnnotationSegment, AnnotationSpan},
+            annotation_track::AnnotationSpan,
             gen_graph_controller::ClickOutcome,
             gen_graph_widget::{FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL, apply_zoom_level},
             graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, group_track_key},
@@ -1274,8 +1275,10 @@ mod tests {
                         name: format!("f{index}"),
                         segments: vec![AnnotationSegment {
                             node_id: node.node_id,
-                            start: node.sequence_start + 1,
-                            end: node.sequence_start + 4,
+                            range: Range {
+                                start: node.sequence_start + 1,
+                                end: node.sequence_start + 4,
+                            },
                             strand: Strand::Forward,
                         }],
                     }),

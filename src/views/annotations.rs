@@ -17,10 +17,10 @@ use std::{
 
 use flate2::read::MultiGzDecoder;
 use gen_annotations::{
-    projection as annotation_projection,
+    projection::{self as annotation_projection, AnnotationSegment},
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, Workspace};
+use gen_core::{HashId, Strand, Workspace, range::Range};
 use gen_graph::GenGraph;
 use gen_models::{
     accession::Accession,
@@ -36,7 +36,7 @@ use tempfile::NamedTempFile;
 use crate::views::{
     annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
     annotation_groups::AnnotationGroupEntry,
-    annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
+    annotation_track::{AnnotationSpan, AnnotationTrack},
 };
 
 pub struct AnnotationGroupTrackRequest<'a> {
@@ -67,7 +67,7 @@ pub struct AnnotationGroupTrackRequest<'a> {
 /// that carries a fragment of it — e.g. every candidate in a combinatorial library, not
 /// only whichever one happens to be "the" current path.
 fn clip_segments_to_graph(
-    accession_segments: &[annotation_projection::AnnotationSegment],
+    accession_segments: &[AnnotationSegment],
     graph: &GenGraph,
 ) -> Vec<AnnotationSegment> {
     let mut clipped = Vec::new();
@@ -83,8 +83,10 @@ fn clip_segments_to_graph(
             }
             clipped.push(AnnotationSegment {
                 node_id: node.node_id,
-                start: overlap_start,
-                end: overlap_end,
+                range: Range {
+                    start: overlap_start,
+                    end: overlap_end,
+                },
                 strand: segment.strand,
             });
         }
@@ -138,18 +140,9 @@ pub fn load_annotations_for_group(
                 .expect("should load accession by id")?;
             let accession_segments =
                 annotation_projection::annotation_segments(conn, &annotation, history_ref);
-            let unclipped_segments: Vec<AnnotationSegment> = accession_segments
-                .iter()
-                .map(|segment| AnnotationSegment {
-                    node_id: segment.node_id,
-                    start: segment.range.start,
-                    end: segment.range.end,
-                    strand: segment.strand,
-                })
-                .collect();
             let clipped_segments = clip_segments_to_graph(&accession_segments, projection_graph);
             let full_segments = if clipped_segments.is_empty() {
-                unclipped_segments
+                accession_segments
             } else {
                 clipped_segments
             };
@@ -282,8 +275,10 @@ pub fn parse_translated_gff<R: BufRead>(
             .or_default()
             .push(AnnotationSegment {
                 node_id,
-                start: seg_start,
-                end: seg_end,
+                range: Range {
+                    start: seg_start,
+                    end: seg_end,
+                },
                 strand: record.strand().into(),
             });
     }
@@ -348,8 +343,10 @@ pub fn parse_translated_bed<R: BufRead>(
             .or_default()
             .push(AnnotationSegment {
                 node_id,
-                start: seg_start,
-                end: seg_end,
+                range: Range {
+                    start: seg_start,
+                    end: seg_end,
+                },
                 strand,
             });
     }
@@ -822,7 +819,8 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_core::{HashId, PATH_START_NODE_ID, Sha256Hash, Strand};
+    use gen_annotations::projection::AnnotationSegment;
+    use gen_core::{HashId, PATH_START_NODE_ID, Sha256Hash, Strand, range::Range};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
         annotations::{
@@ -951,8 +949,8 @@ mod tests {
         assert_eq!(spans[0].name, "feature-a");
         assert_eq!(spans[0].segments.len(), 1);
         assert_eq!(spans[0].segments[0].node_id, node_id);
-        assert_eq!(spans[0].segments[0].start, 5);
-        assert_eq!(spans[0].segments[0].end, 8);
+        assert_eq!(spans[0].segments[0].range.start, 5);
+        assert_eq!(spans[0].segments[0].range.end, 8);
         assert_eq!(spans[0].segments[0].strand, Strand::Reverse);
     }
 
@@ -963,15 +961,15 @@ mod tests {
     fn clip_segments_to_graph_leaves_a_gap_over_an_inserted_block() {
         use gen_graph::{GenGraph, GraphNode};
 
-        use super::{annotation_projection, clip_segments_to_graph};
+        use super::clip_segments_to_graph;
 
         let original_node_id = HashId::convert_str("original");
         let inserted_node_id = HashId::convert_str("inserted");
 
         // The annotation was created before the split, covering the whole original node.
-        let accession_segments = vec![annotation_projection::AnnotationSegment {
+        let accession_segments = vec![AnnotationSegment {
             node_id: original_node_id,
-            range: gen_core::range::Range {
+            range: Range {
                 start: 0,
                 end: 2686,
             },
@@ -998,15 +996,15 @@ mod tests {
         });
 
         let mut segments = clip_segments_to_graph(&accession_segments, &graph);
-        segments.sort_by_key(|s| s.start);
+        segments.sort_by_key(|s| s.range.start);
 
         assert_eq!(segments.len(), 2, "no segment over the inserted block");
         assert_eq!(segments[0].node_id, original_node_id);
-        assert_eq!(segments[0].start, 0);
-        assert_eq!(segments[0].end, 395);
+        assert_eq!(segments[0].range.start, 0);
+        assert_eq!(segments[0].range.end, 395);
         assert_eq!(segments[1].node_id, original_node_id);
-        assert_eq!(segments[1].start, 483);
-        assert_eq!(segments[1].end, 2686);
+        assert_eq!(segments[1].range.start, 483);
+        assert_eq!(segments[1].range.end, 2686);
     }
 
     /// pUC19's `source 1..2686` feature describes the whole record and is hidden by its type,
@@ -1094,7 +1092,7 @@ mod tests {
             assert_eq!(
                 ori.segments
                     .iter()
-                    .map(|segment| (segment.start, segment.end))
+                    .map(|segment| (segment.range.start, segment.range.end))
                     .collect::<Vec<_>>(),
                 vec![(2314, 2686), (0, 217)]
             );
@@ -1278,7 +1276,7 @@ mod tests {
                     let mut segments = span
                         .segments
                         .iter()
-                        .map(|segment| (segment.node_id, segment.start, segment.end))
+                        .map(|segment| (segment.node_id, segment.range.start, segment.range.end))
                         .collect::<Vec<_>>();
                     segments.sort();
                     (span.name, segments)

@@ -1,6 +1,6 @@
-use r#gen::views::annotation_track::AnnotationSpan;
+use r#gen::views::annotation_track::{AnnotationSpan, annotation_segments_from_graph_locus};
 use gen_annotations::projection::AnnotationSegment;
-use gen_core::{HashId, range::Range};
+use gen_core::HashId;
 use gen_graph::{GraphNode, GraphNodeSlice};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
@@ -42,18 +42,7 @@ impl PyAnnotation {
         group: &str,
         sequence_graph: &PySequenceGraph,
     ) -> Self {
-        let ann_segments = span
-            .segments
-            .iter()
-            .map(|segment| AnnotationSegment {
-                node_id: segment.node_id,
-                range: Range {
-                    start: segment.start,
-                    end: segment.end,
-                },
-                strand: segment.strand,
-            })
-            .collect();
+        let ann_segments = span.segments.clone();
         PyAnnotation {
             inner: Annotation {
                 id: span.id,
@@ -84,18 +73,7 @@ impl PyAnnotation {
     #[new]
     pub fn from_locus(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
         let graph_locus = locus.graph_locus();
-        let ann_segments = graph_locus
-            .slices
-            .iter()
-            .map(|s| AnnotationSegment {
-                node_id: s.block.node_id,
-                range: Range {
-                    start: s.block.sequence_start + s.start as i64,
-                    end: s.block.sequence_start + s.end as i64,
-                },
-                strand: s.strand,
-            })
-            .collect();
+        let ann_segments = annotation_segments_from_graph_locus(&graph_locus);
         PyAnnotation {
             inner: Annotation {
                 id: HashId::convert_str(name),
