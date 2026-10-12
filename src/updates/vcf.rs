@@ -113,13 +113,26 @@ fn ambiguous_call(alleles: &[Option<usize>], alternates: &[&str], cnv: &Regex) -
             }))
 }
 
-fn append_parent_range(blocks: &[PathBlock], start: i64, end: i64, output: &mut Vec<PathBlock>) {
-    let first = blocks.partition_point(|block| block.path_end <= start);
+// Stitch parent sequence between sorted edits, advancing through sequence blocks
+// once. Keep the current block available when a range ends partway through it.
+fn append_parent_range(
+    blocks: &[PathBlock],
+    block_index: &mut usize,
+    start: i64,
+    end: i64,
+    output: &mut Vec<PathBlock>,
+) {
+    while blocks
+        .get(*block_index)
+        .is_some_and(|block| block.path_end <= start)
+    {
+        *block_index += 1;
+    }
     // Adjacent edits return to and leave the same parent coordinate. Keep that
     // zero-length slice so their existing edges meet without a new shortcut edge.
     // At the sequence boundaries the variant edges already connect to terminals.
     if start == end && start > 0 {
-        if let Some(block) = blocks.get(first) {
+        if let Some(block) = blocks.get(*block_index) {
             let mut junction = block.clone();
             junction.sequence_start += start - block.path_start;
             junction.sequence_end = junction.sequence_start;
@@ -129,16 +142,20 @@ fn append_parent_range(blocks: &[PathBlock], start: i64, end: i64, output: &mut 
         }
         return;
     }
-    for block in blocks[first..]
-        .iter()
-        .take_while(|block| block.path_start < end)
-    {
+    while let Some(block) = blocks.get(*block_index) {
+        if block.path_start >= end {
+            break;
+        }
         let mut slice = block.clone();
         slice.sequence_start += start.max(block.path_start) - block.path_start;
         slice.sequence_end -= block.path_end - end.min(block.path_end);
         if slice.sequence_start <= slice.sequence_end {
             output.push(slice);
         }
+        if block.path_end > end {
+            break;
+        }
+        *block_index += 1;
     }
 }
 
@@ -154,12 +171,22 @@ fn path_edge_key(mut edge: EdgeData) -> EdgeData {
     edge
 }
 
-/// Assemble and persist a single traversal using the child's existing edges.
+/// Creates a path for a new sample that consists of the segments of the parent
+/// sample's current path that remain in the child, interleaved with the changes
+/// specific to the child.  This assumes that the --create-homozygous-paths flag
+/// is enabled and that a unique path for the child is inferrable from the
+/// edits.
 ///
 /// Reject overlapping edits, unsupported parent strands, out-of-bounds edits,
 /// and missing or invalid connections rather than retaining the inherited path.
 /// Adjacent edits retain zero-length parent junctions so existing variant edges
 /// can form a path. This method never creates edges or their associations.
+///
+/// To build the child path, we build up a list of blocks by iterating over the
+/// variants of the child, in order by position.  For each variant, we append
+/// the blocks of the parent path that occur before the variant block but
+/// haven't been added yet, then add the variant block.  Then we convert the
+/// list of blocks to a list of edges and create the path from that.
 fn record_sample_path(
     conn: &GraphConnection,
     path: &Path,
@@ -184,11 +211,17 @@ fn record_sample_path(
             "parent path contains a non-forward strand".to_string(),
         ));
     }
-    let length = parent_blocks
-        .last()
-        .expect("should have an end block")
-        .path_start;
-    let mut blocks = vec![parent_blocks[0].clone()];
+    let (start_block, remaining_blocks) = parent_blocks
+        .split_first()
+        .expect("should have a start block");
+    let (end_block, sequence_blocks) = remaining_blocks
+        .split_last()
+        .expect("should have an end block");
+    let length = end_block.path_start;
+    // The first block is the sequence-free start sentinel, retained even for
+    // edits at coordinate zero. Parent sequence is appended only between edits.
+    let mut blocks = vec![start_block.clone()];
+    let mut block_index = 0;
     let mut position = 0;
     for change in edits {
         if change.region.start < position || change.region.end > length {
@@ -197,7 +230,8 @@ fn record_sample_path(
             ));
         }
         append_parent_range(
-            &parent_blocks[1..parent_blocks.len() - 1],
+            sequence_blocks,
+            &mut block_index,
             position,
             change.region.start,
             &mut blocks,
@@ -208,17 +242,13 @@ fn record_sample_path(
         position = change.region.end;
     }
     append_parent_range(
-        &parent_blocks[1..parent_blocks.len() - 1],
+        sequence_blocks,
+        &mut block_index,
         position,
         length,
         &mut blocks,
     );
-    blocks.push(
-        parent_blocks
-            .last()
-            .expect("should have an end block")
-            .clone(),
-    );
+    blocks.push(end_block.clone());
     let mut existing_edges = HashMap::new();
     for augmented_edge in BlockGroupEdge::edges_for_block_group(conn, &path.block_group_id, None) {
         let edge = augmented_edge.edge;
@@ -247,7 +277,7 @@ fn record_sample_path(
         };
         edge_ids.push(*edge_id);
     }
-    match Path::validate_edges(conn, &edge_ids, &path.block_group_id) {
+    match path.update_edges(conn, &edge_ids) {
         Ok(()) => {}
         Err(PathError::Invalid(reason)) => {
             return Err(VcfError::PathInference(format!(
@@ -256,8 +286,6 @@ fn record_sample_path(
         }
         Err(error) => return Err(error.into()),
     }
-    Path::delete(conn, &path.name, &path.block_group_id);
-    Path::create(conn, &path.name, &path.block_group_id, &edge_ids)?;
     Ok(())
 }
 
@@ -723,30 +751,32 @@ pub fn update_with_vcf_options(
                 &sample_parent_samples,
             )
             .expect("can't find sample bg....check this out more");
-            let alleles = genotype
-                .iter()
-                .map(|call| {
-                    call.as_ref()
-                        .and_then(|call| usize::try_from(call.allele).ok())
-                })
-                .collect::<Vec<_>>();
-            if ambiguous_call(&alleles, &alt_alleles, &cnv_re) {
-                ambiguous_samples.insert((fixed_sample.to_string(), seq_name.clone()));
-            } else {
-                let allele = alleles[0].expect("should have a called allele");
-                let sequence = if allele == 0 {
-                    ref_seq
+            if create_homozygous_paths {
+                let alleles = genotype
+                    .iter()
+                    .map(|call| {
+                        call.as_ref()
+                            .and_then(|call| usize::try_from(call.allele).ok())
+                    })
+                    .collect::<Vec<_>>();
+                if ambiguous_call(&alleles, &alt_alleles, &cnv_re) {
+                    ambiguous_samples.insert((fixed_sample.to_string(), seq_name.clone()));
                 } else {
-                    alt_alleles[allele - 1]
-                };
-                called_regions
-                    .entry((fixed_sample.to_string(), seq_name.clone()))
-                    .or_default()
-                    .push((
-                        (record.variant_start().unwrap().unwrap().get() - 1) as i64,
-                        ref_end,
-                        sequence.to_string(),
-                    ));
+                    let allele = alleles[0].expect("should have a called allele");
+                    let sequence = if allele == 0 {
+                        ref_seq
+                    } else {
+                        alt_alleles[allele - 1]
+                    };
+                    called_regions
+                        .entry((fixed_sample.to_string(), seq_name.clone()))
+                        .or_default()
+                        .push((
+                            (record.variant_start().unwrap().unwrap().get() - 1) as i64,
+                            ref_end,
+                            sequence.to_string(),
+                        ));
+                }
             }
             let has_ref = genotype.iter().any(|gt| {
                 if let Some(gt) = gt {
@@ -856,30 +886,32 @@ pub fn update_with_vcf_options(
                 )
                 .expect("can't find sample bg....check this out more");
                 let genotype = sample.get(&header, "GT");
-                let alleles = match &genotype {
-                    Some(Ok(Some(Value::Genotype(calls)))) => calls
-                        .iter()
-                        .map(|call| call.ok().and_then(|(allele, _)| allele))
-                        .collect::<Vec<_>>(),
-                    _ => Vec::new(),
-                };
-                if ambiguous_call(&alleles, &alt_alleles, &cnv_re) {
-                    ambiguous_samples.insert((sample_name.to_string(), seq_name.clone()));
-                } else {
-                    let allele = alleles[0].expect("should have a called allele");
-                    let sequence = if allele == 0 {
-                        ref_seq
-                    } else {
-                        alt_alleles[allele - 1]
+                if create_homozygous_paths {
+                    let alleles = match &genotype {
+                        Some(Ok(Some(Value::Genotype(calls)))) => calls
+                            .iter()
+                            .map(|call| call.ok().and_then(|(allele, _)| allele))
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
                     };
-                    called_regions
-                        .entry((sample_name.to_string(), seq_name.clone()))
-                        .or_default()
-                        .push((
-                            (record.variant_start().unwrap().unwrap().get() - 1) as i64,
-                            ref_end,
-                            sequence.to_string(),
-                        ));
+                    if ambiguous_call(&alleles, &alt_alleles, &cnv_re) {
+                        ambiguous_samples.insert((sample_name.to_string(), seq_name.clone()));
+                    } else {
+                        let allele = alleles[0].expect("should have a called allele");
+                        let sequence = if allele == 0 {
+                            ref_seq
+                        } else {
+                            alt_alleles[allele - 1]
+                        };
+                        called_regions
+                            .entry((sample_name.to_string(), seq_name.clone()))
+                            .or_default()
+                            .push((
+                                (record.variant_start().unwrap().unwrap().get() - 1) as i64,
+                                ref_end,
+                                sequence.to_string(),
+                            ));
+                    }
                 }
                 if let Some(Ok(Some(Value::Genotype(genotypes)))) = genotype {
                     // what needs to be done is when it is a cnv, we need to check that ref_start is the same for all variants
@@ -1289,155 +1321,183 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_record_sample_path_only_uses_existing_block_group_edges() {
-        for alternate in ["C", ""] {
-            let context = setup_gen();
-            let conn = context.graph().conn();
-            let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-            import_fasta(
-                &context,
-                &fasta_path.to_string_lossy().into_owned(),
-                "test",
-                Sample::DEFAULT_NAME,
-                None,
-                None,
-            )
+    fn setup_sample_path_changes(alternate: &str) -> (DbContext, Path, [BlockGroupChange; 2]) {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().into_owned(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        Sample::get_or_create_child(
+            conn,
+            "test",
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        )
+        .unwrap();
+        let block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            "test",
+            "child",
+            "m123",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        )
+        .unwrap();
+        let path = Path::select(conn)
+            .block_group_id(block_groups[0].id)
+            .load()
+            .unwrap()
+            .remove(0);
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(alternate)
+            .save(conn)
             .unwrap();
-            Sample::get_or_create_child(
-                conn,
-                "test",
-                "child",
-                vec![Sample::DEFAULT_NAME.to_string()],
-            )
-            .unwrap();
-            let block_groups = BlockGroup::get_or_create_sample_block_groups(
-                conn,
-                "test",
-                "child",
-                "m123",
-                vec![Sample::DEFAULT_NAME.to_string()],
-            )
-            .unwrap();
-            let path = Path::select(conn)
-                .block_group_id(block_groups[0].id)
+        let node_id = Node::create(
+            conn,
+            &sequence.hash,
+            &HashId::convert_str("path test variant"),
+        )
+        .unwrap();
+        let change = BlockGroupChange {
+            region: ResolvedGenRegion::from_path(conn, path.block_group_id, &path, 1, 2).unwrap(),
+            path_accession: None,
+            block: PathBlock {
+                node_id,
+                block_sequence: alternate.to_string(),
+                sequence_start: 0,
+                sequence_end: alternate.len() as i64,
+                path_start: 1,
+                path_end: 2,
+                strand: Strand::Forward,
+            },
+            chromosome_index: 0,
+            phased: 0,
+            preserve_edge: false,
+        };
+        let mut adjacent_change = change.clone();
+        adjacent_change.region.start = 2;
+        adjacent_change.region.end = 3;
+        adjacent_change.block.path_start = 2;
+        adjacent_change.block.path_end = 3;
+        let changes = [change, adjacent_change];
+        (context, path, changes)
+    }
+
+    fn assert_sample_path_edges_unchanged(
+        conn: &GraphConnection,
+        path: &Path,
+        changes: &[BlockGroupChange],
+    ) -> Result<(), VcfError> {
+        let edges_before = Edge::select(conn)
+            .load()
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let associations_before = BlockGroupEdge::select(conn)
+            .load()
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let result = record_sample_path(conn, path, changes);
+        assert_eq!(
+            Edge::select(conn)
                 .load()
                 .unwrap()
-                .remove(0);
-            let sequence = Sequence::new()
-                .sequence_type("DNA")
-                .sequence(alternate)
-                .save(conn)
-                .unwrap();
-            let node_id = Node::create(
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            edges_before
+        );
+        assert_eq!(
+            BlockGroupEdge::select(conn)
+                .load()
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            associations_before
+        );
+        result
+    }
+
+    fn assert_sample_path_inference_rejected(
+        conn: &GraphConnection,
+        path: &Path,
+        changes: &[BlockGroupChange],
+    ) {
+        let original_edge_ids = Path::edge_ids_for_path(conn, &path.id, None);
+        assert!(matches!(
+            assert_sample_path_edges_unchanged(conn, path, changes),
+            Err(VcfError::PathInference(_))
+        ));
+        assert_eq!(
+            Path::edge_ids_for_path(conn, &path.id, None),
+            original_edge_ids
+        );
+    }
+
+    #[test]
+    fn test_record_sample_path_rejects_missing_connections() {
+        for alternate in ["C", ""] {
+            let (context, path, changes) = setup_sample_path_changes(alternate);
+            assert_sample_path_inference_rejected(context.graph().conn(), &path, &changes);
+        }
+    }
+
+    #[test]
+    fn test_record_sample_path_rejects_edges_outside_child_block_group() {
+        for alternate in ["C", ""] {
+            let (context, path, changes) = setup_sample_path_changes(alternate);
+            let conn = context.graph().conn();
+            // Database edges must also belong to the child to qualify as connections.
+            let parent_tree = path.intervaltree(conn).unwrap();
+            let planned = changes
+                .iter()
+                .flat_map(|change| BlockGroup::set_up_new_edges(change, &parent_tree).unwrap())
+                .collect::<Vec<_>>();
+            Edge::bulk_create(
                 conn,
-                &sequence.hash,
-                &HashId::convert_str("path test variant"),
-            )
-            .unwrap();
-            let change = BlockGroupChange {
-                region: ResolvedGenRegion::from_path(conn, path.block_group_id, &path, 1, 2)
-                    .unwrap(),
-                path_accession: None,
-                block: PathBlock {
-                    node_id,
-                    block_sequence: alternate.to_string(),
-                    sequence_start: 0,
-                    sequence_end: alternate.len() as i64,
-                    path_start: 1,
-                    path_end: 2,
-                    strand: Strand::Forward,
-                },
-                chromosome_index: 0,
-                phased: 0,
-                preserve_edge: false,
-            };
-            let mut adjacent_change = change.clone();
-            adjacent_change.region.start = 2;
-            adjacent_change.region.end = 3;
-            adjacent_change.block.path_start = 2;
-            adjacent_change.block.path_end = 3;
-            let changes = [change, adjacent_change];
-            let original_edge_ids = Path::edge_ids_for_path(conn, &path.id, None);
-            for stage in 0..3 {
-                if stage == 1 {
-                    // Edges in the database alone must not qualify as child connections.
-                    let planned = changes
-                        .iter()
-                        .flat_map(|change| {
-                            BlockGroup::set_up_new_edges(change, &path.intervaltree(conn).unwrap())
-                                .unwrap()
-                        })
-                        .collect::<Vec<_>>();
-                    Edge::bulk_create(
-                        conn,
-                        &planned
-                            .iter()
-                            .map(|edge| edge.edge_data)
-                            .collect::<Vec<_>>(),
-                    );
-                } else if stage == 2 {
-                    BlockGroup::insert_changes(conn, context.workspace(), &changes, None).unwrap();
-                }
-                let edges_before = Edge::select(conn)
-                    .load()
-                    .unwrap()
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let associations_before = BlockGroupEdge::select(conn)
-                    .load()
-                    .unwrap()
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let result = record_sample_path(conn, &path, &changes);
-                if stage < 2 {
-                    assert!(matches!(result, Err(VcfError::PathInference(_))));
+                &planned
+                    .iter()
+                    .map(|edge| edge.edge_data)
+                    .collect::<Vec<_>>(),
+            );
+            assert_sample_path_inference_rejected(conn, &path, &changes);
+        }
+    }
+
+    #[test]
+    fn test_record_sample_path_uses_existing_child_connections() {
+        for alternate in ["C", ""] {
+            let (context, path, changes) = setup_sample_path_changes(alternate);
+            let conn = context.graph().conn();
+            BlockGroup::insert_changes(conn, context.workspace(), &changes, None).unwrap();
+            assert_sample_path_edges_unchanged(conn, &path, &changes).unwrap();
+            let blocks = path.coordinate_blocks(conn, None);
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| !is_terminal(block.node_id) && block.path_start == block.path_end)
+            );
+            assert_eq!(
+                path.length(conn, None).unwrap(),
+                32 + 2 * alternate.len() as i64
+            );
+            let tree = path.intervaltree(conn).unwrap();
+            assert_eq!(tree.query_point(1).count(), 1);
+            assert_eq!(
+                path.sequence(conn, context.workspace(), None).unwrap(),
+                if alternate.is_empty() {
+                    "AGATCGATCGATCGATCGGGAACACACAGAGA"
                 } else {
-                    result.unwrap();
+                    "ACCGATCGATCGATCGATCGGGAACACACAGAGA"
                 }
-                assert_eq!(
-                    Edge::select(conn)
-                        .load()
-                        .unwrap()
-                        .into_iter()
-                        .collect::<HashSet<_>>(),
-                    edges_before
-                );
-                assert_eq!(
-                    BlockGroupEdge::select(conn)
-                        .load()
-                        .unwrap()
-                        .into_iter()
-                        .collect::<HashSet<_>>(),
-                    associations_before
-                );
-                if stage < 2 {
-                    assert_eq!(
-                        Path::edge_ids_for_path(conn, &path.id, None),
-                        original_edge_ids
-                    );
-                } else {
-                    let blocks = path.coordinate_blocks(conn, None);
-                    assert!(
-                        blocks.iter().any(|block| !is_terminal(block.node_id)
-                            && block.path_start == block.path_end)
-                    );
-                    assert_eq!(
-                        path.length(conn, None).unwrap(),
-                        32 + 2 * alternate.len() as i64
-                    );
-                    let tree = path.intervaltree(conn).unwrap();
-                    assert_eq!(tree.query_point(1).count(), 1);
-                    assert_eq!(
-                        path.sequence(conn, context.workspace(), None).unwrap(),
-                        if alternate.is_empty() {
-                            "AGATCGATCGATCGATCGGGAACACACAGAGA"
-                        } else {
-                            "ACCGATCGATCGATCGATCGGGAACACACAGAGA"
-                        }
-                    );
-                }
-            }
+            );
         }
     }
 

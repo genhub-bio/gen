@@ -116,11 +116,10 @@ URLs. Pass the index locations explicitly with `--fai <path-or-uri>` and
 
 # VCF update
 
-`gen update vcf` applies the variants in a VCF file to sample graphs and records
-the update as an operation. It uses genotypes from the VCF, or a genotype
-provided with `--genotype`; use `--sample` when assigning calls from a VCF without
-sample columns. Use `--parent-samples` to choose the sample or samples that
-provide the reference coordinates for new samples.
+`gen update vcf` applies the variants in a VCF file to sample graphs and records the update as an operation. It uses
+genotypes from the VCF, or a genotype provided with `--genotype`; use `--sample` when assigning calls from a VCF without
+sample columns. Use `--reference` or `--parent-samples` to choose the sample or samples that provide the reference
+coordinates for new samples.
 
 By default, variant positions are interpreted in the parent sample's reference
 coordinates. Use `--inplace` to interpret them against the sample's existing

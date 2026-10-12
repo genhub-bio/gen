@@ -452,6 +452,27 @@ impl Path {
         Ok(path)
     }
 
+    /// Replaces a path's ordered edges after validation, preserving its identity and metadata.
+    pub fn update_edges(
+        &self,
+        conn: &GraphConnection,
+        edge_ids: &[HashId],
+    ) -> Result<(), PathError> {
+        Self::validate_edges(conn, edge_ids, &self.block_group_id)?;
+        let updated = conn.execute(
+            "UPDATE paths SET edge_ids = ?1 WHERE id = ?2 AND block_group_id = ?3",
+            params![
+                Self::encode_edge_ids(edge_ids),
+                self.id,
+                self.block_group_id
+            ],
+        )?;
+        if updated == 0 {
+            return Err(PathError::Missing(format!("path {}", self.id)));
+        }
+        Ok(())
+    }
+
     pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
         let query = "DELETE FROM paths where name = ?1 AND block_group_id = ?2;";
         conn.execute(query, params![name.to_string(), block_group_id])
@@ -1165,6 +1186,49 @@ mod tests {
         sequence::Sequence,
         test_helpers::{create_bg, get_connection, setup_block_group, test_workspace},
     };
+
+    #[test]
+    fn test_update_edges_preserves_metadata_and_rejects_invalid_updates() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let original_edge_ids = Path::edge_ids_for_path(conn, &path.id, None);
+        let edge = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create empty traversal");
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+        path.update_edges(conn, &[edge.id])
+            .expect("should replace path edges");
+        assert_eq!(Path::get_by_id(conn, &path.id), path);
+        assert_eq!(Path::edge_ids_for_path(conn, &path.id, None), vec![edge.id]);
+        assert!(matches!(
+            path.update_edges(conn, &[original_edge_ids[1], original_edge_ids[0]]),
+            Err(PathError::Invalid(_))
+        ));
+        assert_eq!(Path::edge_ids_for_path(conn, &path.id, None), vec![edge.id]);
+        assert_eq!(Path::get_by_id(conn, &path.id), path);
+
+        Path::delete(conn, &path.name, &path.block_group_id);
+        assert!(matches!(
+            path.update_edges(conn, &original_edge_ids),
+            Err(PathError::Missing(_))
+        ));
+        assert!(Path::select(conn).id(path.id).load().unwrap().is_empty());
+    }
 
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
         Sample::get_or_create(
