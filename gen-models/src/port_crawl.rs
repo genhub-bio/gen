@@ -6,7 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use gen_core::{
@@ -176,19 +176,41 @@ pub struct PortCrawler {
 /// A database-backed adjacency source for a retained local graph.
 ///
 /// Start with an empty graph and seed it with [`Self::locate`] or a known graph slice.
-/// Keep this source paired with that graph; clone both together. The borrowed connection
-/// must remain on the same block-group revision while cached adjacency is retained.
-#[derive(Clone, Debug)]
-pub struct PortGraphSource<'a> {
-    conn: &'a GraphConnection,
+/// Keep this source paired with that graph; clone both together. Clones share a serialized
+/// database connection, preserving its selected branch, but keep independent crawl state.
+/// The source is `Send + Sync`; loading still requires exclusive access to each graph/source pair.
+/// The database must remain on the same block-group revision while adjacency is retained.
+#[derive(Debug)]
+pub struct PortGraphSource {
+    connection: Arc<Mutex<GraphConnection>>,
     crawler: PortCrawler,
 }
 
-impl<'a> PortGraphSource<'a> {
-    /// Create a source with no loaded adjacency for one block group.
-    pub fn new(conn: &'a GraphConnection, block_group_id: HashId, prune: bool) -> Self {
+/// A failure to access the source's connection or load adjacency.
+#[derive(Debug, Error)]
+pub enum PortGraphSourceError {
+    /// A database query or graph construction step failed.
+    #[error(transparent)]
+    Edge(#[from] EdgeError),
+    /// A previous panic left the shared database session in an uncertain state.
+    #[error("the graph source connection lock is poisoned")]
+    ConnectionPoisoned,
+}
+
+impl Clone for PortGraphSource {
+    fn clone(&self) -> Self {
         Self {
-            conn,
+            connection: Arc::clone(&self.connection),
+            crawler: self.crawler.clone(),
+        }
+    }
+}
+
+impl PortGraphSource {
+    /// Take ownership of a connection and create an unexplored source for one block group.
+    pub fn new(connection: GraphConnection, block_group_id: HashId, prune: bool) -> Self {
+        Self {
+            connection: Arc::new(Mutex::new(connection)),
             crawler: PortCrawler::new(block_group_id, prune),
         }
     }
@@ -200,13 +222,19 @@ impl<'a> PortGraphSource<'a> {
         graph: &mut GenGraph,
         node_id: HashId,
         coordinate: i64,
-    ) -> Result<Option<GraphNode>, EdgeError> {
-        self.crawler.locate(self.conn, graph, node_id, coordinate)
+    ) -> Result<Option<GraphNode>, PortGraphSourceError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PortGraphSourceError::ConnectionPoisoned)?;
+        Ok(self
+            .crawler
+            .locate(&connection, graph, node_id, coordinate)?)
     }
 }
 
-impl GraphSource<GenGraph> for PortGraphSource<'_> {
-    type Error = EdgeError;
+impl GraphSource<GenGraph> for PortGraphSource {
+    type Error = PortGraphSourceError;
 
     fn is_frontier(&self, node: GraphNode, direction: Direction) -> bool {
         !self.crawler.is_complete(&node, direction)
@@ -217,7 +245,11 @@ impl GraphSource<GenGraph> for PortGraphSource<'_> {
         graph: &mut GenGraph,
         frontier: &[GraphNode],
     ) -> Result<(), Self::Error> {
-        self.crawler.complete(self.conn, graph, frontier)
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PortGraphSourceError::ConnectionPoisoned)?;
+        Ok(self.crawler.complete(&connection, graph, frontier)?)
     }
 }
 
@@ -636,7 +668,7 @@ impl PortCrawler {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, sync::Arc, thread};
 
     use gen_core::{
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
@@ -645,7 +677,9 @@ mod tests {
     use gen_graph::{GenGraph, GraphNode, GraphSource};
     use petgraph::Direction;
 
-    use super::{CrawlError, CrawlStart, PortCrawler, PortGraphSource, crawl_graph};
+    use super::{
+        CrawlError, CrawlStart, PortCrawler, PortGraphSource, PortGraphSourceError, crawl_graph,
+    };
     use crate::{
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -667,6 +701,84 @@ mod tests {
         }
     }
 
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn test_port_graph_source_moves_between_threads_with_shared_connection() {
+        assert_send_sync::<PortGraphSource>();
+        let connection = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &connection,
+            &[("a", "AAAA")],
+            &[("start", 0, "a", 0, 0), ("a", 4, "end", 0, 0)],
+        );
+        let mut source = PortGraphSource::new(connection, block_group_id, false);
+        let mut graph = GenGraph::new();
+        let anchor = source
+            .locate(&mut graph, node_id_for("a"), 2)
+            .unwrap()
+            .unwrap();
+        let mut cloned_source = source.clone();
+        let mut cloned_graph = graph.clone();
+        assert!(Arc::ptr_eq(&source.connection, &cloned_source.connection));
+        let worker = thread::spawn(move || {
+            cloned_source
+                .expand_frontier(&mut cloned_graph, &[anchor])
+                .unwrap();
+            (cloned_source, cloned_graph)
+        });
+        let (mut cloned_source, mut cloned_graph) = worker
+            .join()
+            .expect("should complete adjacency on another thread");
+        assert!(source.is_frontier(anchor, Direction::Outgoing));
+        assert!(!cloned_source.is_frontier(anchor, Direction::Outgoing));
+        let worker = thread::spawn(move || {
+            source.expand_frontier(&mut graph, &[anchor]).unwrap();
+            (source, graph)
+        });
+        // Both graph/source pairs can continue loading through the same serialized session.
+        cloned_source
+            .expand_frontier(&mut cloned_graph, &[start_sentinel()])
+            .unwrap();
+        let (source, graph) = worker
+            .join()
+            .expect("should expand through the shared connection");
+        assert!(!source.is_frontier(anchor, Direction::Outgoing));
+        assert_eq!(shape(&graph), shape(&cloned_graph));
+    }
+
+    #[test]
+    fn test_port_graph_source_reports_poisoned_connection() {
+        let mut source = PortGraphSource::new(
+            get_connection(None).unwrap(),
+            HashId::convert_str("group"),
+            false,
+        );
+        let connection = Arc::clone(&source.connection);
+        assert!(
+            thread::spawn(move || {
+                let _guard = connection.lock().expect("should lock the connection");
+                panic!("simulate a panic while using the connection");
+            })
+            .join()
+            .is_err()
+        );
+        let mut graph = GenGraph::new();
+        let anchor = start_sentinel();
+        graph.add_node(anchor);
+        assert!(matches!(
+            source.expand_frontier(&mut graph, &[anchor]),
+            Err(PortGraphSourceError::ConnectionPoisoned)
+        ));
+        assert!(matches!(
+            source.locate(&mut graph, node_id_for("a"), 2),
+            Err(PortGraphSourceError::ConnectionPoisoned)
+        ));
+        assert!(source.is_frontier(anchor, Direction::Outgoing));
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+    }
+
     #[test]
     fn test_port_graph_source_retains_immediate_adjacency() {
         let conn = get_connection(None).unwrap();
@@ -680,7 +792,7 @@ mod tests {
                 ("c", 4, "end", 0, 0),
             ],
         );
-        let mut source = PortGraphSource::new(&conn, block_group_id, false);
+        let mut source = PortGraphSource::new(conn, block_group_id, false);
         let mut graph = GenGraph::new();
         let anchor = source
             .locate(&mut graph, node_id_for("b"), 2)
@@ -741,19 +853,27 @@ mod tests {
             &[("a", "AAAA")],
             &[("start", 0, "a", 0, 0), ("a", 4, "end", 0, 0)],
         );
-        let mut source = PortGraphSource::new(&conn, block_group_id, false);
+        let mut source = PortGraphSource::new(conn, block_group_id, false);
         let mut graph = GenGraph::new();
         let anchor = source
             .locate(&mut graph, node_id_for("a"), 2)
             .unwrap()
             .unwrap();
-        conn.execute_batch("ALTER TABLE edges RENAME TO unavailable_edges;")
+        source
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE edges RENAME TO unavailable_edges;")
             .unwrap();
         assert!(source.expand_frontier(&mut graph, &[anchor]).is_err());
         for direction in [Direction::Incoming, Direction::Outgoing] {
             assert!(source.is_frontier(anchor, direction));
         }
-        conn.execute_batch("ALTER TABLE unavailable_edges RENAME TO edges;")
+        source
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE unavailable_edges RENAME TO edges;")
             .unwrap();
         source.expand_frontier(&mut graph, &[anchor]).unwrap();
         for direction in [Direction::Incoming, Direction::Outgoing] {
