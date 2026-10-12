@@ -13,7 +13,7 @@ use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
 };
-use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphSource};
 use petgraph::Direction;
 use thiserror::Error;
 
@@ -171,6 +171,54 @@ pub struct PortCrawler {
     /// An edge is projected once, whichever of its two ports reached it first.
     visited_edges: HashSet<HashId>,
     materialized: HashSet<(GraphNode, Direction)>,
+}
+
+/// A database-backed adjacency source for a retained local graph.
+///
+/// Start with an empty graph and seed it with [`Self::locate`] or a known graph slice.
+/// Keep this source paired with that graph; clone both together. The borrowed connection
+/// must remain on the same block-group revision while cached adjacency is retained.
+#[derive(Clone, Debug)]
+pub struct PortGraphSource<'a> {
+    conn: &'a GraphConnection,
+    crawler: PortCrawler,
+}
+
+impl<'a> PortGraphSource<'a> {
+    /// Create a source with no loaded adjacency for one block group.
+    pub fn new(conn: &'a GraphConnection, block_group_id: HashId, prune: bool) -> Self {
+        Self {
+            conn,
+            crawler: PortCrawler::new(block_group_id, prune),
+        }
+    }
+
+    /// Add the slice containing a backing-node coordinate as an unexplored seed.
+    /// Returns `None` when the position does not belong to the block group.
+    pub fn locate(
+        &mut self,
+        graph: &mut GenGraph,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Result<Option<GraphNode>, EdgeError> {
+        self.crawler.locate(self.conn, graph, node_id, coordinate)
+    }
+}
+
+impl GraphSource<GenGraph> for PortGraphSource<'_> {
+    type Error = EdgeError;
+
+    fn is_frontier(&self, node: GraphNode, direction: Direction) -> bool {
+        !self.crawler.is_complete(&node, direction)
+    }
+
+    fn expand_frontier(
+        &mut self,
+        graph: &mut GenGraph,
+        frontier: &[GraphNode],
+    ) -> Result<(), Self::Error> {
+        self.crawler.complete(self.conn, graph, frontier)
+    }
 }
 
 /// A jump skips sequence within one backing node, so its endpoints sit at different coordinates.
@@ -594,10 +642,10 @@ mod tests {
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
         PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
     };
-    use gen_graph::{GenGraph, GraphNode};
+    use gen_graph::{GenGraph, GraphNode, GraphSource};
     use petgraph::Direction;
 
-    use super::{CrawlError, CrawlStart, PortCrawler, crawl_graph};
+    use super::{CrawlError, CrawlStart, PortCrawler, PortGraphSource, crawl_graph};
     use crate::{
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -617,6 +665,101 @@ mod tests {
             sequence_start: start,
             sequence_end: end,
         }
+    }
+
+    #[test]
+    fn test_port_graph_source_retains_immediate_adjacency() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("b", 4, "c", 0, 0),
+                ("c", 4, "end", 0, 0),
+            ],
+        );
+        let mut source = PortGraphSource::new(&conn, block_group_id, false);
+        let mut graph = GenGraph::new();
+        let anchor = source
+            .locate(&mut graph, node_id_for("b"), 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(graph.node_count(), 1);
+        source.expand_frontier(&mut graph, &[anchor]).unwrap();
+        assert_eq!(graph.node_count(), 3);
+        assert!(graph.contains_edge(block("a", 0, 4), anchor));
+        assert!(graph.contains_edge(anchor, block("c", 0, 4)));
+        for direction in [Direction::Incoming, Direction::Outgoing] {
+            assert!(!source.is_frontier(anchor, direction));
+            assert!(source.is_frontier(block("a", 0, 4), direction));
+            assert!(source.is_frontier(block("c", 0, 4), direction));
+        }
+        let snapshot = |graph: &GenGraph| {
+            (
+                graph.nodes().collect::<BTreeSet<_>>(),
+                graph
+                    .all_edges()
+                    .map(|(source, target, edges)| (source, target, edges.clone()))
+                    .collect::<BTreeSet<_>>(),
+            )
+        };
+        let expected = snapshot(&graph);
+        source
+            .expand_frontier(&mut graph, &[anchor, anchor])
+            .unwrap();
+        assert_eq!(
+            snapshot(&graph),
+            expected,
+            "repeated requests should preserve edge metadata"
+        );
+
+        let mut cloned_source = source.clone();
+        let mut cloned_graph = graph.clone();
+        cloned_source
+            .expand_frontier(&mut cloned_graph, &[block("a", 0, 4)])
+            .unwrap();
+        assert!(source.is_frontier(block("a", 0, 4), Direction::Incoming));
+        assert_eq!(snapshot(&graph), expected);
+        assert!(!cloned_source.is_frontier(block("a", 0, 4), Direction::Incoming));
+        let start = start_sentinel();
+        cloned_source
+            .expand_frontier(&mut cloned_graph, &[start])
+            .unwrap();
+        assert!(
+            !cloned_source.is_frontier(start, Direction::Incoming),
+            "a known dead end should be complete"
+        );
+    }
+
+    #[test]
+    fn test_port_graph_source_retries_failed_adjacency() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA")],
+            &[("start", 0, "a", 0, 0), ("a", 4, "end", 0, 0)],
+        );
+        let mut source = PortGraphSource::new(&conn, block_group_id, false);
+        let mut graph = GenGraph::new();
+        let anchor = source
+            .locate(&mut graph, node_id_for("a"), 2)
+            .unwrap()
+            .unwrap();
+        conn.execute_batch("ALTER TABLE edges RENAME TO unavailable_edges;")
+            .unwrap();
+        assert!(source.expand_frontier(&mut graph, &[anchor]).is_err());
+        for direction in [Direction::Incoming, Direction::Outgoing] {
+            assert!(source.is_frontier(anchor, direction));
+        }
+        conn.execute_batch("ALTER TABLE unavailable_edges RENAME TO edges;")
+            .unwrap();
+        source.expand_frontier(&mut graph, &[anchor]).unwrap();
+        for direction in [Direction::Incoming, Direction::Outgoing] {
+            assert!(!source.is_frontier(anchor, direction));
+        }
+        assert_eq!(graph.edge_count(), 2);
     }
 
     #[test]

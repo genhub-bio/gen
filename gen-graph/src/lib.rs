@@ -24,7 +24,9 @@ use petgraph::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod source;
 pub mod traits;
+pub use source::{EagerSource, GraphSource};
 pub use traits::MergeGraph;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
