@@ -300,7 +300,7 @@ mod tests {
             },
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         BlockGroup::insert_change(conn, test_workspace(), &change)

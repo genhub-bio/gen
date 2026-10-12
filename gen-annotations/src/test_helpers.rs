@@ -200,7 +200,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
         },
         chromosome_index: 0,
         phased: 0,
-        preserve_edge: false,
+        preserve_chromosome_index: None,
     };
 
     BlockGroup::insert_change(conn, test_workspace(), &change)
