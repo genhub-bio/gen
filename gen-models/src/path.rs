@@ -283,6 +283,9 @@ impl Path {
                     second_edge.source_node_id
                 )));
             }
+            // Equal coordinates traverse a zero-length junction without consuming
+            // sequence. Graphs use these to connect adjacent edits; stored paths
+            // must preserve the same traversal. Only backward movement is invalid.
             if first_edge.target_coordinate > second_edge.source_coordinate {
                 return Err(PathError::Invalid(format!(
                     "source coordinate {} for edge {} is before target coordinate {} for edge {}",
@@ -447,6 +450,27 @@ impl Path {
         };
 
         Ok(path)
+    }
+
+    /// Replaces a path's ordered edges after validation, preserving its identity and metadata.
+    pub fn update_edges(
+        &self,
+        conn: &GraphConnection,
+        edge_ids: &[HashId],
+    ) -> Result<(), PathError> {
+        Self::validate_edges(conn, edge_ids, &self.block_group_id)?;
+        let updated = conn.execute(
+            "UPDATE paths SET edge_ids = ?1 WHERE id = ?2 AND block_group_id = ?3",
+            params![
+                Self::encode_edge_ids(edge_ids),
+                self.id,
+                self.block_group_id
+            ],
+        )?;
+        if updated == 0 {
+            return Err(PathError::Missing(format!("path {}", self.id)));
+        }
+        Ok(())
     }
 
     pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
@@ -1163,6 +1187,49 @@ mod tests {
         test_helpers::{create_bg, get_connection, setup_block_group, test_workspace},
     };
 
+    #[test]
+    fn test_update_edges_preserves_metadata_and_rejects_invalid_updates() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let original_edge_ids = Path::edge_ids_for_path(conn, &path.id, None);
+        let edge = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create empty traversal");
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+        path.update_edges(conn, &[edge.id])
+            .expect("should replace path edges");
+        assert_eq!(Path::get_by_id(conn, &path.id), path);
+        assert_eq!(Path::edge_ids_for_path(conn, &path.id, None), vec![edge.id]);
+        assert!(matches!(
+            path.update_edges(conn, &[original_edge_ids[1], original_edge_ids[0]]),
+            Err(PathError::Invalid(_))
+        ));
+        assert_eq!(Path::edge_ids_for_path(conn, &path.id, None), vec![edge.id]);
+        assert_eq!(Path::get_by_id(conn, &path.id), path);
+
+        Path::delete(conn, &path.name, &path.block_group_id);
+        assert!(matches!(
+            path.update_edges(conn, &original_edge_ids),
+            Err(PathError::Missing(_))
+        ));
+        assert!(Path::select(conn).id(path.id).load().unwrap().is_empty());
+    }
+
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
         Sample::get_or_create(
             conn,
@@ -1557,6 +1624,52 @@ mod tests {
             Path::edge_ids_for_path(conn, &path.id, Some(&history_ref)),
             expected_edge_ids
         );
+    }
+
+    #[test]
+    fn test_validate_edges_allows_junctions_but_rejects_backward_traversal() {
+        let into_junction = EdgeData {
+            source_node_id: HashId::convert_str("first variant"),
+            source_coordinate: 1,
+            source_strand: Strand::Forward,
+            target_node_id: HashId::convert_str("parent"),
+            target_coordinate: 4,
+            target_strand: Strand::Forward,
+        };
+        let out_of_junction = EdgeData {
+            source_node_id: into_junction.target_node_id,
+            source_coordinate: 4,
+            source_strand: Strand::Forward,
+            target_node_id: HashId::convert_str("second variant"),
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        let edges = [into_junction, out_of_junction];
+        let edge_ids = edges.map(|edge| edge.id_hash());
+        Path::validate_edges_in_memory(&edge_ids, &edges)
+            .expect("should allow a zero-length junction between variants");
+
+        for invalid_edge in [
+            EdgeData {
+                source_coordinate: 3,
+                ..out_of_junction
+            },
+            EdgeData {
+                source_node_id: HashId::convert_str("other node"),
+                ..out_of_junction
+            },
+            EdgeData {
+                source_strand: Strand::Reverse,
+                ..out_of_junction
+            },
+        ] {
+            let edges = [into_junction, invalid_edge];
+            let edge_ids = edges.map(|edge| edge.id_hash());
+            assert!(matches!(
+                Path::validate_edges_in_memory(&edge_ids, &edges),
+                Err(PathError::Invalid(_))
+            ));
+        }
     }
 
     #[test]
@@ -4559,7 +4672,7 @@ mod tests {
     #[test]
     #[should_panic]
     // Panic message is something like "Source coordinate 2 for edge 2 is before target coordinate 4 for edge 1"
-    fn test_consecutive_edges_must_not_decrease_coordinates_on_a_node() {
+    fn test_consecutive_edges_must_not_traverse_backward_on_a_node() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
