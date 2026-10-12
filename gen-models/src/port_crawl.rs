@@ -168,8 +168,9 @@ pub struct PortCrawler {
     port_blocks: HashMap<Port, Vec<GraphNode>>,
     /// Frontier edge batches are known before their far blocks have been opened and closed.
     edge_groups: HashMap<(Port, Direction), Arc<[AugmentedEdge]>>,
-    /// An edge is projected once, whichever of its two ports reached it first.
-    visited_edges: HashSet<HashId>,
+    /// Each chromosome record is projected once, whichever port reached it first. A stored
+    /// edge ID alone is insufficient because several chromosome copies can share that edge.
+    visited_edge_records: HashSet<GraphEdge>,
     materialized: HashSet<(GraphNode, Direction)>,
 }
 
@@ -201,6 +202,17 @@ struct EdgeEndpoints<'a> {
     target_blocks: &'a [GraphNode],
     source_is_shared_position: bool,
     target_is_shared_position: bool,
+}
+
+fn graph_edge_for(augmented_edge: &AugmentedEdge) -> GraphEdge {
+    GraphEdge {
+        edge_id: augmented_edge.edge.id,
+        source_strand: augmented_edge.edge.source_strand,
+        target_strand: augmented_edge.edge.target_strand,
+        chromosome_index: augmented_edge.chromosome_index,
+        phased: augmented_edge.phased,
+        created_on: augmented_edge.created_on,
+    }
 }
 
 /// Project one stored edge onto the blocks at its two ports, the same way the eager graph
@@ -238,14 +250,7 @@ fn merge_fragment(graph: &mut GenGraph, augmented_edge: &AugmentedEdge, endpoint
         endpoints.source_is_shared_position,
         endpoints.target_is_shared_position,
     );
-    let graph_edge = GraphEdge {
-        edge_id: edge.id,
-        source_strand: edge.source_strand,
-        target_strand: edge.target_strand,
-        chromosome_index: augmented_edge.chromosome_index,
-        phased: augmented_edge.phased,
-        created_on: augmented_edge.created_on,
-    };
+    let graph_edge = graph_edge_for(augmented_edge);
     for (source_block, target_block) in connections {
         let source = GraphNode {
             node_id: source_block.node_id,
@@ -258,10 +263,7 @@ fn merge_fragment(graph: &mut GenGraph, augmented_edge: &AugmentedEdge, endpoint
             sequence_end: target_block.end,
         };
         if let Some(existing) = graph.edge_weight_mut(source, target) {
-            if !existing
-                .iter()
-                .any(|present| present.edge_id == graph_edge.edge_id)
-            {
+            if !existing.contains(&graph_edge) {
                 existing.push(graph_edge);
             }
         } else {
@@ -277,7 +279,7 @@ impl PortCrawler {
             prune,
             port_blocks: HashMap::new(),
             edge_groups: HashMap::new(),
-            visited_edges: HashSet::new(),
+            visited_edge_records: HashSet::new(),
             materialized: HashSet::new(),
         }
     }
@@ -512,12 +514,12 @@ impl PortCrawler {
             self.block_group_id, node, direction
         );
         for augmented_edge in edges.iter() {
-            let edge_id = augmented_edge.edge.id;
-            if self.visited_edges.contains(&edge_id) {
+            let graph_edge = graph_edge_for(augmented_edge);
+            if self.visited_edge_records.contains(&graph_edge) {
                 continue;
             }
             if self.prune && !self.survives_pruning(conn, augmented_edge)? {
-                self.visited_edges.insert(edge_id);
+                self.visited_edge_records.insert(graph_edge);
                 continue;
             }
             let source_port = Port {
@@ -542,7 +544,7 @@ impl PortCrawler {
                     target_is_shared_position,
                 },
             );
-            self.visited_edges.insert(edge_id);
+            self.visited_edge_records.insert(graph_edge);
         }
         self.materialized.insert((node, direction));
         Ok(())
@@ -660,6 +662,49 @@ mod tests {
             ),
             Err(CrawlError::EmptyBudget)
         ));
+    }
+
+    #[test]
+    fn test_crawl_preserves_each_chromosome_record_on_a_shared_stored_edge() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("a", 4, "b", 0, 1),
+                ("a", 4, "c", 0, 0),
+                ("b", 4, "end", 0, 0),
+                ("c", 4, "end", 0, 0),
+            ],
+        );
+
+        for prune in [false, true] {
+            let mut eager =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            if prune {
+                BlockGroup::prune_graph(&mut eager);
+            }
+            let mut crawler = PortCrawler::new(block_group_id, prune);
+            let mut lazy = GenGraph::new();
+            lazy.add_node(start_sentinel());
+            crawl_to_exhaustion(&conn, &mut crawler, &mut lazy);
+
+            for (source, target, expected) in eager.all_edges() {
+                let mut expected = expected.clone();
+                expected.sort();
+                let mut actual = lazy
+                    .edge_weight(source, target)
+                    .expect("should retain a connection with a surviving chromosome record")
+                    .clone();
+                actual.sort();
+                assert_eq!(
+                    actual, expected,
+                    "chromosome records should match with prune={prune}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -882,7 +927,7 @@ mod tests {
             "a reverse crawl should add nothing to the forward graph"
         );
         assert_eq!(
-            crawler.visited_edges.len(),
+            crawler.visited_edge_records.len(),
             6,
             "each of the six edges should be projected once, from whichever side reached it"
         );
