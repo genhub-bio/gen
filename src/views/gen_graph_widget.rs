@@ -29,6 +29,7 @@ use crate::views::{
     },
     graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
+    junction_projection::project_junctions,
 };
 
 /// Labels for special start/end nodes
@@ -259,90 +260,10 @@ pub fn create_gen_graph_widget<'a>(
 /// Contract zero-width routing positions in a display copy while retaining real cycles
 /// and edge metadata in the source graph used by sequence operations.
 fn graph_for_display(graph: &GenGraph) -> GenGraph {
-    let mut contracted_graph = graph.clone();
-    let junctions = graph
-        .nodes()
-        .filter(is_zero_width_junction)
-        .collect::<Vec<_>>();
-
-    for junction in junctions {
-        let incoming = contracted_graph
-            .neighbors_directed(junction, Direction::Incoming)
-            .filter(|source| *source != junction)
-            .filter_map(|source| {
-                contracted_graph
-                    .edge_weight(source, junction)
-                    .map(|edges| (source, edges.clone()))
-            })
-            .collect::<Vec<_>>();
-        let outgoing = contracted_graph
-            .neighbors_directed(junction, Direction::Outgoing)
-            .filter(|target| *target != junction)
-            .filter_map(|target| {
-                contracted_graph
-                    .edge_weight(junction, target)
-                    .map(|edges| (target, edges.clone()))
-            })
-            .collect::<Vec<_>>();
-
-        for (source, incoming_edges) in &incoming {
-            for (target, outgoing_edges) in &outgoing {
-                if source == target {
-                    continue;
-                }
-
-                let mut projected_edges = incoming_edges.clone();
-                for edge in outgoing_edges {
-                    if !projected_edges.contains(edge) {
-                        projected_edges.push(*edge);
-                    }
-                }
-                if let Some(existing_edges) = contracted_graph.edge_weight_mut(*source, *target) {
-                    for edge in projected_edges {
-                        if !existing_edges.contains(&edge) {
-                            existing_edges.push(edge);
-                        }
-                    }
-                } else {
-                    contracted_graph.add_edge(*source, *target, projected_edges);
-                }
-            }
-        }
-
-        contracted_graph.remove_node(junction);
-    }
-
-    let retained_nodes = graph
-        .nodes()
-        .filter(|node| !is_zero_width_junction(node))
-        .collect::<Vec<_>>();
-    let node_order = retained_nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (*node, index))
-        .collect::<HashMap<_, _>>();
-    let mut display_graph = GenGraph::new();
-    for node in &retained_nodes {
-        display_graph.add_node(*node);
-    }
-    for source in &retained_nodes {
-        let mut targets = contracted_graph
-            .neighbors_directed(*source, Direction::Outgoing)
-            .collect::<Vec<_>>();
-        targets.sort_unstable_by_key(|target| node_order[target]);
-        for target in targets {
-            let edge_bundle = contracted_graph
-                .edge_weight(*source, target)
-                .expect("should retain contracted edge bundle")
-                .clone();
-            display_graph.add_edge(*source, target, edge_bundle);
-        }
-    }
-
-    display_graph
+    project_junctions(graph).graph
 }
 
-/// Project the source graph and its actual pruning result before comparing dimmed routes.
+/// Decide which projected routes survive before propagating dimming through sequence nodes.
 fn display_graph_with_lowlights(
     graph: &GenGraph,
 ) -> (
@@ -350,26 +271,24 @@ fn display_graph_with_lowlights(
     HashSet<(GraphNode, GraphNode)>,
     HashSet<GraphNode>,
 ) {
-    let mut pruned_graph = graph.clone();
-    BlockGroup::prune_graph(&mut pruned_graph);
+    let projection = project_junctions(graph);
+    let mut surviving_graph = projection.surviving_routes;
+    BlockGroup::prune_graph(&mut surviving_graph);
 
-    let display_graph = graph_for_display(graph);
-    let pruned_display_graph = graph_for_display(&pruned_graph);
-    let dimmed_edges = display_graph
+    let dimmed_edges = projection
+        .graph
         .all_edges()
-        .filter_map(|(source_node, target_node, _)| {
-            pruned_display_graph
-                .edge_weight(source_node, target_node)
-                .is_none()
-                .then_some((source_node, target_node))
+        .filter_map(|(source, target, _)| {
+            (!surviving_graph.contains_edge(source, target)).then_some((source, target))
         })
         .collect();
-    let dimmed_nodes = display_graph
+    let dimmed_nodes = projection
+        .graph
         .nodes()
-        .filter(|node| !pruned_display_graph.contains_node(*node))
+        .filter(|node| !surviving_graph.contains_node(*node))
         .collect();
 
-    (display_graph, dimmed_edges, dimmed_nodes)
+    (projection.graph, dimmed_edges, dimmed_nodes)
 }
 
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
@@ -899,7 +818,11 @@ mod tests {
         PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand,
     };
     use gen_graph::GraphEdge;
-    use gen_models::sample::Sample;
+    use gen_models::{
+        path::Path,
+        port_crawl::{CrawlStart, crawl_graph},
+        sample::Sample,
+    };
     use gen_tui::{
         geometry::WorldPos,
         graph_controller::HighlightKind,
@@ -1289,8 +1212,8 @@ mod tests {
         assert!(dimmed_nodes.contains(&end));
     }
 
-    #[test]
-    fn test_snapshot_zygosity_pruned_edges() {
+    // Keep the fixture and viewport identical so only graph construction affects the render.
+    fn render_zygosity_pruned_edges(lazy: bool) -> (String, Buffer) {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
 
@@ -1326,8 +1249,39 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph =
-            Sample::get_graph(conn, context.workspace(), collection, "SAMPLE1", None).unwrap();
+        let gen_graph = if lazy {
+            let paths = Path::query_for_collection_and_sample(conn, collection, "SAMPLE1");
+            assert_eq!(paths.len(), 1, "should have one zygosity fixture path");
+            let path = &paths[0];
+            let graph = crawl_graph(
+                conn,
+                path.block_group_id,
+                CrawlStart::Path {
+                    path,
+                    coordinate: 0,
+                },
+                usize::MAX,
+            )
+            .expect("should crawl the complete zygosity graph")
+            .expect("should find the zygosity path start");
+
+            // The crawl selects nodes in a HashSet; stabilize layout tie-breaking for snapshots.
+            let mut nodes: Vec<_> = graph.nodes().collect();
+            nodes.sort();
+            let mut edges: Vec<_> = graph.all_edges().collect();
+            edges.sort_by_key(|(source, target, _)| (*source, *target));
+            let mut ordered_graph = GenGraph::new();
+            for node in nodes {
+                ordered_graph.add_node(node);
+            }
+            for (source, target, weights) in edges {
+                ordered_graph.add_edge(source, target, weights.clone());
+            }
+            ordered_graph
+        } else {
+            Sample::get_graph(conn, context.workspace(), collection, "SAMPLE1", None)
+                .expect("should load the eager zygosity graph")
+        };
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -1342,7 +1296,28 @@ mod tests {
             })
             .unwrap();
 
-        insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
+        (
+            terminal.backend().to_string(),
+            terminal.backend().buffer().clone(),
+        )
+    }
+
+    #[test]
+    fn test_snapshot_zygosity_pruned_edges() {
+        let (render, _) = render_zygosity_pruned_edges(false);
+        insta::assert_snapshot!("zygosity_pruned_edges", render);
+    }
+
+    #[test]
+    fn test_snapshot_zygosity_pruned_edges_lazy() {
+        let (lazy_render, lazy_buffer) = render_zygosity_pruned_edges(true);
+        let (eager_render, eager_buffer) = render_zygosity_pruned_edges(false);
+
+        insta::assert_snapshot!("zygosity_pruned_edges_lazy", lazy_render);
+        insta::assert_snapshot!("zygosity_pruned_edges", eager_render);
+
+        assert_eq!(lazy_render, eager_render);
+        assert_eq!(lazy_buffer, eager_buffer);
     }
 
     /// A cell highlight set in `Full` detail must re-map onto the truncated cells

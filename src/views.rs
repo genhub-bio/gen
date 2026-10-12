@@ -12,6 +12,7 @@ pub mod gen_graph_widget;
 pub mod graph_overlay;
 pub mod helpers;
 pub mod inline_label_placement;
+pub(crate) mod junction_projection;
 pub mod messages;
 pub mod operations;
 pub mod panels;
