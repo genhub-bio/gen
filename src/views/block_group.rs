@@ -43,8 +43,9 @@ use crate::{
         },
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
-            RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
-            resolve_region_search_matches,
+            RegionSearchContext, RegionSearchMatch, RegionSearchTask, RegionSearchWorker,
+            RegionSearchWorkerPoll, RegionSearchWorkerResult, activate_search_match,
+            remove_search_overlay,
         },
         tui_runtime::TuiSession,
     },
@@ -55,20 +56,60 @@ struct RegionSearchState {
     query: String,
     matches: Vec<RegionSearchMatch>,
     selected_match: Option<usize>,
+    completed_query: Option<String>,
+    completed_feedback: Option<String>,
     focused: bool,
+    generation: u64,
+    search_due: Option<Instant>,
+    selection_pending: bool,
 }
 
 impl RegionSearchState {
+    fn clear_search_state(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.search_due = None;
+        self.selection_pending = false;
+        self.clear_cached_results();
+    }
+
+    fn schedule_query(&mut self, now: Instant) {
+        self.generation = self.generation.wrapping_add(1);
+        self.clear_cached_results();
+        self.selection_pending = false;
+        self.search_due = (!self.query.trim().is_empty()).then_some(now + REGION_SEARCH_DEBOUNCE);
+    }
+
+    fn blur(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.search_due = None;
+        self.selection_pending = false;
+        self.focused = false;
+    }
+
     fn clear_matches(&mut self) {
         self.matches.clear();
         self.selected_match = None;
     }
 
-    fn set_matches(&mut self, matches: Vec<RegionSearchMatch>) {
-        self.matches = matches;
-        self.selected_match = self.selected_match.and_then(|selected_match| {
-            (selected_match < self.matches.len()).then_some(selected_match)
-        });
+    fn clear_cached_results(&mut self) {
+        self.clear_matches();
+        self.completed_query = None;
+        self.completed_feedback = None;
+    }
+
+    fn complete_query(&mut self, result: Result<Vec<RegionSearchMatch>, String>) {
+        self.completed_query = Some(self.query.trim().to_string());
+        match result {
+            Ok(matches) => {
+                self.matches = matches;
+                self.selected_match = None;
+                self.completed_feedback = None;
+            }
+            Err(feedback) => {
+                self.clear_matches();
+                self.completed_feedback = Some(feedback);
+            }
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -84,25 +125,25 @@ impl RegionSearchState {
         });
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> RegionSearchInputAction {
+    fn handle_key_at(&mut self, key: KeyEvent, now: Instant) -> RegionSearchInputAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
             self.query.clear();
-            self.clear_matches();
+            self.clear_search_state();
             return RegionSearchInputAction::Cleared;
         }
         match key.code {
             KeyCode::Char(character) => {
                 self.query.push(character);
-                self.selected_match = None;
+                self.schedule_query(now);
                 RegionSearchInputAction::Changed
             }
             KeyCode::Backspace => {
                 if self.query.pop().is_some() {
-                    self.selected_match = None;
                     if self.query.is_empty() {
-                        self.clear_matches();
+                        self.clear_search_state();
                         RegionSearchInputAction::Cleared
                     } else {
+                        self.schedule_query(now);
                         RegionSearchInputAction::Changed
                     }
                 } else {
@@ -117,26 +158,64 @@ impl RegionSearchState {
                 self.move_selection(1);
                 RegionSearchInputAction::Ignored
             }
-            KeyCode::Enter => self
+            KeyCode::Enter if !self.selection_pending => self
                 .selected_match
                 .and_then(|selected_match| self.matches.get(selected_match))
                 .cloned()
                 .map_or(RegionSearchInputAction::Ignored, |region_match| {
                     RegionSearchInputAction::Selected(Box::new(region_match))
                 }),
-            KeyCode::Esc => RegionSearchInputAction::Closed,
+            KeyCode::Enter => RegionSearchInputAction::Ignored,
+            KeyCode::Esc => {
+                self.blur();
+                RegionSearchInputAction::Closed
+            }
             _ => RegionSearchInputAction::Ignored,
         }
     }
+
+    fn due_query(&mut self, now: Instant) -> Option<(u64, String)> {
+        if self.search_due.is_some_and(|search_due| now >= search_due) {
+            self.search_due = None;
+            Some((self.generation, self.query.trim().to_string()))
+        } else {
+            None
+        }
+    }
 }
+
+const REGION_SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 fn is_region_search_command(key_code: KeyCode) -> bool {
     key_code == KeyCode::Char('g')
 }
 
-fn focus_region_search(state: &mut RegionSearchState) {
+fn focus_region_search(state: &mut RegionSearchState, now: Instant) {
     state.focused = true;
-    state.clear_matches();
+    if state.completed_query.as_deref() != Some(state.query.trim()) {
+        state.schedule_query(now);
+    }
+}
+
+fn current_region_search_context(
+    workspace: &Workspace,
+    collection_name: &str,
+    current_block_group: Option<&BlockGroup>,
+    history_ref: Option<&str>,
+    annotation_files: &[AnnotationFileEntry],
+    active_annotation_files: &HashSet<HashId>,
+) -> Option<RegionSearchContext> {
+    current_block_group.map(|block_group| {
+        RegionSearchContext::new(
+            workspace,
+            collection_name,
+            block_group.sample_name.as_str(),
+            block_group,
+            history_ref,
+            annotation_files,
+            active_annotation_files,
+        )
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -148,28 +227,41 @@ enum RegionSearchInputAction {
     Ignored,
 }
 
-fn refresh_region_search(
-    state: &mut RegionSearchState,
-    search_error: &mut Option<String>,
-    request: Option<&RegionSearchRequest<'_>>,
-) {
-    state.selected_match = None;
-    *search_error = None;
-    if state.query.trim().is_empty() {
-        state.clear_matches();
-        return;
+fn queue_region_search_task(
+    worker: &RegionSearchWorker,
+    task_in_flight: &mut bool,
+    pending_task: &mut Option<RegionSearchTask>,
+    task: RegionSearchTask,
+) -> Result<(), String> {
+    if *task_in_flight {
+        *pending_task = Some(task);
+        Ok(())
+    } else {
+        worker.submit(task)?;
+        *task_in_flight = true;
+        Ok(())
     }
-    let Some(request) = request else {
-        state.clear_matches();
-        *search_error = Some("select a block group first".to_string());
-        return;
-    };
-    match resolve_region_search_matches(request, state.query.trim()) {
-        Ok(matches) => state.set_matches(matches),
-        Err(error) => {
-            state.clear_matches();
-            *search_error = Some(error);
-        }
+}
+
+fn select_region_search_match(
+    state: &mut RegionSearchState,
+    worker: &RegionSearchWorker,
+    context: Option<RegionSearchContext>,
+    task_in_flight: &mut bool,
+    pending_task: &mut Option<RegionSearchTask>,
+    search_match: RegionSearchMatch,
+) -> Result<Option<RegionSearchMatch>, String> {
+    if state.selection_pending {
+        return Ok(None);
+    }
+    if search_match.needs_selection_resolution() {
+        let context = context.ok_or_else(|| "select a block group first".to_string())?;
+        let task = RegionSearchTask::resolve_selection(state.generation, context, search_match);
+        queue_region_search_task(worker, task_in_flight, pending_task, task)?;
+        state.selection_pending = true;
+        Ok(None)
+    } else {
+        Ok(Some(search_match))
     }
 }
 
@@ -178,6 +270,48 @@ fn search_match_window_start(selected_match: Option<usize>, match_count: usize) 
         .unwrap_or(0)
         .saturating_sub(4)
         .min(match_count.saturating_sub(5))
+}
+
+fn is_current_search_generation(state: &RegionSearchState, generation: u64) -> bool {
+    state.focused && state.generation == generation
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RegionSearchViewIdentity {
+    collection_name: String,
+    selected_block_group_id: Option<HashId>,
+    current_block_group_id: Option<HashId>,
+    current_block_group_name: Option<String>,
+    current_sample_name: Option<String>,
+    history_ref: Option<String>,
+    active_file_ids: Vec<HashId>,
+    annotation_files: Vec<AnnotationFileEntry>,
+}
+
+impl RegionSearchViewIdentity {
+    fn new(
+        collection_name: &str,
+        selected_block_group_id: Option<HashId>,
+        current_block_group: Option<&BlockGroup>,
+        history_ref: Option<&str>,
+        annotation_files: &[AnnotationFileEntry],
+        active_annotation_files: &HashSet<HashId>,
+    ) -> Self {
+        let mut active_file_ids = active_annotation_files.iter().copied().collect::<Vec<_>>();
+        active_file_ids.sort_unstable();
+        Self {
+            collection_name: collection_name.to_string(),
+            selected_block_group_id,
+            current_block_group_id: current_block_group.map(|block_group| block_group.id),
+            current_block_group_name: current_block_group
+                .map(|block_group| block_group.name.clone()),
+            current_sample_name: current_block_group
+                .map(|block_group| block_group.sample_name.clone()),
+            history_ref: history_ref.map(str::to_string),
+            active_file_ids,
+            annotation_files: annotation_files.to_vec(),
+        }
+    }
 }
 
 // Frequency by which we check for external updates to the db
@@ -334,6 +468,8 @@ fn load_annotation_groups_for_viewport(
     }
 }
 
+/// Shared inputs for loading an annotation file's track, common to activating one file
+/// (on checkbox toggle) and auto-activating every available file on load.
 struct AnnotationFileActivationContext<'a> {
     collection_name: &'a str,
     history_ref: Option<&'a str>,
@@ -627,6 +763,11 @@ pub fn view_block_group(
         worker_branch.clone(),
         history_ref.map(str::to_string),
     )?;
+    let region_search_worker = RegionSearchWorker::new(
+        workspace.graph_db_path()?,
+        worker_branch,
+        history_ref.map(str::to_string),
+    )?;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -650,6 +791,9 @@ pub fn view_block_group(
     let mut last_search_dropdown_area = Rect::default();
     let mut search_state = RegionSearchState::default();
     let mut search_error: Option<String> = None;
+    let mut search_task_in_flight = false;
+    let mut pending_search_task: Option<RegionSearchTask> = None;
+    let mut search_view_identity: Option<RegionSearchViewIdentity> = None;
 
     // Track the last selected block group to detect changes
     let mut last_selected_block_group_id = block_group_id;
@@ -660,49 +804,73 @@ pub fn view_block_group(
     loop {
         // Drain ALL pending input events before doing any work
         while crossterm::event::poll(Duration::from_millis(0))? {
-            match event::read()? {
+            let input_event = event::read()?;
+            if let event::Event::Mouse(mouse) = &input_event
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && search_state.focused
+                && !last_search_area.contains(Position {
+                    x: mouse.column,
+                    y: mouse.row,
+                })
+                && !last_search_dropdown_area.contains(Position {
+                    x: mouse.column,
+                    y: mouse.row,
+                })
+            {
+                search_state.blur();
+                pending_search_task = None;
+                search_error = None;
+            }
+            match input_event {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if search_state.focused && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
                     {
-                        match search_state.handle_key(key) {
-                            RegionSearchInputAction::Changed => {
-                                let request = current_block_group.as_ref().map(|block_group| {
-                                    RegionSearchRequest {
-                                        conn,
-                                        collection_name: &current_collection_name,
-                                        sample_name: block_group.sample_name.as_str(),
-                                    }
-                                });
-                                refresh_region_search(
-                                    &mut search_state,
-                                    &mut search_error,
-                                    request.as_ref(),
-                                );
-                            }
+                        match search_state.handle_key_at(key, Instant::now()) {
+                            RegionSearchInputAction::Changed => search_error = None,
                             RegionSearchInputAction::Cleared => {
                                 search_error = None;
+                                pending_search_task = None;
                                 remove_search_overlay(&mut overlays);
                             }
                             RegionSearchInputAction::Selected(search_match) => {
-                                match activate_search_match(
-                                    &mut graph_controller,
-                                    &mut overlays,
-                                    search_match.as_ref(),
-                                    conn,
+                                let context = current_region_search_context(
                                     workspace,
+                                    &current_collection_name,
+                                    current_block_group.as_ref(),
+                                    history_ref,
+                                    &explorer.data.annotation_files,
+                                    &explorer_state.active_annotation_files,
+                                );
+                                match select_region_search_match(
+                                    &mut search_state,
+                                    &region_search_worker,
+                                    context,
+                                    &mut search_task_in_flight,
+                                    &mut pending_search_task,
+                                    *search_match,
                                 ) {
-                                    Ok(()) => {
-                                        search_state.focused = false;
-                                        search_state.clear_matches();
-                                        search_error = None;
-                                        focus_zone = FocusZone::Canvas;
-                                    }
+                                    Ok(Some(search_match)) => match activate_search_match(
+                                        &mut graph_controller,
+                                        &mut overlays,
+                                        &search_match,
+                                        conn,
+                                        workspace,
+                                    ) {
+                                        Ok(()) => {
+                                            search_state.blur();
+                                            pending_search_task = None;
+                                            search_error = None;
+                                            focus_zone = FocusZone::Canvas;
+                                        }
+                                        Err(error) => search_error = Some(error),
+                                    },
+                                    Ok(None) => search_error = None,
                                     Err(error) => search_error = Some(error),
                                 }
                             }
                             RegionSearchInputAction::Closed => {
-                                search_state.focused = false;
-                                search_state.clear_matches();
+                                search_state.blur();
+                                pending_search_task = None;
                                 search_error = None;
                             }
                             RegionSearchInputAction::Ignored => {}
@@ -711,26 +879,15 @@ pub fn view_block_group(
                     }
 
                     if search_state.focused {
-                        search_state.focused = false;
-                        search_state.clear_matches();
+                        search_state.blur();
+                        pending_search_task = None;
                         search_error = None;
                     }
 
                     if is_region_search_command(key.code) {
                         if !search_state.focused {
-                            focus_region_search(&mut search_state);
-                            let request = current_block_group.as_ref().map(|block_group| {
-                                RegionSearchRequest {
-                                    conn,
-                                    collection_name: &current_collection_name,
-                                    sample_name: block_group.sample_name.as_str(),
-                                }
-                            });
-                            refresh_region_search(
-                                &mut search_state,
-                                &mut search_error,
-                                request.as_ref(),
-                            );
+                            focus_region_search(&mut search_state, Instant::now());
+                            search_error = search_state.completed_feedback.clone();
                         }
                         continue;
                     }
@@ -971,20 +1128,8 @@ pub fn view_block_group(
                 {
                     let was_focused = search_state.focused;
                     if !was_focused {
-                        focus_region_search(&mut search_state);
-                        let request =
-                            current_block_group
-                                .as_ref()
-                                .map(|block_group| RegionSearchRequest {
-                                    conn,
-                                    collection_name: &current_collection_name,
-                                    sample_name: block_group.sample_name.as_str(),
-                                });
-                        refresh_region_search(
-                            &mut search_state,
-                            &mut search_error,
-                            request.as_ref(),
-                        );
+                        focus_region_search(&mut search_state, Instant::now());
+                        search_error = search_state.completed_feedback.clone();
                     }
                     focus_zone = FocusZone::Canvas;
                     if last_search_dropdown_area.contains(Position {
@@ -1002,19 +1147,38 @@ pub fn view_block_group(
                         if row < search_state.matches.len() {
                             search_state.selected_match = Some(row);
                             let search_match = search_state.matches[row].clone();
-                            match activate_search_match(
-                                &mut graph_controller,
-                                &mut overlays,
-                                &search_match,
-                                conn,
+                            let context = current_region_search_context(
                                 workspace,
+                                &current_collection_name,
+                                current_block_group.as_ref(),
+                                history_ref,
+                                &explorer.data.annotation_files,
+                                &explorer_state.active_annotation_files,
+                            );
+                            match select_region_search_match(
+                                &mut search_state,
+                                &region_search_worker,
+                                context,
+                                &mut search_task_in_flight,
+                                &mut pending_search_task,
+                                search_match,
                             ) {
-                                Ok(()) => {
-                                    search_state.focused = false;
-                                    search_state.clear_matches();
-                                    search_error = None;
-                                    focus_zone = FocusZone::Canvas;
-                                }
+                                Ok(Some(search_match)) => match activate_search_match(
+                                    &mut graph_controller,
+                                    &mut overlays,
+                                    &search_match,
+                                    conn,
+                                    workspace,
+                                ) {
+                                    Ok(()) => {
+                                        search_state.blur();
+                                        pending_search_task = None;
+                                        search_error = None;
+                                        focus_zone = FocusZone::Canvas;
+                                    }
+                                    Err(error) => search_error = Some(error),
+                                },
+                                Ok(None) => search_error = None,
                                 Err(error) => search_error = Some(error),
                             }
                         }
@@ -1160,10 +1324,12 @@ pub fn view_block_group(
             annotation_file_loaded_windows.clear();
             explorer_state.active_annotation_groups.clear();
             annotation_groups_loaded = false;
+            annotation_files_loaded = false;
             is_loading = false;
             last_refresh = Instant::now();
-            search_state.clear_matches();
             search_state.focused = false;
+            search_state.clear_search_state();
+            pending_search_task = None;
             search_error = None;
         }
 
@@ -1298,6 +1464,109 @@ pub fn view_block_group(
         }
         annotation_loads.dispatch_pending();
 
+        let current_search_view_identity = RegionSearchViewIdentity::new(
+            &current_collection_name,
+            explorer_state.selected_block_group_id,
+            current_block_group.as_ref(),
+            history_ref,
+            &explorer.data.annotation_files,
+            &explorer_state.active_annotation_files,
+        );
+        if search_view_identity.as_ref() != Some(&current_search_view_identity) {
+            search_view_identity = Some(current_search_view_identity);
+            search_state.clear_search_state();
+            search_error = None;
+            pending_search_task = None;
+            if search_state.focused {
+                search_state.schedule_query(Instant::now());
+            }
+        }
+
+        loop {
+            let response = match region_search_worker.try_receive() {
+                RegionSearchWorkerPoll::Response(response) => *response,
+                RegionSearchWorkerPoll::Empty => break,
+                RegionSearchWorkerPoll::Disconnected => {
+                    search_task_in_flight = false;
+                    pending_search_task = None;
+                    if search_state.focused {
+                        search_state.selection_pending = false;
+                        search_state.search_due = None;
+                        search_state.clear_cached_results();
+                        search_error = Some("region search worker stopped".to_string());
+                    }
+                    break;
+                }
+            };
+            search_task_in_flight = false;
+            if is_current_search_generation(&search_state, response.generation) {
+                match response.result {
+                    RegionSearchWorkerResult::Matches(result) => {
+                        search_state.complete_query(result);
+                        search_error = search_state.completed_feedback.clone();
+                    }
+                    RegionSearchWorkerResult::Selection(Ok(search_match)) => {
+                        search_state.selection_pending = false;
+                        match activate_search_match(
+                            &mut graph_controller,
+                            &mut overlays,
+                            search_match.as_ref(),
+                            conn,
+                            workspace,
+                        ) {
+                            Ok(()) => {
+                                search_state.blur();
+                                pending_search_task = None;
+                                search_error = None;
+                                focus_zone = FocusZone::Canvas;
+                            }
+                            Err(error) => search_error = Some(error),
+                        }
+                    }
+                    RegionSearchWorkerResult::Selection(Err(error)) => {
+                        search_state.selection_pending = false;
+                        search_error = Some(error);
+                    }
+                }
+            }
+            if let Some(task) = pending_search_task.take()
+                && search_state.focused
+                && task.generation() == search_state.generation
+            {
+                match region_search_worker.submit(task) {
+                    Ok(()) => search_task_in_flight = true,
+                    Err(error) => search_error = Some(error),
+                }
+            }
+        }
+
+        if let Some((generation, query)) = search_state.due_query(Instant::now()) {
+            if let Some(context) = current_region_search_context(
+                workspace,
+                &current_collection_name,
+                current_block_group.as_ref().filter(|_| !is_loading),
+                history_ref,
+                &explorer.data.annotation_files,
+                &explorer_state.active_annotation_files,
+            ) {
+                let task = RegionSearchTask::query(generation, context, query);
+                if let Err(error) = queue_region_search_task(
+                    &region_search_worker,
+                    &mut search_task_in_flight,
+                    &mut pending_search_task,
+                    task,
+                ) {
+                    search_error = Some(error);
+                }
+            } else {
+                search_error = Some(if is_loading {
+                    "loading selected block group".to_string()
+                } else {
+                    "select a block group first".to_string()
+                });
+            }
+        }
+
         // Calculate frame delta for smooth animations
         let now = Instant::now();
         let frame_delta = now.duration_since(last_frame_time);
@@ -1337,10 +1606,20 @@ pub fn view_block_group(
             last_sidebar_area = sidebar_area;
             let viewer_root_area = sidebar_layout[1];
 
-            let visible_search_matches = search_state.matches.len().min(5);
+            let search_is_pending = search_state.focused
+                && !search_state.query.trim().is_empty()
+                && (search_state.search_due.is_some()
+                    || search_state.selection_pending
+                    || search_task_in_flight
+                    || pending_search_task.is_some());
+            let visible_search_matches = if search_state.focused {
+                search_state.matches.len().min(5)
+            } else {
+                0
+            };
             let search_dropdown_rows = if visible_search_matches > 0 {
                 visible_search_matches as u16 + 2
-            } else if search_state.focused && search_error.is_some() {
+            } else if search_state.focused && (search_error.is_some() || search_is_pending) {
                 3
             } else {
                 0
@@ -1431,20 +1710,29 @@ pub fn view_block_group(
                 );
             frame.render_widget(search_input, search_input_area);
 
-            let visible_search_matches = search_state.matches.len().min(5);
+            let visible_search_matches = if search_state.focused {
+                search_state.matches.len().min(5)
+            } else {
+                0
+            };
             let search_dropdown_rows = if visible_search_matches > 0 {
                 visible_search_matches as u16 + 2
-            } else if search_error.is_some() && search_state.focused {
+            } else if search_state.focused && (search_error.is_some() || search_is_pending) {
                 3
             } else {
                 0
             };
             if search_state.focused && search_dropdown_rows > 0 {
                 let dropdown_items = if search_state.matches.is_empty() {
+                    let feedback = search_error.as_deref().unwrap_or(if search_state
+                        .selection_pending
+                    {
+                        "Resolving selected annotation…"
+                    } else {
+                        "Searching…"
+                    });
                     vec![ListItem::new(Line::from(Span::styled(
-                        search_error
-                            .as_deref()
-                            .unwrap_or("no matching regions"),
+                        feedback,
                         Style::default().fg(current_theme()[0x04]),
                     )))]
                 } else {
@@ -1775,8 +2063,11 @@ pub fn view_block_group(
             }
         }
 
-        // After the first draw the viewport is populated. Queue file loads without blocking
-        // input or redraws; the worker reports missing files and continues with the others.
+        // After the first draw the viewport is populated. Activate every available
+        // annotation file (one that resolves on disk) the same way DB-derived groups are
+        // auto-activated above; a file that fails to resolve is skipped rather than
+        // blocking the rest. Already-active files are left untouched here — panning past
+        // their loaded window is handled separately below.
         if !annotation_files_loaded && let Some(block_group) = current_block_group.as_ref() {
             let query_window =
                 current_view_coordinate_window(&graph_controller).map(expand_query_window);
@@ -1845,8 +2136,9 @@ pub fn view_block_group(
             annotation_files_loaded = false;
 
             is_loading = false;
-            search_state.clear_matches();
             search_state.focused = false;
+            search_state.clear_search_state();
+            pending_search_task = None;
             search_error = None;
             continue;
         }
@@ -1859,7 +2151,7 @@ pub fn view_block_group(
 
         // If an animation is running, wake up after tick_rate to advance it.
         // If the display is idle, block indefinitely — the next input event will wake us.
-        let wait = if graph_controller.is_animating() {
+        let mut wait = if graph_controller.is_animating() {
             tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or(Duration::ZERO)
@@ -1868,6 +2160,13 @@ pub fn view_block_group(
         } else {
             Duration::from_secs(3600)
         };
+        if let Some(search_due) = search_state.search_due {
+            wait = wait.min(search_due.saturating_duration_since(Instant::now()));
+        }
+        if search_task_in_flight || pending_search_task.is_some() || search_state.selection_pending
+        {
+            wait = wait.min(Duration::from_millis(75));
+        }
         let _ = crossterm::event::poll(wait);
 
         // Update tick
@@ -1881,11 +2180,13 @@ pub fn view_block_group(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        RegionSearchInputAction, RegionSearchState, focus_region_search, is_region_search_command,
-        refresh_region_search,
+        REGION_SEARCH_DEBOUNCE, RegionSearchInputAction, RegionSearchState, focus_region_search,
+        is_current_search_generation, is_region_search_command,
     };
     use crate::views::region_search::{resolve_region_search_matches, search_request_fixture};
 
@@ -1903,11 +2204,15 @@ mod tests {
             .expect("fixture should provide a search match");
         let matches = vec![match_template.clone(), match_template];
 
-        let mut state = RegionSearchState::default();
-        state.set_matches(matches);
+        let mut state = RegionSearchState {
+            focused: true,
+            ..RegionSearchState::default()
+        };
+        state.complete_query(Ok(matches.clone()));
         assert_eq!(state.selected_match, None);
+        let now = Instant::now();
         assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            state.handle_key_at(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), now),
             RegionSearchInputAction::Ignored
         ));
         state.move_selection(1);
@@ -1915,17 +2220,27 @@ mod tests {
         state.move_selection(1);
         assert_eq!(state.selected_match, Some(1));
         assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                now + Duration::from_millis(10),
+            ),
             RegionSearchInputAction::Changed
         ));
         assert_eq!(state.selected_match, None);
         assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                now + Duration::from_millis(10),
+            ),
             RegionSearchInputAction::Ignored
         ));
+        state.complete_query(Ok(matches));
         state.move_selection(1);
         assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                now + Duration::from_millis(10),
+            ),
             RegionSearchInputAction::Selected(_)
         ));
     }
@@ -1935,57 +2250,194 @@ mod tests {
         let request = search_request_fixture();
         let mut state = RegionSearchState {
             query: "chr1:5-10".to_string(),
-            matches: resolve_region_search_matches(&request.request(), "chr1:5-10")
-                .expect("should resolve the clear-action fixture query"),
-            selected_match: Some(0),
             focused: true,
+            ..RegionSearchState::default()
         };
+        state.complete_query(Ok(resolve_region_search_matches(
+            &request.request(),
+            "chr1:5-10",
+        )
+        .expect("should resolve the clear-action fixture query")));
+        state.selected_match = Some(0);
 
         assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                Instant::now(),
+            ),
             RegionSearchInputAction::Cleared
         ));
         assert!(state.query.is_empty());
         assert!(state.matches.is_empty());
+        assert_eq!(state.completed_query, None);
+        assert_eq!(state.completed_feedback, None);
         assert_eq!(state.selected_match, None);
         assert!(state.focused);
 
         state.query = "x".to_string();
-        state.matches = resolve_region_search_matches(&request.request(), "chr1:5-10")
-            .expect("should resolve the query before backspace clears it");
+        state.complete_query(Ok(resolve_region_search_matches(
+            &request.request(),
+            "chr1:5-10",
+        )
+        .expect("should resolve the query before backspace clears it")));
         state.selected_match = Some(0);
         assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                Instant::now(),
+            ),
             RegionSearchInputAction::Cleared
         ));
         assert!(state.query.is_empty());
         assert!(state.matches.is_empty());
+        assert_eq!(state.completed_query, None);
     }
 
     #[test]
-    fn test_region_search_refocus_preserves_query_without_default_selection() {
+    fn test_region_search_refocus_reuses_matches_and_selected_index() {
         let request = search_request_fixture();
         let mut state = RegionSearchState {
             query: "chr1:5-10".to_string(),
+            focused: true,
             ..RegionSearchState::default()
         };
-        state.set_matches(
-            resolve_region_search_matches(&request.request(), &state.query)
-                .expect("should resolve the preserved query"),
-        );
+        state.complete_query(Ok(resolve_region_search_matches(
+            &request.request(),
+            &state.query,
+        )
+        .expect("should resolve the preserved query")));
+        let matches = state.matches.clone();
         state.selected_match = Some(0);
-        state.focused = false;
+        let completed_generation = state.generation;
+        state.blur();
+        let blurred_generation = state.generation;
+        assert!(!is_current_search_generation(&state, completed_generation));
 
-        focus_region_search(&mut state);
+        let now = Instant::now();
+        focus_region_search(&mut state, now);
         assert_eq!(state.query, "chr1:5-10");
-        assert_eq!(state.selected_match, None);
+        assert_eq!(state.matches.len(), matches.len());
+        assert_eq!(state.selected_match, Some(0));
+        assert!(state.search_due.is_none());
+        assert_eq!(state.generation, blurred_generation);
+        assert!(state.due_query(now + REGION_SEARCH_DEBOUNCE).is_none());
+    }
+
+    #[test]
+    fn test_region_search_refocus_reuses_completed_not_found_feedback() {
+        let mut state = RegionSearchState {
+            query: "missing-region".to_string(),
+            focused: true,
+            ..RegionSearchState::default()
+        };
+        state.complete_query(Err("no region matched missing-region".to_string()));
+        state.blur();
+
+        let now = Instant::now();
+        focus_region_search(&mut state, now);
         assert!(state.matches.is_empty());
+        assert_eq!(
+            state.completed_feedback.as_deref(),
+            Some("no region matched missing-region")
+        );
+        assert!(state.search_due.is_none());
+        assert!(state.due_query(now + REGION_SEARCH_DEBOUNCE).is_none());
+    }
 
-        let mut search_error = None;
-        refresh_region_search(&mut state, &mut search_error, Some(&request.request()));
-        assert_eq!(state.query, "chr1:5-10");
-        assert_eq!(state.matches.len(), 1);
-        assert_eq!(state.selected_match, None);
-        assert!(search_error.is_none());
+    #[test]
+    fn test_region_search_refocus_retries_query_cancelled_before_completion() {
+        let now = Instant::now();
+        let mut state = RegionSearchState {
+            focused: true,
+            ..RegionSearchState::default()
+        };
+        state.handle_key_at(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE), now);
+        let cancelled_generation = state.generation;
+        state.blur();
+        assert!(!is_current_search_generation(&state, cancelled_generation));
+        assert!(state.search_due.is_none());
+
+        focus_region_search(&mut state, now + Duration::from_millis(50));
+        assert_eq!(state.due_query(now + Duration::from_millis(199)), None);
+        assert_eq!(
+            state.due_query(now + Duration::from_millis(200)),
+            Some((state.generation, "U".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_region_search_debounce_only_sends_the_final_query() {
+        let now = Instant::now();
+        let mut state = RegionSearchState {
+            focused: true,
+            ..RegionSearchState::default()
+        };
+        assert!(matches!(
+            state.handle_key_at(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE), now,),
+            RegionSearchInputAction::Changed
+        ));
+        assert!(matches!(
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+                now + Duration::from_millis(100),
+            ),
+            RegionSearchInputAction::Changed
+        ));
+        assert!(state.due_query(now + Duration::from_millis(249)).is_none());
+        assert_eq!(
+            state.due_query(now + Duration::from_millis(250)),
+            Some((state.generation, "U2".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_region_search_clear_and_escape_cancel_debounced_lookup() {
+        let now = Instant::now();
+        let mut state = RegionSearchState {
+            focused: true,
+            ..RegionSearchState::default()
+        };
+        state.handle_key_at(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE), now);
+        let cancelled_generation = state.generation;
+        assert!(matches!(
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                now + Duration::from_millis(50),
+            ),
+            RegionSearchInputAction::Cleared
+        ));
+        assert!(state.due_query(now + Duration::from_secs(1)).is_none());
+        assert!(state.generation > cancelled_generation);
+
+        state.handle_key_at(
+            KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE),
+            now + Duration::from_secs(2),
+        );
+        assert!(matches!(
+            state.handle_key_at(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                now + Duration::from_secs(2) + Duration::from_millis(50),
+            ),
+            RegionSearchInputAction::Closed
+        ));
+        assert!(state.due_query(now + Duration::from_secs(3)).is_none());
+    }
+
+    #[test]
+    fn test_region_search_discards_results_from_a_stale_generation() {
+        let now = Instant::now();
+        let mut state = RegionSearchState {
+            focused: true,
+            ..RegionSearchState::default()
+        };
+        state.handle_key_at(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE), now);
+        let old_generation = state.generation;
+        assert!(is_current_search_generation(&state, old_generation));
+
+        state.handle_key_at(
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            now + Duration::from_millis(20),
+        );
+        assert!(!is_current_search_generation(&state, old_generation));
     }
 }
