@@ -227,7 +227,9 @@ mod tests {
     use std::{fs::File, sync::Arc};
 
     use gen_core::{HashId, Strand};
-    use gen_models::{interval_tree::IntervalTreeSource as _, sample::Sample};
+    use gen_models::{
+        interval_tree::IntervalTreeSource as _, region::ResolvedGenRegion, sample::Sample,
+    };
 
     use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
 
@@ -370,5 +372,38 @@ mod tests {
         assert_eq!(interval.value.sequence_start, 5);
         assert_eq!(interval.value.sequence_end, 8);
         assert_eq!(interval.value.strand, Strand::Reverse);
+
+        // Stored path node and reverse-oriented BED feature, with one ruler column per base:
+        //   index tens:  00000000001111111
+        //   index ones:  01234567890123456
+        //   node DNA:    ATCGATCGATCGATCGA
+        //   edge strand: +++++++++++++++++
+        //   node span:   ^----------------^ [0,17)
+        //   feature -:        ^--^ BED [5,8) selects raw TCG.
+        //
+        //   feature offset: 012
+        //   feature DNA:    CGA
+        //   interior [1,3):  ^-^ = GA; it maps to raw [5,7) TC.
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 3)
+            .expect("should resolve the negative-strand BED feature");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build the negative-strand BED graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"CGA",
+            "negative-strand BED retrieval should reverse-complement raw path TCG"
+        );
+
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 1, 3)
+            .expect("should resolve the negative-strand BED interior");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build the trimmed negative-strand BED graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"GA",
+            "negative-strand BED interior [1,3) should map to raw [5,7) and fetch GA"
+        );
     }
 }

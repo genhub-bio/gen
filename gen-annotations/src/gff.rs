@@ -374,6 +374,17 @@ mod tests {
         let temp_dir = tempdir().expect("should create temp directory");
         let input_path = temp_dir.path().join("input.gff");
         let output_path = temp_dir.path().join("output.gff");
+        // The two path-edge endpoints at the fixture's sole node have strand +.
+        // A child edit changes its path:
+        //   index tens:  0000000000111111111122222222223333
+        //   index ones:  0123456789012345678901234567890123
+        //   node DNA:    ATCGATCGATCGATCGATCGGGAACACACAGAGA
+        //   edge strand: ++++++++++++++++++++++++++++++++++
+        //   node span:   ^---------------------------------^ [0,34)
+        //   GFF (-):         ^---------------^ input 5..20 = path [4,20)
+        //   child edit:                 ^---------^ path [15,25)
+        // The feature is read in reverse index order 19..4. Propagation emits GFF 5..15 (-)
+        // while preserving ID=reverse-gene.
         std::fs::write(
             &input_path,
             "##gff-version 3\nm123\tgen-test\tGene\t5\t20\t.\t-\t.\tID=reverse-gene\n",
