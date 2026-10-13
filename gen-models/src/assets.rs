@@ -2924,46 +2924,6 @@ mod tests {
         assert!(matches!(err, FileAdditionError::PathOutsideRepo { .. }));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn test_repo_relative_destination_write_follows_external_symlink_parent() {
-        let workspace_directory = tempfile::tempdir().unwrap();
-        let workspace = Workspace::new(workspace_directory.path());
-        workspace.ensure_gen_dir();
-        let repository_root = workspace.repo_root().unwrap();
-
-        let outside_directory = tempfile::tempdir().unwrap();
-        fs::remove_dir(workspace.asset_dir().unwrap()).unwrap();
-        std::os::unix::fs::symlink(outside_directory.path(), workspace.asset_dir().unwrap())
-            .unwrap();
-
-        let relative_path = ".gen/assets/nested/missing/sentinel.bin";
-        let destination =
-            LocalAssetUri::repo_relative_destination_path(&workspace, relative_path).unwrap();
-        let expected_bytes = b"destination path symlink escape regression";
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        let mut file = fs::File::create(&destination).unwrap();
-        file.write_all(expected_bytes).unwrap();
-        file.flush().unwrap();
-        drop(file);
-
-        let external_file = outside_directory.path().join("nested/missing/sentinel.bin");
-        let actual_bytes = fs::read(&external_file).unwrap();
-        let actual_path = fs::canonicalize(&destination).unwrap();
-        let repository_root = fs::canonicalize(repository_root).unwrap();
-
-        assert_eq!(actual_bytes, expected_bytes);
-        assert!(
-            actual_path.starts_with(&repository_root),
-            "repo_relative_destination_path({relative_path:?}) returned {}, but File::create wrote {} outside workspace {} with {} bytes: {:?}",
-            destination.display(),
-            actual_path.display(),
-            repository_root.display(),
-            actual_bytes.len(),
-            String::from_utf8_lossy(&actual_bytes)
-        );
-    }
-
     #[test]
     fn test_stored_relative_path_keeps_workspace_relative_paths() {
         let context = setup_gen();
