@@ -63,9 +63,19 @@ show only the frame. Later frames have no header. Print one widget per graph whe
 and label each block with the sample or graph name. Add one or two sentences of your own
 interpreting what the graph shows, since the user did not see the header.
 
+### As an image
+
+Use `widget.save_png("plot.png", cols=120, rows=30)` when the user wants a file (a figure for
+a document, slide or README), or when you can view or attach images. It needs no Jupyter
+dependencies and trims blank space around the graph, so a larger `cols`/`rows` shows more of it
+without padding the image. It returns the widget, so it chains after `show()` or `go_to()`.
+From the shell, `gen view <graph> --sample <s> --png out.png` does the same. Keep the text frame
+for answers in chat.
+
 ## Mistakes to avoid
 
 - Pasting the `#` orientation header into the answer for the user.
 - Calling `print(widget)` before `refresh()` after graph edits and showing a stale frame.
 - Expecting an interactive canvas outside a live Jupyter kernel.
 - Describing `print(graph)` or `print(sample)` as "the plot".
+- Pasting a text frame when the user asked for an image or file; use `save_png`.

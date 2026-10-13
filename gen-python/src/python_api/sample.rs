@@ -110,6 +110,9 @@ impl PySample {
     /// Outside of an IPython/Jupyter environment the display call is silently
     /// skipped and only the widget is returned.
     ///
+    /// Call ``save_png(path)`` on the returned widget to write the current view
+    /// to a PNG file instead; this needs no Jupyter dependencies.
+    ///
     /// Parameters
     /// rows : int, optional
     ///     Initial viewport height in terminal rows.

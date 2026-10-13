@@ -34,8 +34,9 @@ _TEXT_FALLBACK_HINT = (
     "# library of sequences: read it left to right, where nodes are sequence fragments\n"
     "# and solid edges are the ways fragments can be joined into full paths. A node\n"
     "# shows its complete sequence, a truncated one with an ellipsis where sequence is\n"
-    "# omitted, or (most minimal view) just a filled circle. Omit these # lines when\n"
-    "# showing the graph to a user; paste the frame in a code fence.\n"
+    "# omitted, or (most minimal view) just a filled circle. For an image file instead\n"
+    '# of text, call widget.save_png("plot.png"). Omit these # lines when showing the\n'
+    "# graph to a user; paste the frame in a code fence.\n"
 )
 
 # Text fallback output can occur many times in one notebook or agent session.

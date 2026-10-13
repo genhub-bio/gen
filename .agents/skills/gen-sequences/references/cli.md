@@ -152,6 +152,7 @@ gen list-samples
 gen list-graphs --sample ref
 gen view <graph-name> --sample ref
 gen view <graph-name> --sample ref --full
+gen view <graph-name> --sample ref --png plot.png    # image file, no terminal needed
 gen get-sequence --sample ref --graph chr1 --start 100 --end 160
 gen get-sequence --sample ref --region chr1:100-160
 gen search ATGCGTACGTAG --sample ref
