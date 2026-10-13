@@ -136,6 +136,21 @@ gen diff --query <query> --base <base> --gfa <output.gfa>
 
 The older `--sample1` and `--sample2` names remain aliases for compatibility.
 
+## PNG export
+
+Write a plot to an image file instead of opening the viewer, for scripts, CI and
+documents:
+
+```sh
+gen view <graph> --sample <sample> --png plot.png
+gen view <graph> --query <query> --base <base> --png diff.png
+```
+
+The plot is drawn without a terminal, including annotations, then trimmed of
+blank rows and columns, leaving a one-cell margin. `--png-columns` (default 100)
+and `--png-rows` (default 24) set the canvas size in terminal cells before
+trimming, each 13 by 28 pixels, so a larger value shows more of the graph.
+
 ## Revision diff
 
 Compare two commits or branches with:

@@ -37,11 +37,20 @@ use gen_models::{
     history::dolt::active_branch,
 };
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    plotter::PathStyle, theme::current_theme,
+    LineStyle,
+    graph_controller::GraphController,
+    graph_widget::GraphWidget,
+    layout::VisualDetail,
+    plotter::PathStyle,
+    png_export::{PngConfig, PngRenderer},
+    theme::current_theme,
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
-use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
+use pyo3::{
+    exceptions::PyRuntimeError,
+    prelude::*,
+    types::{PyBytes, PyDict},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -1224,6 +1233,14 @@ impl PyGraphController {
         })
     }
 
+    /// Draw just the active page's graph into a fresh `cols` x `rows` buffer, without the header.
+    fn render_graph_buffer(&mut self, cols: u16, rows: u16) -> PyResult<Buffer> {
+        let mut buf = Buffer::empty(Rect::new(0, 0, cols, rows));
+        self.active()?
+            .render_into(&mut buf, Rect::new(0, 0, cols, rows))?;
+        Ok(buf)
+    }
+
     fn active(&mut self) -> PyResult<&mut GraphPage> {
         let page = &mut self.pages[self.current_index];
         if let Page::Pending(page_ref) = page {
@@ -1331,6 +1348,26 @@ impl PyGraphController {
         self.active()?.render_into(&mut buf, graph_area)?;
         let frame = serialize_buffer(&buf, cols, rows);
         serde_json::to_string(&frame).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Rasterize the current view to PNG bytes, one terminal cell per 13x28 pixels.
+    ///
+    /// Works without any Jupyter dependency, so scripts and agents can save plots.
+    fn render_png<'py>(
+        &mut self,
+        py: Python<'py>,
+        cols: u16,
+        rows: u16,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let mut renderer = PngRenderer::new(PngConfig::default())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let buf = self.render_graph_buffer(cols, rows)?;
+        let cropped = renderer.crop_to_content(&buf);
+        let mut bytes = Vec::new();
+        renderer
+            .write_png(&cropped, &mut bytes)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyBytes::new(py, &bytes))
     }
 
     fn zoom_in(&mut self) -> PyResult<()> {

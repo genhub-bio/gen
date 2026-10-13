@@ -247,6 +247,8 @@ Widgets support `go_to(target, center=False)` and `show(target, color=None, cent
 positions, loci, annotations, or supported region targets. They also expose zoom, scrolling,
 page navigation, refresh, highlight clearing, path visibility, and annotation-track controls such
 as `show_track(name)`, `hide_track(name)`, `hide_all_tracks()`, and `tracks`.
+`save_png(path, cols=None, rows=None)` writes the current view to a PNG file, trimmed to the
+graph with a one-cell margin, and works without the `jupyter` extra.
 
 ## 10. Common value types
 

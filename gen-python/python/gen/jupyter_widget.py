@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import warnings
 from typing import Self
@@ -224,6 +225,31 @@ class GraphWidget(anywidget.AnyWidget):
         frame_json = self._controller.render_frame(self.cols, self.rows)
         self.frame = json.loads(frame_json)
         self.page_index = self._controller.page_index
+
+    def save_png(
+        self,
+        path: str | os.PathLike,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+    ) -> Self:
+        """Write the current view of the graph to a PNG file.
+
+        Needs no Jupyter dependencies. Each terminal cell becomes 13x28 pixels, and blank
+        rows and columns around the graph are trimmed, leaving a one-cell margin.
+
+        Parameters
+        ----------
+        path:
+            Destination file.
+        cols, rows:
+            Size of the canvas in terminal cells before trimming. Defaults to the
+            widget's own size; larger values show more of the graph.
+        """
+        data = self._controller.render_png(cols or self.cols, rows or self.rows)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return self
 
     def _on_resize(self, change) -> None:
         # change is required by the traitlets observe protocol but we only need

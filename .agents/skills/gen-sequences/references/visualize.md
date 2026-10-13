@@ -47,7 +47,9 @@ the interactive widget freely.
 - `zoom_in()`/`zoom_out()` step the detail level.
 - Also on both widgets: `clear_highlights()`, `show_path()`, `hide_path()`,
   `show_track(name)`, `hide_track(name)`, `.tracks`, `hide_all_tracks()`,
-  `handle_click(col, row)`. Persist annotations through the graph API
+  `handle_click(col, row)`, and `save_png(path, cols=None, rows=None)` to write the view to a PNG
+  (no Jupyter needed; `gen view <graph> --sample <s> --png out.png` does the same from the CLI).
+  Persist annotations through the graph API
   (`graph.add_annotation`, see `design.md`); highlights are ephemeral.
 
 ## Showing a plot to a user

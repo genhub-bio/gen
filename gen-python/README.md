@@ -382,6 +382,10 @@ only the frame in a fenced code block.
 - `widget.zoom_in()` / `widget.zoom_out()`: step the detail/zoom level.
 - All of the above mutate the widget in place and re-render; print
   `repr(widget)` afterward to see the effect.
+- `widget.save_png("plot.png", cols=120, rows=30)`: write the current view to
+  a PNG. Works without `gen[jupyter]`; `cols` and `rows` default to the
+  widget's size and are measured in terminal cells (13 by 28 pixels each). Blank
+  rows and columns are trimmed, leaving a one-cell margin.
 
 ```python
 import gen

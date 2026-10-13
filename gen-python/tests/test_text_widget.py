@@ -1,6 +1,7 @@
 """Test the plain-text graph viewer when Jupyter extras are unavailable."""
 
 import json
+import pathlib
 import tempfile
 import unittest
 
@@ -15,6 +16,9 @@ class FakeController:
     page_count = 1
     page_index = 0
 
+    def render_png(self, cols, rows):
+        return b"\x89PNG" + bytes([cols, rows])
+
     def render_frame(self, cols, rows):
         return json.dumps(
             {
@@ -26,6 +30,16 @@ class FakeController:
 
 
 class TextGraphWidgetTests(unittest.TestCase):
+    def test_save_png_writes_controller_bytes_and_returns_the_widget(self):
+        widget = text_widget.TextGraphWidget(FakeController(), cols=7, rows=3)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "plot.png"
+            self.assertIs(widget.save_png(target), widget)
+            self.assertEqual(target.read_bytes(), b"\x89PNG" + bytes([7, 3]))
+            widget.save_png(target, cols=9, rows=4)
+            self.assertEqual(target.read_bytes(), b"\x89PNG" + bytes([9, 4]))
+
     def setUp(self):
         self.original_hint_shown = text_widget._text_fallback_hint_shown
         text_widget._text_fallback_hint_shown = False
@@ -111,4 +125,5 @@ _GRAPH_WIDGET_API = {
     "hide_track",
     "tracks",
     "hide_all_tracks",
+    "save_png",
 }

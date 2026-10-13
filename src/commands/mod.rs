@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use gen_core::DoltHashId;
 use gen_diff::operations::DiffRange;
@@ -143,6 +145,15 @@ pub enum Commands {
         /// Number of terminal rows for the inline graph view
         #[arg(long, default_value_t = 16)]
         height: u16,
+        /// Write the graph to a PNG file instead of opening a viewer. Needs a graph and sample (or --query and --base).
+        #[arg(long, value_name = "PATH")]
+        png: Option<PathBuf>,
+        /// Width of the PNG plot in terminal columns (13 pixels each)
+        #[arg(long, default_value_t = 100, requires = "png")]
+        png_columns: u16,
+        /// Height of the PNG plot in terminal rows (28 pixels each)
+        #[arg(long, default_value_t = 24, requires = "png")]
+        png_rows: u16,
     },
     /// Show a diff of operations and render the consolidated graph
     #[command(name = "view-diff", arg_required_else_help(true))]
@@ -531,6 +542,8 @@ pub fn get_default_collection(conn: &ConfigConnection) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
     use gen_diff::operations::DiffRange;
 
@@ -692,6 +705,34 @@ mod tests {
         assert_eq!(graph.as_deref(), Some("m123"));
         assert_eq!(query.as_deref(), Some("foo"));
         assert_eq!(base.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn test_view_png_options_parse() {
+        let cli = Cli::try_parse_from([
+            "gen",
+            "view",
+            "m123",
+            "--sample",
+            "s1",
+            "--png",
+            "plot.png",
+            "--png-columns",
+            "80",
+        ])
+        .expect("should parse png export options");
+        let Some(Commands::View {
+            png,
+            png_columns,
+            png_rows,
+            ..
+        }) = cli.command
+        else {
+            panic!("should parse view command");
+        };
+        assert_eq!(png, Some(PathBuf::from("plot.png")));
+        assert_eq!((png_columns, png_rows), (80, 24));
+        assert!(Cli::try_parse_from(["gen", "view", "--png-rows", "10"]).is_err());
     }
 
     #[test]

@@ -1,18 +1,20 @@
 use std::{
     collections::HashSet,
-    io::{Error, Result},
+    io::{Error, Result, Write},
     panic,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_core::{HashId, Workspace};
+use gen_diff::graph::DiffGenGraph;
 use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
     layout::VisualDetail,
     plotter::{LineStyle, PathStyle},
+    png_export::{PngConfig, PngRenderer},
     theme::current_theme,
 };
 use ratatui::{
@@ -279,6 +281,84 @@ pub fn show_inline_block_group_widget(
     )
 }
 
+/// Size of a rendered plot in terminal cells; the PNG is this many cells at the exporter's cell size.
+#[derive(Debug, Clone, Copy)]
+pub struct PlotSize {
+    pub columns: u16,
+    pub rows: u16,
+}
+
+/// Write a PNG of a `BlockGroup`'s graph, with annotations, without needing a terminal.
+pub fn write_block_group_png(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    block_group_id: HashId,
+    history_ref: Option<&str>,
+    size: PlotSize,
+    output: &mut impl Write,
+) -> Result<()> {
+    let graph = BlockGroup::get_graph(conn, workspace, &block_group_id, history_ref)
+        .map_err(Error::other)?;
+    let mut state =
+        InlineGenGraphState::new(&graph, conn, workspace, Some(block_group_id), history_ref);
+    write_state_png(&mut state, size, output)
+}
+
+/// Write a PNG of a sample diff using the standard added/removed highlights.
+pub fn write_diff_graph_png(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    diff_graph: &DiffGenGraph,
+    size: PlotSize,
+    output: &mut impl Write,
+) -> Result<()> {
+    let component = build_diff_graph_component(diff_graph, String::new());
+    let graph = component.graph.clone();
+    let mut state = InlineGenGraphState::new(&graph, conn, workspace, None, None);
+    state.diff_component = Some(component);
+    write_state_png(&mut state, size, output)
+}
+
+/// Render the graph into an offscreen buffer and encode it as a PNG.
+///
+/// Annotations can only be loaded once a first render has chosen the visible nodes, so the
+/// plot is drawn twice: once to populate the viewport, once with the annotation overlays.
+fn write_state_png(
+    state: &mut InlineGenGraphState,
+    size: PlotSize,
+    output: &mut impl Write,
+) -> Result<()> {
+    let area = Rect::new(0, 0, size.columns, size.rows);
+    render_offscreen(state, area);
+    let node_ids = extract_viewport_node_ids(&state.controller);
+    if !node_ids.is_empty() {
+        state.load_annotation_groups(&node_ids);
+    }
+    let buffer = render_offscreen(state, area);
+    let mut renderer = PngRenderer::new(PngConfig::default()).map_err(Error::other)?;
+    let cropped = renderer.crop_to_content(&buffer);
+    renderer.write_png(&cropped, output).map_err(Error::other)
+}
+
+fn render_offscreen(state: &mut InlineGenGraphState, area: Rect) -> Buffer {
+    reapply_overlays(
+        &mut state.controller,
+        &mut state.overlays,
+        &mut state.annotation_colors,
+    );
+    if let Some(diff_component) = &state.diff_component {
+        apply_diff_highlights(&mut state.controller, diff_component);
+    }
+    let mut buffer = Buffer::empty(area);
+    state.controller.viewport_state.viewport_bounds = area;
+    state.controller.viewport_state.blur();
+    let detail_level = state.controller.get_detail_level();
+    let widget = create_gen_graph_widget(state.conn, state.workspace).detail_level(detail_level);
+    widget.render(area, &mut buffer, &mut state.controller);
+    draw_annotation_labels(&mut buffer, area, &state.controller, &state.overlays);
+    buffer
+}
+
 fn show_inline_widget(
     conn: &GraphConnection,
     workspace: &Workspace,
@@ -542,7 +622,10 @@ mod tests {
     use petgraph::graphmap::DiGraphMap;
 
     use super::*;
-    use crate::{graph::GraphNode, test_helpers::setup_gen};
+    use crate::{
+        graph::GraphNode,
+        test_helpers::{setup_block_group, setup_gen},
+    };
 
     #[test]
     fn test_inline_state_creation() {
@@ -560,5 +643,28 @@ mod tests {
 
         let state = InlineGenGraphState::new(&graph, conn, context.workspace(), None, None);
         assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
+    }
+
+    #[test]
+    fn test_write_block_group_png_emits_png() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (block_group_id, _) = setup_block_group(conn);
+
+        let mut bytes = Vec::new();
+        write_block_group_png(
+            conn,
+            context.workspace(),
+            block_group_id,
+            None,
+            PlotSize {
+                columns: 40,
+                rows: 10,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 }

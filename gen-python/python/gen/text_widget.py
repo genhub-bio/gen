@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Self
 
 from .ascii_render import frame_text
@@ -252,6 +253,31 @@ class TextGraphWidget:
         """Return to the previous sequence graph and refresh the text output."""
         self._controller.prev_page()
         self._render()
+        return self
+
+    def save_png(
+        self,
+        path: str | os.PathLike,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+    ) -> Self:
+        """Write the current view of the graph to a PNG file.
+
+        Needs no Jupyter dependencies. Each terminal cell becomes 13x28 pixels, and blank
+        rows and columns around the graph are trimmed, leaving a one-cell margin.
+
+        Parameters
+        ----------
+        path:
+            Destination file.
+        cols, rows:
+            Size of the canvas in terminal cells before trimming. Defaults to the
+            widget's own size; larger values show more of the graph.
+        """
+        data = self._controller.render_png(cols or self.cols, rows or self.rows)
+        with open(path, "wb") as handle:
+            handle.write(data)
         return self
 
     def refresh(self) -> Self:

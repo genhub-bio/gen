@@ -93,6 +93,7 @@ Changes since the latest release, `v0.3.1`.
 
 ### Other additions
 
+- `plot()` widgets gain `save_png(path, cols=, rows=)`, which writes the current view to a PNG without the `jupyter` extra.
 - `Repository(path, committer=, email=)` and `clone()` set the committer identity.
 - `gen.clone` reuses an untouched initialized workspace.
 - `Branch.head`, `Operation.id` and `Operation.parent_id` are new properties.
