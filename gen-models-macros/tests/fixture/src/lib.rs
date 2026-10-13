@@ -32,6 +32,19 @@ pub struct FixtureGroup {
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "fixture_defaulted_models")]
+pub struct FixtureDefaultedModel {
+    #[model_select(skip)]
+    pub skipped_before: String,
+    pub id: i64,
+    #[model_select(skip)]
+    pub skipped_between: Option<String>,
+    pub sample_name: String,
+    #[model_select(skip)]
+    pub skipped_after: bool,
+}
+
+#[derive(Debug, ModelSelect, PartialEq)]
 #[model_select(table = "fixture_foreign_targets")]
 pub struct FixtureForeignTarget {
     pub id: i64,
@@ -76,6 +89,17 @@ pub struct FixtureNullableRelation {
     pub id: i64,
     #[model_select(foreign_key(FixtureForeignTarget, cache = cached_target))]
     pub optional_target_id: Option<i64>,
+    #[model_select(skip)]
+    pub cached_target: ForeignKeyCache<FixtureForeignTarget>,
+}
+
+#[derive(Clone, Debug, ModelSelect)]
+#[model_select(table = "fixture_joined_relations")]
+pub struct FixtureJoinedRelation {
+    pub id: i64,
+    pub sample_name: String,
+    #[model_select(foreign_key(FixtureForeignTarget, cache = cached_target))]
+    pub target_id: i64,
     #[model_select(skip)]
     pub cached_target: ForeignKeyCache<FixtureForeignTarget>,
 }
@@ -213,6 +237,10 @@ pub fn connection() -> Connection {
             name TEXT NOT NULL,
             collection_name TEXT NOT NULL
         );
+        CREATE TABLE fixture_defaulted_models (
+            id INTEGER PRIMARY KEY,
+            sample_name TEXT NOT NULL
+        );
         CREATE TABLE fixture_foreign_targets (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
@@ -228,6 +256,11 @@ pub fn connection() -> Connection {
             optional_target_id INTEGER
         );
         INSERT INTO fixture_nullable_relations (id, optional_target_id) VALUES (1, NULL), (2, 99);
+        CREATE TABLE fixture_joined_relations (
+            id INTEGER PRIMARY KEY,
+            sample_name TEXT NOT NULL,
+            target_id INTEGER NOT NULL
+        );
         CREATE TABLE fixture_composite_keys (
             namespace TEXT NOT NULL,
             name TEXT NOT NULL,

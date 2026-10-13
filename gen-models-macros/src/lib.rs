@@ -24,10 +24,12 @@ use syn::{
 /// `#[model_select(primary_key)]` marks each field in an explicit primary key,
 /// `#[model_select(default_sort(field = "asc", tie_breaker = "desc"))]` configures default
 /// ordering in precedence order,
-/// `#[model_select(skip)]` excludes a field, and the struct-level `history`, `from_row`, `source`,
-/// `alias`, and `select` options support custom persistence behavior or aliased queries. A field
-/// can declare `foreign_key(Target, cache = cached_target)` to generate cache-aware relation
-/// accessors when its skipped cache field stores `ForeignKeyCache<Target>`.
+/// `#[model_select(skip)]` excludes a field from generated SQL columns and defaults it during
+/// generated row decoding when no custom `from_row` function is configured. The struct-level
+/// `history`,
+/// `from_row`, `source`, `alias`, and `select` options support custom persistence behavior or
+/// aliased queries. A field can declare `foreign_key(Target, cache = cached_target)` to generate
+/// cache-aware relation accessors when its skipped cache field stores `ForeignKeyCache<Target>`.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -189,6 +191,14 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 ));
             }
             has_skipped_field = true;
+            if options.from_row.is_none() {
+                model_initializers.push(quote! {
+                    #field_name: ::core::default::Default::default()
+                });
+                query_initializers.push(quote! {
+                    #field_name: ::core::default::Default::default()
+                });
+            }
             continue;
         }
 
@@ -199,7 +209,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let column_literal = LitStr::new(&column, Span::call_site());
         let field_type = &field.ty;
         let value_type = option_inner(field_type).unwrap_or(field_type);
-        let field_index = model_initializers.len();
+        let field_index = model_columns.len();
 
         let primary_key = PrimaryKeyField {
             field: field_name.clone(),
@@ -287,16 +297,20 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         explicit_primary_keys
     };
     let primary_key_methods = primary_key_methods(&model, table, &primary_keys);
+    let history_ref_cache_hook = if relation_caches.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn set_history_ref(&mut self, history_ref: ::core::option::Option<&str>) {
+                #(self.#relation_caches.set_history_ref(history_ref);)*
+            }
+        }
+    };
+    let model_select_row_history_ref_hook = history_ref_cache_hook.clone();
 
     let process_row = if let Some(from_row) = options.from_row.as_ref() {
         quote! { #from_row(row) }
     } else {
-        if has_skipped_field {
-            return Err(Error::new_spanned(
-                model,
-                "ModelSelect requires `from_row = path` when a model skips fields",
-            ));
-        }
         quote! {
             ::core::result::Result::Ok(Self {
                 #(#query_initializers),*
@@ -317,6 +331,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             ) -> ::gen_models::select::SqlResult<Self> {
                 #process_row
             }
+
+            #model_select_row_history_ref_hook
         }
 
         impl #model {
@@ -358,7 +374,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 )
             }
         });
-    let selectable_model_impl = if has_skipped_field {
+    let selectable_model_impl = if has_skipped_field && options.from_row.is_some() {
         quote! {}
     } else {
         quote! {
@@ -383,6 +399,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                         #(#model_initializers),*
                     })
                 }
+
+                #history_ref_cache_hook
             }
         }
     };
@@ -484,6 +502,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self
             }
 
+            /// Selects a historical view for the query and related-model lookups on loaded rows.
             pub fn with_ref<R, K>(
                 mut self,
                 history_ref: R,
@@ -1007,7 +1026,7 @@ fn foreign_key_methods(field: &Field, relation: &ForeignKeyOptions) -> proc_macr
 
     if option_inner(field_type).is_some() {
         quote! {
-            /// Returns a matching cached relation or loads it; successful loads are retained at runtime.
+            /// Returns a matching cached relation or loads and retains it from the selected view.
             /// A null foreign key returns `None` without querying the database.
             pub fn #getter(
                 &self,
@@ -1025,6 +1044,7 @@ fn foreign_key_methods(field: &Field, relation: &ForeignKeyOptions) -> proc_macr
                         |cached| cached.id == *foreign_key,
                         || {
                             let related = #target::select(conn)
+                                .with_ref(self.#cache.history_ref())
                                 .get_by_id(foreign_key.clone())?
                                 .ok_or_else(|| {
                                     ::gen_models::ModelSelectError::DatabaseError(
@@ -1049,7 +1069,7 @@ fn foreign_key_methods(field: &Field, relation: &ForeignKeyOptions) -> proc_macr
         }
     } else {
         quote! {
-            /// Returns a matching cached relation or loads it; successful loads are retained at runtime.
+            /// Returns a matching cached relation or loads and retains it from the selected view.
             pub fn #getter(
                 &self,
                 conn: &::gen_models::select::Connection,
@@ -1061,6 +1081,7 @@ fn foreign_key_methods(field: &Field, relation: &ForeignKeyOptions) -> proc_macr
                     |cached| cached.id == self.#field_name,
                     || {
                         let related = #target::select(conn)
+                            .with_ref(self.#cache.history_ref())
                             .get_by_id(self.#field_name.clone())?
                             .ok_or_else(|| {
                                 ::gen_models::ModelSelectError::DatabaseError(

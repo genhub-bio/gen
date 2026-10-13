@@ -445,6 +445,7 @@ where
 }
 
 #[doc(hidden)]
+/// Decodes one model from joined columns and retains the selector's view for relation lookups.
 pub trait SelectableModel: Sized {
     fn table_name() -> &'static str;
 
@@ -453,13 +454,17 @@ pub trait SelectableModel: Sized {
     fn columns() -> &'static [&'static str];
 
     fn process_row(row: &Row, offset: usize) -> SqlResult<Self>;
+
+    fn set_history_ref(&mut self, _history_ref: Option<&str>) {}
 }
 
-/// Connects each derive-generated full-row decoder to the shared loader. This is the only model
-/// behavior the runtime needs generically; table and column metadata stay in generated selectors.
+/// Connects each derive-generated full-row decoder to the shared loader and retains its selected
+/// view for relation lookups. Table and column metadata stay in generated selectors.
 #[doc(hidden)]
 pub trait ModelSelectRow: Sized {
     fn process_row(row: &Row) -> SqlResult<Self>;
+
+    fn set_history_ref(&mut self, _history_ref: Option<&str>) {}
 }
 
 #[doc(hidden)]
@@ -542,6 +547,13 @@ pub trait ModelProjection {
     fn fields() -> Vec<(&'static str, &'static str, &'static str)>;
 
     fn process_row(row: &Row) -> SqlResult<Self::Output>;
+
+    fn process_row_with_history_ref(
+        row: &Row,
+        _history_ref: Option<&str>,
+    ) -> SqlResult<Self::Output> {
+        Self::process_row(row)
+    }
 }
 
 macro_rules! impl_model_projection_for_tuple {
@@ -567,9 +579,17 @@ macro_rules! impl_model_projection_for_tuple {
             }
 
             fn process_row(row: &Row) -> SqlResult<Self::Output> {
+                Self::process_row_with_history_ref(row, None)
+            }
+
+            fn process_row_with_history_ref(
+                row: &Row,
+                history_ref: Option<&str>,
+            ) -> SqlResult<Self::Output> {
                 let mut offset = 0;
                 let output = ($({
-                    let model = <$model as SelectableModel>::process_row(row, offset)?;
+                    let mut model = <$model as SelectableModel>::process_row(row, offset)?;
+                    model.set_history_ref(history_ref);
                     offset += <$model as SelectableModel>::columns().len();
                     model
                 },)+);
@@ -643,7 +663,10 @@ where
     P: ModelProjection,
 {
     pub fn load(self) -> Result<Vec<P::Output>, ModelSelectError> {
-        load_projection(self.select, P::fields(), P::process_row)
+        let history_ref = self.select.history_ref().map(str::to_owned);
+        load_projection(self.select, P::fields(), |row| {
+            P::process_row_with_history_ref(row, history_ref.as_deref())
+        })
     }
 }
 
@@ -697,8 +720,13 @@ where
     M: ModelSelectRow,
     S: SelectQuery,
 {
+    let history_ref = select.history_ref();
     let (query, params) = render_query(select, select.select_clause(), None)?;
-    query_rows(conn, &query, params, M::process_row)
+    query_rows(conn, &query, params, |row| {
+        let mut model = M::process_row(row)?;
+        model.set_history_ref(history_ref);
+        Ok(model)
+    })
 }
 
 #[doc(hidden)]
@@ -707,8 +735,13 @@ where
     M: ModelSelectRow,
     S: SelectQuery,
 {
+    let history_ref = select.history_ref();
     let (query, params) = render_query(select, select.select_clause(), Some(2))?;
-    let mut rows = query_rows(conn, &query, params, M::process_row)?;
+    let mut rows = query_rows(conn, &query, params, |row| {
+        let mut model = M::process_row(row)?;
+        model.set_history_ref(history_ref);
+        Ok(model)
+    })?;
     match rows.len() {
         0 => Ok(None),
         1 => Ok(rows.pop()),

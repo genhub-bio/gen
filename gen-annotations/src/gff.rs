@@ -257,7 +257,7 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
         );
 
-        let sample_bg_id = BlockGroup::get_or_create_sample_block_groups(
+        let sample_block_group = BlockGroup::get_or_create_sample_block_groups(
             conn,
             "test",
             "child sample",
@@ -265,8 +265,8 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
         )
         .expect("should create child block group")[0]
-            .id;
-        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id, None).unwrap();
+            .clone();
+        let sample_path = BlockGroup::get_current_path(conn, &sample_block_group.id, None).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()
@@ -284,8 +284,7 @@ mod tests {
             )),
         )
         .unwrap();
-        let region =
-            ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 15, 25).unwrap();
+        let region = ResolvedGenRegion::from_path(conn, &sample_path, 15, 25).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,

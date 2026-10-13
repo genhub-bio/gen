@@ -279,9 +279,10 @@ The tuple order determines both the SQL column order and the returned tuple orde
 be the base selector or one of its joins. Like field projections, model tuples support one through
 16 entries. Write a one-element tuple such as `.models::<(Sample,)>()` when needed.
 
-The derive generates an offset-aware, fallible row decoder for this API. A model containing a
-`#[model_select(skip)]` field does not receive that decoder because a complete value cannot be
-constructed from the selected columns.
+The derive generates an offset-aware, fallible row decoder for this API. When `from_row` is not
+set, skipped fields are initialized with `Default::default()` and remain available to `.models()`;
+their Rust types must implement `Default`. A model with skipped fields and an explicit `from_row`
+function still needs a manual `SelectableModel` implementation to participate in `.models()`.
 
 ## Ordering and pagination
 
@@ -380,6 +381,9 @@ let samples = Sample::select(conn)
     .load()
     .expect("should load samples at the optional history ref");
 ```
+
+Models loaded from a selector retain its view for generated foreign-key accessors, so lazy related
+model lookups use the same historical ref.
 
 For the default source, a historical query reads `dolt_at_<table>(:history_ref)`. When selectors
 are joined, the same history ref is applied to every source. If both selectors specify refs, they
@@ -487,6 +491,10 @@ pub struct Example {
 }
 ```
 
+A skipped field is omitted from generated SQL column metadata. Without a custom `from_row`,
+the derive initializes it with `Default::default()`; with `from_row`, the custom decoder remains
+responsible for constructing it.
+
 The derive also accepts advanced struct-level options:
 
 ```rust,ignore
@@ -509,8 +517,8 @@ pub struct Sample {
 - `history = false` disables historical reads. If omitted, historical reads use the configured
   table name.
 - `from_row = path::to::function` supplies a `fn(&Row) -> rusqlite::Result<Model>` for models that
-  need custom row decoding. This is required when any field uses `skip`; otherwise the derive reads
-  every field by its configured SQL column name.
+  need custom row decoding. Without it, skipped fields are initialized with `Default::default()` in
+  generated row decoders, so each skipped field type must implement `Default`.
 - `alias = "..."` sets the SQL alias used to qualify generated columns. Aliases and field-level
   `column` values are single SQL identifiers; generated SQL always double-quotes them and treats
   punctuation such as `.` as part of the identifier.
@@ -593,6 +601,8 @@ without expanding every derive.
 - Each `join_on` call expresses one equality; composite join conditions are not yet supported.
 - A source alias can only refer to one source and join condition in a query.
 - `only` supports projections of one through 16 fields from selected and joined models.
-- `models` supports tuples of one through 16 selected and joined models without skipped fields.
+- `models` supports tuples of one through 16 selected and joined models. Skipped fields use the
+  generated default decoder unless the model configures a custom `from_row` function; that custom
+  decoder still requires a manual `SelectableModel` implementation for `.models()`.
 - Generated code references `gen_models`, so downstream consumers should use the macro through the
   `gen-models` crate under its standard crate name.

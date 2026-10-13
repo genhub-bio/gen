@@ -1,11 +1,15 @@
-use gen_models::{Direction, ModelSelectError, select::Connection};
+use gen_models::{
+    Direction, ModelSelectError,
+    select::{Connection, SelectableModel},
+};
 use gen_models_macros_fixture::{
     CountedModel, CustomSourceModel, CustomSourceModelSelect, DerivedModel, DerivedModelSelect,
     FailingSqlValue, FailingSqlValueModel, FixtureCompositeKey, FixtureCompositeKeySelect,
-    FixtureGroup, FixtureGroupSelect, FixtureSample, FixtureSampleSelect,
-    IDENTIFIER_INJECTED_BRANCH, InvalidRow, MissingTableModel, MissingTableModelSelect,
-    QuotedIdentifierModel, QuotedIdentifierModelSelect, connection, insert_composite_key,
-    insert_group, insert_sample, processed_row_count, reset_processed_row_count,
+    FixtureDefaultedModel, FixtureDefaultedModelSelect, FixtureGroup, FixtureGroupSelect,
+    FixtureSample, FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, InvalidRow, MissingTableModel,
+    MissingTableModelSelect, QuotedIdentifierModel, QuotedIdentifierModelSelect, connection,
+    insert_composite_key, insert_group, insert_sample, processed_row_count,
+    reset_processed_row_count,
 };
 use rusqlite::limits::Limit;
 
@@ -16,6 +20,47 @@ fn branch_exists(conn: &Connection, branch_name: &str) -> bool {
         |row| row.get(0),
     )
     .expect("should inspect fixture branches")
+}
+
+#[test]
+fn test_skipped_fields_default_in_direct_and_joined_model_decoders() {
+    let conn = connection();
+    insert_sample(&conn, "sample-defaulted", true);
+    conn.execute(
+        "INSERT INTO fixture_defaulted_models (id, sample_name) VALUES (?1, ?2)",
+        (1, "sample-defaulted"),
+    )
+    .expect("should insert the fixture model with persisted columns only");
+
+    let direct = FixtureDefaultedModel::select(&conn)
+        .id(1)
+        .get()
+        .expect("should decode a fixture model with defaulted skipped fields")
+        .expect("should find the fixture model");
+    let joined: Vec<(FixtureSample, FixtureDefaultedModel)> = FixtureSample::select(&conn)
+        .name("sample-defaulted")
+        .join_on(
+            FixtureSampleSelect::Name,
+            FixtureDefaultedModelSelect::SampleName,
+        )
+        .models::<(FixtureSample, FixtureDefaultedModel)>()
+        .load()
+        .expect("should decode a joined model at its nonzero column offset");
+
+    assert_eq!(
+        <FixtureDefaultedModel as SelectableModel>::columns(),
+        &["id", "sample_name"],
+        "skipped fields should be omitted from selectable columns",
+    );
+    assert_eq!(direct.skipped_before, "");
+    assert_eq!(direct.skipped_between, None);
+    assert!(!direct.skipped_after);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(joined[0].1.id, 1);
+    assert_eq!(joined[0].1.sample_name, "sample-defaulted");
+    assert_eq!(joined[0].1.skipped_before, "");
+    assert_eq!(joined[0].1.skipped_between, None);
+    assert!(!joined[0].1.skipped_after);
 }
 
 #[test]

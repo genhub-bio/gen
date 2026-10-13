@@ -666,6 +666,10 @@ pub fn update_with_vcf_options(
     let mut block_group_cache = BlockGroupCache::new(conn);
     let mut path_cache = PathCache::new(conn);
     let mut sequence_cache = SequenceCache::new(conn);
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "Path equality and hashing ignore runtime caches"
+    )]
     let mut accession_cache = HashMap::new();
     let mut path_region_cache: HashMap<(HashId, String), ResolvedGenRegion> = HashMap::new();
     let mut parent_bg_cache: HashMap<HashId, Option<HashId>> = HashMap::new();
@@ -680,6 +684,10 @@ pub fn update_with_vcf_options(
     let mut ambiguous_samples = HashSet::<(String, String)>::new();
     let mut called_regions = HashMap::<(String, String), Vec<(i64, i64, String)>>::new();
     let mut paths_to_record = Vec::new();
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "Path equality and hashing ignore runtime caches"
+    )]
     let mut changes: HashMap<(Path, String), Vec<BlockGroupChange>> = HashMap::new();
 
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
@@ -1364,7 +1372,7 @@ mod tests {
         )
         .unwrap();
         let change = BlockGroupChange {
-            region: ResolvedGenRegion::from_path(conn, path.block_group_id, &path, 1, 2).unwrap(),
+            region: ResolvedGenRegion::from_path(conn, &path, 1, 2).unwrap(),
             path_accession: None,
             block: PathBlock {
                 node_id,
