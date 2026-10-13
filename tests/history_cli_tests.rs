@@ -636,6 +636,20 @@ mod operation_history {
             ],
         );
         assert_success(&add_annotation_output, "add-annotation-file should succeed");
+        let stderr = String::from_utf8_lossy(&add_annotation_output.stderr);
+        let sorting_position = stderr
+            .find("Sorting the annotation file")
+            .expect("should report annotation sorting on stderr");
+        let compression_position = stderr
+            .find("Compressing the file")
+            .expect("should report annotation compression on stderr");
+        let index_position = stderr
+            .find("Building the index")
+            .expect("should report annotation index creation on stderr");
+        assert!(
+            sorting_position < compression_position && compression_position < index_position,
+            "should report annotation preparation stages in order: {stderr}"
+        );
         let printed_commit_hash = trailing_commit_hash(
             &add_annotation_output,
             "add-annotation-file should print the commit hash",

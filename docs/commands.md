@@ -107,6 +107,13 @@ being downloaded in full when the server supports range requests. Otherwise,
 the file is streamed into the cache and reused locally. Run `gen cache-clear` to
 remove the cache. Local repository files and `.gen/assets` are not affected.
 
+# Annotation file import
+
+Adding a local GFF3 or BED file with `gen add-annotation-file` sorts it, builds its CSI coordinate
+index as the source is compressed, and records the attribute index used by viewer search. CSI
+supports large contigs beyond the TBI coordinate limit. The command reports sorting, compression,
+and attribute-index building while it works.
+
 # FASTA import
 
 Use `gen import fasta <path-or-uri>` to import a FASTA. BGZF-compressed inputs
