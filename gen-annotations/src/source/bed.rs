@@ -224,7 +224,7 @@ fn translated_bed_interval_tree(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, sync::Arc};
+    use std::{fs::File, io::Cursor, sync::Arc};
 
     use gen_core::{HashId, Strand};
     use gen_models::{
@@ -232,6 +232,25 @@ mod tests {
     };
 
     use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
+    use crate::{
+        test_helpers::{create_forward_test_block_group, create_reverse_test_block_group},
+        translate::bed::translate_bed,
+    };
+
+    fn translate_bed_input(conn: &gen_models::db::GraphConnection, input: &str) -> String {
+        let mut translated = Vec::new();
+        translate_bed(
+            conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate BED input");
+        String::from_utf8(translated).expect("should write UTF-8 BED output")
+    }
 
     #[test]
     fn test_bed_annotation_matches_identifier_and_preserves_metadata() {
@@ -405,5 +424,176 @@ mod tests {
             b"GA",
             "negative-strand BED interior [1,3) should map to raw [5,7) and fetch GA"
         );
+    }
+
+    #[test]
+    fn test_translates_reverse_split_bed_to_exact_node_local_spans() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        // Path edges traverse B then A; edge endpoint strands at B/A are -. Feature strand is +.
+        //   path index:  01234567890123456
+        //   path nodes:  BBBBBBBBAAAAAAAAA
+        //   path DNA:    TGCAACGGTAACCGGTT
+        //   feature:            ^^ [7,9) = GT
+        //
+        // Stored node B:
+        //   index:     012345678
+        //   DNA:       CCGTTGCAT
+        //   span:      ^-------^ [0,8)
+        //   selected:  ^ [0,1) = C
+        //
+        // Stored node A:
+        //   index:     012345678
+        //   DNA:       AACCGGTTA
+        //   span:      ^--------^ [0,9)
+        //   selected:          ^ [8,9) = A
+        // Edge strand - maps stored C to G and A to T; feature strand + emits fragments B then A.
+        // BED [7,9) maps to path [7,9), producing B [0,1) (-) then A [8,9) (-).
+        // This explains orientation; the assertion checks emitted records, not fetched DNA.
+        let input = format!("{}\t7\t9\tcross-boundary\t0\t+\n", block_group.name);
+        let translated = translate_bed_input(&conn, &input);
+        assert_eq!(
+            translated,
+            format!(
+                "{node_b_id}\t0\t1\tcross-boundary\t0\t-\n{node_a_id}\t8\t9\tcross-boundary\t0\t-\n"
+            ),
+            "positive-coordinate BED fragments should clip to each reverse-oriented node in path order"
+        );
+    }
+
+    #[test]
+    fn test_resolves_minus_strand_bed_from_forward_and_reverse_path_dna() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let forward = create_forward_test_block_group(&conn);
+        let reverse = create_reverse_test_block_group(&conn);
+
+        // The same minus-strand feature is fetched through both fixture edge traversals.
+        for ((block_group, node_a_id, node_b_id), name, expected_sequence) in [
+            (forward, "forward", b"GGTTTGCAA".as_slice()),
+            (reverse, "reverse", b"GTTACCGTT".as_slice()),
+        ] {
+            let context = AnnotationTranslationContext {
+                conn: &conn,
+                workspace: crate::test_helpers::test_workspace(),
+                collection_name: "test",
+                sample_name: Sample::DEFAULT_NAME,
+                block_group_id: block_group.id,
+                history_ref: None,
+            };
+            let identifier = format!("minus-{name}");
+            let input = format!("{name}\t3\t12\t{identifier}\t0\t-\n");
+            let mut annotation =
+                parse_bed_annotation(identifier.as_str(), Cursor::new(input.as_bytes()))
+                    .expect("should parse minus-strand BED feature");
+            let accession =
+                translate_bed_annotation(&context, &mut annotation, Cursor::new(input.as_bytes()))
+                    .expect("should translate minus-strand BED feature");
+            let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 9)
+                .expect("should resolve minus-strand BED feature");
+            let graph_locus = resolved
+                .graph_locus(&conn, crate::test_helpers::test_workspace())
+                .expect("should build minus-strand BED graph locus");
+            assert_eq!(
+                graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+                expected_sequence,
+                "minus-strand BED sequence should be fetched in feature orientation on the {name} path"
+            );
+            assert_eq!(
+                graph_locus
+                    .slices
+                    .iter()
+                    .map(|slice| slice.block.node_id)
+                    .collect::<Vec<_>>(),
+                [node_a_id, node_b_id],
+                "minus-strand BED slices should follow feature order on the {name} path"
+            );
+
+            for (start, end, expected_base) in [
+                (0, 1, &expected_sequence[..1]),
+                (8, 9, &expected_sequence[8..9]),
+            ] {
+                let resolved =
+                    ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, start, end)
+                        .expect("should resolve one minus-strand BED base");
+                let graph_locus = resolved
+                    .graph_locus(&conn, crate::test_helpers::test_workspace())
+                    .expect("should build one-base minus-strand BED graph locus");
+                assert_eq!(
+                    graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+                    expected_base,
+                    "one-base BED slices should retain feature orientation on the {name} path"
+                );
+            }
+
+            // These are two separate path inputs; both features have strand -.
+            // Case 1: edge endpoints at B/A +.
+            //   feature nodes:   AAAABBBBB
+            //   feature offset:  012345678
+            //   feature DNA:     GGTTTGCAA
+            //   query [1,3):      ^-^ = GT
+            //   query [2,6):       ^---^ = TTTG
+            // Case 2: edge endpoints at B/A -.
+            //   feature nodes:   AAAABBBBB
+            //   feature offset:  012345678
+            //   feature DNA:     GTTACCGTT
+            //   query [1,3):      ^-^ = TT
+            //   query [2,6):       ^---^ = TACC
+            // [1,3) checks an interior slice of A; [2,6) trims across A/B. These independent
+            // queries overlap at offset 2 (T), included in both results.
+            for (start, end, expected_forward, expected_reverse) in [
+                (1, 3, b"GT".as_slice(), b"TT".as_slice()),
+                (2, 6, b"TTTG".as_slice(), b"TACC".as_slice()),
+            ] {
+                let expected_subsequence = if name == "forward" {
+                    expected_forward
+                } else {
+                    expected_reverse
+                };
+                let resolved =
+                    ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, start, end)
+                        .expect("should resolve a minus-strand BED subrange");
+                let graph_locus = resolved
+                    .graph_locus(&conn, crate::test_helpers::test_workspace())
+                    .expect("should build the trimmed minus-strand BED graph locus");
+                assert_eq!(
+                    graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+                    expected_subsequence,
+                    "minus-strand BED subrange {start}..{end} should trim in feature orientation on the {name} path"
+                );
+                if (start, end) == (2, 6) {
+                    let actual_slices = graph_locus
+                        .slices
+                        .iter()
+                        .map(|slice| {
+                            (
+                                slice.block.node_id,
+                                slice.block.sequence_start,
+                                slice.block.sequence_end,
+                                slice.start,
+                                slice.end,
+                                slice.strand,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let expected_slices = if name == "forward" {
+                        vec![
+                            (node_a_id, 0, 4, 0, 2, Strand::Reverse),
+                            (node_b_id, 3, 8, 3, 5, Strand::Reverse),
+                        ]
+                    } else {
+                        vec![
+                            (node_a_id, 5, 9, 2, 4, Strand::Forward),
+                            (node_b_id, 0, 5, 0, 2, Strand::Forward),
+                        ]
+                    };
+                    assert_eq!(
+                        actual_slices, expected_slices,
+                        "boundary-crossing BED subrange should trim node-local slices in feature order"
+                    );
+                }
+            }
+        }
     }
 }
