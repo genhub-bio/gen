@@ -22,8 +22,8 @@ use crate::{
     Direction, ForeignKeyCache, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
     assets::{
-        AssetRef, AssetRole, AssetUri, ChecksummedWriter, CompressionType, LocalAssetUri,
-        OperationKind,
+        ANNOTATION_ATTRIBUTE_INDEX_ROLE, AssetRef, AssetRole, AssetUri, ChecksummedWriter,
+        CompressionType, LocalAssetUri, OperationKind,
     },
     db::{DbContext, GraphConnection, max_rows_per_batch},
     errors::{FileAdditionError, OperationError},
@@ -865,7 +865,7 @@ fn prepare_local_sorted_annotation(
     path: &str,
     file_type: FileTypes,
     checksum_override: Option<Sha256Hash>,
-) -> Result<(FileAddition, FileAddition), AnnotationFileError> {
+) -> Result<(FileAddition, FileAddition, FileAddition), AnnotationFileError> {
     let cache_dir = workspace
         .find_cache_dir()
         .ok_or_else(|| {
@@ -955,14 +955,43 @@ fn prepare_local_sorted_annotation(
     coordinate_index_writer.write_index(&coordinate_index)?;
     coordinate_index_writer.into_inner().finish()?.flush()?;
 
+    let source_path = asset_dir.join(
+        file_addition
+            .hashed_filename()
+            .expect("should have a checksum for retained local annotations"),
+    );
     let index_file_addition = FileAddition::prepare(
         workspace,
         &coordinate_index_path.to_string_lossy(),
         FileTypes::Tabix,
         None,
     )?;
+    let attribute_index_path = sidecar_temp_dir.path().join("attributes.gai");
+    let name_index_options = match format {
+        gai::SortFormat::Gff => {
+            gai::NameIndexOptions::new(["Name", "name", "gene", "gene_name", "db_xref"], false)?
+        }
+        gai::SortFormat::Bed => gai::NameIndexOptions::bed(false),
+    };
+    gai::build_name_index_with_options(
+        &source_path,
+        &coordinate_index_path,
+        &attribute_index_path,
+        &name_index_options,
+        &gai::BuildOptions::default(),
+    )?;
+    let attribute_index_file_addition = FileAddition::prepare(
+        workspace,
+        &attribute_index_path.to_string_lossy(),
+        FileTypes::None,
+        None,
+    )?;
 
-    Ok((file_addition, index_file_addition))
+    Ok((
+        file_addition,
+        index_file_addition,
+        attribute_index_file_addition,
+    ))
 }
 
 /// Adds an annotation asset and its available indexes to operation history.
@@ -998,23 +1027,33 @@ pub fn add_annotation_file(
         {
             // Sorting changes compressed offsets, so local GFF/BED sidecars are always rebuilt against
             // the retained BGZF bytes. A supplied coordinate index describes the original input bytes.
-            let (file_addition, index_file_addition) = prepare_local_sorted_annotation(
-                workspace,
-                path,
-                file_type,
-                checksum_overrides.annotation,
-            )?;
+            let (file_addition, index_file_addition, attribute_index_file_addition) =
+                prepare_local_sorted_annotation(
+                    workspace,
+                    path,
+                    file_type,
+                    checksum_overrides.annotation,
+                )?;
             let logical_path =
                 OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
             let filename = Path::new(&logical_path)
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("annotation");
-            let sidecars = vec![(
-                index_file_addition,
-                format!("{logical_path}.csi"),
-                format!("{filename}.csi"),
-            )];
+            let sidecars = vec![
+                (
+                    index_file_addition,
+                    AssetRole::AnnotationIndex,
+                    format!("{logical_path}.csi"),
+                    format!("{filename}.csi"),
+                ),
+                (
+                    attribute_index_file_addition,
+                    AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string()),
+                    format!("{logical_path}.gai"),
+                    format!("{filename}.gai"),
+                ),
+            ];
             (file_addition, logical_path, sidecars)
         } else {
             let file_addition =
@@ -1040,7 +1079,12 @@ pub fn add_annotation_file(
                     .and_then(|value| value.to_str())
                     .map(str::to_string)
                     .unwrap_or_else(|| index_path.clone());
-                sidecars.push((index_file_addition, index_logical_path, index_name));
+                sidecars.push((
+                    index_file_addition,
+                    AssetRole::AnnotationIndex,
+                    index_logical_path,
+                    index_name,
+                ));
             }
             (file_addition, logical_path, sidecars)
         };
@@ -1058,7 +1102,7 @@ pub fn add_annotation_file(
     let annotation_asset_ref_id = annotation_asset_ref.id;
     let index_file_addition_ids = sidecars
         .iter()
-        .map(|(file_addition, _, _)| file_addition.id.to_string())
+        .map(|(file_addition, _, _, _)| file_addition.id.to_string())
         .collect::<Vec<_>>()
         .join(":");
     let log_id = HashId(calculate_hash(&format!(
@@ -1069,10 +1113,10 @@ pub fn add_annotation_file(
         .map(str::to_string)
         .unwrap_or_else(|| format!("Add annotation file {path}"));
     let mut asset_refs = vec![annotation_asset_ref];
-    for (file_addition, logical_path, index_name) in &sidecars {
+    for (file_addition, role, logical_path, index_name) in &sidecars {
         asset_refs.push(AssetRef::from_file_addition(
             file_addition,
-            AssetRole::AnnotationIndex,
+            role.clone(),
             Some(logical_path),
             Some(index_name),
             Some(&annotation_asset_ref_id),
@@ -1682,11 +1726,11 @@ mod tests {
         asset_refs.sort_by(|left, right| left.role.as_str().cmp(right.role.as_str()));
         let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
-        assert_eq!(asset_refs.len(), 2);
+        assert_eq!(asset_refs.len(), 3);
         let annotation_asset = asset_refs
             .iter()
             .find(|asset| asset.role == AssetRole::Annotation)
-            .expect("should track annotation source");
+            .expect("should track the annotation source");
         assert_eq!(annotation_asset.name.as_deref(), Some("track-1"));
         assert!(
             annotation_asset
@@ -1699,13 +1743,17 @@ mod tests {
             asset.role == AssetRole::AnnotationIndex
                 && asset.upstream_asset_ref_id == Some(annotation_asset.id)
         }));
+        assert!(asset_refs.iter().any(|asset| {
+            asset.role == AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string())
+                && asset.upstream_asset_ref_id == Some(annotation_asset.id)
+        }));
         assert_eq!(operation_logs.len(), 1);
         assert_eq!(
             operation_logs[0].operation_kind,
             OperationKind::AnnotationFile
         );
         let operation_assets = OperationAsset::by_log_id(graph_conn, &operation_logs[0].id);
-        assert_eq!(operation_assets.len(), 2);
+        assert_eq!(operation_assets.len(), 3);
         assert!(
             history_store
                 .log(None)
@@ -1828,7 +1876,7 @@ mod tests {
         .expect("should index local GFF input");
 
         let assets = AssetRef::all(graph_conn).expect("should load generated annotation assets");
-        assert_eq!(assets.len(), 2);
+        assert_eq!(assets.len(), 3);
         let annotation = assets
             .iter()
             .find(|asset| asset.role == AssetRole::Annotation)
@@ -1866,6 +1914,96 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         assert!(String::from_utf8_lossy(&records[0]).contains("Alpha-feature"));
+    }
+
+    #[test]
+    fn test_add_annotation_file_builds_local_gff_attribute_index() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let annotation_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("features.gff3");
+        let input = concat!(
+            "##gff-version 3\n",
+            "m123\tsource\tgene\t2\t4\t.\t+\t.\tID=private-alpha;Name=Alpha-feature;gene_name=BRCA1\n",
+        );
+        fs::write(&annotation_path, input).expect("should write GFF input with searchable names");
+
+        add_annotation_file(
+            &context,
+            annotation_path
+                .to_str()
+                .expect("should encode annotation path"),
+            None,
+            None,
+            Some("indexed-gff"),
+            None,
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should index configured GFF attributes");
+
+        let assets = AssetRef::all(graph_conn).expect("should load generated annotation assets");
+        assert_eq!(assets.len(), 3);
+        let annotation = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::Annotation)
+            .expect("should track GFF source");
+        let coordinate_index = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::AnnotationIndex)
+            .expect("should track CSI coordinate index");
+        let attribute_index = assets
+            .iter()
+            .find(|asset| {
+                asset.role == AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string())
+            })
+            .expect("should track GAI attribute index");
+        assert!(attribute_index.uri.ends_with(".gai"));
+        assert_eq!(attribute_index.file_type, FileTypes::None.as_str());
+        assert_eq!(
+            attribute_index.upstream_asset_ref_id,
+            Some(annotation.id),
+            "GAI metadata should link to its annotation source"
+        );
+
+        let source_path = annotation
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained BGZF source");
+        let coordinate_index_path = coordinate_index
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained CSI index");
+        let attribute_index_path = attribute_index
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained GAI index");
+        assert_eq!(
+            gai::inspect_index(&attribute_index_path)
+                .expect("should inspect retained GAI index")
+                .attributes,
+            vec![
+                "Name".to_string(),
+                "name".to_string(),
+                "gene".to_string(),
+                "gene_name".to_string(),
+                "db_xref".to_string(),
+            ]
+        );
+        let mut indexed_source =
+            gai::open_index(&source_path, &coordinate_index_path, &attribute_index_path)
+                .expect("should open retained BGZF, CSI, and GAI files");
+        let records = indexed_source
+            .query_name("BRCA1")
+            .expect("should query configured gene_name attribute");
+        assert_eq!(records.len(), 1);
+        assert!(records[0].raw_line.contains("gene_name=BRCA1"));
+        assert!(
+            indexed_source
+                .query_name("private-alpha")
+                .expect("should query for private ID")
+                .is_empty(),
+            "the ID attribute should not be indexed"
+        );
     }
 
     #[test]
@@ -1984,8 +2122,15 @@ mod tests {
             index_asset.logical_path.as_deref(),
             Some("annotation.gff3.csi")
         );
-        assert_ne!(index_asset.logical_path.as_deref(), Some(index_path));
         assert!(!index_asset.uri.contains(index_path));
+        assert!(assets.iter().any(|asset| {
+            asset.role == AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string())
+                && asset
+                    .logical_path
+                    .as_deref()
+                    .is_some_and(|logical_path| logical_path.ends_with(".gai"))
+        }));
+        assert!(!assets.iter().any(|asset| asset.uri.contains(index_path)));
     }
 
     #[test]
