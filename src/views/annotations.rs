@@ -876,7 +876,7 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_core::{HashId, Sha256Hash, Strand};
+    use gen_core::{HashId, Sha256Hash, Strand, Workspace};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
@@ -890,9 +890,9 @@ mod tests {
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
-        annotation_index_is_tabix, load_annotation_file_track, load_annotations_for_group,
-        load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
-        spans_whole_block_group,
+        annotation_index_is_tabix, cache_remote_annotation_asset, load_annotation_file_track,
+        load_annotations_for_group, load_indexed_annotation_bytes, parse_translated_bed,
+        remote_annotation_cache_path, spans_whole_block_group,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -1407,6 +1407,130 @@ mod tests {
         assert_eq!(
             fs::read(cache_path).expect("should read cached annotation index"),
             index_contents
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remote_annotation_cache_path_creates_directory_through_external_cache_symlink() {
+        let workspace_directory = tempdir().expect("should create workspace directory");
+        let workspace = Workspace::new(workspace_directory.path());
+        workspace.ensure_gen_dir();
+        let outside_directory = tempdir().expect("should create outside directory");
+        std::os::unix::fs::symlink(
+            outside_directory.path(),
+            workspace
+                .find_cache_dir()
+                .expect("should find workspace cache path"),
+        )
+        .expect("should link workspace cache to outside directory");
+        let file_addition = AnnotationAssetEntry {
+            id: HashId::convert_str("external-cache-path-test"),
+            asset_uri: "http://127.0.0.1:1/annotation.gff3".to_string(),
+            file_type: FileTypes::Gff3,
+            checksum: None,
+        };
+
+        let cache_path = remote_annotation_cache_path(&workspace, &file_addition, "annotations")
+            .expect("should resolve remote annotation cache path");
+        let outside_entries = fs::read_dir(outside_directory.path())
+            .expect("should inspect outside cache target")
+            .map(|entry| {
+                let path = entry.expect("should read outside cache entry").path();
+                let metadata = fs::metadata(&path).expect("should inspect outside cache entry");
+                format!(
+                    "{} ({})",
+                    path.display(),
+                    if metadata.is_dir() {
+                        "directory"
+                    } else {
+                        "file"
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        let actual_cache_directory = fs::canonicalize(cache_path.parent().unwrap())
+            .expect("should resolve created cache directory");
+        let repository_root = fs::canonicalize(workspace.repo_root().unwrap())
+            .expect("should resolve workspace root");
+
+        assert!(
+            actual_cache_directory.starts_with(&repository_root),
+            "remote_annotation_cache_path created cache directories outside workspace: returned {}, resolved parent {}, workspace {}, external entries {:?}",
+            cache_path.display(),
+            actual_cache_directory.display(),
+            repository_root.display(),
+            outside_entries
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cache_remote_annotation_asset_downloads_through_external_cache_symlink() {
+        let workspace_directory = tempdir().expect("should create workspace directory");
+        let workspace = Workspace::new(workspace_directory.path());
+        workspace.ensure_gen_dir();
+        let outside_directory = tempdir().expect("should create outside directory");
+        std::os::unix::fs::symlink(
+            outside_directory.path(),
+            workspace
+                .find_cache_dir()
+                .expect("should find workspace cache path"),
+        )
+        .expect("should link workspace cache to outside directory");
+
+        let expected_bytes = b"##gff-version 3\nexternal cache write\n";
+        let (asset_uri, server) = serve_http_content(expected_bytes, 1);
+        let file_addition = AnnotationAssetEntry {
+            id: HashId::convert_str("external-cache-download-test"),
+            asset_uri: format!("{asset_uri}.gff3"),
+            file_type: FileTypes::Gff3,
+            checksum: None,
+        };
+
+        let cache_path = cache_remote_annotation_asset(&workspace, &file_addition, "annotations")
+            .expect("should cache remote annotation");
+        server.join().expect("should finish loopback HTTP server");
+
+        let actual_bytes = fs::read(&cache_path).expect("should read downloaded cache file");
+        let external_directory = outside_directory.path().join("annotations");
+        let external_files = fs::read_dir(&external_directory)
+            .expect("should inspect external annotation cache")
+            .map(|entry| {
+                let path = entry
+                    .expect("should read external annotation cache entry")
+                    .path();
+                let bytes = fs::read(&path).expect("should read external annotation bytes");
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        let external_file_details = external_files
+            .iter()
+            .map(|(path, bytes)| {
+                format!(
+                    "{} ({} bytes, readback={:?})",
+                    path.display(),
+                    bytes.len(),
+                    String::from_utf8_lossy(bytes)
+                )
+            })
+            .collect::<Vec<_>>();
+        let actual_cache_path =
+            fs::canonicalize(&cache_path).expect("should resolve cached file through symlink");
+        let repository_root = fs::canonicalize(workspace.repo_root().unwrap())
+            .expect("should resolve workspace root");
+
+        assert_eq!(actual_bytes, expected_bytes);
+        assert_eq!(external_files.len(), 1);
+        assert_eq!(external_files[0].1, expected_bytes);
+        assert!(
+            actual_cache_path.starts_with(&repository_root),
+            "cache_remote_annotation_asset downloaded outside workspace: returned {}, resolved {}, workspace {}, external files {:?}, byte count {}",
+            cache_path.display(),
+            actual_cache_path.display(),
+            repository_root.display(),
+            external_file_details,
+            actual_bytes.len()
         );
     }
 
