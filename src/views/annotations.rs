@@ -1197,8 +1197,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(
@@ -1358,8 +1358,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(

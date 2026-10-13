@@ -2359,8 +2359,8 @@ mod tests {
             &fasta_path,
             collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_vcf(
@@ -3610,8 +3610,8 @@ mod tests {
                 &fasta_path,
                 folder,
                 Sample::DEFAULT_NAME,
-                false,
-                &[],
+                None,
+                None,
             )
             .expect("should import reference fixture");
             update_with_vcf(
