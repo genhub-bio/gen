@@ -1,5 +1,5 @@
 //! Annotation track loading resolves local files first and materializes remote indexes and data
-//! only when the selected workflow requires them. A remote tabix index is downloaded in full,
+//! only when the selected workflow requires them. A remote coordinate index is downloaded in full,
 //! cached under `.gen/cache/annotation-indexes`, and parsed before the annotation is queried. With
 //! an index and viewport, the annotation is read through OpenDAL range requests; if ranged access
 //! fails, the complete file is cached and the query is retried locally. Remote annotations without
@@ -31,7 +31,7 @@ use gen_models::{
     file_types::FileTypes,
     reference_alias::ReferenceAlias,
 };
-use noodles::{bed, core::Region, csi, gff, tabix};
+use noodles::{bed, bgzf, core::Region, csi, gff, tabix};
 use petgraph::Direction;
 use tempfile::NamedTempFile;
 
@@ -527,52 +527,57 @@ fn cache_remote_annotation_asset(
     }
 }
 
-/// Finds the conventional sibling index for a local annotation without an explicit index asset.
+#[derive(Clone)]
+enum AnnotationCoordinateIndex {
+    Csi(csi::Index),
+    Tabix(tabix::Index),
+}
+
+/// Finds a conventional sibling CSI or TBI index for a local annotation.
 ///
 /// Index loading calls this only after the primary annotation has resolved to a local path. An
 /// explicit index entry, including a remote index URI, takes the other branch of that workflow.
-fn tabix_index_path(file_path: &FsPath) -> PathBuf {
-    let mut index_path = file_path.to_path_buf();
-    index_path.set_extension(format!(
-        "{}.tbi",
-        file_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-    ));
-    if index_path.exists() {
-        return index_path;
+fn coordinate_index_path(file_path: &FsPath) -> PathBuf {
+    let csi_path = PathBuf::from(format!("{}.csi", file_path.display()));
+    if csi_path.exists() {
+        return csi_path;
     }
-    PathBuf::from(format!("{}.tbi", file_path.display()))
+
+    let tbi_path = PathBuf::from(format!("{}.tbi", file_path.display()));
+    if tbi_path.exists() {
+        return tbi_path;
+    }
+
+    csi_path
 }
 
-/// Reports whether track loading should use the explicitly recorded index as a tabix index.
+/// Reports whether track loading should use the explicitly recorded coordinate index.
 ///
-/// Other index file types do not enter the tabix query workflow and leave local sibling discovery
-/// to `load_annotation_index`.
-fn annotation_index_is_tabix(entry: &AnnotationFileEntry) -> bool {
+/// Other index file types do not enter indexed query loading and leave local sibling discovery to
+/// `load_annotation_index`.
+fn annotation_index_is_coordinate_index(entry: &AnnotationFileEntry) -> bool {
     entry
         .index_file_addition
         .as_ref()
         .is_some_and(|index_file_addition| index_file_addition.file_type == FileTypes::Tabix)
 }
 
-/// Loads the tabix index before track loading decides how to access the annotation data.
+/// Loads a CSI or TBI index before track loading decides how to access the annotation data.
 ///
 /// A configured remote index is downloaded in full and cached, while a configured local index is
-/// resolved from the workspace. Without an explicit tabix asset, local annotations are checked for
-/// a conventional sibling index. The resulting BGZF-compressed index is parsed into memory before
-/// any local or remote annotation query begins.
+/// resolved from the workspace. Without an explicit coordinate-index asset, local annotations are
+/// checked for a conventional sibling index. The resulting BGZF-compressed index is parsed into
+/// memory before any local or remote annotation query begins.
 fn load_annotation_index(
     workspace: &Workspace,
     entry: &AnnotationFileEntry,
     annotation_path: Option<&FsPath>,
-) -> Result<Option<tabix::Index>, Box<dyn Error>> {
-    let index_path = if annotation_index_is_tabix(entry) {
+) -> Result<Option<AnnotationCoordinateIndex>, Box<dyn Error>> {
+    let index_path = if annotation_index_is_coordinate_index(entry) {
         let index_file_addition = entry
             .index_file_addition
             .as_ref()
-            .expect("should have index file addition when index type is tabix");
+            .expect("should have coordinate index file addition");
         if LocalAssetUri::is_local_path_or_file_uri(&index_file_addition.asset_uri) {
             resolve_local_annotation_file_path(workspace, index_file_addition).ok_or_else(|| {
                 io::Error::new(
@@ -590,28 +595,50 @@ fn load_annotation_index(
         let Some(annotation_path) = annotation_path else {
             return Ok(None);
         };
-        let index_path = tabix_index_path(annotation_path);
+        let index_path = coordinate_index_path(annotation_path);
         if !index_path.exists() {
             return Ok(None);
         }
         index_path
     };
-    Ok(Some(tabix::fs::read(index_path)?))
+    Ok(Some(read_coordinate_index(&index_path)?))
 }
 
-/// Executes a tabix query after the workflow has selected a seekable annotation source.
+fn read_coordinate_index(index_path: &FsPath) -> Result<AnnotationCoordinateIndex, Box<dyn Error>> {
+    let mut reader = bgzf::io::Reader::new(File::open(index_path)?);
+    let mut magic = [0; 4];
+    reader.read_exact(&mut magic)?;
+
+    match &magic {
+        b"CSI\x01" => Ok(AnnotationCoordinateIndex::Csi(csi::fs::read(index_path)?)),
+        b"TBI\x01" => Ok(AnnotationCoordinateIndex::Tabix(tabix::fs::read(
+            index_path,
+        )?)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unrecognized coordinate index format: {}",
+                index_path.display()
+            ),
+        )
+        .into()),
+    }
+}
+
+/// Executes an indexed coordinate query after selecting a seekable annotation source.
 ///
 /// Local files, cached files, and OpenDAL remote readers all enter here as raw BGZF streams. The
 /// noodles indexed reader applies the parsed index's virtual offsets and decompresses only the
 /// blocks needed to return records intersecting the requested window.
-fn load_tabix_region_bytes<R>(
+fn load_coordinate_region_bytes<R, I>(
     reader: R,
-    index: tabix::Index,
+    index: I,
     reference_name: &str,
     window: (i64, i64),
 ) -> Result<Vec<u8>, Box<dyn Error>>
 where
     R: Read + Seek,
+    I: csi::BinningIndex,
 {
     let start = (window.0 + 1).max(1);
     let end = window.1.max(start);
@@ -639,12 +666,43 @@ fn load_indexed_annotation_bytes(
     workspace: &Workspace,
     file_addition: &AnnotationAssetEntry,
     local_file_path: Option<&FsPath>,
-    index: tabix::Index,
+    index: AnnotationCoordinateIndex,
     reference_name: &str,
     window: (i64, i64),
 ) -> Result<Vec<u8>, Box<dyn Error>> {
+    match index {
+        AnnotationCoordinateIndex::Csi(index) => load_indexed_annotation_bytes_with_index(
+            workspace,
+            file_addition,
+            local_file_path,
+            index,
+            reference_name,
+            window,
+        ),
+        AnnotationCoordinateIndex::Tabix(index) => load_indexed_annotation_bytes_with_index(
+            workspace,
+            file_addition,
+            local_file_path,
+            index,
+            reference_name,
+            window,
+        ),
+    }
+}
+
+fn load_indexed_annotation_bytes_with_index<I>(
+    workspace: &Workspace,
+    file_addition: &AnnotationAssetEntry,
+    local_file_path: Option<&FsPath>,
+    index: I,
+    reference_name: &str,
+    window: (i64, i64),
+) -> Result<Vec<u8>, Box<dyn Error>>
+where
+    I: csi::BinningIndex + Clone,
+{
     if let Some(path) = local_file_path {
-        return load_tabix_region_bytes(File::open(path)?, index, reference_name, window);
+        return load_coordinate_region_bytes(File::open(path)?, index, reference_name, window);
     }
     if LocalAssetUri::is_local_path_or_file_uri(&file_addition.asset_uri) {
         return Err("Annotation file not found in repo or assets".into());
@@ -652,7 +710,12 @@ fn load_indexed_annotation_bytes(
 
     let cache_path = remote_annotation_cache_path(workspace, file_addition, "annotations")?;
     if cache_path.exists() {
-        return load_tabix_region_bytes(File::open(cache_path)?, index, reference_name, window);
+        return load_coordinate_region_bytes(
+            File::open(cache_path)?,
+            index,
+            reference_name,
+            window,
+        );
     }
 
     // The indexed query itself is the range-support check. This tests the actual read behavior
@@ -661,13 +724,15 @@ fn load_indexed_annotation_bytes(
     let ranged_result = asset_uri
         .reader(workspace)
         .map_err(|error| Box::new(error) as Box<dyn Error>)
-        .and_then(|reader| load_tabix_region_bytes(reader, index.clone(), reference_name, window));
+        .and_then(|reader| {
+            load_coordinate_region_bytes(reader, index.clone(), reference_name, window)
+        });
     match ranged_result {
         Ok(bytes) => Ok(bytes),
         Err(_) => {
             let cache_path =
                 cache_remote_annotation_asset(workspace, file_addition, "annotations")?;
-            load_tabix_region_bytes(File::open(cache_path)?, index, reference_name, window)
+            load_coordinate_region_bytes(File::open(cache_path)?, index, reference_name, window)
         }
     }
 }
@@ -889,8 +954,9 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{
-        AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
-        annotation_index_is_tabix, load_annotation_file_track, load_annotations_for_group,
+        AnnotationCoordinateIndex, AnnotationFileTrackRequest, AnnotationGroupTrackRequest,
+        AnnotationSegment, annotation_index_is_coordinate_index, coordinate_index_path,
+        load_annotation_file_track, load_annotation_index, load_annotations_for_group,
         load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
         spans_whole_block_group,
     };
@@ -1321,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn test_annotation_index_is_tabix_only_for_tabix_sidecars() {
+    fn test_annotation_index_is_coordinate_index_for_csi_and_tbi_sidecars() {
         let annotation_entry = AnnotationFileEntry {
             file_addition: AnnotationAssetEntry {
                 id: HashId::convert_str("annotation"),
@@ -1338,7 +1404,7 @@ mod tests {
             name: None,
             display_name: "annotation".to_string(),
         };
-        assert!(!annotation_index_is_tabix(&annotation_entry));
+        assert!(!annotation_index_is_coordinate_index(&annotation_entry));
 
         let tabix_entry = AnnotationFileEntry {
             index_file_addition: Some(AnnotationAssetEntry {
@@ -1350,7 +1416,90 @@ mod tests {
             }),
             ..annotation_entry
         };
-        assert!(annotation_index_is_tabix(&tabix_entry));
+        assert!(annotation_index_is_coordinate_index(&tabix_entry));
+    }
+
+    #[test]
+    fn test_coordinate_index_path_prefers_csi_and_falls_back_to_tbi() {
+        let directory = tempdir().expect("should create index directory");
+        let annotation_path = directory.path().join("genes.gff3.gz");
+        let csi_path = PathBuf::from(format!("{}.csi", annotation_path.display()));
+        let tbi_path = PathBuf::from(format!("{}.tbi", annotation_path.display()));
+        fs::write(&csi_path, b"csi").expect("should write CSI sidecar");
+        fs::write(&tbi_path, b"tbi").expect("should write TBI sidecar");
+
+        assert_eq!(coordinate_index_path(&annotation_path), csi_path);
+
+        fs::remove_file(&csi_path).expect("should remove CSI sidecar");
+        assert_eq!(coordinate_index_path(&annotation_path), tbi_path);
+    }
+
+    #[test]
+    fn test_load_annotation_index_sniffs_csi_with_an_arbitrary_suffix() {
+        let context = setup_gen();
+        let cache_dir = context
+            .workspace()
+            .ensure_cache_dir()
+            .expect("should resolve workspace cache directory");
+        let temp_dir = tempfile::tempdir_in(cache_dir)
+            .expect("should create a workspace-contained temporary directory");
+        let input_path = temp_dir.path().join("annotations.gff3");
+        let output_path = temp_dir.path().join("annotations.bgz");
+        let coordinate_index_path = temp_dir.path().join("custom.index-data");
+        fs::write(
+            &input_path,
+            b"##gff-version 3\nchr1\tsource\tgene\t600000000\t600000010\t.\t+\t.\tName=GENE1\n",
+        )
+        .expect("should write GFF annotation");
+        gai::compress_file(&input_path, &output_path, Some(&coordinate_index_path))
+            .expect("should write BGZF and CSI outputs");
+
+        let entry = AnnotationFileEntry {
+            file_addition: AnnotationAssetEntry {
+                id: HashId::convert_str("annotation"),
+                asset_uri: format!("file://{}", output_path.display()),
+                file_type: FileTypes::Gff3,
+                checksum: None,
+            },
+            index_file_addition: Some(AnnotationAssetEntry {
+                id: HashId::convert_str("coordinate-index"),
+                asset_uri: format!("file://{}", coordinate_index_path.display()),
+                file_type: FileTypes::Tabix,
+                checksum: None,
+            }),
+            name: None,
+            display_name: "annotation".to_string(),
+        };
+
+        let index = load_annotation_index(context.workspace(), &entry, None)
+            .expect("should load recorded coordinate index")
+            .expect("should find recorded coordinate index");
+        assert!(matches!(index, AnnotationCoordinateIndex::Csi(_)));
+
+        let matching_bytes = load_indexed_annotation_bytes(
+            context.workspace(),
+            &entry.file_addition,
+            Some(&output_path),
+            index.clone(),
+            "chr1",
+            (599_999_999, 600_000_010),
+        )
+        .expect("should query the large coordinate through the CSI track loader");
+        assert_eq!(
+            matching_bytes,
+            b"chr1\tsource\tgene\t600000000\t600000010\t.\t+\t.\tName=GENE1\n"
+        );
+
+        let nonoverlapping_bytes = load_indexed_annotation_bytes(
+            context.workspace(),
+            &entry.file_addition,
+            Some(&output_path),
+            index,
+            "chr1",
+            (0, 5),
+        )
+        .expect("should query an empty nonoverlapping window");
+        assert!(nonoverlapping_bytes.is_empty());
     }
 
     #[test]
@@ -1536,7 +1685,9 @@ mod tests {
             context.workspace(),
             &file_addition,
             None,
-            tabix::fs::read(&index_path).expect("should read tabix index"),
+            AnnotationCoordinateIndex::Tabix(
+                tabix::fs::read(&index_path).expect("should read tabix index"),
+            ),
             "chr22",
             (16_050_074, 16_050_120),
         )
@@ -1559,7 +1710,9 @@ mod tests {
             context.workspace(),
             &file_addition,
             None,
-            tabix::fs::read(index_path).expect("should reread tabix index"),
+            AnnotationCoordinateIndex::Tabix(
+                tabix::fs::read(index_path).expect("should reread tabix index"),
+            ),
             "chr22",
             (16_050_074, 16_050_120),
         )

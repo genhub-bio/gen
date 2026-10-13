@@ -20,6 +20,7 @@ gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.4.0" }
 gen-core = { path = "../gen-core", version = "0.4.0" }
 gen-graph = { path = "../gen-graph", version = "0.4.0" }
 gen-models-macros = { path = "../gen-models-macros", version = "0.4.0" }
+gai = { package = "genomic-attribute-index", version = "0.2.5" }
 cached = "0.55.1"
 capnp = { version = "0.24" }
 include_dir = "0.7.4"
