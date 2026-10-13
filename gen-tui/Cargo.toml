@@ -21,7 +21,7 @@ rstar = { version = "0.12.2", features = ["serde"] }
 ftree = "1.2.0"
 rand = { version = "0.10.1", features = ["std"] }
 tachyonfx = "0.23.0"
-fontdue = "0.9.4"
+fontdue = { version = "0.9.4", default-features = false }
 png = "0.17.16"
 
 

@@ -371,41 +371,7 @@ fn color_to_rgb(color: Color, default: [u8; 3]) -> [u8; 3] {
         Color::LightCyan => [41, 184, 219],
         Color::White => [255, 255, 255],
         Color::Rgb(red, green, blue) => [red, green, blue],
-        Color::Indexed(index) => indexed_to_rgb(index),
-    }
-}
-
-fn indexed_to_rgb(index: u8) -> [u8; 3] {
-    const ANSI: [[u8; 3]; 16] = [
-        [0, 0, 0],
-        [128, 0, 0],
-        [0, 128, 0],
-        [128, 128, 0],
-        [0, 0, 128],
-        [128, 0, 128],
-        [0, 128, 128],
-        [192, 192, 192],
-        [128, 128, 128],
-        [255, 0, 0],
-        [0, 255, 0],
-        [255, 255, 0],
-        [0, 0, 255],
-        [255, 0, 255],
-        [0, 255, 255],
-        [255, 255, 255],
-    ];
-    match index {
-        0..=15 => ANSI[usize::from(index)],
-        16..=231 => {
-            let offset = index - 16;
-            let scale = |level: u8| if level == 0 { 0 } else { 55 + level * 40 };
-            [
-                scale(offset / 36),
-                scale(offset % 36 / 6),
-                scale(offset % 6),
-            ]
-        }
-        232..=255 => [8 + (index - 232) * 10; 3],
+        Color::Indexed(_) => default,
     }
 }
 

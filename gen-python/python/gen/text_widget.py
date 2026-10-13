@@ -6,7 +6,7 @@ import json
 import os
 from typing import Self
 
-from .ascii_render import frame_text
+from .ascii_render import PNG_DEFAULT_COLS, PNG_DEFAULT_ROWS, frame_text
 
 
 def _in_jupyter_kernel() -> bool:
@@ -273,10 +273,12 @@ class TextGraphWidget:
         path:
             Destination file.
         cols, rows:
-            Size of the canvas in terminal cells before trimming. Defaults to the
-            widget's own size; larger values show more of the graph.
+            Size of the canvas in terminal cells before trimming. Defaults to 600 by 300,
+            large enough to capture most graphs whole; the blank space is trimmed.
         """
-        data = self._controller.render_png(cols or self.cols, rows or self.rows)
+        data = self._controller.render_png(
+            cols or PNG_DEFAULT_COLS, rows or PNG_DEFAULT_ROWS
+        )
         with open(path, "wb") as handle:
             handle.write(data)
         return self

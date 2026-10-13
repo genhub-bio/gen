@@ -9,6 +9,11 @@ must stay free of anywidget/ipywidgets/traitlets imports.
 
 from __future__ import annotations
 
+# Canvas size, in terminal cells, that ``save_png`` uses when none is given. Large enough to
+# capture most graphs whole; the PNG is trimmed to its content afterwards.
+PNG_DEFAULT_COLS = 600
+PNG_DEFAULT_ROWS = 300
+
 
 def highlighted(cell: dict, frame: dict) -> bool:
     """True when the cell carries a highlight colour.

@@ -147,9 +147,10 @@ gen view <graph> --query <query> --base <base> --png diff.png
 ```
 
 The plot is drawn without a terminal, including annotations, then trimmed of
-blank rows and columns, leaving a one-cell margin. `--png-columns` (default 100)
-and `--png-rows` (default 24) set the canvas size in terminal cells before
-trimming, each 13 by 28 pixels, so a larger value shows more of the graph.
+blank rows and columns, leaving a one-cell margin. `--png-columns` (default 600)
+and `--png-rows` (default 300) set the canvas size in terminal cells before
+trimming, each 13 by 28 pixels, so a larger value shows more of the graph. The default canvas is large enough to
+capture most graphs whole.
 
 ## Revision diff
 

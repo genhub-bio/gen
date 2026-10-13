@@ -383,9 +383,9 @@ only the frame in a fenced code block.
 - All of the above mutate the widget in place and re-render; print
   `repr(widget)` afterward to see the effect.
 - `widget.save_png("plot.png", cols=120, rows=30)`: write the current view to
-  a PNG. Works without `gen[jupyter]`; `cols` and `rows` default to the
-  widget's size and are measured in terminal cells (13 by 28 pixels each). Blank
-  rows and columns are trimmed, leaving a one-cell margin.
+  a PNG. Works without `gen[jupyter]`; `cols` and `rows` default to 600 and 300
+  and are measured in terminal cells (13 by 28 pixels each). Blank rows and
+  columns are trimmed, leaving a one-cell margin.
 
 ```python
 import gen

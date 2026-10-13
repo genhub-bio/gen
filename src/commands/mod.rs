@@ -149,10 +149,10 @@ pub enum Commands {
         #[arg(long, value_name = "PATH")]
         png: Option<PathBuf>,
         /// Width of the PNG plot in terminal columns (13 pixels each)
-        #[arg(long, default_value_t = 100, requires = "png")]
+        #[arg(long, default_value_t = 600, requires = "png")]
         png_columns: u16,
         /// Height of the PNG plot in terminal rows (28 pixels each)
-        #[arg(long, default_value_t = 24, requires = "png")]
+        #[arg(long, default_value_t = 300, requires = "png")]
         png_rows: u16,
     },
     /// Show a diff of operations and render the consolidated graph
@@ -731,7 +731,7 @@ mod tests {
             panic!("should parse view command");
         };
         assert_eq!(png, Some(PathBuf::from("plot.png")));
-        assert_eq!((png_columns, png_rows), (80, 24));
+        assert_eq!((png_columns, png_rows), (80, 300));
         assert!(Cli::try_parse_from(["gen", "view", "--png-rows", "10"]).is_err());
     }
 
