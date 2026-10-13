@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 
 use gen_core::{Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
@@ -24,8 +24,8 @@ use ratatui::{
 
 use crate::views::{
     annotation_track::{
-        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
-        span_should_show_in_truncated,
+        AnnotationSpan, CoordinatePrefixMaximumIndex, GraphNodeFragmentLookup,
+        SegmentContainmentIndex, locus_should_show_in_truncated, span_label_text,
     },
     graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
@@ -160,7 +160,7 @@ fn map_scaled_col(raw_col: i64, sequence_length: i64, visual_width: u64) -> i64 
 pub struct GenGraphNodeRenderer<'a> {
     conn: &'a GraphConnection,
     workspace: &'a Workspace,
-    cache: HashMap<GraphNode, String>,
+    cache: HashMap<(GraphNode, i64, i64), String>,
     zoom_scale: u64,
 }
 
@@ -182,26 +182,36 @@ impl<'a> GenGraphNodeRenderer<'a> {
 
     /// Fetch sequence for a GenGraph node with caching
     pub fn get_sequence(&mut self, node_key: &GraphNode) -> Result<String, SequenceError> {
-        // Check cache first
-        if let Some(cached) = self.cache.get(node_key) {
-            return Ok(cached.clone());
+        self.get_sequence_range_ref(node_key, node_key.sequence_start, node_key.sequence_end)
+            .map(str::to_owned)
+    }
+
+    fn get_sequence_ref(&mut self, node_key: &GraphNode) -> Result<&str, SequenceError> {
+        self.get_sequence_range_ref(node_key, node_key.sequence_start, node_key.sequence_end)
+    }
+
+    fn get_sequence_range_ref(
+        &mut self,
+        node_key: &GraphNode,
+        start: i64,
+        end: i64,
+    ) -> Result<&str, SequenceError> {
+        let cache_key = (*node_key, start, end);
+        if let Entry::Vacant(entry) = self.cache.entry(cache_key) {
+            let (db_node_id, start, end) = (node_key.node_id, start, end);
+            let sequences =
+                Node::get_sequences_by_node_ids(self.conn, self.workspace, &[db_node_id], None);
+            let sequence = match sequences.get(&db_node_id) {
+                Some(sequence) => sequence.get_sequence(start, end)?,
+                None => "?".repeat((end - start).max(0) as usize),
+            };
+            entry.insert(sequence);
         }
 
-        // Cache miss - query database
-        let (db_node_id, start, end) = (
-            node_key.node_id,
-            node_key.sequence_start,
-            node_key.sequence_end,
-        );
-        let sequences =
-            Node::get_sequences_by_node_ids(self.conn, self.workspace, &[db_node_id], None);
-        let sequence = match sequences.get(&db_node_id) {
-            Some(seq) => seq.get_sequence(start, end)?,
-            None => "?".repeat((end - start).max(0) as usize),
-        };
-
-        self.cache.insert(*node_key, sequence.clone());
-        Ok(sequence)
+        Ok(self
+            .cache
+            .get(&cache_key)
+            .expect("should cache a sequence after loading it"))
     }
 }
 
@@ -223,6 +233,10 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         detail_level: VisualDetail,
     ) {
         let theme = current_theme();
+        let Some(visible_area) = buffer.calculate_visible_area(area) else {
+            return;
+        };
+
         if is_zero_width_junction(node_id) {
             let position = area.left_center();
             let (glyph, color) = buffer
@@ -244,7 +258,7 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         let background_style = Style::default().bg(theme[0x05]);
         let text_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
 
-        buffer.fill_rect(area, ' ');
+        buffer.fill_rect(visible_area, ' ');
         buffer.set_char_styled(area.left_center(), ' ', background_style);
 
         // Handle special start/end nodes (always show full label)
@@ -267,24 +281,63 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
             }
             VisualDetail::Truncated => {
                 // 13 cells: 5 left bases + "..." + 5 right bases.
-                let sequence = self
-                    .get_sequence(node_id)
-                    .unwrap_or_else(|_| "Unknown Sequence".to_string());
+                let sequence = self.get_sequence_ref(node_id).unwrap_or("Unknown Sequence");
                 let max_width = 13u32;
-                let truncated = inner_truncation(&sequence, max_width);
+                let truncated = inner_truncation(sequence, max_width);
                 buffer.set_string_styled(area.left_center(), &truncated, text_style);
             }
             VisualDetail::Full => {
-                if self.zoom_scale > 1 && node_id.length().max(0) as u64 > area.width() as u64 + 1 {
-                    let aggregate_glyphs = "·".repeat(area.width().max(0) as usize + 1);
-                    buffer.set_string_styled(area.left_center(), &aggregate_glyphs, text_style);
+                // WorldRect corners are inclusive, while width() is the corner difference.
+                let visible_cell_count = area.width().saturating_add(1).max(0) as u64;
+                if self.zoom_scale > 1 && node_id.length().max(0) as u64 > visible_cell_count {
+                    let aggregate_glyphs = "·".repeat(visible_area.width() as usize + 1);
+                    buffer.set_string_styled(
+                        WorldPos::new(visible_area.min.x, area.left_center().y),
+                        &aggregate_glyphs,
+                        text_style,
+                    );
                     return;
                 }
-                // Full scale: Show complete sequence (truncated only by area width)
-                let sequence = self
-                    .get_sequence(node_id)
-                    .unwrap_or_else(|_| "Unknown Sequence".to_string());
-                buffer.set_string_styled(area.left_center(), &sequence, text_style);
+
+                let node_length = usize::try_from(node_id.length().max(0)).unwrap_or(usize::MAX);
+                let visible_start = usize::try_from(visible_area.min.x.saturating_sub(area.min.x))
+                    .unwrap_or(usize::MAX)
+                    .min(node_length);
+                let visible_end = usize::try_from(
+                    visible_area
+                        .max
+                        .x
+                        .saturating_sub(area.min.x)
+                        .saturating_add(1),
+                )
+                .unwrap_or(usize::MAX)
+                .min(node_length)
+                .max(visible_start);
+                let sequence_start = node_id
+                    .sequence_start
+                    .saturating_add(i64::try_from(visible_start).unwrap_or(i64::MAX));
+                let sequence_end = node_id
+                    .sequence_start
+                    .saturating_add(i64::try_from(visible_end).unwrap_or(i64::MAX));
+                let visible_sequence =
+                    match self.get_sequence_range_ref(node_id, sequence_start, sequence_end) {
+                        Ok(sequence) => sequence,
+                        Err(_) => {
+                            let fallback = "Unknown Sequence";
+                            let fallback_start = visible_start.min(fallback.len());
+                            let fallback_end = visible_end.min(fallback.len()).max(fallback_start);
+                            fallback
+                                .as_bytes()
+                                .get(fallback_start..fallback_end)
+                                .and_then(|bases| std::str::from_utf8(bases).ok())
+                                .unwrap_or_default()
+                        }
+                    };
+                buffer.set_string_styled(
+                    WorldPos::new(visible_area.min.x, area.left_center().y),
+                    visible_sequence,
+                    text_style,
+                );
             }
         }
     }
@@ -513,27 +566,12 @@ pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
         .collect()
 }
 
-/// Compute the world-space bounding corners of the matched region in a `GraphLocus`.
-///
-/// Returns `(left_pos, right_pos)` where:
-/// - `left_pos` is the world position of the first matched column in `blocks[0]`,
-///   with the minimum y across all blocks
-/// - `right_pos` is the world position of the last matched column in `blocks[last]`,
-///   with the maximum y across all blocks
-///
-/// Column offsets are mapped with `NodeSizer::map_column` so they land correctly in
-/// every detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
-/// The x bounds are clipped to the visible camera rect so viewport-spanning annotations
-/// place their label near the visible portion rather than off-screen.
-///
-/// Returns `None` if no block in the locus is present in `pos_map` (all off-screen),
-/// or if the annotation's x span is entirely outside the camera rect.
-pub fn locus_label_bounds<S: NodeSizer<GenGraph>>(
+/// Compute unclipped world-space bounds for a matched region in a graph locus.
+fn locus_label_world_bounds<S: NodeSizer<GenGraph>>(
     locus: &GraphLocus,
-    pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
+    pos_map: &ViewportNodePositionMap,
     node_sizer: &S,
     detail_level: VisualDetail,
-    viewport_state: &ViewportState,
 ) -> Option<(WorldPos, WorldPos)> {
     let block_world_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
         let &(center, size) = pos_map.get(&block)?;
@@ -575,6 +613,16 @@ pub fn locus_label_bounds<S: NodeSizer<GenGraph>>(
         return None;
     }
 
+    Some((
+        WorldPos::new(left_pos.x, y_max),
+        WorldPos::new(right_pos.x, y_min),
+    ))
+}
+
+fn clip_label_bounds(
+    (left_pos, right_pos): (WorldPos, WorldPos),
+    viewport_state: &ViewportState,
+) -> Option<(WorldPos, WorldPos)> {
     let cam = viewport_state.camera_rect();
     let clipped_left_x = left_pos.x.max(cam.min.x);
     let clipped_right_x = right_pos.x.min(cam.max.x);
@@ -582,10 +630,28 @@ pub fn locus_label_bounds<S: NodeSizer<GenGraph>>(
         return None;
     }
 
-    let left_pos = WorldPos::new(clipped_left_x, y_max);
-    let right_pos = WorldPos::new(clipped_right_x, y_min);
+    let left_pos = WorldPos::new(clipped_left_x, left_pos.y);
+    let right_pos = WorldPos::new(clipped_right_x, right_pos.y);
 
     Some((left_pos, right_pos))
+}
+
+/// Compute world-space bounds for a matched region and clip them to the visible camera.
+///
+/// Column offsets map through the current detail level, and viewport-spanning annotations
+/// place their labels near the visible portion. Returns `None` if the locus has no visible
+/// block or its x span falls outside the camera rect.
+pub fn locus_label_bounds<S: NodeSizer<GenGraph>>(
+    locus: &GraphLocus,
+    pos_map: &ViewportNodePositionMap,
+    node_sizer: &S,
+    detail_level: VisualDetail,
+    viewport_state: &ViewportState,
+) -> Option<(WorldPos, WorldPos)> {
+    clip_label_bounds(
+        locus_label_world_bounds(locus, pos_map, node_sizer, detail_level)?,
+        viewport_state,
+    )
 }
 
 /// Map a sequence offset to a visual cell column inside a 13-cell truncated node.
@@ -679,6 +745,191 @@ fn edge_path_across_zero_width_junctions(
 
 /// A mapped cell rectangle: the node it's on, and its top-left/bottom-right columns.
 type CellRegion = (GraphNode, (i64, i64), (i64, i64));
+type ViewportNodePositionMap = HashMap<GraphNode, (WorldPos, (u64, u64))>;
+
+struct SpanOverlayCandidate<'a> {
+    overlay_index: usize,
+    span: &'a AnnotationSpan,
+    total_length: i64,
+    locus: GraphLocus,
+    regions: Vec<CellRegion>,
+}
+
+struct AnnotationLabelCandidate<'a> {
+    span: &'a AnnotationSpan,
+    style: PathStyle,
+    bounds: (WorldPos, WorldPos),
+}
+
+struct PreparedAnnotationLabel {
+    overlay_index: usize,
+    locus: GraphLocus,
+    world_bounds: Option<(WorldPos, WorldPos)>,
+}
+
+// The full viewer keeps exact overlay snapshots and viewport positions so unchanged spans
+// can reuse their graph projections and world bounds. Callers invalidate this on graph
+// replacement; camera clipping and label placement remain current on every draw.
+#[derive(Default)]
+pub(crate) struct OverlayRenderCache {
+    detail_level: Option<VisualDetail>,
+    zoom_scale: Option<u64>,
+    overlays: Option<Vec<GraphOverlay>>,
+    labels: Vec<PreparedAnnotationLabel>,
+    hidden_truncated_labels: bool,
+    viewport_positions: Option<ViewportNodePositionMap>,
+}
+
+impl OverlayRenderCache {
+    pub(crate) fn invalidate(&mut self) {
+        self.detail_level = None;
+        self.zoom_scale = None;
+        self.overlays = None;
+        self.labels.clear();
+        self.hidden_truncated_labels = false;
+        self.viewport_positions = None;
+    }
+
+    fn matches(
+        &self,
+        detail_level: VisualDetail,
+        zoom_scale: u64,
+        overlays: &[GraphOverlay],
+    ) -> bool {
+        self.detail_level == Some(detail_level)
+            && self.zoom_scale == Some(zoom_scale)
+            && self.overlays.as_deref() == Some(overlays)
+    }
+
+    fn prepare_labels<S: NodeSizer<GenGraph>>(
+        &mut self,
+        controller: &GraphController<GenGraph, S>,
+        overlays: &[GraphOverlay],
+    ) {
+        let detail_level = controller.get_detail_level();
+        let mut ordered_labels = overlays
+            .iter()
+            .enumerate()
+            .filter_map(|(overlay_index, overlay)| {
+                let span = overlay.span()?;
+                if span.name.is_empty()
+                    || matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                {
+                    return None;
+                }
+                let total_length = span
+                    .segments
+                    .iter()
+                    .map(|segment| segment.end - segment.start)
+                    .sum::<i64>();
+                Some((overlay_index, total_length))
+            })
+            .collect::<Vec<_>>();
+        ordered_labels.sort_by_key(|(_, total_length)| -*total_length);
+
+        let fragment_lookup = GraphNodeFragmentLookup::new(controller.graph());
+        self.labels.clear();
+        self.hidden_truncated_labels = false;
+        for (overlay_index, _) in ordered_labels {
+            let Some(locus) = overlays[overlay_index]
+                .span()
+                .and_then(|span| fragment_lookup.locus_for_span(span))
+            else {
+                continue;
+            };
+            if detail_level == VisualDetail::Truncated && !locus_should_show_in_truncated(&locus) {
+                self.hidden_truncated_labels = true;
+                continue;
+            }
+            self.labels.push(PreparedAnnotationLabel {
+                overlay_index,
+                locus,
+                world_bounds: None,
+            });
+        }
+        self.viewport_positions = None;
+        self.detail_level = Some(detail_level);
+        self.zoom_scale = Some(controller.zoom_scale());
+        self.overlays = Some(overlays.to_vec());
+    }
+}
+
+pub(crate) fn reapply_overlays_cached<S: NodeSizer<GenGraph>>(
+    controller: &mut GraphController<GenGraph, S>,
+    overlays: &mut [GraphOverlay],
+    color_cache: &mut AnnotationColorCache,
+    render_cache: &mut OverlayRenderCache,
+) {
+    if render_cache.matches(
+        controller.get_detail_level(),
+        controller.zoom_scale(),
+        overlays,
+    ) {
+        return;
+    }
+
+    reapply_overlays(controller, overlays, color_cache);
+    render_cache.prepare_labels(controller, overlays);
+}
+
+struct NodeColorOverlapIndex {
+    starts: Vec<i64>,
+    by_color: HashMap<Color, CoordinatePrefixMaximumIndex>,
+}
+
+struct ColorOverlapIndex {
+    by_node: HashMap<GraphNode, NodeColorOverlapIndex>,
+}
+
+impl ColorOverlapIndex {
+    fn new(regions: &[CellRegion]) -> Self {
+        let mut starts_by_node: HashMap<GraphNode, Vec<i64>> = HashMap::new();
+        for region in regions {
+            starts_by_node.entry(region.0).or_default().push(region.1.0);
+        }
+        let by_node = starts_by_node
+            .into_iter()
+            .map(|(node, mut starts)| {
+                starts.sort_unstable();
+                starts.dedup();
+                (
+                    node,
+                    NodeColorOverlapIndex {
+                        starts,
+                        by_color: HashMap::new(),
+                    },
+                )
+            })
+            .collect();
+        Self { by_node }
+    }
+
+    fn colors_overlapping(&self, region: &CellRegion) -> Vec<Color> {
+        self.by_node
+            .get(&region.0)
+            .into_iter()
+            .flat_map(|node| node.by_color.iter())
+            .filter_map(|(color, index)| {
+                (index.maximum_end_for_start_at_most(region.2.0) >= region.1.0).then_some(*color)
+            })
+            .collect()
+    }
+
+    fn insert_region(&mut self, region: &CellRegion, color: Color) {
+        let Some(node) = self.by_node.get_mut(&region.0) else {
+            return;
+        };
+        if let Entry::Vacant(entry) = node.by_color.entry(color) {
+            entry.insert(CoordinatePrefixMaximumIndex::new(node.starts.clone()));
+        }
+        if let Some(index) = node.by_color.get_mut(&color) {
+            index.insert(region.1.0, region.2.0);
+        }
+    }
+}
 
 /// The mapped column range a `GraphNodeSlice` occupies once rendered, using the exact
 /// same `NodeSizer::map_column` math `highlight_locus` uses to paint it. Computing
@@ -702,11 +953,6 @@ fn slice_region<S: NodeSizer<GenGraph>>(
         0,
     );
     (slice.block, tl, br)
-}
-
-/// Whether two mapped cell regions occupy any of the same cells.
-fn regions_overlap(a: &CellRegion, b: &CellRegion) -> bool {
-    a.0 == b.0 && a.1.0 <= b.2.0 && b.1.0 <= a.2.0
 }
 
 /// The 8 theme accent slots annotation colors and `next_accent_color` are drawn from.
@@ -742,8 +988,8 @@ fn accent_colors() -> [Color; 8] {
 /// `overlays` is written back with the colors actually used, so `draw_annotation_labels`
 /// (which reads `overlay.style` separately, after this runs) labels each span in the same
 /// color that got painted. Callers run this after any change that invalidates mapped
-/// highlight columns (zoom, detail change) or, in the live TUI viewers, every frame
-/// because the overlay set changes with scrolling.
+/// highlight columns (overlay or detail changes). The full viewer uses
+/// `reapply_overlays_cached` to skip unchanged passes.
 pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     controller: &mut GraphController<GenGraph, S>,
     overlays: &mut [GraphOverlay],
@@ -752,66 +998,74 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     let detail_level = controller.get_detail_level();
     let node_sizer = &controller.partition_controller.node_sizer;
     let graph = controller.graph();
+    let fragment_lookup = GraphNodeFragmentLookup::new(graph);
 
     // DB-loaded tracks are too busy to paint at minimal detail. At truncated detail, a span
     // confined to a partial slice of a single node remains suppressed for ordinary annotations,
     // while explicit search/ad-hoc highlights stay visible as user targets.
-    let mut span_indices: Vec<usize> = overlays
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, overlay)| {
-            overlay
-                .span()
-                .filter(|_| {
-                    !matches!(
-                        (detail_level, &overlay.source),
-                        (VisualDetail::Minimal, OverlaySource::Track(_))
-                    )
-                })
-                .filter(|span| {
-                    detail_level != VisualDetail::Truncated
-                        || matches!(
-                            &overlay.source,
-                            OverlaySource::Adhoc | OverlaySource::Search
-                        )
-                        || span_should_show_in_truncated(span, graph)
-                })
-                .map(|_| idx)
-        })
-        .collect();
-    span_indices.sort_by_key(|&idx| {
-        let span = overlays[idx]
-            .span()
-            .expect("filtered to span overlays above");
-        -(span
+    let mut span_candidates = Vec::new();
+    for (overlay_index, overlay) in overlays.iter().enumerate() {
+        let Some(span) = overlay.span() else {
+            continue;
+        };
+        if matches!(
+            (detail_level, &overlay.source),
+            (VisualDetail::Minimal, OverlaySource::Track(_))
+        ) {
+            continue;
+        }
+        let Some(locus) = fragment_lookup.locus_for_span(span) else {
+            continue;
+        };
+        if detail_level == VisualDetail::Truncated
+            && !matches!(
+                &overlay.source,
+                OverlaySource::Adhoc | OverlaySource::Search
+            )
+            && !locus_should_show_in_truncated(&locus)
+        {
+            continue;
+        }
+        let total_length = span
             .segments
             .iter()
             .map(|segment| segment.end - segment.start)
-            .sum::<i64>())
-    });
-
-    // Decide every span's locus and color first (only needs `&controller`); painting
-    // (`&mut controller`) happens in a second pass once every color is settled.
-    let accents = accent_colors();
-    let mut occupied: Vec<(CellRegion, Color)> = Vec::new();
-    let mut decisions: Vec<(usize, GraphLocus, Color)> = Vec::new();
-    for idx in span_indices {
-        let span = overlays[idx]
-            .span()
-            .expect("filtered to span overlays above");
-        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
-            continue;
-        };
-        let regions: Vec<CellRegion> = locus
+            .sum();
+        let regions = locus
             .slices
             .iter()
             .map(|slice| slice_region(node_sizer, detail_level, slice))
             .collect();
-        let used: Vec<Color> = occupied
-            .iter()
-            .filter(|(placed, _)| regions.iter().any(|region| regions_overlap(placed, region)))
-            .map(|(_, color)| *color)
-            .collect();
+        span_candidates.push(SpanOverlayCandidate {
+            overlay_index,
+            span,
+            total_length,
+            locus,
+            regions,
+        });
+    }
+    span_candidates.sort_by_key(|candidate| -candidate.total_length);
+
+    let all_regions = span_candidates
+        .iter()
+        .flat_map(|candidate| candidate.regions.iter().copied())
+        .collect::<Vec<_>>();
+    let mut color_overlap_index = ColorOverlapIndex::new(&all_regions);
+
+    // Decide every span's locus and color first (only needs `&controller`); painting
+    // (`&mut controller`) happens in a second pass once every color is settled.
+    let accents = accent_colors();
+    let mut decisions: Vec<(usize, GraphLocus, Color)> = Vec::new();
+    for candidate in span_candidates {
+        let span = candidate.span;
+        let mut used = Vec::new();
+        for region in &candidate.regions {
+            for color in color_overlap_index.colors_overlapping(region) {
+                if !used.contains(&color) {
+                    used.push(color);
+                }
+            }
+        }
 
         // Prefer this span's previous color, or, the first time it's seen, the next color
         // in rotation, so spans that never conflict with anything still get spread across
@@ -832,10 +1086,10 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
         };
         color_cache.set(span.id, color);
 
-        for region in regions {
-            occupied.push((region, color));
+        for region in &candidate.regions {
+            color_overlap_index.insert_region(region, color);
         }
-        decisions.push((idx, locus, color));
+        decisions.push((candidate.overlay_index, candidate.locus, color));
     }
 
     controller.clear_all_highlights();
@@ -864,7 +1118,7 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     overlays: &[GraphOverlay],
 ) -> bool {
     let detail_level = controller.get_detail_level();
-    let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
+    let mut labeled: Vec<(&AnnotationSpan, PathStyle, i64)> = overlays
         .iter()
         .filter_map(|overlay| {
             overlay
@@ -876,23 +1130,23 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
                         (VisualDetail::Minimal, OverlaySource::Track(_))
                     )
                 })
-                .map(|span| (span, overlay.style))
+                .map(|span| {
+                    let total_length = span
+                        .segments
+                        .iter()
+                        .map(|segment| segment.end - segment.start)
+                        .sum();
+                    (span, overlay.style, total_length)
+                })
         })
         .collect();
     if labeled.is_empty() {
         return false;
     }
-    labeled.sort_by_key(|(span, _)| {
-        -(span
-            .segments
-            .iter()
-            .map(|segment| segment.end - segment.start)
-            .sum::<i64>())
-    });
+    labeled.sort_by_key(|(_, _, total_length)| -*total_length);
 
-    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
+    let fragment_lookup = GraphNodeFragmentLookup::new(controller.graph());
     let pos_map = viewport_pos_map(controller);
-    let theme = current_theme();
     let max_distance = if detail_level == VisualDetail::Minimal {
         10
     } else {
@@ -900,17 +1154,12 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     };
 
     let mut any_hidden = false;
-    for (idx, (span, style)) in labeled.iter().enumerate() {
-        let Some(locus) = graph_locus_from_annotation_span(span, controller.graph()) else {
+    let mut candidates = Vec::with_capacity(labeled.len());
+    for (span, style, _total_length) in labeled {
+        let Some(locus) = fragment_lookup.locus_for_span(span) else {
             continue;
         };
-        if span_covered_by_later(span, idx, &span_refs) {
-            any_hidden = true;
-            continue;
-        }
-        if detail_level == VisualDetail::Truncated
-            && !span_should_show_in_truncated(span, controller.graph())
-        {
+        if detail_level == VisualDetail::Truncated && !locus_should_show_in_truncated(&locus) {
             any_hidden = true;
             continue;
         }
@@ -923,15 +1172,114 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
         ) else {
             continue;
         };
-        let color = match style.color {
+        candidates.push(AnnotationLabelCandidate {
+            span,
+            style,
+            bounds,
+        });
+    }
+
+    draw_annotation_label_candidates(buf, area, controller, candidates, any_hidden, max_distance)
+}
+
+pub(crate) fn draw_annotation_labels_cached<S: NodeSizer<GenGraph>>(
+    buf: &mut Buffer,
+    area: Rect,
+    controller: &GraphController<GenGraph, S>,
+    overlays: &[GraphOverlay],
+    render_cache: &mut OverlayRenderCache,
+) -> bool {
+    let detail_level = controller.get_detail_level();
+    if !render_cache.matches(detail_level, controller.zoom_scale(), overlays) {
+        return draw_annotation_labels(buf, area, controller, overlays);
+    }
+
+    let pos_map = viewport_pos_map(controller);
+    if render_cache.viewport_positions.as_ref() != Some(&pos_map) {
+        for prepared in &mut render_cache.labels {
+            prepared.world_bounds = locus_label_world_bounds(
+                &prepared.locus,
+                &pos_map,
+                &controller.partition_controller.node_sizer,
+                detail_level,
+            );
+        }
+        render_cache.viewport_positions = Some(pos_map);
+    }
+
+    let max_distance = if detail_level == VisualDetail::Minimal {
+        10
+    } else {
+        5
+    };
+    let mut candidates = Vec::with_capacity(render_cache.labels.len());
+    for prepared in &render_cache.labels {
+        let Some(overlay) = overlays.get(prepared.overlay_index) else {
+            continue;
+        };
+        let Some(span) = overlay.span() else {
+            continue;
+        };
+        let Some(bounds) = prepared
+            .world_bounds
+            .and_then(|world_bounds| clip_label_bounds(world_bounds, &controller.viewport_state))
+        else {
+            continue;
+        };
+        candidates.push(AnnotationLabelCandidate {
+            span,
+            style: overlay.style,
+            bounds,
+        });
+    }
+
+    if candidates.is_empty() {
+        return render_cache.hidden_truncated_labels;
+    }
+
+    draw_annotation_label_candidates(
+        buf,
+        area,
+        controller,
+        candidates,
+        render_cache.hidden_truncated_labels,
+        max_distance,
+    )
+}
+
+fn draw_annotation_label_candidates<S: NodeSizer<GenGraph>>(
+    buf: &mut Buffer,
+    area: Rect,
+    controller: &GraphController<GenGraph, S>,
+    candidates: Vec<AnnotationLabelCandidate<'_>>,
+    mut any_hidden: bool,
+    max_distance: u16,
+) -> bool {
+    let theme = current_theme();
+    let span_refs: Vec<&AnnotationSpan> =
+        candidates.iter().map(|candidate| candidate.span).collect();
+    let mut containment_index = SegmentContainmentIndex::for_spans(&span_refs);
+    let mut covered = vec![false; candidates.len()];
+    for index in (0..candidates.len()).rev() {
+        let candidate = &candidates[index];
+        covered[index] = containment_index.covers_every_segment(candidate.span);
+        containment_index.insert_span(candidate.span);
+    }
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        if covered[index] {
+            any_hidden = true;
+            continue;
+        }
+        let color = match candidate.style.color {
             Color::Reset => theme[0x06],
             other => other,
         };
-        let label = span_label_text(span);
+        let label = span_label_text(candidate.span);
         if draw_label_near_pos(
             buf,
             area,
-            bounds,
+            candidate.bounds,
             &label,
             color,
             &controller.viewport_state,
@@ -978,7 +1326,11 @@ mod tests {
         PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand,
     };
     use gen_graph::GraphEdge;
-    use gen_models::sample::Sample;
+    use gen_models::{
+        assets::{AssetRef, AssetRole},
+        sample::Sample,
+        sequence::Sequence,
+    };
     use gen_tui::{
         geometry::WorldPos,
         graph_controller::HighlightKind,
@@ -996,6 +1348,674 @@ mod tests {
         updates::vcf::update_with_vcf,
         views::{annotation_track::AnnotationSegment, graph_overlay::OverlayContent},
     };
+
+    fn prepare_label_test_controller(
+        graph: GenGraph,
+        detail_level: VisualDetail,
+        area: Rect,
+    ) -> GraphController<GenGraph, GenGraphNodeSizer> {
+        let mut controller = create_gen_graph_controller(graph);
+        controller.set_detail_level(detail_level);
+        controller.viewport_state.viewport_bounds = area;
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+        controller
+    }
+
+    fn span_overlay(span: AnnotationSpan) -> GraphOverlay {
+        GraphOverlay {
+            content: OverlayContent::Span(span),
+            source: OverlaySource::Track("labels".to_string()),
+            style: PathStyle::new(Color::Cyan),
+        }
+    }
+
+    #[test]
+    fn test_overlay_render_cache_invalidates_on_exact_overlay_and_graph_changes() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("cached-overlay-node"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let area = Rect::new(0, 0, 40, 5);
+        let mut controller = prepare_label_test_controller(graph, VisualDetail::Full, area);
+        let mut overlays = vec![span_overlay(AnnotationSpan {
+            id: HashId::convert_str("cached-overlay-span"),
+            name: "cached".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 8,
+                strand: Strand::Forward,
+            }],
+        })];
+        let mut color_cache = AnnotationColorCache::new();
+        let mut render_cache = OverlayRenderCache::default();
+
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 1, &overlays));
+        let first_highlights = controller.highlights.clone();
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert_eq!(controller.highlights, first_highlights);
+
+        let span = match &mut overlays[0].content {
+            OverlayContent::Span(span) => span,
+            OverlayContent::Path(_) => unreachable!(),
+        };
+        span.name = "renamed".to_string();
+        assert!(!render_cache.matches(VisualDetail::Full, 1, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 1, &overlays));
+
+        let span = match &mut overlays[0].content {
+            OverlayContent::Span(span) => span,
+            OverlayContent::Path(_) => unreachable!(),
+        };
+        span.segments[0].start = 2;
+        assert!(!render_cache.matches(VisualDetail::Full, 1, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 1, &overlays));
+
+        overlays[0].style.color = Color::Yellow;
+        assert!(!render_cache.matches(VisualDetail::Full, 1, &overlays));
+        overlays[0].source = OverlaySource::Search;
+        assert!(!render_cache.matches(VisualDetail::Full, 1, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 1, &overlays));
+
+        controller.set_detail_level(VisualDetail::Truncated);
+        assert!(!render_cache.matches(VisualDetail::Truncated, 1, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Truncated, 1, &overlays));
+
+        overlays.clear();
+        assert!(!render_cache.matches(VisualDetail::Truncated, 1, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(controller.highlights.is_empty());
+
+        overlays.push(span_overlay(AnnotationSpan {
+            id: HashId::convert_str("added-cached-overlay-span"),
+            name: "added".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 20,
+                strand: Strand::Forward,
+            }],
+        }));
+        assert!(!render_cache.matches(VisualDetail::Truncated, 1, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Truncated, 1, &overlays));
+        assert_eq!(controller.highlights.len(), 1);
+
+        assert!(render_cache.matches(VisualDetail::Truncated, 1, &overlays));
+        let replacement_node = GraphNode {
+            node_id: node.node_id,
+            sequence_start: 10,
+            sequence_end: 20,
+        };
+        let mut replacement_graph = GenGraph::new();
+        replacement_graph.add_node(replacement_node);
+        let mut replacement_controller =
+            prepare_label_test_controller(replacement_graph.clone(), VisualDetail::Truncated, area);
+        let mut uncached_replacement_controller =
+            prepare_label_test_controller(replacement_graph, VisualDetail::Truncated, area);
+        let mut replacement_overlays = overlays.clone();
+        let mut uncached_replacement_overlays = overlays.clone();
+        let mut uncached_replacement_color_cache = color_cache.clone();
+        render_cache.invalidate();
+        assert!(!render_cache.matches(VisualDetail::Truncated, 1, &replacement_overlays));
+        reapply_overlays_cached(
+            &mut replacement_controller,
+            &mut replacement_overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        reapply_overlays(
+            &mut uncached_replacement_controller,
+            &mut uncached_replacement_overlays,
+            &mut uncached_replacement_color_cache,
+        );
+        assert_eq!(
+            replacement_controller.highlights, uncached_replacement_controller.highlights,
+            "should rebuild projections against the replacement graph after invalidation"
+        );
+    }
+
+    #[test]
+    fn test_overlay_cache_and_label_bounds_follow_proportional_zoom() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("scaled-label-node"),
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let area = Rect::new(0, 0, 40, 5);
+        let mut controller = prepare_label_test_controller(graph, VisualDetail::Full, area);
+        let mut overlays = vec![span_overlay(AnnotationSpan {
+            id: HashId::convert_str("scaled-label-span"),
+            name: "scaled".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 3,
+                end: 29,
+                strand: Strand::Forward,
+            }],
+        })];
+        let mut color_cache = AnnotationColorCache::new();
+        let mut render_cache = OverlayRenderCache::default();
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 1, &overlays));
+
+        controller.zoom_out();
+        controller.rebuild_viewport_graph().unwrap();
+        assert_eq!(controller.zoom_scale(), 2);
+        assert!(!render_cache.matches(VisualDetail::Full, 2, &overlays));
+        reapply_overlays_cached(
+            &mut controller,
+            &mut overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 2, &overlays));
+
+        let node_sizer = &controller.partition_controller.node_sizer;
+        let (actual_cell_position, actual_top_left, actual_bottom_right, _) = controller
+            .get_cell_highlights()
+            .first()
+            .expect("should project the annotation into visible cells");
+        let (node_center, _) = viewport_pos_map(&controller)[&node];
+        assert_eq!(*actual_cell_position, node_center);
+        assert_eq!(
+            (*actual_top_left, *actual_bottom_right),
+            (
+                (node_sizer.map_column(&node, 3, VisualDetail::Full), 0),
+                (node_sizer.map_column(&node, 28, VisualDetail::Full), 0),
+            )
+        );
+
+        let span = overlays[0]
+            .span()
+            .expect("should retain the annotation span");
+        let locus = GraphNodeFragmentLookup::new(controller.graph())
+            .locus_for_span(span)
+            .expect("should map the annotation into the graph");
+        let pos_map = viewport_pos_map(&controller);
+        let bounds = locus_label_world_bounds(
+            &locus,
+            &pos_map,
+            &controller.partition_controller.node_sizer,
+            VisualDetail::Full,
+        )
+        .expect("should compute scaled label bounds");
+        let (center, size) = pos_map[&node];
+        let rect = WorldRect::from_center_and_size(center, size);
+        let node_sizer = &controller.partition_controller.node_sizer;
+        assert_eq!(
+            bounds,
+            (
+                WorldPos::new(
+                    rect.min.x + node_sizer.map_column(&node, 3, VisualDetail::Full),
+                    center.y,
+                ),
+                WorldPos::new(
+                    rect.min.x + node_sizer.map_column(&node, 28, VisualDetail::Full),
+                    center.y,
+                ),
+            )
+        );
+    }
+
+    #[test]
+    fn test_scaled_disjoint_annotations_get_distinct_colors_after_cell_mapping() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("scaled-collision-node"),
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let area = Rect::new(0, 0, 120, 5);
+        let mut controller = prepare_label_test_controller(graph, VisualDetail::Full, area);
+        controller.zoom_out();
+        controller.rebuild_viewport_graph().unwrap();
+        assert_eq!(controller.zoom_scale(), 2);
+
+        let mut overlays = vec![
+            span_overlay(AnnotationSpan {
+                id: HashId::convert_str("scaled-collision-first"),
+                name: "first-base".to_string(),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: 2,
+                    end: 3,
+                    strand: Strand::Forward,
+                }],
+            }),
+            span_overlay(AnnotationSpan {
+                id: HashId::convert_str("scaled-collision-second"),
+                name: "second-base".to_string(),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: 3,
+                    end: 4,
+                    strand: Strand::Forward,
+                }],
+            }),
+        ];
+        reapply_overlays(
+            &mut controller,
+            &mut overlays,
+            &mut AnnotationColorCache::new(),
+        );
+
+        assert_ne!(overlays[0].style.color, overlays[1].style.color);
+        let highlights = controller.get_cell_highlights();
+        assert_eq!(highlights.len(), 2);
+        for (_, top_left, bottom_right, _) in highlights {
+            assert_eq!((*top_left, *bottom_right), ((1, 0), (1, 0)));
+        }
+    }
+
+    #[test]
+    fn test_cached_annotation_labels_match_after_camera_and_detail_changes() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("cached-label-node"),
+            sequence_start: 0,
+            sequence_end: 30,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let area = Rect::new(0, 0, 80, 5);
+        let mut cached_controller =
+            prepare_label_test_controller(graph.clone(), VisualDetail::Full, area);
+        let mut public_controller = prepare_label_test_controller(graph, VisualDetail::Full, area);
+        let make_overlays = || {
+            vec![span_overlay(AnnotationSpan {
+                id: HashId::convert_str("cached-label-span"),
+                name: "ADA2".to_string(),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: 4,
+                    end: 14,
+                    strand: Strand::Forward,
+                }],
+            })]
+        };
+        let mut cached_overlays = make_overlays();
+        let mut public_overlays = make_overlays();
+        let mut color_cache = AnnotationColorCache::new();
+        let mut render_cache = OverlayRenderCache::default();
+        reapply_overlays_cached(
+            &mut cached_controller,
+            &mut cached_overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        reapply_overlays(
+            &mut public_controller,
+            &mut public_overlays,
+            &mut AnnotationColorCache::new(),
+        );
+
+        let assert_labels_match =
+            |cached_controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+             public_controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+             cached_overlays: &[GraphOverlay],
+             public_overlays: &[GraphOverlay],
+             render_cache: &mut OverlayRenderCache| {
+                let mut cached_buffer = Buffer::empty(area);
+                let mut public_buffer = Buffer::empty(area);
+                let cached_hidden = draw_annotation_labels_cached(
+                    &mut cached_buffer,
+                    area,
+                    cached_controller,
+                    cached_overlays,
+                    render_cache,
+                );
+                let public_hidden = draw_annotation_labels(
+                    &mut public_buffer,
+                    area,
+                    public_controller,
+                    public_overlays,
+                );
+                assert_eq!(cached_buffer, public_buffer);
+                assert_eq!(cached_hidden, public_hidden);
+            };
+
+        assert_labels_match(
+            &cached_controller,
+            &public_controller,
+            &cached_overlays,
+            &public_overlays,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 1, &cached_overlays));
+
+        for controller in [&mut cached_controller, &mut public_controller] {
+            controller.zoom_out();
+            controller.rebuild_viewport_graph().unwrap();
+            assert_eq!(controller.zoom_scale(), 2);
+        }
+        reapply_overlays_cached(
+            &mut cached_controller,
+            &mut cached_overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        reapply_overlays(
+            &mut public_controller,
+            &mut public_overlays,
+            &mut AnnotationColorCache::new(),
+        );
+        assert_eq!(
+            cached_controller.get_cell_highlights(),
+            public_controller.get_cell_highlights()
+        );
+        let expected_start = cached_controller
+            .partition_controller
+            .node_sizer
+            .map_column(&node, 4, VisualDetail::Full);
+        let expected_end = cached_controller
+            .partition_controller
+            .node_sizer
+            .map_column(&node, 13, VisualDetail::Full);
+        assert_eq!(
+            (
+                cached_controller.get_cell_highlights()[0].1,
+                cached_controller.get_cell_highlights()[0].2,
+            ),
+            ((expected_start, 0), (expected_end, 0))
+        );
+        assert_labels_match(
+            &cached_controller,
+            &public_controller,
+            &cached_overlays,
+            &public_overlays,
+            &mut render_cache,
+        );
+        assert!(render_cache.matches(VisualDetail::Full, 2, &cached_overlays));
+
+        for controller in [&mut cached_controller, &mut public_controller] {
+            controller.viewport_state.camera_current.x += 4;
+            controller.viewport_state.camera_target = controller.viewport_state.camera_current;
+        }
+        assert_labels_match(
+            &cached_controller,
+            &public_controller,
+            &cached_overlays,
+            &public_overlays,
+            &mut render_cache,
+        );
+
+        for controller in [&mut cached_controller, &mut public_controller] {
+            controller.trigger_rebuild();
+            controller.ensure_camera_coverage().unwrap();
+            controller.rebuild_viewport_graph().unwrap();
+        }
+        let highlights_before_reuse = cached_controller.highlights.clone();
+        reapply_overlays_cached(
+            &mut cached_controller,
+            &mut cached_overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        assert_eq!(cached_controller.highlights, highlights_before_reuse);
+        assert_eq!(cached_controller.get_cell_highlights().len(), 1);
+        assert_labels_match(
+            &cached_controller,
+            &public_controller,
+            &cached_overlays,
+            &public_overlays,
+            &mut render_cache,
+        );
+
+        cached_controller.set_detail_level(VisualDetail::Truncated);
+        public_controller.set_detail_level(VisualDetail::Truncated);
+        reapply_overlays_cached(
+            &mut cached_controller,
+            &mut cached_overlays,
+            &mut color_cache,
+            &mut render_cache,
+        );
+        reapply_overlays(
+            &mut public_controller,
+            &mut public_overlays,
+            &mut AnnotationColorCache::new(),
+        );
+        assert_labels_match(
+            &cached_controller,
+            &public_controller,
+            &cached_overlays,
+            &public_overlays,
+            &mut render_cache,
+        );
+    }
+
+    fn regions_overlap(a: &CellRegion, b: &CellRegion) -> bool {
+        a.0 == b.0 && a.1.0 <= b.2.0 && b.1.0 <= a.2.0
+    }
+
+    #[test]
+    fn test_draw_annotation_labels_does_not_let_hidden_truncated_spans_cover_visible_spans() {
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("label-node-a"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("label-node-b"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(node_a, node_b, Vec::new());
+
+        let visible_span = AnnotationSpan {
+            id: HashId::convert_str("visible-cross-node"),
+            name: "VISIBLE".to_string(),
+            segments: vec![
+                AnnotationSegment {
+                    node_id: node_a.node_id,
+                    start: 0,
+                    end: 10,
+                    strand: Strand::Forward,
+                },
+                AnnotationSegment {
+                    node_id: node_b.node_id,
+                    start: 0,
+                    end: 10,
+                    strand: Strand::Forward,
+                },
+            ],
+        };
+        let mut overlays = vec![span_overlay(visible_span)];
+        overlays.extend((0..50_000).map(|index| {
+            let node = if index % 2 == 0 { node_a } else { node_b };
+            span_overlay(AnnotationSpan {
+                id: HashId::convert_str(&format!("hidden-{index}")),
+                name: format!("hidden-{index}"),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: 0,
+                    end: 10,
+                    strand: Strand::Reverse,
+                }],
+            })
+        }));
+
+        let area = Rect::new(0, 0, 80, 5);
+        let controller = prepare_label_test_controller(graph, VisualDetail::Truncated, area);
+        let mut buffer = Buffer::empty(area);
+        let any_hidden = draw_annotation_labels(&mut buffer, area, &controller, &overlays);
+
+        assert!(
+            any_hidden,
+            "partial-node labels should still set the hidden hint"
+        );
+        assert!(
+            buffer.content().iter().any(|cell| cell.symbol() == "V"),
+            "the visible cross-node label must not be suppressed by hidden single-node spans"
+        );
+    }
+
+    #[test]
+    fn test_draw_annotation_labels_handles_50k_disjoint_spans_at_full_detail() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("many-label-node"),
+            sequence_start: 0,
+            sequence_end: 50_000,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut overlays = vec![span_overlay(AnnotationSpan {
+            id: HashId::convert_str("visible-label"),
+            name: "VISIBLE".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 1,
+                strand: Strand::Forward,
+            }],
+        })];
+        overlays.extend((1..50_000).map(|index| {
+            span_overlay(AnnotationSpan {
+                id: HashId::convert_str(&format!("disjoint-label-{index}")),
+                name: format!("span-{index}"),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: index,
+                    end: index + 1,
+                    strand: Strand::Forward,
+                }],
+            })
+        }));
+
+        let area = Rect::new(0, 0, 80, 5);
+        let controller = prepare_label_test_controller(graph, VisualDetail::Full, area);
+        let mut buffer = Buffer::empty(area);
+        let _ = draw_annotation_labels(&mut buffer, area, &controller, &overlays);
+        assert!(buffer.content().iter().any(|cell| cell.symbol() == "V"));
+    }
+
+    #[test]
+    fn test_draw_annotation_labels_skips_fully_offscreen_candidates() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("offscreen-label-node"),
+            sequence_start: 0,
+            sequence_end: 50_000,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("offscreen"),
+            name: "OFFSCREEN".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 45_000,
+                end: 45_010,
+                strand: Strand::Forward,
+            }],
+        };
+        let overlays = vec![span_overlay(span)];
+        let area = Rect::new(0, 0, 80, 5);
+        let controller = prepare_label_test_controller(graph, VisualDetail::Full, area);
+        let mut buffer = Buffer::empty(area);
+
+        assert!(!draw_annotation_labels(
+            &mut buffer,
+            area,
+            &controller,
+            &overlays
+        ));
+        assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+    }
+
+    #[test]
+    fn test_color_overlap_index_matches_inclusive_reference() {
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("color-node-a"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("color-node-b"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let regions = vec![
+            (node_a, (0, 0), (4, 0)),
+            (node_a, (4, 0), (8, 0)),
+            (node_a, (9, 0), (12, 0)),
+            (node_b, (0, 0), (20, 0)),
+        ];
+        let colors = [Color::Red, Color::Blue, Color::Red, Color::Green];
+        let mut index = ColorOverlapIndex::new(&regions);
+        let mut occupied = Vec::new();
+
+        for (region, color) in regions.iter().zip(colors) {
+            let expected = occupied
+                .iter()
+                .filter(|(placed, _)| regions_overlap(placed, region))
+                .map(|(_, placed_color)| *placed_color)
+                .collect::<HashSet<_>>();
+            let indexed = index
+                .colors_overlapping(region)
+                .into_iter()
+                .collect::<HashSet<_>>();
+            assert_eq!(indexed, expected);
+            index.insert_region(region, color);
+            occupied.push((*region, color));
+        }
+    }
 
     /// Test coordinate handling for very large genomic sequences
     ///
@@ -1330,33 +2350,6 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_width_junction_renders_as_line() {
-        let context = setup_gen_on_disk();
-        let junction = GraphNode {
-            node_id: HashId::convert_str("zero-width-junction"),
-            sequence_start: 3,
-            sequence_end: 3,
-        };
-        let mut viewport_state = ViewportState::new();
-        viewport_state.viewport_bounds = Rect::new(0, 0, 5, 5);
-        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
-        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
-
-        renderer.render_node(
-            &mut world_buffer,
-            WorldRect::from_center_and_size(WorldPos::ZERO, (1, 1)),
-            &junction,
-            VisualDetail::Full,
-        );
-
-        assert_eq!(
-            world_buffer.get_char(WorldPos::ZERO),
-            Some(ZERO_WIDTH_GLYPH)
-        );
-    }
-
-    #[test]
     fn test_scaled_full_renderer_draws_aggregate_cells_without_sequence_lookup() {
         let context = setup_gen_on_disk();
         let node = GraphNode {
@@ -1383,7 +2376,37 @@ mod tests {
         assert_eq!(world_buffer.get_char(WorldPos::new(0, 0)), Some('·'));
         assert_eq!(world_buffer.get_char(WorldPos::new(1, 0)), Some('·'));
         assert_eq!(world_buffer.get_char(WorldPos::new(2, 0)), Some('·'));
-        assert!(renderer.cache.is_empty(), "should not fetch sequence bases");
+        assert!(
+            renderer.cache.is_empty(),
+            "should not fetch hidden sequence bases"
+        );
+    }
+
+    #[test]
+    fn test_zero_width_junction_renders_as_line() {
+        let context = setup_gen_on_disk();
+        let junction = GraphNode {
+            node_id: HashId::convert_str("zero-width-junction"),
+            sequence_start: 3,
+            sequence_end: 3,
+        };
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = Rect::new(0, 0, 5, 5);
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
+
+        renderer.render_node(
+            &mut world_buffer,
+            WorldRect::from_center_and_size(WorldPos::ZERO, (1, 1)),
+            &junction,
+            VisualDetail::Full,
+        );
+
+        assert_eq!(
+            world_buffer.get_char(WorldPos::ZERO),
+            Some(ZERO_WIDTH_GLYPH)
+        );
     }
 
     #[test]
@@ -1414,6 +2437,340 @@ mod tests {
             .expect("should render the zero-width junction");
         assert_eq!(character, '━');
         assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_full_renderer_clips_large_sequence_to_visible_node_slice() {
+        const NODE_START: i64 = 50;
+        const SEQUENCE_LENGTH: usize = 1_000_000;
+        const VIEWPORT_WIDTH: u16 = 5;
+
+        let context = setup_gen_on_disk();
+        let sequence_text = "ACGT".repeat(SEQUENCE_LENGTH / 4);
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence(&sequence_text)
+            .save(context.graph().conn())
+            .unwrap();
+        let node_id = Node::create(
+            context.graph().conn(),
+            &sequence.hash,
+            &HashId::convert_str(&format!("large-renderer-node.{}", sequence.hash)),
+        )
+        .unwrap();
+        let graph_node = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: SEQUENCE_LENGTH as i64,
+        };
+        let node_area = WorldRect::from_corners(
+            WorldPos::new(NODE_START, 0),
+            WorldPos::new(NODE_START + SEQUENCE_LENGTH as i64 - 1, 0),
+        );
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
+
+        let visible_offset = 123_457i64;
+        let visible_start = NODE_START + visible_offset;
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = Rect::new(0, 0, VIEWPORT_WIDTH, 1);
+        viewport_state.camera_current =
+            WorldPos::new(visible_start + i64::from(VIEWPORT_WIDTH / 2), 0);
+        viewport_state.camera_target = viewport_state.camera_current;
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        {
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+            renderer.render_node(
+                &mut world_buffer,
+                node_area,
+                &graph_node,
+                VisualDetail::Full,
+            );
+
+            for offset in 0..i64::from(VIEWPORT_WIDTH) {
+                let expected = sequence_text.as_bytes()[(visible_offset + offset) as usize] as char;
+                assert_eq!(
+                    world_buffer.get_char(WorldPos::new(visible_start + offset, 0)),
+                    Some(expected),
+                    "should render the visible world base at its matching sequence coordinate"
+                );
+            }
+        }
+
+        let mut left_boundary_state = ViewportState::new();
+        left_boundary_state.viewport_bounds = Rect::new(0, 0, VIEWPORT_WIDTH, 1);
+        left_boundary_state.camera_current = WorldPos::new(NODE_START, 0);
+        left_boundary_state.camera_target = left_boundary_state.camera_current;
+        let mut left_boundary_buffer = Buffer::empty(left_boundary_state.viewport_bounds);
+        {
+            let mut world_buffer =
+                WorldBuffer::new(&mut left_boundary_buffer, &left_boundary_state);
+            renderer.render_node(
+                &mut world_buffer,
+                node_area,
+                &graph_node,
+                VisualDetail::Full,
+            );
+
+            assert_eq!(
+                world_buffer.get_char(WorldPos::new(NODE_START - 2, 0)),
+                Some(' ')
+            );
+            assert_eq!(
+                world_buffer.get_char(WorldPos::new(NODE_START - 1, 0)),
+                Some(' ')
+            );
+            for offset in 0..3i64 {
+                assert_eq!(
+                    world_buffer.get_char(WorldPos::new(NODE_START + offset, 0)),
+                    Some(sequence_text.as_bytes()[offset as usize] as char)
+                );
+            }
+        }
+
+        let node_end = NODE_START + SEQUENCE_LENGTH as i64 - 1;
+        let mut right_boundary_state = ViewportState::new();
+        right_boundary_state.viewport_bounds = Rect::new(0, 0, VIEWPORT_WIDTH, 1);
+        right_boundary_state.camera_current = WorldPos::new(node_end, 0);
+        right_boundary_state.camera_target = right_boundary_state.camera_current;
+        let mut right_boundary_buffer = Buffer::empty(right_boundary_state.viewport_bounds);
+        {
+            let mut world_buffer =
+                WorldBuffer::new(&mut right_boundary_buffer, &right_boundary_state);
+            renderer.render_node(
+                &mut world_buffer,
+                node_area,
+                &graph_node,
+                VisualDetail::Full,
+            );
+
+            let last_visible_start = node_end - 2;
+            for offset in 0..3i64 {
+                let sequence_offset = SEQUENCE_LENGTH as i64 - 3 + offset;
+                assert_eq!(
+                    world_buffer.get_char(WorldPos::new(last_visible_start + offset, 0)),
+                    Some(sequence_text.as_bytes()[sequence_offset as usize] as char)
+                );
+            }
+            assert_eq!(
+                world_buffer.get_char(WorldPos::new(node_end + 1, 0)),
+                Some(' ')
+            );
+            assert_eq!(
+                world_buffer.get_char(WorldPos::new(node_end + 2, 0)),
+                Some(' ')
+            );
+        }
+
+        let mut offscreen_renderer =
+            GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
+        let mut offscreen_state = ViewportState::new();
+        offscreen_state.viewport_bounds = Rect::new(0, 0, VIEWPORT_WIDTH, 1);
+        offscreen_state.camera_current = WorldPos::new(node_end + 10, 0);
+        offscreen_state.camera_target = offscreen_state.camera_current;
+        let mut offscreen_buffer = Buffer::empty(offscreen_state.viewport_bounds);
+        {
+            let mut world_buffer = WorldBuffer::new(&mut offscreen_buffer, &offscreen_state);
+            offscreen_renderer.render_node(
+                &mut world_buffer,
+                node_area,
+                &graph_node,
+                VisualDetail::Full,
+            );
+            assert!(offscreen_renderer.cache.is_empty());
+            let first_visible_x = node_end + 8;
+            for offset in 0..i64::from(VIEWPORT_WIDTH) {
+                assert_eq!(
+                    world_buffer.get_char(WorldPos::new(first_visible_x + offset, 0)),
+                    Some(' ')
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_full_renderer_reads_visible_range_from_indexed_external_sequence() {
+        const NODE_WORLD_START: i64 = 100;
+        const NODE_SEQUENCE_START: i64 = 5;
+        const NODE_SEQUENCE_END: i64 = 29;
+        const VISIBLE_OFFSET: i64 = 7;
+        const VIEWPORT_WIDTH: u16 = 5;
+        const SEQUENCE_TEXT: &str = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+
+        let context = setup_gen_on_disk();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .expect("should have a UTF-8 fixture path")
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            "renderer-range",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .expect("should import the indexed external FASTA fixture");
+
+        let graph = Sample::get_graph(
+            context.graph().conn(),
+            context.workspace(),
+            "renderer-range",
+            Sample::DEFAULT_NAME,
+            None,
+        )
+        .expect("should load the fixture graph");
+        let graph_node = graph
+            .nodes()
+            .find(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id))
+            .expect("should contain a sequence node");
+        let graph_node = GraphNode {
+            sequence_start: NODE_SEQUENCE_START,
+            sequence_end: NODE_SEQUENCE_END,
+            ..graph_node
+        };
+        let sequence = Node::get_sequences_by_node_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[graph_node.node_id],
+            None,
+        )
+        .remove(&graph_node.node_id)
+        .expect("should load the external sequence for the graph node");
+        assert!(sequence.external_sequence);
+        assert!(sequence.asset_ref_id.is_some());
+
+        let node_area = WorldRect::from_corners(
+            WorldPos::new(NODE_WORLD_START, 0),
+            WorldPos::new(NODE_WORLD_START + graph_node.length() - 1, 0),
+        );
+        let visible_start = NODE_WORLD_START + VISIBLE_OFFSET;
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = Rect::new(0, 0, VIEWPORT_WIDTH, 1);
+        viewport_state.camera_current =
+            WorldPos::new(visible_start + i64::from(VIEWPORT_WIDTH / 2), 0);
+        viewport_state.camera_target = viewport_state.camera_current;
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
+        {
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+            renderer.render_node(
+                &mut world_buffer,
+                node_area,
+                &graph_node,
+                VisualDetail::Full,
+            );
+
+            let expected_start = usize::try_from(NODE_SEQUENCE_START + VISIBLE_OFFSET)
+                .expect("should have a positive sequence offset");
+            for offset in 0..i64::from(VIEWPORT_WIDTH) {
+                let sequence_offset = expected_start + usize::try_from(offset).unwrap();
+                assert_eq!(
+                    world_buffer.get_char(WorldPos::new(visible_start + offset, 0)),
+                    Some(SEQUENCE_TEXT.as_bytes()[sequence_offset] as char),
+                    "should render the visible external sequence at its genomic coordinate"
+                );
+            }
+        }
+
+        assert_eq!(renderer.cache.len(), 1);
+        let ((cached_node, cached_start, cached_end), cached_sequence) = renderer
+            .cache
+            .iter()
+            .next()
+            .expect("should cache the visible range");
+        assert_eq!(*cached_node, graph_node);
+        assert_eq!(*cached_start, NODE_SEQUENCE_START + VISIBLE_OFFSET);
+        assert_eq!(
+            *cached_end,
+            NODE_SEQUENCE_START + VISIBLE_OFFSET + i64::from(VIEWPORT_WIDTH)
+        );
+        assert_eq!(cached_sequence.len(), usize::from(VIEWPORT_WIDTH));
+
+        assert_eq!(
+            renderer
+                .get_sequence(&graph_node)
+                .expect("should preserve the public full-node sequence API"),
+            &SEQUENCE_TEXT[NODE_SEQUENCE_START as usize..NODE_SEQUENCE_END as usize]
+        );
+    }
+
+    #[test]
+    fn test_full_renderer_clamps_unknown_sequence_to_visible_fallback_bases() {
+        const NODE_WORLD_START: i64 = 100;
+        const NODE_LENGTH: i64 = 40;
+        const VIEWPORT_WIDTH: u16 = 5;
+
+        let context = setup_gen_on_disk();
+        let missing_asset_id = HashId::convert_str("missing-renderer-sequence-asset");
+        AssetRef::create(
+            context.graph().conn(),
+            &AssetRef {
+                id: missing_asset_id,
+                uri: "missing-renderer-sequence.fa".to_string(),
+                file_type: "fasta".to_string(),
+                checksum: None,
+                size: None,
+                role: AssetRole::Input,
+                logical_path: Some("missing-renderer-sequence.fa".to_string()),
+                name: None,
+                created_on: 0,
+                upstream_asset_ref_id: None,
+                materialized_checksum: None,
+            },
+        )
+        .expect("should create the intentionally unresolved sequence asset");
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .name("missing-sequence")
+            .asset_ref_id(Some(&missing_asset_id))
+            .length(NODE_LENGTH)
+            .save(context.graph().conn())
+            .expect("should save an external sequence with a missing asset reference");
+        let node_id = Node::create(
+            context.graph().conn(),
+            &sequence.hash,
+            &HashId::convert_str("unknown-renderer-sequence-node"),
+        )
+        .expect("should create a graph node for the missing sequence");
+        let graph_node = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: NODE_LENGTH,
+        };
+        let node_area = WorldRect::from_corners(
+            WorldPos::new(NODE_WORLD_START, 0),
+            WorldPos::new(NODE_WORLD_START + NODE_LENGTH - 1, 0),
+        );
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
+
+        for (visible_offset, expected) in [(10i64, "quenc"), (12, "ence "), (16, "     ")] {
+            let visible_start = NODE_WORLD_START + visible_offset;
+            let mut viewport_state = ViewportState::new();
+            viewport_state.viewport_bounds = Rect::new(0, 0, VIEWPORT_WIDTH, 1);
+            viewport_state.camera_current =
+                WorldPos::new(visible_start + i64::from(VIEWPORT_WIDTH / 2), 0);
+            viewport_state.camera_target = viewport_state.camera_current;
+            let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+            renderer.render_node(
+                &mut world_buffer,
+                node_area,
+                &graph_node,
+                VisualDetail::Full,
+            );
+
+            for (offset, expected_base) in expected.chars().enumerate() {
+                assert_eq!(
+                    world_buffer.get_char(WorldPos::new(
+                        visible_start + i64::try_from(offset).unwrap(),
+                        0,
+                    )),
+                    Some(expected_base),
+                    "should preserve available fallback bases at the correct visible offsets"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2178,5 +3535,44 @@ mod tests {
     fn test_midpoint_of_empty_locus_is_none() {
         let locus = GraphLocus { slices: vec![] };
         assert_eq!(locus_midpoint(&locus), None);
+    }
+
+    #[test]
+    fn test_reapply_overlays_handles_50k_non_overlapping_spans() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("many-overlay-node"),
+            sequence_start: 0,
+            sequence_end: 50_000,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut controller = create_gen_graph_controller(graph);
+        controller.set_detail_level(VisualDetail::Full);
+        let mut overlays = (0..50_000)
+            .map(|index| {
+                span_overlay(AnnotationSpan {
+                    id: HashId::convert_str(&format!("non-overlap-{index}")),
+                    name: format!("span-{index}"),
+                    segments: vec![AnnotationSegment {
+                        node_id: node.node_id,
+                        start: index,
+                        end: index + 1,
+                        strand: Strand::Forward,
+                    }],
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut color_cache = AnnotationColorCache::new();
+
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        assert_eq!(
+            controller
+                .highlights
+                .iter()
+                .filter(|(kind, _)| matches!(kind, HighlightKind::Cells { .. }))
+                .count(),
+            overlays.len()
+        );
     }
 }
