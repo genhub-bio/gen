@@ -95,7 +95,7 @@ tracing-subscriber = { version = "0.3.19", features = ["registry"], optional = t
 pprof = { version = "0.15.0", optional = true }
 
 [dev-dependencies]
-cargo-llvm-cov = "0.8.5"
+cargo-llvm-cov = "0.9.0"
 cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 insta = "1.43.1"
