@@ -1510,6 +1510,7 @@ dependencies = [
  "gen-graph",
  "gen-models",
  "interavl",
+ "intervaltree",
  "noodles",
  "thiserror 2.0.18",
 ]
