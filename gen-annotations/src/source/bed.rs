@@ -116,6 +116,15 @@ pub fn translate_bed_annotation_records<I>(
 where
     I: IntoIterator<Item = bed::Record<6>>,
 {
+    let mut records = records.into_iter().peekable();
+    let feature_strand = records
+        .peek()
+        .and_then(|record| record.strand().ok().flatten())
+        .map(|strand| match strand {
+            bed::feature::record::Strand::Forward => Strand::Forward,
+            bed::feature::record::Strand::Reverse => Strand::Reverse,
+        })
+        .unwrap_or(Strand::Unknown);
     let mut input = Vec::new();
     {
         let mut writer = bed::io::Writer::<6, _>::new(&mut input);
@@ -134,7 +143,9 @@ where
         &mut translated,
     )
     .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
-    let interval_tree = Arc::new(translated_bed_interval_tree(&translated)?);
+    // Use the source orientation for feature order because translated records already include
+    // the path orientation in their output strand.
+    let interval_tree = Arc::new(translated_bed_interval_tree(&translated, feature_strand)?);
     annotation.set_cached_interval_tree(Some(Arc::clone(&interval_tree)));
     let mut accession = Accession {
         id: annotation.accession_id,
@@ -172,10 +183,10 @@ fn parse_bed_list(value: &str) -> Vec<i64> {
 
 fn translated_bed_interval_tree(
     translated: &[u8],
+    feature_strand: Strand,
 ) -> Result<IntervalTree<i64, NodeIntervalBlock>, FileAnnotationError> {
     let mut reader = bed::io::reader::Builder::<6>.build_from_reader(Cursor::new(translated));
     let mut record = bed::Record::<6>::default();
-    let mut position = 0;
     let mut blocks = Vec::new();
     while reader.read_record(&mut record)? != 0 {
         let node_name = String::from_utf8_lossy(record.reference_sequence_name().as_ref());
@@ -204,21 +215,30 @@ fn translated_bed_interval_tree(
         };
         let block = NodeIntervalBlock {
             node_id,
-            start: position,
-            end: position + end - start,
+            start: 0,
+            end: end - start,
             sequence_start: start,
             sequence_end: end,
             strand,
         };
-        position = block.end;
         blocks.push(block);
     }
     if blocks.is_empty() {
         return Err(FileAnnotationError::Empty);
     }
+    if feature_strand == Strand::Reverse {
+        blocks.reverse();
+    }
+    let mut position = 0;
     Ok(blocks
         .into_iter()
-        .map(|block| (block.start..block.end, block))
+        .map(|mut block| {
+            let length = block.end - block.start;
+            block.start = position;
+            block.end = position + length;
+            position = block.end;
+            (block.start..block.end, block)
+        })
         .collect())
 }
 
@@ -595,5 +615,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_multipart_minus_bed_cache_uses_source_feature_orientation() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        let input = format!(
+            "{}\t2\t4\tminus-multipart\t0\t-\n{}\t10\t12\tminus-multipart\t0\t-\n",
+            block_group.name, block_group.name
+        );
+        let mut translated = Vec::new();
+        translate_bed(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate multipart BED records");
+        assert_eq!(
+            String::from_utf8(translated).expect("should write UTF-8 BED output"),
+            format!(
+                "{node_b_id}\t4\t6\tminus-multipart\t0\t+\n{node_a_id}\t5\t7\tminus-multipart\t0\t+\n"
+            ),
+            "translated BED fragments should stay in positive path order"
+        );
+
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let mut annotation = parse_bed_annotation("minus-multipart", Cursor::new(input.as_bytes()))
+            .expect("should parse multipart minus-strand BED records");
+        let accession =
+            translate_bed_annotation(&context, &mut annotation, Cursor::new(input.as_bytes()))
+                .expect("should cache multipart minus-strand BED records");
+        let tree = annotation
+            .intervaltree(&conn)
+            .expect("should read multipart BED cache");
+        let mut spans = tree
+            .iter()
+            .map(|entry| (entry.range.clone(), entry.value))
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|(range, _)| range.start);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(range, block)| (
+                    range.clone(),
+                    block.node_id,
+                    block.sequence_start,
+                    block.sequence_end,
+                    block.strand,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (0..2, node_a_id, 5, 7, Strand::Forward),
+                (2..4, node_b_id, 4, 6, Strand::Forward),
+            ],
+            "minus-strand cache fragments should follow source 5-prime order even when composed output strand is forward"
+        );
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 4)
+            .expect("should resolve multipart minus-strand BED annotation");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build multipart minus-strand BED graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"GTTG",
+            "multipart minus-strand BED cache should retrieve features from the 5-prime end"
+        );
     }
 }

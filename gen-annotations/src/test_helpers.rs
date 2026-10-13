@@ -359,3 +359,65 @@ pub(crate) fn create_forward_test_block_group(
 ) -> (BlockGroup, HashId, HashId) {
     create_two_node_test_block_group(conn, "forward", Strand::Forward)
 }
+
+pub(crate) fn create_sliced_test_block_group(
+    conn: &gen_models::db::GraphConnection,
+    name: &str,
+    strand: Strand,
+) -> (BlockGroup, HashId) {
+    let block_group = BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            name,
+            parent_block_group_id: None,
+            is_default: false,
+        },
+    )
+    .expect("should create sliced test block group");
+    let sequence = Sequence::new()
+        .sequence_type("DNA")
+        .sequence("AACCGGTTAA")
+        .save(conn)
+        .expect("should save sliced path sequence");
+    let node_id = HashId::convert_str(&format!("{name}-sliced-node"));
+    Node::create(conn, &sequence.hash, &node_id).expect("should create sliced path node");
+    let (path_start, path_end) = (3, 7);
+    let edge_start = Edge::create(
+        conn,
+        PATH_START_NODE_ID,
+        0,
+        Strand::Forward,
+        node_id,
+        path_start,
+        strand,
+    )
+    .expect("should create sliced path start edge");
+    let edge_end = Edge::create(
+        conn,
+        node_id,
+        path_end,
+        strand,
+        PATH_END_NODE_ID,
+        0,
+        Strand::Forward,
+    )
+    .expect("should create sliced path end edge");
+    BlockGroupEdge::bulk_create(
+        conn,
+        &[edge_start.id, edge_end.id]
+            .iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: *edge_id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>(),
+    );
+    Path::create(conn, name, &block_group.id, &[edge_start.id, edge_end.id])
+        .expect("should create sliced test path");
+
+    (block_group, node_id)
+}

@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use gen_core::{HashId, NodeIntervalBlock};
+use gen_core::{HashId, NodeIntervalBlock, Strand};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationExtra, GffAttribute, GffExtra},
@@ -123,6 +123,11 @@ pub fn translate_gff_annotation_records<I>(
 where
     I: IntoIterator<Item = gff::feature::RecordBuf>,
 {
+    let mut records = records.into_iter().peekable();
+    let feature_strand = records
+        .peek()
+        .map(|record| Strand::from(record.strand()))
+        .unwrap_or(Strand::Unknown);
     let mut input = Vec::new();
     {
         let mut writer = gff::io::Writer::new(&mut input);
@@ -141,7 +146,9 @@ where
         &mut translated,
     )
     .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
-    let interval_tree = Arc::new(translated_gff_interval_tree(&translated)?);
+    // Use the source orientation for feature order because translated records already include
+    // the path orientation in their output strand.
+    let interval_tree = Arc::new(translated_gff_interval_tree(&translated, feature_strand)?);
     annotation.set_cached_interval_tree(Some(Arc::clone(&interval_tree)));
     let mut accession = Accession {
         id: annotation.accession_id,
@@ -165,9 +172,9 @@ fn matching_gff_record(record: &gff::feature::RecordBuf, identifier: &str) -> bo
 
 fn translated_gff_interval_tree(
     translated: &[u8],
+    feature_strand: Strand,
 ) -> Result<IntervalTree<i64, NodeIntervalBlock>, FileAnnotationError> {
     let mut reader = gff::io::Reader::new(Cursor::new(translated));
-    let mut position = 0;
     let mut blocks = Vec::new();
     for result in reader.record_bufs() {
         let record = result?;
@@ -181,21 +188,30 @@ fn translated_gff_interval_tree(
         }
         let block = NodeIntervalBlock {
             node_id,
-            start: position,
-            end: position + end - start,
+            start: 0,
+            end: end - start,
             sequence_start: start,
             sequence_end: end,
             strand: record.strand().into(),
         };
-        position = block.end;
         blocks.push(block);
     }
     if blocks.is_empty() {
         return Err(FileAnnotationError::Empty);
     }
+    if feature_strand == Strand::Reverse {
+        blocks.reverse();
+    }
+    let mut position = 0;
     Ok(blocks
         .into_iter()
-        .map(|block| (block.start..block.end, block))
+        .map(|mut block| {
+            let length = block.end - block.start;
+            block.start = position;
+            block.end = position + length;
+            position = block.end;
+            (block.start..block.end, block)
+        })
         .collect())
 }
 
@@ -853,5 +869,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_multipart_minus_gff_cache_uses_source_feature_orientation() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        let input = format!(
+            concat!(
+                "{}\tsource\texon\t3\t4\t.\t-\t.\tID=low;Name=minus-multipart\n",
+                "{}\tsource\texon\t11\t12\t.\t-\t.\tID=high;Name=minus-multipart\n"
+            ),
+            block_group.name, block_group.name
+        );
+        let mut translated = Vec::new();
+        translate_gff(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            BufReader::new(Cursor::new(input.as_bytes())),
+            &mut translated,
+        )
+        .expect("should translate multipart GFF records");
+        assert_eq!(
+            String::from_utf8(translated).expect("should write UTF-8 GFF output"),
+            format!(
+                "{node_b_id}\tsource\texon\t5\t6\t.\t+\t.\tID=low;Name=minus-multipart\n{node_a_id}\tsource\texon\t6\t7\t.\t+\t.\tID=high;Name=minus-multipart\n"
+            ),
+            "translated GFF fragments should stay in positive path order"
+        );
+
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let mut annotation = parse_gff_annotation(
+            "minus-multipart",
+            BufReader::new(Cursor::new(input.as_bytes())),
+        )
+        .expect("should parse multipart minus-strand GFF records");
+        let accession = translate_gff_annotation(
+            &context,
+            &mut annotation,
+            BufReader::new(Cursor::new(input.as_bytes())),
+        )
+        .expect("should cache multipart minus-strand GFF records");
+        let tree = annotation
+            .intervaltree(&conn)
+            .expect("should read multipart GFF cache");
+        let mut spans = tree
+            .iter()
+            .map(|entry| (entry.range.clone(), entry.value))
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|(range, _)| range.start);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(range, block)| (
+                    range.clone(),
+                    block.node_id,
+                    block.sequence_start,
+                    block.sequence_end,
+                    block.strand,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (0..2, node_a_id, 5, 7, Strand::Forward),
+                (2..4, node_b_id, 4, 6, Strand::Forward),
+            ],
+            "minus-strand cache fragments should follow source 5-prime order even when composed output strand is forward"
+        );
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 4)
+            .expect("should resolve multipart minus-strand GFF annotation");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build multipart minus-strand GFF graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"GTTG",
+            "multipart minus-strand GFF cache should retrieve exons from the feature 5-prime end"
+        );
     }
 }
