@@ -243,6 +243,11 @@ where
         self.detail_level
     }
 
+    /// Get the current proportional zoom density, in source units per visual cell.
+    pub fn zoom_scale(&self) -> u64 {
+        self.partition_controller.node_sizer.zoom_scale()
+    }
+
     /// Get a reference to the node highlights in the current viewport
     pub fn get_node_highlights(&self) -> &[(WorldPos, PathStyle)] {
         &self.viewport_graph.node_highlights
@@ -643,7 +648,7 @@ where
         None
     }
 
-    /// Zoom in: increase detail level or call disperse
+    /// Zoom in: restore proportional detail before increasing vertex spacing.
     pub fn zoom_in(&mut self) {
         match self.detail_level {
             VisualDetail::Minimal => {
@@ -653,18 +658,28 @@ where
                 self.set_detail_level(VisualDetail::Full);
             }
             VisualDetail::Full => {
-                self.disperse();
+                if self.get_current_vertex_spacing() > VERTEX_SPACING_DEFAULT {
+                    self.disperse();
+                } else if self.partition_controller.node_sizer.zoom_in_scale() {
+                    self.proportional_zoom_changed();
+                } else {
+                    self.disperse();
+                }
             }
         }
     }
 
-    /// Zoom out: decrease detail level or call contract
+    /// Zoom out: reduce Full-detail density before changing detail level.
     pub fn zoom_out(&mut self) {
         match self.detail_level {
             VisualDetail::Full => {
                 // Check if we can contract first
                 if self.get_current_vertex_spacing() > VERTEX_SPACING_DEFAULT {
                     self.contract();
+                } else if self.has_full_detail_above_truncated_width()
+                    && self.partition_controller.node_sizer.zoom_out_scale()
+                {
+                    self.proportional_zoom_changed();
                 } else {
                     self.set_detail_level(VisualDetail::Truncated);
                 }
@@ -676,6 +691,34 @@ where
                 // Already at minimum zoom
             }
         }
+    }
+
+    /// Reset proportional zoom to one source unit per cell when supported.
+    ///
+    /// Returns `true` if the layout density changed.
+    pub fn reset_zoom_scale(&mut self) -> bool {
+        if !self.partition_controller.node_sizer.reset_zoom_scale() {
+            return false;
+        }
+        self.proportional_zoom_changed();
+        true
+    }
+
+    fn has_full_detail_above_truncated_width(&self) -> bool {
+        let node_sizer = &self.partition_controller.node_sizer;
+        self.partition_controller
+            .graph
+            .node_identifiers()
+            .any(|node| {
+                node_sizer.get_node_size(&node, VisualDetail::Full).0
+                    > node_sizer.get_node_size(&node, VisualDetail::Truncated).0
+            })
+    }
+
+    fn proportional_zoom_changed(&mut self) {
+        self.partition_controller.clear_all_layouts();
+        self.rebuild_needed = true;
+        self.layout_changed = true;
     }
 
     /// Increase vertex spacing and refresh layouts
@@ -1412,6 +1455,38 @@ mod tests {
         geometry::WorldRect, layout::VisualDetail, plotter::NodeSizer,
         testing::mocks::MockDomainGraph,
     };
+
+    #[test]
+    fn test_default_node_sizer_keeps_legacy_detail_zoom_steps() {
+        #[derive(Clone)]
+        struct TestNodeSizer;
+
+        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, detail_level: VisualDetail) -> (u64, u64) {
+                match detail_level {
+                    VisualDetail::Minimal => (1, 1),
+                    VisualDetail::Truncated => (13, 1),
+                    VisualDetail::Full => (100, 1),
+                }
+            }
+        }
+
+        let mut graph = MockDomainGraph::new();
+        graph.add_node(());
+        let mut controller = GraphController::new(graph, TestNodeSizer);
+        controller.set_detail_level(VisualDetail::Full);
+
+        assert_eq!(controller.zoom_scale(), 1);
+        controller.zoom_out();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
+        controller.zoom_out();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Minimal);
+        controller.zoom_in();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
+        controller.zoom_in();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
+        assert_eq!(controller.zoom_scale(), 1);
+    }
 
     #[test]
     fn test_coordinate_conversions() {

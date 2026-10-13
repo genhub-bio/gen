@@ -62,7 +62,7 @@ mod tests {
             ..Default::default()
         };
 
-        let node_sizer = GenGraphNodeSizer;
+        let node_sizer = GenGraphNodeSizer::default();
         let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         // Set up test terminal
@@ -341,7 +341,7 @@ mod tests {
             ..Default::default()
         };
 
-        let node_sizer = GenGraphNodeSizer;
+        let node_sizer = GenGraphNodeSizer::default();
         let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 80, 24);
@@ -418,7 +418,7 @@ mod tests {
             ..Default::default()
         };
 
-        let node_sizer = GenGraphNodeSizer;
+        let node_sizer = GenGraphNodeSizer::default();
         let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         controller.viewport_state.viewport_bounds = Rect::new(0, 0, 80, 24);

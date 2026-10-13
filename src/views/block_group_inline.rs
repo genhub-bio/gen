@@ -138,7 +138,7 @@ impl<'a> InlineGenGraphState<'a> {
         block_group_id: Option<HashId>,
         history_ref: Option<&'a str>,
     ) -> Self {
-        let node_sizer = GenGraphNodeSizer;
+        let node_sizer = GenGraphNodeSizer::default();
         let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
