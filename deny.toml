@@ -115,6 +115,8 @@ confidence-threshold = 0.8
 exceptions = [
   # Each entry is the crate and version constraint, and its specific allow
   # list
+  # GAI's external sort dependency is distributed under the Unlicense.
+  { allow = ["Unlicense"], crate = "ext-sort@0.1.6" },
   #{ allow = ["Zlib"], crate = "adler32" },
 ]
 

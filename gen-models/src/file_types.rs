@@ -163,7 +163,7 @@ impl FileTypes {
             "csv" => FileTypes::CSV,
             "gff" | "gff3" => FileTypes::Gff3,
             "bed" => FileTypes::Bed,
-            "tbi" => FileTypes::Tabix,
+            "tbi" | "csi" => FileTypes::Tabix,
             _ => FileTypes::None,
         }
     }
@@ -250,6 +250,7 @@ mod tests {
         assert_eq!(FileTypes::infer_from_path("sample.gff3"), FileTypes::Gff3);
         assert_eq!(FileTypes::infer_from_path("sample.bed"), FileTypes::Bed);
         assert_eq!(FileTypes::infer_from_path("sample.tbi"), FileTypes::Tabix);
+        assert_eq!(FileTypes::infer_from_path("sample.csi"), FileTypes::Tabix);
         assert_eq!(
             FileTypes::infer_from_path("sample.unknown"),
             FileTypes::None

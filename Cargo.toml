@@ -41,6 +41,7 @@ gen-models = { path = "gen-models", version = "0.4.0" }
 gen-graph = { path = "gen-graph", version = "0.4.0" }
 gen-tui = { path = "gen-tui", version = "0.4.0" }
 gen-annotations = { path = "gen-annotations", version = "0.4.0" }
+gai = { package = "genomic-attribute-index", version = "0.2.5" }
 gen-capnp-schemas = { path = "gen-capnp-schemas", version = "0.4.0" }
 clap = { version = "4.5.32", features = ["derive"] }
 chrono = { version = "0.4.40", features = ["serde"] }
