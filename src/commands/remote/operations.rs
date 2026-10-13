@@ -1647,7 +1647,7 @@ mod tests {
         env,
         ffi::OsString,
         fs,
-        io::{Cursor, Read as _, Write as _},
+        io::{BufRead as _, BufReader, Cursor, Read as _, Write as _},
         net::TcpListener,
         path::PathBuf,
         sync::Mutex,
@@ -1678,10 +1678,10 @@ mod tests {
 
     use super::{
         AssetTransferRange, AssetTransferTarget, DownloadAssetOutcome, PushTransferLease,
-        RemoteOperation, canonical_remote_url, clone_destination_name, copy_versioned_asset,
-        download_asset, download_to_versioned_store, execute_pull, execute_push, file_graph_url,
-        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
-        transfer_assets,
+        RemoteOperation, canonical_remote_url, clone_destination_name, clone_into_workspace,
+        copy_versioned_asset, download_asset, download_to_versioned_store, execute_pull,
+        execute_push, file_graph_url, get_remaining_assets_to_transfer, resolve_remote,
+        run_graph_transfer, temporary_path, transfer_assets, upload_asset,
     };
     use crate::{get_config_connection, get_connection, get_raw_connection};
 
@@ -3111,6 +3111,349 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_clone_materializes_source_symlinked_asset_as_regular_files() {
+        let temp = tempdir().expect("should create clone transfer workspace");
+        let source_root = temp.path().join("source");
+        let source_workspace = Workspace::new(&source_root);
+        source_workspace.ensure_gen_dir();
+        let source_graph = get_connection(
+            source_workspace
+                .graph_db_path()
+                .expect("should resolve source graph path"),
+        )
+        .expect("should open source graph");
+        Collection::create(&source_graph, "base").expect("should create source collection");
+        let contents = b"source symlink asset\n";
+        let asset = test_asset(contents, "linked.gfa", 1);
+        AssetRef::create(&source_graph, &asset).expect("should insert source asset");
+        commit_all(&source_graph, "add source asset").expect("should commit source asset");
+        drop(source_graph);
+
+        let external_payload = temp.path().join("source-payload.gfa");
+        fs::write(&external_payload, contents).expect("should write source payload");
+        let source_archive = versioned_asset_path(&source_workspace, &asset);
+        fs::create_dir_all(
+            source_archive
+                .parent()
+                .expect("should have source archive parent"),
+        )
+        .expect("should create source archive directory");
+        std::os::unix::fs::symlink(&external_payload, &source_archive)
+            .expect("should link retained asset to source payload");
+        assert!(
+            fs::symlink_metadata(&source_archive)
+                .expect("should inspect source archive link")
+                .file_type()
+                .is_symlink(),
+            "fixture should contain a source-owned retained-asset symlink"
+        );
+
+        let destination_root = temp.path().join("clone");
+        let destination_workspace = Workspace::new(&destination_root);
+        destination_workspace.ensure_gen_dir();
+        let config = get_config_connection(Some(
+            destination_workspace
+                .gen_db_path()
+                .expect("should resolve destination config path"),
+        ))
+        .expect("should open destination config");
+        let remote = Remote::create(
+            &config,
+            "origin",
+            &format!("file://{}", source_root.display()),
+        )
+        .expect("should configure source workspace remote");
+
+        clone_into_workspace(&config, &remote, &destination_workspace)
+            .expect("should clone source asset bytes");
+
+        let received_archive = versioned_asset_path(&destination_workspace, &asset);
+        let archive_metadata = fs::symlink_metadata(&received_archive)
+            .expect("should inspect received versioned asset");
+        assert!(archive_metadata.file_type().is_file());
+        assert!(!archive_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(&received_archive).expect("should read received versioned asset"),
+            contents
+        );
+        let materialized_asset = destination_root.join("linked.gfa");
+        let materialized_metadata = fs::symlink_metadata(&materialized_asset)
+            .expect("should inspect received materialized asset");
+        assert!(materialized_metadata.file_type().is_file());
+        assert!(!materialized_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(materialized_asset).expect("should read received materialized asset"),
+            contents
+        );
+        assert_eq!(
+            fs::read(&external_payload).expect("should reread source payload"),
+            contents,
+            "clone should read through the source symlink without writing its target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pull_materializes_source_symlinked_asset_as_regular_files() {
+        let temp = tempdir().expect("should create pull transfer workspace");
+        let source_root = temp.path().join("source");
+        let source_workspace = Workspace::new(&source_root);
+        source_workspace.ensure_gen_dir();
+        let source_graph = get_connection(
+            source_workspace
+                .graph_db_path()
+                .expect("should resolve source graph path"),
+        )
+        .expect("should open source graph");
+        Collection::create(&source_graph, "base").expect("should create source collection");
+        commit_all(&source_graph, "create base state").expect("should commit source base");
+        drop(source_graph);
+
+        let destination_root = temp.path().join("pull");
+        let destination_workspace = Workspace::new(&destination_root);
+        destination_workspace.ensure_gen_dir();
+        let destination_graph = get_raw_connection(
+            destination_workspace
+                .graph_db_path()
+                .expect("should resolve destination graph path"),
+        )
+        .expect("should open destination graph");
+        clone_remote(
+            &destination_graph,
+            &format!(
+                "file://{}",
+                source_workspace
+                    .graph_db_path()
+                    .expect("should resolve source graph path")
+                    .display()
+            ),
+        )
+        .expect("should clone source base state");
+        drop(destination_graph);
+
+        let config = get_config_connection(Some(
+            destination_workspace
+                .gen_db_path()
+                .expect("should resolve destination config path"),
+        ))
+        .expect("should open destination config");
+        let remote = Remote::create(
+            &config,
+            "origin",
+            &format!("file://{}", source_root.display()),
+        )
+        .expect("should configure source workspace remote");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set source workspace as default remote");
+
+        let contents = b"source symlink pull asset\n";
+        let asset = test_asset(contents, "linked.gfa", 1);
+        let source_graph = get_connection(
+            source_workspace
+                .graph_db_path()
+                .expect("should resolve source graph path"),
+        )
+        .expect("should reopen source graph");
+        AssetRef::create(&source_graph, &asset).expect("should insert source asset");
+        commit_all(&source_graph, "add source asset").expect("should commit source asset");
+        drop(source_graph);
+
+        let external_payload = temp.path().join("source-payload.gfa");
+        fs::write(&external_payload, contents).expect("should write source payload");
+        let source_archive = versioned_asset_path(&source_workspace, &asset);
+        fs::create_dir_all(
+            source_archive
+                .parent()
+                .expect("should have source archive parent"),
+        )
+        .expect("should create source archive directory");
+        std::os::unix::fs::symlink(&external_payload, &source_archive)
+            .expect("should link retained asset to source payload");
+        assert!(
+            fs::symlink_metadata(&source_archive)
+                .expect("should inspect source archive link")
+                .file_type()
+                .is_symlink(),
+            "fixture should contain a source-owned retained-asset symlink"
+        );
+
+        execute_pull(&destination_workspace, None, None).expect("should pull source asset");
+
+        let received_archive = versioned_asset_path(&destination_workspace, &asset);
+        let archive_metadata = fs::symlink_metadata(&received_archive)
+            .expect("should inspect received versioned asset");
+        assert!(archive_metadata.file_type().is_file());
+        assert!(!archive_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(&received_archive).expect("should read received versioned asset"),
+            contents
+        );
+        let materialized_asset = destination_root.join("linked.gfa");
+        let materialized_metadata = fs::symlink_metadata(&materialized_asset)
+            .expect("should inspect received materialized asset");
+        assert!(materialized_metadata.file_type().is_file());
+        assert!(!materialized_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(materialized_asset).expect("should read received materialized asset"),
+            contents
+        );
+        assert_eq!(
+            fs::read(&external_payload).expect("should reread source payload"),
+            contents,
+            "pull should read through the source symlink without writing its target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_http_roundtrip_transfers_source_symlinked_asset_as_regular_files() {
+        let temp = tempdir().expect("should create HTTP transfer workspace");
+        let source_workspace = Workspace::new(temp.path().join("source"));
+        source_workspace.ensure_gen_dir();
+        let destination_root = temp.path().join("receiver");
+        let destination_workspace = Workspace::new(&destination_root);
+        destination_workspace.ensure_gen_dir();
+
+        let contents = b"source symlink HTTP asset\n";
+        let (asset, archived_contents) = test_bgzf_asset(contents, "linked.gfa", 1);
+
+        let external_payload = temp.path().join("source-payload.gfa");
+        fs::write(&external_payload, &archived_contents).expect("should write source payload");
+        let source_archive = versioned_asset_path(&source_workspace, &asset);
+        fs::create_dir_all(
+            source_archive
+                .parent()
+                .expect("should have source archive parent"),
+        )
+        .expect("should create source archive directory");
+        std::os::unix::fs::symlink(&external_payload, &source_archive)
+            .expect("should link retained asset to source payload");
+        assert!(
+            fs::symlink_metadata(&source_archive)
+                .expect("should inspect source archive link")
+                .file_type()
+                .is_symlink(),
+            "fixture should contain a source-owned retained-asset symlink"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind asset server");
+        let address = listener
+            .local_addr()
+            .expect("should read asset server address");
+        let server = thread::spawn(move || {
+            let (upload_stream, _) = listener.accept().expect("should accept asset upload");
+            let mut upload_reader = BufReader::new(upload_stream);
+            let mut upload_request = String::new();
+            upload_reader
+                .read_line(&mut upload_request)
+                .expect("should read upload request line");
+            let mut content_length = None;
+            loop {
+                let mut header = String::new();
+                upload_reader
+                    .read_line(&mut header)
+                    .expect("should read upload headers");
+                if header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse::<usize>().ok();
+                }
+            }
+            let mut uploaded = vec![0; content_length.expect("should receive content length")];
+            upload_reader
+                .read_exact(&mut uploaded)
+                .expect("should read uploaded asset bytes");
+            write!(
+                upload_reader.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("should finish upload response");
+            drop(upload_reader);
+
+            let (download_stream, _) = listener.accept().expect("should accept asset download");
+            let mut download_reader = BufReader::new(download_stream);
+            let mut download_request = String::new();
+            download_reader
+                .read_line(&mut download_request)
+                .expect("should read download request line");
+            loop {
+                let mut header = String::new();
+                download_reader
+                    .read_line(&mut header)
+                    .expect("should read download headers");
+                if header == "\r\n" {
+                    break;
+                }
+            }
+            let mut response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                uploaded.len()
+            )
+            .into_bytes();
+            response.extend_from_slice(&uploaded);
+            download_reader
+                .get_mut()
+                .write_all(&response)
+                .expect("should return uploaded asset bytes");
+            (upload_request, download_request, uploaded)
+        });
+
+        let client = Client::new();
+        upload_asset(
+            &client,
+            &source_workspace,
+            &asset,
+            &format!("http://{address}/upload"),
+        )
+        .expect("should upload source symlink asset bytes");
+        let download_result = download_asset(
+            &client,
+            &destination_workspace,
+            &asset,
+            &HashMap::new(),
+            asset.logical_path.as_deref(),
+            &format!("http://{address}/download"),
+        );
+        let (upload_request, download_request, uploaded) =
+            server.join().expect("should finish asset server");
+
+        assert!(upload_request.starts_with("PUT /upload "));
+        assert!(download_request.starts_with("GET /download "));
+        assert_eq!(uploaded, archived_contents);
+        assert_eq!(
+            download_result.expect("should download and materialize uploaded bytes"),
+            DownloadAssetOutcome::Downloaded
+        );
+        let received_archive = versioned_asset_path(&destination_workspace, &asset);
+        let archive_metadata = fs::symlink_metadata(&received_archive)
+            .expect("should inspect received versioned asset");
+        assert!(archive_metadata.file_type().is_file());
+        assert!(!archive_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(&received_archive).expect("should read received versioned asset"),
+            archived_contents
+        );
+        let materialized_asset = destination_root.join("linked.gfa");
+        let materialized_metadata = fs::symlink_metadata(&materialized_asset)
+            .expect("should inspect received materialized asset");
+        assert!(materialized_metadata.file_type().is_file());
+        assert!(!materialized_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(materialized_asset).expect("should read received materialized asset"),
+            contents
+        );
+        assert_eq!(
+            fs::read(&external_payload).expect("should reread source payload"),
+            archived_contents,
+            "HTTP transfer should read through the source symlink without writing its target"
+        );
+    }
+
     #[test]
     fn test_execute_pull_transfers_assets_after_graph_db_is_synced() {
         // Test that if we have transferred a graph.db, on a subsequent pull we will transfer assets. This mimics
@@ -3660,6 +4003,109 @@ mod tests {
         let local_hash = hash_of(&graph, "main").expect("should query local branch");
         let tracking_hash = hash_of(&graph, "origin/main").expect("should query tracking branch");
         assert_eq!(tracking_hash, local_hash);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_push_transfers_source_symlinked_asset_as_regular_archive() {
+        let temp = tempdir().expect("should create push transfer workspace");
+        let source_root = temp.path().join("source");
+        let source_workspace = Workspace::new(&source_root);
+        source_workspace.ensure_gen_dir();
+        let source_graph = get_connection(
+            source_workspace
+                .graph_db_path()
+                .expect("should resolve source graph path"),
+        )
+        .expect("should open source graph");
+        Collection::create(&source_graph, "base").expect("should create source collection");
+        commit_all(&source_graph, "create base state").expect("should commit source base");
+        drop(source_graph);
+
+        let destination_root = temp.path().join("remote");
+        let destination_workspace = Workspace::new(&destination_root);
+        destination_workspace.ensure_gen_dir();
+        let destination_graph = get_raw_connection(
+            destination_workspace
+                .graph_db_path()
+                .expect("should resolve destination graph path"),
+        )
+        .expect("should open destination graph");
+        clone_remote(
+            &destination_graph,
+            &format!(
+                "file://{}",
+                source_workspace
+                    .graph_db_path()
+                    .expect("should resolve source graph path")
+                    .display()
+            ),
+        )
+        .expect("should clone source base state to destination");
+        drop(destination_graph);
+
+        let contents = b"source symlink push asset\n";
+        let asset = test_asset(contents, "linked.gfa", 1);
+        let source_graph = get_connection(
+            source_workspace
+                .graph_db_path()
+                .expect("should resolve source graph path"),
+        )
+        .expect("should reopen source graph");
+        AssetRef::create(&source_graph, &asset).expect("should insert source asset");
+        commit_all(&source_graph, "add source asset").expect("should commit source asset");
+        drop(source_graph);
+
+        let external_payload = temp.path().join("source-payload.gfa");
+        fs::write(&external_payload, contents).expect("should write source payload");
+        let source_archive = versioned_asset_path(&source_workspace, &asset);
+        fs::create_dir_all(
+            source_archive
+                .parent()
+                .expect("should have source archive parent"),
+        )
+        .expect("should create source archive directory");
+        std::os::unix::fs::symlink(&external_payload, &source_archive)
+            .expect("should link retained asset to source payload");
+        assert!(
+            fs::symlink_metadata(&source_archive)
+                .expect("should inspect source archive link")
+                .file_type()
+                .is_symlink(),
+            "fixture should contain a source-owned retained-asset symlink"
+        );
+
+        let config = get_config_connection(Some(
+            source_workspace
+                .gen_db_path()
+                .expect("should resolve source config path"),
+        ))
+        .expect("should open source config");
+        let remote = Remote::create(
+            &config,
+            "origin",
+            &format!("file://{}", destination_root.display()),
+        )
+        .expect("should configure destination workspace remote");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set destination workspace as default remote");
+
+        execute_push(&source_workspace, None, None, false).expect("should push source asset");
+
+        let received_archive = versioned_asset_path(&destination_workspace, &asset);
+        let archive_metadata = fs::symlink_metadata(&received_archive)
+            .expect("should inspect received versioned asset");
+        assert!(archive_metadata.file_type().is_file());
+        assert!(!archive_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(&received_archive).expect("should read received versioned asset"),
+            contents
+        );
+        assert_eq!(
+            fs::read(&external_payload).expect("should reread source payload"),
+            contents,
+            "push should read through the source symlink without writing its target"
+        );
     }
 
     #[test]
