@@ -14,7 +14,8 @@ use gen_models::{
     port_crawl::{PortCrawler, PortGraphSource},
 };
 use gen_tui::crawl::{
-    GraphCursor, GraphSource, PreferredWormholeDoors, StructuralSubgraph, crawl_batch, subgraph_for,
+    EagerSource, GraphCursor, GraphSource, PreferredWormholeDoors, StructuralSubgraph, crawl_batch,
+    subgraph_for,
 };
 use petgraph::Direction;
 
@@ -23,7 +24,26 @@ use crate::{get_connection_for_branch, views::junction_projection::project_junct
 /// Prepare the complete projected window before the layout engine claims any of its nodes.
 /// The source resolves raw junctions while `crawl_batch` asks for adjacency; the returned
 /// edges and doors therefore refer only to stable projected identities.
-pub fn prepare_projected_batch<S: GraphSource<GenGraph>>(
+/// Complete a source's projected boundary after a batch's member selection has stopped.
+pub trait ProjectedBatchSource: GraphSource<GenGraph> {
+    fn finish_projected_batch(
+        &mut self,
+        graph: &mut GenGraph,
+        members: &[GraphNode],
+    ) -> Result<(), String>;
+}
+
+impl ProjectedBatchSource for EagerSource {
+    fn finish_projected_batch(
+        &mut self,
+        _graph: &mut GenGraph,
+        _members: &[GraphNode],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+pub fn prepare_projected_batch<S: ProjectedBatchSource>(
     anchor: GraphNode,
     node_budget: usize,
     graph: &mut GenGraph,
@@ -37,6 +57,7 @@ pub fn prepare_projected_batch<S: GraphSource<GenGraph>>(
         &mut GraphCursor::new(graph, source),
         is_claimed,
     )?;
+    source.finish_projected_batch(graph, &members)?;
     Ok(subgraph_for(anchor, members, graph, preferred_doors))
 }
 
@@ -362,18 +383,23 @@ impl ProjectedGraphSource {
         if located.sequence_start == located.sequence_end && !gen_core::is_terminal(located.node_id)
         {
             self.resolve_junction_frontier().ok()?;
-            let mut adjacent: Vec<_> = self
+            let mut outgoing: Vec<_> = self
                 .raw_graph
                 .neighbors_directed(located, Direction::Outgoing)
-                .chain(
-                    self.raw_graph
-                        .neighbors_directed(located, Direction::Incoming),
-                )
                 .filter(|node| node.sequence_start != node.sequence_end)
                 .collect();
-            adjacent.sort();
+            let mut incoming: Vec<_> = self
+                .raw_graph
+                .neighbors_directed(located, Direction::Incoming)
+                .filter(|node| node.sequence_start != node.sequence_end)
+                .collect();
+            outgoing.sort();
+            incoming.sort();
             self.refresh_projection(graph);
-            return adjacent.into_iter().find(|node| graph.contains_node(*node));
+            return outgoing
+                .into_iter()
+                .chain(incoming)
+                .find(|node| graph.contains_node(*node));
         }
         self.refresh_projection(graph);
         Some(located)
@@ -404,6 +430,41 @@ impl GraphSource<GenGraph> for ProjectedGraphSource {
             .map_err(|error| error.to_string())?;
         self.resolve_junction_frontier()?;
         self.refresh_projection(graph);
+        Ok(())
+    }
+}
+
+impl ProjectedBatchSource for ProjectedGraphSource {
+    fn finish_projected_batch(
+        &mut self,
+        graph: &mut GenGraph,
+        members: &[GraphNode],
+    ) -> Result<(), String> {
+        self.ensure_source(graph)?;
+        let source = self
+            .port_source
+            .as_mut()
+            .expect("should have initialized port source");
+        let unfinished = members
+            .iter()
+            .copied()
+            .filter(|node| {
+                source.is_frontier(*node, Direction::Incoming)
+                    || source.is_frontier(*node, Direction::Outgoing)
+            })
+            .collect::<Vec<_>>();
+        if !unfinished.is_empty() {
+            source
+                .expand_frontier(&mut self.raw_graph, &unfinished)
+                .map_err(|error| error.to_string())?;
+        }
+        self.resolve_junction_frontier()?;
+        self.refresh_projection(graph);
+        if members.iter().any(|node| !graph.contains_node(*node)) {
+            return Err(
+                "a projected batch member disappeared while resolving its frontier".to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -465,6 +526,19 @@ impl GraphSource<GenGraph> for EagerOrProjectedSource {
         match self {
             Self::Eager { .. } => Ok(()),
             Self::Projected(source) => source.expand_frontier(graph, frontier),
+        }
+    }
+}
+
+impl ProjectedBatchSource for EagerOrProjectedSource {
+    fn finish_projected_batch(
+        &mut self,
+        graph: &mut GenGraph,
+        members: &[GraphNode],
+    ) -> Result<(), String> {
+        match self {
+            Self::Eager { .. } => Ok(()),
+            Self::Projected(source) => source.finish_projected_batch(graph, members),
         }
     }
 }
@@ -702,6 +776,23 @@ pub(crate) mod tests {
                     || gen_core::is_terminal(node.node_id))
         );
         assert!(batch.nodes.iter().all(|node| graph.contains_node(*node)));
+        let port_source = source.port_source.as_ref().unwrap();
+        assert!(batch.nodes.iter().all(|node| {
+            !port_source.is_frontier(*node, Direction::Incoming)
+                && !port_source.is_frontier(*node, Direction::Outgoing)
+        }));
+        assert!(
+            source
+                .raw_graph
+                .nodes()
+                .filter(|node| {
+                    node.sequence_start == node.sequence_end && !gen_core::is_terminal(node.node_id)
+                })
+                .all(|junction| {
+                    !port_source.is_frontier(junction, Direction::Incoming)
+                        && !port_source.is_frontier(junction, Direction::Outgoing)
+                })
+        );
         assert!(
             batch
                 .external_edges

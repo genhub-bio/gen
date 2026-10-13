@@ -1491,7 +1491,7 @@ fn build_gen_graph_engine_lazy<R, S>(
     zoom_index: usize,
 ) -> GraphEngineSetupLazy<R, S>
 where
-    S: GraphSource<GenGraph>,
+    S: crate::views::lazy_graph_source::ProjectedBatchSource,
 {
     let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
     let mut view_state = GraphViewState::default();
@@ -1522,7 +1522,7 @@ pub fn create_annotated_gen_graph_engine_lazy<'a, Src, Seq>(
     GraphViewState<GraphNode>,
 )
 where
-    Src: GraphSource<GenGraph>,
+    Src: crate::views::lazy_graph_source::ProjectedBatchSource,
     Seq: SequenceSource + Clone + 'a,
 {
     build_gen_graph_engine_lazy(
@@ -1548,7 +1548,7 @@ pub fn create_send_sync_annotated_gen_graph_engine_lazy<Src, Seq>(
     GraphViewState<GraphNode>,
 )
 where
-    Src: GraphSource<GenGraph>,
+    Src: crate::views::lazy_graph_source::ProjectedBatchSource,
     Seq: SequenceSource + Clone + Send + Sync + 'static,
 {
     build_gen_graph_engine_lazy(
