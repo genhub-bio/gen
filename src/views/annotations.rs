@@ -439,6 +439,59 @@ fn resolve_local_annotation_file_path(
     }
 }
 
+/// Local paths for an annotation source and its coordinate and attribute indexes.
+pub(super) struct AnnotationSearchPaths {
+    pub(super) source_path: PathBuf,
+    pub(super) coordinate_index_path: PathBuf,
+    pub(super) attribute_index_path: PathBuf,
+}
+
+/// Resolves the source and both recorded indexes needed for GAI-backed region search.
+///
+/// Remote assets are materialized only when a selected file actually needs to be searched.
+pub(super) fn resolve_annotation_search_paths(
+    workspace: &Workspace,
+    entry: &AnnotationFileEntry,
+) -> Result<Option<AnnotationSearchPaths>, Box<dyn Error>> {
+    let (Some(coordinate_index), Some(attribute_index)) = (
+        entry.index_file_addition.as_ref(),
+        entry.attribute_index_file_addition.as_ref(),
+    ) else {
+        return Ok(None);
+    };
+    if !matches!(
+        entry.file_addition.file_type,
+        FileTypes::Gff3 | FileTypes::Bed
+    ) {
+        return Ok(None);
+    }
+
+    let resolve_path = |asset: &AnnotationAssetEntry, cache_subdirectory: &str| {
+        if LocalAssetUri::is_local_path_or_file_uri(&asset.asset_uri) {
+            resolve_local_annotation_file_path(workspace, asset).ok_or_else(|| {
+                Box::new(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "annotation search asset is unavailable: {}",
+                        asset.asset_uri
+                    ),
+                )) as Box<dyn Error>
+            })
+        } else {
+            cache_remote_annotation_asset(workspace, asset, cache_subdirectory)
+        }
+    };
+
+    let source_path = resolve_path(&entry.file_addition, "annotation-search-sources")?;
+    let coordinate_index_path = resolve_path(coordinate_index, "annotation-search-indexes")?;
+    let attribute_index_path = resolve_path(attribute_index, "annotation-search-attributes")?;
+    Ok(Some(AnnotationSearchPaths {
+        source_path,
+        coordinate_index_path,
+        attribute_index_path,
+    }))
+}
+
 /// Builds the stable filename used when a remote annotation or index is cached locally.
 ///
 /// Cache path construction calls this for both data and index files. A known content checksum is
