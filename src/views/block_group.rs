@@ -27,10 +27,10 @@ use crate::{
     views::{
         annotation_files::AnnotationFileEntry,
         annotation_groups::load_annotation_group_entries,
-        annotations::{
-            AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
-            load_annotations_for_group,
+        annotation_loading::{
+            AnnotationLoadCoordinator, AnnotationLoadIdentity, AnnotationLoadSpec,
         },
+        annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
@@ -334,83 +334,159 @@ fn load_annotation_groups_for_viewport(
     }
 }
 
-/// Shared inputs for loading an annotation file's track, common to activating one file
-/// (on checkbox toggle) and auto-activating every available file on load.
 struct AnnotationFileActivationContext<'a> {
-    conn: &'a GraphConnection,
-    history_ref: Option<&'a str>,
-    workspace: &'a Workspace,
     collection_name: &'a str,
-    sample_name: &'a str,
-    block_group_name: Option<&'a str>,
+    history_ref: Option<&'a str>,
+    block_group: &'a BlockGroup,
     block_graph: &'a GenGraph,
     query_window: Option<(i64, i64)>,
 }
 
-/// Load `entry`'s track and record its overlays, index availability, and loaded window.
-/// Shared by the checkbox toggle-on handlers and by automatic activation on load.
-fn activate_annotation_file(
+fn annotation_file_load_spec(
     context: &AnnotationFileActivationContext,
     entry: &AnnotationFileEntry,
-    overlays: &mut Vec<GraphOverlay>,
-    annotation_file_index_available: &mut HashMap<HashId, bool>,
-    annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
-) -> Result<(), Box<dyn Error>> {
-    let node_filter: HashSet<HashId> = context
-        .block_graph
-        .nodes()
-        .map(|node| node.node_id)
-        .collect();
-    let request = AnnotationFileTrackRequest {
-        conn: context.conn,
-        history_ref: context.history_ref,
-        workspace: context.workspace,
-        collection_name: context.collection_name,
-        sample_name: context.sample_name,
-        block_group_name: context.block_group_name,
+) -> AnnotationLoadSpec {
+    AnnotationLoadSpec {
+        collection_name: context.collection_name.to_string(),
+        sample_name: context.block_group.sample_name.clone(),
+        block_group_id: context.block_group.id,
+        block_group_name: context.block_group.name.clone(),
+        history_ref: context.history_ref.map(str::to_string),
         query_window: context.query_window,
-        node_filter: &node_filter,
-        entry,
-    };
-    let load = load_annotation_file_track(&request)?;
-    let id = entry.file_addition.id;
-    replace_track_overlays(overlays, &file_track_key(&id), load.track.annotations);
-    annotation_file_index_available.insert(id, load.index_available);
-    if let Some(window) = load.loaded_window {
-        annotation_file_loaded_windows.insert(id, window);
-    } else {
-        annotation_file_loaded_windows.remove(&id);
+        node_filter: context
+            .block_graph
+            .nodes()
+            .map(|node| node.node_id)
+            .collect(),
+        entry: entry.clone(),
     }
-    Ok(())
 }
 
-/// Activate every annotation file that isn't already active, skipping any whose
-/// underlying file isn't available (deleted, moved, or otherwise unresolvable) so a
-/// missing file doesn't block the rest from showing. Mirrors
-/// `load_annotation_groups_for_viewport`'s auto-activation of DB-derived groups.
+/// Queue automatic file loading without holding up input or redraws.
 fn auto_activate_annotation_files_for_viewport(
     context: &AnnotationFileActivationContext,
     entries: &[AnnotationFileEntry],
     explorer_state: &mut CollectionExplorerState,
-    overlays: &mut Vec<GraphOverlay>,
-    annotation_file_index_available: &mut HashMap<HashId, bool>,
-    annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
+    annotation_file_index_available: &HashMap<HashId, bool>,
+    annotation_loads: &mut AnnotationLoadCoordinator,
 ) {
     for entry in entries {
         let id = entry.file_addition.id;
-        if explorer_state.is_annotation_file_active(&id) {
-            continue;
-        }
-        if activate_annotation_file(
-            context,
-            entry,
-            overlays,
-            annotation_file_index_available,
-            annotation_file_loaded_windows,
-        )
-        .is_ok()
-        {
+        let active = explorer_state.is_annotation_file_active(&id);
+        if !active {
             explorer_state.active_annotation_files.insert(id);
+        }
+        if (!active || !annotation_file_index_available.contains_key(&id))
+            && !annotation_loads.has_current_work_for_file(id)
+        {
+            annotation_loads.queue_activation(annotation_file_load_spec(context, entry));
+        }
+    }
+}
+
+fn annotation_file_result_matches_view(
+    identity: &AnnotationLoadIdentity,
+    current_collection_name: &str,
+    selected_block_group_id: Option<HashId>,
+    current_block_group: Option<&BlockGroup>,
+    history_ref: Option<&str>,
+) -> bool {
+    identity.collection_name == current_collection_name
+        && selected_block_group_id == Some(identity.block_group_id)
+        && identity.history_ref.as_deref() == history_ref
+        && current_block_group.is_some_and(|block_group| {
+            identity.block_group_id == block_group.id
+                && identity.block_group_name == block_group.name
+                && identity.sample_name == block_group.sample_name
+        })
+}
+
+fn annotation_result_window_covers(
+    indexed: bool,
+    loaded_window: Option<(i64, i64)>,
+    visible_window: Option<(i64, i64)>,
+) -> bool {
+    if !indexed || visible_window.is_none() {
+        return true;
+    }
+    let (Some((loaded_start, loaded_end)), Some((visible_start, visible_end))) =
+        (loaded_window, visible_window)
+    else {
+        return false;
+    };
+    loaded_start <= visible_start && loaded_end >= visible_end
+}
+
+struct AnnotationLoadView<'a> {
+    collection_name: &'a str,
+    selected_block_group_id: Option<HashId>,
+    block_group: Option<&'a BlockGroup>,
+    history_ref: Option<&'a str>,
+    visible_window: Option<(i64, i64)>,
+    explorer: &'a CollectionExplorer,
+}
+
+struct AnnotationLoadUiState<'a> {
+    explorer_state: &'a mut CollectionExplorerState,
+    overlays: &'a mut Vec<GraphOverlay>,
+    index_available: &'a mut HashMap<HashId, bool>,
+    loaded_windows: &'a mut HashMap<HashId, (i64, i64)>,
+    messages: &'a mut crate::views::messages::MessageBuffer,
+}
+
+fn apply_annotation_load_result(
+    result: crate::views::annotation_loading::AnnotationLoadResult,
+    annotation_loads: &mut AnnotationLoadCoordinator,
+    view: AnnotationLoadView<'_>,
+    state: AnnotationLoadUiState<'_>,
+) {
+    let file_id = result.identity.entry.file_addition.id;
+    if !annotation_loads.is_current(&result.identity)
+        || !state.explorer_state.is_annotation_file_active(&file_id)
+        || !annotation_file_result_matches_view(
+            &result.identity,
+            view.collection_name,
+            view.selected_block_group_id,
+            view.block_group,
+            view.history_ref,
+        )
+        || view.explorer.annotation_file_entry(&file_id) != Some(&result.identity.entry)
+    {
+        return;
+    }
+
+    match result.result {
+        Ok(load) => {
+            state.index_available.insert(file_id, load.index_available);
+            if !annotation_result_window_covers(
+                load.index_available,
+                load.loaded_window,
+                view.visible_window,
+            ) {
+                return;
+            }
+            replace_track_overlays(
+                state.overlays,
+                &file_track_key(&file_id),
+                load.track.annotations,
+            );
+            if let Some(window) = load.loaded_window {
+                state.loaded_windows.insert(file_id, window);
+                annotation_loads.cancel_pending_reloads(file_id);
+            } else {
+                state.loaded_windows.remove(&file_id);
+            }
+        }
+        Err(error) => {
+            state.messages.push_warn(format!(
+                "Failed to load annotation file {}: {error}",
+                result.identity.entry.display_name
+            ));
+            annotation_loads.cancel_file(file_id);
+            state.explorer_state.deactivate_annotation_file(&file_id);
+            remove_track_overlays(state.overlays, &file_track_key(&file_id));
+            state.index_available.remove(&file_id);
+            state.loaded_windows.remove(&file_id);
         }
     }
 }
@@ -540,6 +616,17 @@ pub fn view_block_group(
 
     let mut annotation_groups_loaded = false;
     let mut annotation_files_loaded = false;
+    let worker_branch = if history_ref.is_none() {
+        Some(gen_models::history::dolt::active_branch(conn)?)
+    } else {
+        None
+    };
+    let mut annotation_loads = AnnotationLoadCoordinator::new(
+        workspace.graph_db_path()?,
+        workspace.clone(),
+        worker_branch.clone(),
+        history_ref.map(str::to_string),
+    )?;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -789,40 +876,27 @@ pub fn view_block_group(
                                 explorer_state.annotation_file_toggle_requested.take()
                             {
                                 if explorer_state.is_annotation_file_active(&toggled_id) {
-                                    if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
+                                    if !is_loading
+                                        && let Some(entry) =
+                                            explorer.annotation_file_entry(&toggled_id)
                                         && let Some(bg) = current_block_group.as_ref()
                                     {
                                         let query_window =
                                             current_view_coordinate_window(&graph_controller)
                                                 .map(expand_query_window);
                                         let context = AnnotationFileActivationContext {
-                                            conn,
                                             history_ref,
-                                            workspace,
                                             collection_name: &current_collection_name,
-                                            sample_name: bg.sample_name.as_str(),
-                                            block_group_name: Some(&bg.name),
+                                            block_group: bg,
                                             block_graph: &block_graph,
                                             query_window,
                                         };
-                                        if let Err(err) = activate_annotation_file(
-                                            &context,
-                                            entry,
-                                            &mut overlays,
-                                            &mut annotation_file_index_available,
-                                            &mut annotation_file_loaded_windows,
-                                        ) {
-                                            messages.push_warn(format!("{err}"));
-                                            explorer_state.deactivate_annotation_file(&toggled_id);
-                                            remove_track_overlays(
-                                                &mut overlays,
-                                                &file_track_key(&toggled_id),
-                                            );
-                                            annotation_file_index_available.remove(&toggled_id);
-                                            annotation_file_loaded_windows.remove(&toggled_id);
-                                        }
+                                        annotation_loads.queue_activation(
+                                            annotation_file_load_spec(&context, entry),
+                                        );
                                     }
                                 } else {
+                                    annotation_loads.cancel_file(toggled_id);
                                     remove_track_overlays(
                                         &mut overlays,
                                         &file_track_key(&toggled_id),
@@ -963,40 +1037,25 @@ pub fn view_block_group(
                     if let Some(toggled_id) = explorer_state.annotation_file_toggle_requested.take()
                     {
                         if explorer_state.is_annotation_file_active(&toggled_id) {
-                            if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
+                            if !is_loading
+                                && let Some(entry) = explorer.annotation_file_entry(&toggled_id)
                                 && let Some(bg) = current_block_group.as_ref()
                             {
                                 let query_window =
                                     current_view_coordinate_window(&graph_controller)
                                         .map(expand_query_window);
                                 let context = AnnotationFileActivationContext {
-                                    conn,
                                     history_ref,
-                                    workspace,
                                     collection_name: &current_collection_name,
-                                    sample_name: bg.sample_name.as_str(),
-                                    block_group_name: Some(&bg.name),
+                                    block_group: bg,
                                     block_graph: &block_graph,
                                     query_window,
                                 };
-                                if let Err(err) = activate_annotation_file(
-                                    &context,
-                                    entry,
-                                    &mut overlays,
-                                    &mut annotation_file_index_available,
-                                    &mut annotation_file_loaded_windows,
-                                ) {
-                                    messages.push_warn(format!("{err}"));
-                                    explorer_state.deactivate_annotation_file(&toggled_id);
-                                    remove_track_overlays(
-                                        &mut overlays,
-                                        &file_track_key(&toggled_id),
-                                    );
-                                    annotation_file_index_available.remove(&toggled_id);
-                                    annotation_file_loaded_windows.remove(&toggled_id);
-                                }
+                                annotation_loads
+                                    .queue_activation(annotation_file_load_spec(&context, entry));
                             }
                         } else {
+                            annotation_loads.cancel_file(toggled_id);
                             remove_track_overlays(&mut overlays, &file_track_key(&toggled_id));
                             annotation_file_index_available.remove(&toggled_id);
                             annotation_file_loaded_windows.remove(&toggled_id);
@@ -1077,6 +1136,7 @@ pub fn view_block_group(
         }
 
         if let Some(selected_collection) = explorer_state.collection_change_requested.take() {
+            annotation_loads.invalidate_view();
             current_collection_name = selected_collection;
             explorer_state.selected_block_group_id = None;
             last_selected_block_group_id = None;
@@ -1109,6 +1169,7 @@ pub fn view_block_group(
 
         // Trigger reload if selection changed to a new block group
         if explorer_state.selected_block_group_id != last_selected_block_group_id {
+            annotation_loads.invalidate_view();
             is_loading = true;
             last_selected_block_group_id = explorer_state.selected_block_group_id;
         }
@@ -1118,6 +1179,7 @@ pub fn view_block_group(
         // indicator is shown without any extra latency.
         // I do this every REFRESH_INTERVAL seconds.
         if !is_loading && last_refresh.elapsed() >= Duration::from_secs(REFRESH_INTERVAL) {
+            let previous_annotation_files = explorer.data.annotation_files.clone();
             let selected_sample = current_block_group
                 .as_ref()
                 .map(|bg| bg.sample_name.as_str());
@@ -1129,6 +1191,8 @@ pub fn view_block_group(
                 &current_collection_name,
                 history_ref,
             ) {
+                let annotation_files_changed =
+                    previous_annotation_files != explorer.data.annotation_files;
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
@@ -1152,13 +1216,19 @@ pub fn view_block_group(
                     }
                     _ => true,
                 });
+                if annotation_files_changed {
+                    annotation_loads.invalidate_view();
+                    annotation_file_index_available.clear();
+                    annotation_file_loaded_windows.clear();
+                    annotation_files_loaded = false;
+                }
             }
             last_refresh = Instant::now();
         }
 
-        // Reload indexed annotation file tracks when the user scrolls past the loaded window.
-        // Annotation group reload piggybacks on the viewport-rebuild signal: when the camera has
-        // moved far enough that the cropped-graph node set changes, invalidate and re-load.
+        // Queue indexed file reloads after the viewport leaves their loaded window. Only one
+        // request per file can wait behind the worker, so repeated pan events replace that file's
+        // queued window instead of building a backlog.
         if !is_loading
             && let Some(bg) = current_block_group.as_ref()
             && let Some(visible_window) = current_view_coordinate_window(&graph_controller)
@@ -1167,8 +1237,6 @@ pub fn view_block_group(
                 annotation_groups_loaded = false;
             }
             let query_window = expand_query_window(visible_window);
-            let node_filter: std::collections::HashSet<HashId> =
-                block_graph.nodes().map(|node| node.node_id).collect();
             for entry in &explorer.data.annotation_files {
                 let id = entry.file_addition.id;
                 if !explorer_state.is_annotation_file_active(&id) {
@@ -1192,42 +1260,43 @@ pub fn view_block_group(
                 if !needs_reload {
                     continue;
                 }
-
-                let request = AnnotationFileTrackRequest {
-                    conn,
-                    history_ref,
-                    workspace,
-                    collection_name: &current_collection_name,
-                    sample_name: bg.sample_name.as_str(),
-                    block_group_name: Some(&bg.name),
-                    query_window: Some(query_window),
-                    node_filter: &node_filter,
-                    entry,
-                };
-                match load_annotation_file_track(&request) {
-                    Ok(load) => {
-                        replace_track_overlays(
-                            &mut overlays,
-                            &file_track_key(&id),
-                            load.track.annotations,
-                        );
-                        if let Some(window) = load.loaded_window {
-                            annotation_file_loaded_windows.insert(id, window);
-                        } else {
-                            annotation_file_loaded_windows.remove(&id);
-                        }
-                        annotation_file_index_available.insert(id, load.index_available);
-                    }
-                    Err(err) => {
-                        messages.push_warn(format!("{err}"));
-                        explorer_state.deactivate_annotation_file(&id);
-                        remove_track_overlays(&mut overlays, &file_track_key(&id));
-                        annotation_file_index_available.remove(&id);
-                        annotation_file_loaded_windows.remove(&id);
-                    }
+                if annotation_loads.has_current_request_covering(id, visible_window) {
+                    continue;
                 }
+                let context = AnnotationFileActivationContext {
+                    history_ref,
+                    collection_name: &current_collection_name,
+                    block_group: bg,
+                    block_graph: &block_graph,
+                    query_window: Some(query_window),
+                };
+                annotation_loads.queue_reload(annotation_file_load_spec(&context, entry));
             }
         }
+
+        let visible_window = current_view_coordinate_window(&graph_controller);
+        while let Some(result) = annotation_loads.try_receive() {
+            apply_annotation_load_result(
+                result,
+                &mut annotation_loads,
+                AnnotationLoadView {
+                    collection_name: &current_collection_name,
+                    selected_block_group_id: explorer_state.selected_block_group_id,
+                    block_group: current_block_group.as_ref(),
+                    history_ref,
+                    visible_window,
+                    explorer: &explorer,
+                },
+                AnnotationLoadUiState {
+                    explorer_state: &mut explorer_state,
+                    overlays: &mut overlays,
+                    index_available: &mut annotation_file_index_available,
+                    loaded_windows: &mut annotation_file_loaded_windows,
+                    messages: &mut messages,
+                },
+            );
+        }
+        annotation_loads.dispatch_pending();
 
         // Calculate frame delta for smooth animations
         let now = Instant::now();
@@ -1449,6 +1518,19 @@ pub fn view_block_group(
             };
             if let Some(error) = search_error.as_deref() {
                 status_message = format!("search: {error}");
+            }
+            if let Some(status) = annotation_loads.status() {
+                let spinner = ['|', '/', '-', '\\'][((status.elapsed.as_millis() / 100) % 4) as usize];
+                let loading_message = if status.waiting {
+                    format!("{spinner} Waiting to load annotation {}", status.display_name)
+                } else {
+                    format!(
+                        "{spinner} Loading annotation {} ({:.1}s)",
+                        status.display_name,
+                        status.elapsed.as_secs_f32()
+                    )
+                };
+                status_message = format!("{loading_message} | {status_message}");
             }
             if !search_state.focused && focus_zone != FocusZone::Canvas {
                 status_message.push_str(" | *g* search");
@@ -1693,22 +1775,16 @@ pub fn view_block_group(
             }
         }
 
-        // After the first draw the viewport is populated. Activate every available
-        // annotation file (one that resolves on disk) the same way DB-derived groups are
-        // auto-activated above; a file that fails to resolve is skipped rather than
-        // blocking the rest. Already-active files are left untouched here — panning past
-        // their loaded window is handled separately below.
+        // After the first draw the viewport is populated. Queue file loads without blocking
+        // input or redraws; the worker reports missing files and continues with the others.
         if !annotation_files_loaded && let Some(block_group) = current_block_group.as_ref() {
             let query_window =
                 current_view_coordinate_window(&graph_controller).map(expand_query_window);
             if query_window.is_some() {
                 let context = AnnotationFileActivationContext {
-                    conn,
                     history_ref,
-                    workspace,
                     collection_name: &current_collection_name,
-                    sample_name: block_group.sample_name.as_str(),
-                    block_group_name: Some(&block_group.name),
+                    block_group,
                     block_graph: &block_graph,
                     query_window,
                 };
@@ -1716,11 +1792,11 @@ pub fn view_block_group(
                     &context,
                     &explorer.data.annotation_files,
                     &mut explorer_state,
-                    &mut overlays,
-                    &mut annotation_file_index_available,
-                    &mut annotation_file_loaded_windows,
+                    &annotation_file_index_available,
+                    &mut annotation_loads,
                 );
                 annotation_files_loaded = true;
+                annotation_loads.dispatch_pending();
                 annotation_groups_loaded_after_draw = true;
             }
         }
@@ -1787,6 +1863,8 @@ pub fn view_block_group(
             tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or(Duration::ZERO)
+        } else if annotation_loads.is_busy() {
+            Duration::from_millis(75)
         } else {
             Duration::from_secs(3600)
         };
