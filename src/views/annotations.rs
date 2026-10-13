@@ -876,13 +876,25 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_core::{HashId, Sha256Hash, Strand};
+    use gen_annotations::{
+        AnnotationTranslationContext, parse_gff_annotation, translate_gff_annotation,
+    };
+    use gen_core::{
+        HashId, Sha256Hash, Strand, Workspace,
+        region::{Region, normalize_user_search_region},
+    };
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
-        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+        accession::Accession,
+        annotations::{
+            Annotation, AnnotationFileChecksumOverrides, add_annotation, add_annotation_file,
+        },
         block_group::BlockGroup,
+        db::GraphConnection,
         file_types::FileTypes,
+        interval_tree::IntervalTreeSource as _,
         operations::commit_operation_summary,
+        region::{ResolvedGenRegion, resolve_annotation},
         sample::Sample,
     };
     use noodles::{bgzf, core::Position, csi, tabix};
@@ -890,9 +902,9 @@ mod tests {
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
-        annotation_index_is_tabix, load_annotation_file_track, load_annotations_for_group,
-        load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
-        spans_whole_block_group,
+        annotation_index_is_tabix, annotation_reader, load_annotation_file_track,
+        load_annotations_for_group, load_indexed_annotation_bytes, parse_translated_bed,
+        remote_annotation_cache_path, resolve_local_annotation_file_path, spans_whole_block_group,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -1745,5 +1757,279 @@ mod tests {
                 .any(|annotation| annotation.name == "gene-a0001"),
             "retained annotation should contain gene-a0001"
         );
+    }
+
+    fn resolve_translated_annotation_region(
+        query: &str,
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        annotation: &Annotation,
+        accession: &Accession,
+    ) -> ResolvedGenRegion {
+        let user_region = Region::parse(query).expect("should parse relative annotation query");
+        let region = normalize_user_search_region(&user_region);
+        let annotation_length = annotation
+            .length(conn)
+            .expect("should read translated annotation length");
+        let (start, end) = region
+            .resolve_relative_bounds(0, annotation_length)
+            .expect("should resolve normalized annotation bounds");
+        ResolvedGenRegion::from_annotation(conn, annotation, accession, start, end)
+            .expect("should construct a region from the translated annotation")
+            .find_graph_positions(conn, workspace, 0, 0)
+            .expect("should locate translated annotation graph positions")
+    }
+
+    #[test]
+    fn test_file_annotation_relative_region_uses_shared_resolver() {
+        let context = setup_gen_on_disk();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        let fasta_path = fasta_path
+            .to_str()
+            .expect("should encode fixture FASTA path")
+            .to_string();
+        let gff_path = gff_path
+            .to_str()
+            .expect("should encode fixture GFF path")
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .expect("should import simple FASTA fixture");
+        add_annotation_file(
+            &context,
+            &gff_path,
+            Some("gff3"),
+            None,
+            Some("simple.gff"),
+            Some("add simple GFF annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should add simple GFF fixture");
+
+        let conn = context.graph().conn();
+        let entry = load_annotation_file_entries(conn, None)
+            .into_iter()
+            .find(|entry| entry.name.as_deref() == Some("simple.gff"))
+            .expect("should find fixture annotation entry");
+        let block_group = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find fixture block group");
+        let selected_file_path =
+            resolve_local_annotation_file_path(context.workspace(), &entry.file_addition)
+                .expect("should resolve selected fixture annotation path");
+        let translation_context = AnnotationTranslationContext {
+            conn,
+            workspace: context.workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let mut file_annotation = parse_gff_annotation(
+            "gene-a0001",
+            annotation_reader(Some(&selected_file_path), None)
+                .expect("should open selected simple GFF fixture"),
+        )
+        .expect("should match gene-a0001 from simple GFF fixture");
+        let file_accession = translate_gff_annotation(
+            &translation_context,
+            &mut file_annotation,
+            annotation_reader(Some(&selected_file_path), None)
+                .expect("should reopen selected simple GFF fixture"),
+        )
+        .expect("should translate gene-a0001 from simple GFF fixture");
+        assert_eq!(file_annotation.name, "gene-a0001");
+        assert_eq!(file_accession.name, "gene-a0001");
+
+        let negative_point = resolve_translated_annotation_region(
+            "gene-a0001:-3",
+            conn,
+            context.workspace(),
+            &file_annotation,
+            &file_accession,
+        );
+        assert_eq!((negative_point.start, negative_point.end), (-3, -3));
+        assert_eq!(
+            negative_point
+                .start_anchors
+                .as_ref()
+                .expect("should have negative-point start anchors")
+                .len(),
+            1
+        );
+        assert_eq!(
+            negative_point
+                .end_anchors
+                .as_ref()
+                .expect("should have negative-point end anchors")
+                .len(),
+            1
+        );
+        assert_eq!(
+            negative_point
+                .start_anchors
+                .as_ref()
+                .expect("should have negative-point start anchor")[0]
+                .coordinate(),
+            1
+        );
+        assert_eq!(
+            negative_point
+                .end_anchors
+                .as_ref()
+                .expect("should have negative-point end anchor")[0]
+                .coordinate(),
+            1
+        );
+
+        let zero_point = resolve_translated_annotation_region(
+            "gene-a0001:0",
+            conn,
+            context.workspace(),
+            &file_annotation,
+            &file_accession,
+        );
+        assert_eq!((zero_point.start, zero_point.end), (0, 0));
+        assert_eq!(
+            (
+                zero_point
+                    .start_anchors
+                    .as_ref()
+                    .expect("should have zero-point start anchor")[0]
+                    .coordinate(),
+                zero_point
+                    .end_anchors
+                    .as_ref()
+                    .expect("should have zero-point end anchor")[0]
+                    .coordinate()
+            ),
+            (4, 4)
+        );
+
+        let positive_slice = resolve_translated_annotation_region(
+            "gene-a0001:5-8",
+            conn,
+            context.workspace(),
+            &file_annotation,
+            &file_accession,
+        );
+        assert_eq!((positive_slice.start, positive_slice.end), (4, 8));
+        assert_eq!(
+            (
+                positive_slice
+                    .start_anchors
+                    .as_ref()
+                    .expect("should have positive-slice start anchor")[0]
+                    .coordinate(),
+                positive_slice
+                    .end_anchors
+                    .as_ref()
+                    .expect("should have positive-slice end anchor")[0]
+                    .coordinate()
+            ),
+            (8, 12)
+        );
+
+        let mut reverse_annotation = parse_gff_annotation(
+            "gene-a0002",
+            annotation_reader(Some(&selected_file_path), None)
+                .expect("should reopen selected simple GFF fixture"),
+        )
+        .expect("should parse reverse-strand gene-a0002 from fixture");
+        let reverse_accession = translate_gff_annotation(
+            &translation_context,
+            &mut reverse_annotation,
+            annotation_reader(Some(&selected_file_path), None)
+                .expect("should reopen selected simple GFF fixture"),
+        )
+        .expect("should translate reverse-strand gene-a0002 from fixture");
+        assert_eq!(reverse_annotation.name, "gene-a0002");
+        assert_eq!(reverse_accession.name, "gene-a0002");
+        let reverse_interval_tree = reverse_annotation
+            .cached_interval_tree()
+            .expect("should cache translated reverse-strand intervals");
+        let reverse_strands = reverse_interval_tree
+            .iter()
+            .map(|interval| interval.value.strand)
+            .collect::<Vec<_>>();
+        assert!(
+            !reverse_strands.is_empty(),
+            "should translate at least one interval"
+        );
+        assert!(
+            reverse_strands
+                .iter()
+                .all(|strand| *strand == Strand::Reverse),
+            "should preserve reverse strand through GFF translation"
+        );
+        let reverse_point = resolve_translated_annotation_region(
+            "gene-a0002:0",
+            conn,
+            context.workspace(),
+            &reverse_annotation,
+            &reverse_accession,
+        );
+        assert_eq!((reverse_point.start, reverse_point.end), (0, 0));
+        assert_eq!(
+            (
+                reverse_point
+                    .start_anchors
+                    .as_ref()
+                    .expect("should have reverse-point start anchor")[0]
+                    .coordinate(),
+                reverse_point
+                    .end_anchors
+                    .as_ref()
+                    .expect("should have reverse-point end anchor")[0]
+                    .coordinate()
+            ),
+            (4, 4)
+        );
+
+        add_annotation(
+            &context,
+            "test",
+            "gene-persisted",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:4-20",
+        )
+        .expect("should create persisted comparison annotation");
+        for suffix in [":-3", ":0", ":5-8"] {
+            let file_query = format!("gene-a0001{suffix}");
+            let persisted_query = format!("gene-persisted{suffix}");
+            let file_region = resolve_translated_annotation_region(
+                &file_query,
+                conn,
+                context.workspace(),
+                &file_annotation,
+                &file_accession,
+            );
+            let persisted_user_region =
+                Region::parse(&persisted_query).expect("should parse persisted comparison query");
+            let persisted_region = normalize_user_search_region(&persisted_user_region);
+            let persisted =
+                resolve_annotation(&persisted_region, conn, "test", Sample::DEFAULT_NAME)
+                    .expect("should resolve persisted annotation through the model resolver")
+                    .find_graph_positions(conn, context.workspace(), 0, 0)
+                    .expect("should resolve persisted graph positions");
+            assert_eq!(
+                file_region.start_anchors, persisted.start_anchors,
+                "should align file-backed and persisted start anchors for {suffix}"
+            );
+            assert_eq!(
+                file_region.end_anchors, persisted.end_anchors,
+                "should align file-backed and persisted end anchors for {suffix}"
+            );
+        }
     }
 }

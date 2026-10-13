@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 pub use gen_core::region::Region;
 use gen_core::{
     HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
@@ -10,11 +12,12 @@ use thiserror::Error;
 use crate::{
     accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
+    block_group::{BlockGroup, BlockGroupChange, BlockGroupError},
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
     edge::EdgeData,
     errors::PathError,
+    interval_tree::IntervalTreeSource,
     locus::GraphLocus,
     path::Path,
 };
@@ -331,25 +334,16 @@ fn resolve_target(
     region: &Region,
     target: RegionTarget,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let (start, end) = match (region.start, region.end) {
-        (None, None) => (target.anchor_start, target.anchor_end),
-        (Some(start), None) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, target.feature_length)
-            } else {
-                (target.anchor_start + start, target.anchor_end)
-            }
+    let (start, end) = match target.kind {
+        RegionTargetKind::Annotation | RegionTargetKind::Accession => {
+            region.resolve_relative_bounds(target.anchor_start, target.anchor_end)?
         }
-        (Some(start), Some(end)) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, end)
-            } else {
-                (target.anchor_start + start, target.anchor_start + end)
-            }
-        }
-        (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
+        RegionTargetKind::Path | RegionTargetKind::BlockGroup => match (region.start, region.end) {
+            (None, None) => (target.anchor_start, target.anchor_end),
+            (Some(start), None) => (start, target.feature_length),
+            (Some(start), Some(end)) => (start, end),
+            (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
+        },
     };
 
     let out_of_bounds = match target.kind {
@@ -407,7 +401,10 @@ fn target_from_accession(
     {
         return Err(GenRegionError::NotFound(region.name.clone()));
     }
-    let path_length = accession.length(conn)?;
+    let path_length = match &annotation {
+        Some(annotation) => annotation.length(conn)?,
+        None => accession.length(conn)?,
+    };
     Ok(RegionTarget {
         kind,
         block_group,
@@ -480,7 +477,7 @@ impl ResolvedGenRegion {
         end: i64,
     ) -> Result<Self, BlockGroupError> {
         let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id, None)?;
-        let accession_length = accession.length(conn)?;
+        let annotation_length = annotation.length(conn)?;
         Ok(ResolvedGenRegion {
             block_group,
             path: None,
@@ -488,8 +485,8 @@ impl ResolvedGenRegion {
             annotation: Some(annotation.clone()),
             kind: ResolvedRegionKind::Annotation,
             anchor_start: 0,
-            anchor_end: accession_length,
-            feature_length: accession_length,
+            anchor_end: annotation_length,
+            feature_length: annotation_length,
             start,
             end,
             start_anchors: None,
@@ -557,33 +554,33 @@ impl ResolvedGenRegion {
         &self,
         conn: &GraphConnection,
         workspace: &Workspace,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, GenRegionError> {
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, GenRegionError> {
         match self.kind {
             ResolvedRegionKind::Path => {
                 let path = self
                     .path
                     .as_ref()
                     .ok_or_else(|| GenRegionError::NotFound("No path for region".to_string()))?;
-                Ok(path.intervaltree(conn)?)
+                Ok(Arc::new(path.intervaltree(conn)?))
             }
             ResolvedRegionKind::Annotation => {
-                let accession = self.accession.as_ref().ok_or_else(|| {
-                    GenRegionError::NotFound("No accession for annotation".to_string())
+                let annotation = self.annotation.as_ref().ok_or_else(|| {
+                    GenRegionError::NotFound("No annotation for region".to_string())
                 })?;
-                Ok(accession.intervaltree(conn)?)
+                Ok(IntervalTreeSource::intervaltree(annotation, conn)?)
             }
             ResolvedRegionKind::Accession => {
                 let accession = self.accession.as_ref().ok_or_else(|| {
                     GenRegionError::NotFound("No accession for region".to_string())
                 })?;
-                Ok(accession.intervaltree(conn)?)
+                Ok(IntervalTreeSource::intervaltree(accession, conn)?)
             }
-            ResolvedRegionKind::BlockGroup => Ok(BlockGroup::intervaltree_for(
+            ResolvedRegionKind::BlockGroup => Ok(Arc::new(BlockGroup::intervaltree_for(
                 conn,
                 workspace,
                 &self.block_group.id,
                 self.remove_ambiguous_positions,
-            )?),
+            )?)),
         }
     }
 
@@ -717,8 +714,10 @@ impl ResolvedGenRegion {
                 let tree = match tree {
                     Some(tree) => tree,
                     None => {
-                        local_tree = IntervalTreeSource::intervaltree(self, conn, workspace)?;
-                        &local_tree
+                        local_tree = self.intervaltree(conn, workspace).map_err(|error| {
+                            BlockGroupError::ChangeOutOfBounds(error.to_string())
+                        })?;
+                        local_tree.as_ref()
                     }
                 };
                 return BlockGroup::set_up_new_edges(change, tree);
@@ -840,17 +839,6 @@ impl ResolvedGenRegion {
         }
 
         Ok(new_edges)
-    }
-}
-
-impl IntervalTreeSource for ResolvedGenRegion {
-    fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-        workspace: &Workspace,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        ResolvedGenRegion::intervaltree(self, conn, workspace)
-            .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))
     }
 }
 

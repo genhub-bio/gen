@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Range as StdRange};
+use std::{collections::HashMap, ops::Range as StdRange, sync::Arc};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace,
@@ -8,7 +8,7 @@ use gen_core::{
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::params;
+use rusqlite::{Result as SqlResult, Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -18,16 +18,42 @@ use crate::{
     block_group_edge::AugmentedEdgeData,
     db::{GraphConnection, max_rows_per_batch},
     gen_models_capnp::{accession, accession_node},
+    interval_tree::IntervalTreeSource,
     region::ResolvedGenRegion,
 };
 
-#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq, ModelSelect)]
-#[model_select(table = "accessions")]
+#[derive(Clone, Deserialize, Serialize, Debug, ModelSelect)]
+#[model_select(table = "accessions", from_row = accession_from_row)]
 pub struct Accession {
     pub id: HashId,
     pub name: String,
     pub block_group_id: HashId,
     pub parent_accession_id: Option<HashId>,
+    /// Runtime-only interval tree attached by a file annotation translator.
+    #[serde(skip)]
+    #[model_select(skip)]
+    pub cached_interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
+}
+
+impl PartialEq for Accession {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.block_group_id == other.block_group_id
+            && self.parent_accession_id == other.parent_accession_id
+    }
+}
+
+impl Eq for Accession {}
+
+fn accession_from_row(row: &Row) -> SqlResult<Accession> {
+    Ok(Accession {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        block_group_id: row.get(2)?,
+        parent_accession_id: row.get(3)?,
+        cached_interval_tree: None,
+    })
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -103,6 +129,7 @@ impl<'a> Capnp<'a> for Accession {
             name,
             block_group_id,
             parent_accession_id,
+            cached_interval_tree: None,
         }
     }
 }
@@ -334,6 +361,7 @@ impl Accession {
                 name: new.name.clone(),
                 block_group_id: new.block_group_id,
                 parent_accession_id: new.parent_accession_id,
+                cached_interval_tree: None,
             },
             Err(rusqlite::Error::SqliteFailure(err, _details))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -398,6 +426,7 @@ impl Accession {
                     name: new.name.clone(),
                     block_group_id: new.block_group_id,
                     parent_accession_id: new.parent_accession_id,
+                    cached_interval_tree: None,
                 };
                 let nodes = Self::get_nodes_by_id(conn, &accession.id, None);
                 if nodes.is_empty() {
@@ -501,6 +530,10 @@ impl Accession {
     }
 
     pub fn length(&self, conn: &GraphConnection) -> Result<i64, AccessionError> {
+        if let Some(interval_tree) = IntervalTreeSource::cached_interval_tree(self) {
+            return intervaltree_length(interval_tree);
+        }
+
         let nodes = Self::get_nodes_by_id(conn, &self.id, None);
         if nodes.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
@@ -515,12 +548,35 @@ impl Accession {
     pub fn intervaltree(
         &self,
         conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AccessionError> {
-        Ok(self
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, AccessionError> {
+        IntervalTreeSource::intervaltree(self, conn)
+    }
+}
+
+impl IntervalTreeSource for Accession {
+    type Error = AccessionError;
+
+    fn cached_interval_tree(&self) -> Option<&Arc<IntervalTree<i64, NodeIntervalBlock>>> {
+        self.cached_interval_tree.as_ref()
+    }
+
+    fn set_cached_interval_tree(
+        &mut self,
+        interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
+    ) {
+        self.cached_interval_tree = interval_tree;
+    }
+
+    fn load_interval_tree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, Self::Error> {
+        let interval_tree = self
             .blocks(conn)?
             .into_iter()
             .map(|block| (block.start..block.end, block))
-            .collect())
+            .collect::<IntervalTree<i64, NodeIntervalBlock>>();
+        Ok(Arc::new(interval_tree))
     }
 }
 
@@ -597,7 +653,9 @@ impl AccessionSpan {
     }
 }
 
-fn intervaltree_length(tree: &IntervalTree<i64, NodeIntervalBlock>) -> Result<i64, AccessionError> {
+pub(crate) fn intervaltree_length(
+    tree: &IntervalTree<i64, NodeIntervalBlock>,
+) -> Result<i64, AccessionError> {
     if let Some(end_block) = tree
         .query_point(i64::MAX - 2)
         .map(|entry| &entry.value)
@@ -607,7 +665,9 @@ fn intervaltree_length(tree: &IntervalTree<i64, NodeIntervalBlock>) -> Result<i6
     }
 
     tree.iter_sorted()
-        .map(|entry| &entry.value.end)
+        .map(|entry| &entry.value)
+        .filter(|block| !is_terminal(block.node_id))
+        .map(|block| &block.end)
         .last()
         .copied()
         .ok_or(AccessionError::MissingIntervalTreeLength)
@@ -820,6 +880,7 @@ mod tests {
             name: "test_accession".to_string(),
             block_group_id: HashId::pad_str(150),
             parent_accession_id: Some(HashId::pad_str(100)),
+            cached_interval_tree: None,
         };
 
         let mut message = TypedBuilder::<accession::Owned>::new_default();
@@ -837,6 +898,7 @@ mod tests {
             name: "test_accession_2".to_string(),
             block_group_id: HashId::pad_str(151),
             parent_accession_id: None,
+            cached_interval_tree: None,
         };
 
         let mut message = TypedBuilder::<accession::Owned>::new_default();
@@ -909,6 +971,7 @@ mod tests {
                 name: "test".to_string(),
                 block_group_id,
                 parent_accession_id: None,
+                cached_interval_tree: None,
             }]
         );
     }

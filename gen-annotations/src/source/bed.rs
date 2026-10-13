@@ -1,0 +1,697 @@
+//! BED parsing and translation adapters.
+//!
+//! The source of the BED file comes from the caller, this file works off a readable input.
+//! The readers here carry out parsing that input, matching identifiers, and returning an
+//! Annotation object for use downstream.
+
+use std::{
+    io::{Cursor, Read},
+    sync::Arc,
+};
+
+use gen_core::{HashId, NodeIntervalBlock, Strand, is_terminal};
+use gen_models::{
+    accession::Accession,
+    annotations::{Annotation, AnnotationExtra, BedExtra},
+    interval_tree::IntervalTreeSource as _,
+};
+use intervaltree::IntervalTree;
+use noodles::bed;
+
+use super::{AnnotationTranslationContext, FileAnnotationError};
+use crate::translate::bed::translate_bed;
+
+/// Parse one BED name's matching records into the existing annotation model.
+pub fn parse_bed_annotation<R>(
+    identifier: impl Into<String>,
+    reader: R,
+) -> Result<Annotation, FileAnnotationError>
+where
+    R: Read,
+{
+    let identifier = identifier.into();
+    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
+    let mut record = bed::Record::<6>::default();
+    let mut records = Vec::new();
+    while bed_reader.read_record(&mut record)? != 0 {
+        if matching_bed_record(&record, &identifier) {
+            records.push(record.clone());
+        }
+    }
+    parse_bed_annotation_records(identifier, records)
+}
+
+/// Build a BED annotation from records already matched by an upstream lookup provider.
+pub fn parse_bed_annotation_records<I>(
+    identifier: impl Into<String>,
+    records: I,
+) -> Result<Annotation, FileAnnotationError>
+where
+    I: IntoIterator<Item = bed::Record<6>>,
+{
+    let identifier = identifier.into();
+    let records: Vec<_> = records.into_iter().collect();
+    let first = records.first().ok_or(FileAnnotationError::Empty)?;
+    let fields = bed_other_fields(first);
+    let bed = BedExtra {
+        score: Some(first.score()?.to_string()),
+        thick_start: fields.first().and_then(|value| value.parse().ok()),
+        thick_end: fields.get(1).and_then(|value| value.parse().ok()),
+        item_rgb: fields.get(2).cloned(),
+        block_count: fields.get(3).and_then(|value| value.parse().ok()),
+        block_sizes: fields
+            .get(4)
+            .map(|value| parse_bed_list(value))
+            .filter(|values| !values.is_empty()),
+        block_starts: fields
+            .get(5)
+            .map(|value| parse_bed_list(value))
+            .filter(|values| !values.is_empty()),
+        other_fields: fields.get(6..).unwrap_or_default().to_vec(),
+    };
+    let id = HashId::convert_str(&identifier);
+    Ok(Annotation {
+        id,
+        name: identifier,
+        group: "bed".to_string(),
+        accession_id: id,
+        cached_interval_tree: None,
+        extra: Some(AnnotationExtra {
+            bed: Some(bed),
+            ..AnnotationExtra::default()
+        }),
+    })
+}
+
+/// Translate matching BED records and cache their graph intervals on the annotation.
+///
+/// Returns the associated accession.
+pub fn translate_bed_annotation<R>(
+    context: &AnnotationTranslationContext<'_>,
+    annotation: &mut Annotation,
+    reader: R,
+) -> Result<Accession, FileAnnotationError>
+where
+    R: Read,
+{
+    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
+    let mut record = bed::Record::<6>::default();
+    let mut records = Vec::new();
+    while bed_reader.read_record(&mut record)? != 0 {
+        if matching_bed_record(&record, &annotation.name) {
+            records.push(record.clone());
+        }
+    }
+    translate_bed_annotation_records(context, annotation, records)
+}
+
+/// Translate selected BED records and cache their graph intervals on the annotation.
+///
+/// Returns the associated accession.
+pub fn translate_bed_annotation_records<I>(
+    context: &AnnotationTranslationContext<'_>,
+    annotation: &mut Annotation,
+    records: I,
+) -> Result<Accession, FileAnnotationError>
+where
+    I: IntoIterator<Item = bed::Record<6>>,
+{
+    let mut records = records.into_iter().peekable();
+    let feature_strand = records
+        .peek()
+        .and_then(|record| record.strand().ok().flatten())
+        .map(|strand| match strand {
+            bed::feature::record::Strand::Forward => Strand::Forward,
+            bed::feature::record::Strand::Reverse => Strand::Reverse,
+        })
+        .unwrap_or(Strand::Unknown);
+    let mut input = Vec::new();
+    {
+        let mut writer = bed::io::Writer::<6, _>::new(&mut input);
+        for record in records {
+            writer.write_record(&record)?;
+        }
+    }
+    let mut translated = Vec::new();
+    translate_bed(
+        context.conn,
+        context.workspace,
+        context.collection_name,
+        context.sample_name,
+        context.history_ref,
+        Cursor::new(input),
+        &mut translated,
+    )
+    .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
+    // Use the source orientation for feature order because translated records already include
+    // the path orientation in their output strand.
+    let interval_tree = Arc::new(translated_bed_interval_tree(&translated, feature_strand)?);
+    annotation.set_cached_interval_tree(Some(Arc::clone(&interval_tree)));
+    let mut accession = Accession {
+        id: annotation.accession_id,
+        name: annotation.name.clone(),
+        block_group_id: context.block_group_id,
+        parent_accession_id: None,
+        cached_interval_tree: None,
+    };
+    accession.set_cached_interval_tree(Some(interval_tree));
+    Ok(accession)
+}
+
+fn matching_bed_record(record: &bed::Record<6>, identifier: &str) -> bool {
+    record
+        .name()
+        .and_then(|name| std::str::from_utf8(name.as_ref()).ok())
+        .is_some_and(|name| name.eq_ignore_ascii_case(identifier))
+}
+
+fn bed_other_fields(record: &bed::Record<6>) -> Vec<String> {
+    record
+        .other_fields()
+        .iter()
+        .map(|value| String::from_utf8_lossy(value.as_ref()).into_owned())
+        .collect()
+}
+
+fn parse_bed_list(value: &str) -> Vec<i64> {
+    value
+        .split(',')
+        .filter(|item| !item.is_empty())
+        .filter_map(|item| item.parse().ok())
+        .collect()
+}
+
+fn translated_bed_interval_tree(
+    translated: &[u8],
+    feature_strand: Strand,
+) -> Result<IntervalTree<i64, NodeIntervalBlock>, FileAnnotationError> {
+    let mut reader = bed::io::reader::Builder::<6>.build_from_reader(Cursor::new(translated));
+    let mut record = bed::Record::<6>::default();
+    let mut blocks = Vec::new();
+    while reader.read_record(&mut record)? != 0 {
+        let node_name = String::from_utf8_lossy(record.reference_sequence_name().as_ref());
+        let node_id = HashId::try_from(node_name.as_ref())
+            .map_err(|_| FileAnnotationError::InvalidNode(node_name.to_string()))?;
+        if is_terminal(node_id) {
+            continue;
+        }
+        let start = record
+            .feature_start()
+            .map_err(|error| FileAnnotationError::Translation(error.to_string()))?
+            .get() as i64
+            - 1;
+        let end = record
+            .feature_end()
+            .ok_or_else(|| FileAnnotationError::Translation("BED record has no end".to_string()))?
+            .map_err(|error| FileAnnotationError::Translation(error.to_string()))?
+            .get() as i64;
+        if end <= start {
+            continue;
+        }
+        let strand = match record.strand() {
+            Ok(Some(bed::feature::record::Strand::Forward)) => Strand::Forward,
+            Ok(Some(bed::feature::record::Strand::Reverse)) => Strand::Reverse,
+            Ok(None) | Err(_) => Strand::Unknown,
+        };
+        let block = NodeIntervalBlock {
+            node_id,
+            start: 0,
+            end: end - start,
+            sequence_start: start,
+            sequence_end: end,
+            strand,
+        };
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        return Err(FileAnnotationError::Empty);
+    }
+    if feature_strand == Strand::Reverse {
+        blocks.reverse();
+    }
+    let mut position = 0;
+    Ok(blocks
+        .into_iter()
+        .map(|mut block| {
+            let length = block.end - block.start;
+            block.start = position;
+            block.end = position + length;
+            position = block.end;
+            (block.start..block.end, block)
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::Cursor, sync::Arc};
+
+    use gen_core::{HashId, Strand};
+    use gen_models::{
+        interval_tree::IntervalTreeSource as _, region::ResolvedGenRegion, sample::Sample,
+    };
+
+    use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
+    use crate::{
+        test_helpers::{create_forward_test_block_group, create_reverse_test_block_group},
+        translate::bed::translate_bed,
+    };
+
+    fn translate_bed_input(conn: &gen_models::db::GraphConnection, input: &str) -> String {
+        let mut translated = Vec::new();
+        translate_bed(
+            conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate BED input");
+        String::from_utf8(translated).expect("should write UTF-8 BED output")
+    }
+
+    #[test]
+    fn test_bed_annotation_matches_identifier_and_preserves_metadata() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find test block group");
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
+        let mut annotation = parse_bed_annotation(
+            "abc123.1",
+            File::open(path).expect("should open simple BED fixture"),
+        )
+        .expect("should parse the matching BED record");
+        assert_eq!(annotation.name, "abc123.1");
+        assert_eq!(annotation.id, HashId::convert_str("abc123.1"));
+        assert_eq!(annotation.accession_id, annotation.id);
+        assert_eq!(annotation.group, "bed");
+        let metadata = annotation
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.bed.as_ref())
+            .expect("should preserve BED metadata");
+        assert_eq!(metadata.score.as_deref(), Some("0"));
+        assert_eq!(metadata.block_count, Some(3));
+        assert_eq!(
+            metadata.block_sizes.as_deref(),
+            Some([102, 188, 129].as_slice())
+        );
+        assert_eq!(
+            metadata.block_starts.as_deref(),
+            Some([0, 3508, 4691].as_slice())
+        );
+        let accession = translate_bed_annotation(
+            &context,
+            &mut annotation,
+            File::open(path).expect("should reopen simple BED fixture"),
+        )
+        .expect("should translate the matching BED record");
+        assert_eq!(accession.id, annotation.accession_id);
+        assert_eq!(
+            annotation
+                .intervaltree(&conn)
+                .expect("should get translated BED tree")
+                .iter()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_bed_annotation_preserves_negative_strand_coordinates() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find test block group");
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
+        let mut annotation = parse_bed_annotation(
+            "xyz.1",
+            File::open(path).expect("should open simple BED fixture"),
+        )
+        .expect("should parse the negative-strand BED record");
+        assert_eq!(annotation.name, "xyz.1");
+
+        let accession = translate_bed_annotation(
+            &context,
+            &mut annotation,
+            File::open(path).expect("should reopen simple BED fixture"),
+        )
+        .expect("should translate the negative-strand BED record");
+        assert_eq!(accession.name, "xyz.1");
+        let annotation_tree = annotation
+            .intervaltree(&conn)
+            .expect("should get the cached BED annotation tree");
+        let accession_tree = accession
+            .intervaltree(&conn)
+            .expect("should get the cached BED accession tree");
+        assert!(Arc::ptr_eq(&annotation_tree, &accession_tree));
+        assert!(Arc::ptr_eq(
+            &annotation_tree,
+            annotation
+                .cached_interval_tree()
+                .expect("should find the cached BED annotation tree")
+        ));
+        assert!(Arc::ptr_eq(
+            &accession_tree,
+            accession
+                .cached_interval_tree()
+                .expect("should find the cached BED accession tree")
+        ));
+        assert_eq!(accession.length(&conn).expect("should get BED length"), 3);
+        let cloned_annotation = annotation.clone();
+        assert!(Arc::ptr_eq(
+            &annotation_tree,
+            cloned_annotation
+                .cached_interval_tree()
+                .expect("should clone the cached BED annotation tree")
+        ));
+        let cloned_accession = accession.clone();
+        assert!(Arc::ptr_eq(
+            &accession_tree,
+            cloned_accession
+                .cached_interval_tree()
+                .expect("should clone the cached BED accession tree")
+        ));
+
+        let intervals: Vec<_> = annotation_tree.iter().collect();
+        assert_eq!(intervals.len(), 1, "should emit one node interval");
+
+        let interval = intervals[0];
+        assert_eq!(interval.range, 0..3);
+        assert_eq!(
+            interval.value.node_id,
+            HashId::try_from("b59698a422128d20462c44537b2d23ef")
+                .expect("should parse the translated node id")
+        );
+        assert_eq!(interval.value.start, 0);
+        assert_eq!(interval.value.end, 3);
+        assert_eq!(interval.value.sequence_start, 5);
+        assert_eq!(interval.value.sequence_end, 8);
+        assert_eq!(interval.value.strand, Strand::Reverse);
+
+        // Stored path node and reverse-oriented BED feature, with one ruler column per base:
+        //   index tens:  00000000001111111
+        //   index ones:  01234567890123456
+        //   node DNA:    ATCGATCGATCGATCGA
+        //   edge strand: +++++++++++++++++
+        //   node span:   ^----------------^ [0,17)
+        //   feature -:        ^--^ BED [5,8) selects raw TCG.
+        //
+        //   feature offset: 012
+        //   feature DNA:    CGA
+        //   interior [1,3):  ^-^ = GA; it maps to raw [5,7) TC.
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 3)
+            .expect("should resolve the negative-strand BED feature");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build the negative-strand BED graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"CGA",
+            "negative-strand BED retrieval should reverse-complement raw path TCG"
+        );
+
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 1, 3)
+            .expect("should resolve the negative-strand BED interior");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build the trimmed negative-strand BED graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"GA",
+            "negative-strand BED interior [1,3) should map to raw [5,7) and fetch GA"
+        );
+    }
+
+    #[test]
+    fn test_translates_reverse_split_bed_to_exact_node_local_spans() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        // Path edges traverse B then A; edge endpoint strands at B/A are -. Feature strand is +.
+        //   path index:  01234567890123456
+        //   path nodes:  BBBBBBBBAAAAAAAAA
+        //   path DNA:    TGCAACGGTAACCGGTT
+        //   feature:            ^^ [7,9) = GT
+        //
+        // Stored node B:
+        //   index:     012345678
+        //   DNA:       CCGTTGCAT
+        //   span:      ^-------^ [0,8)
+        //   selected:  ^ [0,1) = C
+        //
+        // Stored node A:
+        //   index:     012345678
+        //   DNA:       AACCGGTTA
+        //   span:      ^--------^ [0,9)
+        //   selected:          ^ [8,9) = A
+        // Edge strand - maps stored C to G and A to T; feature strand + emits fragments B then A.
+        // BED [7,9) maps to path [7,9), producing B [0,1) (-) then A [8,9) (-).
+        // This explains orientation; the assertion checks emitted records, not fetched DNA.
+        let input = format!("{}\t7\t9\tcross-boundary\t0\t+\n", block_group.name);
+        let translated = translate_bed_input(&conn, &input);
+        assert_eq!(
+            translated,
+            format!(
+                "{node_b_id}\t0\t1\tcross-boundary\t0\t-\n{node_a_id}\t8\t9\tcross-boundary\t0\t-\n"
+            ),
+            "positive-coordinate BED fragments should clip to each reverse-oriented node in path order"
+        );
+    }
+
+    #[test]
+    fn test_resolves_minus_strand_bed_from_forward_and_reverse_path_dna() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let forward = create_forward_test_block_group(&conn);
+        let reverse = create_reverse_test_block_group(&conn);
+
+        // The same minus-strand feature is fetched through both fixture edge traversals.
+        for ((block_group, node_a_id, node_b_id), name, expected_sequence) in [
+            (forward, "forward", b"GGTTTGCAA".as_slice()),
+            (reverse, "reverse", b"GTTACCGTT".as_slice()),
+        ] {
+            let context = AnnotationTranslationContext {
+                conn: &conn,
+                workspace: crate::test_helpers::test_workspace(),
+                collection_name: "test",
+                sample_name: Sample::DEFAULT_NAME,
+                block_group_id: block_group.id,
+                history_ref: None,
+            };
+            let identifier = format!("minus-{name}");
+            let input = format!("{name}\t3\t12\t{identifier}\t0\t-\n");
+            let mut annotation =
+                parse_bed_annotation(identifier.as_str(), Cursor::new(input.as_bytes()))
+                    .expect("should parse minus-strand BED feature");
+            let accession =
+                translate_bed_annotation(&context, &mut annotation, Cursor::new(input.as_bytes()))
+                    .expect("should translate minus-strand BED feature");
+            let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 9)
+                .expect("should resolve minus-strand BED feature");
+            let graph_locus = resolved
+                .graph_locus(&conn, crate::test_helpers::test_workspace())
+                .expect("should build minus-strand BED graph locus");
+            assert_eq!(
+                graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+                expected_sequence,
+                "minus-strand BED sequence should be fetched in feature orientation on the {name} path"
+            );
+            assert_eq!(
+                graph_locus
+                    .slices
+                    .iter()
+                    .map(|slice| slice.block.node_id)
+                    .collect::<Vec<_>>(),
+                [node_a_id, node_b_id],
+                "minus-strand BED slices should follow feature order on the {name} path"
+            );
+
+            for (start, end, expected_base) in [
+                (0, 1, &expected_sequence[..1]),
+                (8, 9, &expected_sequence[8..9]),
+            ] {
+                let resolved =
+                    ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, start, end)
+                        .expect("should resolve one minus-strand BED base");
+                let graph_locus = resolved
+                    .graph_locus(&conn, crate::test_helpers::test_workspace())
+                    .expect("should build one-base minus-strand BED graph locus");
+                assert_eq!(
+                    graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+                    expected_base,
+                    "one-base BED slices should retain feature orientation on the {name} path"
+                );
+            }
+
+            // These are two separate path inputs; both features have strand -.
+            // Case 1: edge endpoints at B/A +.
+            //   feature nodes:   AAAABBBBB
+            //   feature offset:  012345678
+            //   feature DNA:     GGTTTGCAA
+            //   query [1,3):      ^-^ = GT
+            //   query [2,6):       ^---^ = TTTG
+            // Case 2: edge endpoints at B/A -.
+            //   feature nodes:   AAAABBBBB
+            //   feature offset:  012345678
+            //   feature DNA:     GTTACCGTT
+            //   query [1,3):      ^-^ = TT
+            //   query [2,6):       ^---^ = TACC
+            // [1,3) checks an interior slice of A; [2,6) trims across A/B. These independent
+            // queries overlap at offset 2 (T), included in both results.
+            for (start, end, expected_forward, expected_reverse) in [
+                (1, 3, b"GT".as_slice(), b"TT".as_slice()),
+                (2, 6, b"TTTG".as_slice(), b"TACC".as_slice()),
+            ] {
+                let expected_subsequence = if name == "forward" {
+                    expected_forward
+                } else {
+                    expected_reverse
+                };
+                let resolved =
+                    ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, start, end)
+                        .expect("should resolve a minus-strand BED subrange");
+                let graph_locus = resolved
+                    .graph_locus(&conn, crate::test_helpers::test_workspace())
+                    .expect("should build the trimmed minus-strand BED graph locus");
+                assert_eq!(
+                    graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+                    expected_subsequence,
+                    "minus-strand BED subrange {start}..{end} should trim in feature orientation on the {name} path"
+                );
+                if (start, end) == (2, 6) {
+                    let actual_slices = graph_locus
+                        .slices
+                        .iter()
+                        .map(|slice| {
+                            (
+                                slice.block.node_id,
+                                slice.block.sequence_start,
+                                slice.block.sequence_end,
+                                slice.start,
+                                slice.end,
+                                slice.strand,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let expected_slices = if name == "forward" {
+                        vec![
+                            (node_a_id, 0, 4, 0, 2, Strand::Reverse),
+                            (node_b_id, 3, 8, 3, 5, Strand::Reverse),
+                        ]
+                    } else {
+                        vec![
+                            (node_a_id, 5, 9, 2, 4, Strand::Forward),
+                            (node_b_id, 0, 5, 0, 2, Strand::Forward),
+                        ]
+                    };
+                    assert_eq!(
+                        actual_slices, expected_slices,
+                        "boundary-crossing BED subrange should trim node-local slices in feature order"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_multipart_minus_bed_cache_uses_source_feature_orientation() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        let input = format!(
+            "{}\t2\t4\tminus-multipart\t0\t-\n{}\t10\t12\tminus-multipart\t0\t-\n",
+            block_group.name, block_group.name
+        );
+        let mut translated = Vec::new();
+        translate_bed(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate multipart BED records");
+        assert_eq!(
+            String::from_utf8(translated).expect("should write UTF-8 BED output"),
+            format!(
+                "{node_b_id}\t4\t6\tminus-multipart\t0\t+\n{node_a_id}\t5\t7\tminus-multipart\t0\t+\n"
+            ),
+            "translated BED fragments should stay in positive path order"
+        );
+
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_id: block_group.id,
+            history_ref: None,
+        };
+        let mut annotation = parse_bed_annotation("minus-multipart", Cursor::new(input.as_bytes()))
+            .expect("should parse multipart minus-strand BED records");
+        let accession =
+            translate_bed_annotation(&context, &mut annotation, Cursor::new(input.as_bytes()))
+                .expect("should cache multipart minus-strand BED records");
+        let tree = annotation
+            .intervaltree(&conn)
+            .expect("should read multipart BED cache");
+        let mut spans = tree
+            .iter()
+            .map(|entry| (entry.range.clone(), entry.value))
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|(range, _)| range.start);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(range, block)| (
+                    range.clone(),
+                    block.node_id,
+                    block.sequence_start,
+                    block.sequence_end,
+                    block.strand,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (0..2, node_a_id, 5, 7, Strand::Forward),
+                (2..4, node_b_id, 4, 6, Strand::Forward),
+            ],
+            "minus-strand cache fragments should follow source 5-prime order even when composed output strand is forward"
+        );
+        let resolved = ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, 0, 4)
+            .expect("should resolve multipart minus-strand BED annotation");
+        let graph_locus = resolved
+            .graph_locus(&conn, crate::test_helpers::test_workspace())
+            .expect("should build multipart minus-strand BED graph locus");
+        assert_eq!(
+            graph_locus.sequence(&conn, crate::test_helpers::test_workspace()),
+            b"GTTG",
+            "multipart minus-strand BED cache should retrieve features from the 5-prime end"
+        );
+    }
+}

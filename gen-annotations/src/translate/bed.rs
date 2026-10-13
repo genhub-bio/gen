@@ -101,13 +101,30 @@ where
                 .map(|name| String::from_utf8_lossy(name.as_ref()).to_string());
             let score = record.score().ok();
             let strand = record.strand().ok().flatten();
-            for (overlap, (node, _strand)) in projection.iter_overlaps(&range) {
-                let overlap_start = max(start, overlap.start) as usize;
-                let overlap_end = min(end, overlap.end) as usize;
+            let feature_strand = strand.map(|strand| match strand {
+                bed::feature::record::Strand::Forward => Strand::Forward,
+                bed::feature::record::Strand::Reverse => Strand::Reverse,
+            });
+            let mut overlaps = projection.iter_overlaps(&range).collect::<Vec<_>>();
+            overlaps.sort_by_key(|(overlap, _)| overlap.start);
+            for (path_interval, (node, traversal_strand)) in overlaps {
+                let overlap = max(start, path_interval.start)..min(end, path_interval.end);
+                let node_interval = super::project_overlap_to_node(
+                    *node,
+                    path_interval,
+                    &overlap,
+                    *traversal_strand,
+                );
                 let mut out_record = bed::feature::RecordBuf::<6>::builder()
                     .set_reference_sequence_name(format!("{nid}", nid = node.node_id))
-                    .set_feature_start(Position::try_from(overlap_start + 1).unwrap())
-                    .set_feature_end(Position::try_from(overlap_end).unwrap())
+                    .set_feature_start(
+                        Position::try_from(node_interval.start as usize + 1)
+                            .expect("should convert the stored-node start to a BED position"),
+                    )
+                    .set_feature_end(
+                        Position::try_from(node_interval.end as usize)
+                            .expect("should convert the stored-node end to a BED position"),
+                    )
                     .set_other_fields(other_fields.clone());
                 if let Some(name) = &name {
                     out_record = out_record.set_name(name.clone());
@@ -115,8 +132,16 @@ where
                 if let Some(score) = score {
                     out_record = out_record.set_score(score);
                 }
-                if let Some(strand) = strand {
-                    out_record = out_record.set_strand(strand);
+                if let Some(feature_strand) = feature_strand {
+                    let strand = super::compose_strand(feature_strand, *traversal_strand);
+                    let output_strand = match strand {
+                        Strand::Forward => Some(bed::feature::record::Strand::Forward),
+                        Strand::Reverse => Some(bed::feature::record::Strand::Reverse),
+                        Strand::Unknown | Strand::ImportantButUnknown => None,
+                    };
+                    if let Some(output_strand) = output_strand {
+                        out_record = out_record.set_strand(output_strand);
+                    }
                 }
                 let out_record = out_record.build();
                 bed_writer.write_feature_record(&out_record)?;
@@ -128,12 +153,30 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, path::PathBuf};
+    use std::{fs::File, io::Cursor, path::PathBuf};
 
+    use gen_core::Strand;
     use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
 
     use super::translate_bed;
-    use crate::test_helpers::{get_connection, setup_test_data, test_workspace};
+    use crate::test_helpers::{
+        create_sliced_test_block_group, get_connection, setup_test_data, test_workspace,
+    };
+
+    fn translate_bed_input(conn: &gen_models::db::GraphConnection, input: &str) -> String {
+        let mut translated = Vec::new();
+        translate_bed(
+            conn,
+            test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate BED input");
+        String::from_utf8(translated).expect("should write UTF-8 BED output")
+    }
 
     #[test]
     fn translates_coordinates_to_nodes() {
@@ -164,7 +207,7 @@ mod tests {
                 "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
                 "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
                 "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t0\t6\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
 
@@ -187,7 +230,7 @@ mod tests {
                 "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
                 "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
                 "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t0\t6\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
     }
@@ -234,8 +277,28 @@ mod tests {
                 "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
                 "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
                 "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t0\t6\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
+    }
+
+    #[test]
+    fn test_translates_sliced_graph_nodes_to_stored_sequence_coordinates() {
+        let conn = get_connection();
+        setup_test_data(&conn);
+
+        for (name, traversal_strand, output_strand) in [
+            ("sliced-forward", Strand::Forward, "+"),
+            ("sliced-reverse", Strand::Reverse, "-"),
+        ] {
+            let (block_group, node_id) =
+                create_sliced_test_block_group(&conn, name, traversal_strand);
+            let input = format!("{}\t1\t3\tsliced-feature\t0\t+\n", block_group.name);
+            assert_eq!(
+                translate_bed_input(&conn, &input),
+                format!("{node_id}\t4\t6\tsliced-feature\t0\t{output_strand}\n"),
+                "BED overlaps should map to the backing sequence span on {name}"
+            );
+        }
     }
 }

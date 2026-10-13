@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gen_core::{
     DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
@@ -20,6 +23,7 @@ use crate::{
     file_types::FileTypes,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     history::{HistoryStore, dolt::DoltHistoryStore},
+    interval_tree::IntervalTreeSource,
     operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
     region::GenRegionError,
     select::query_models,
@@ -87,7 +91,7 @@ impl<'a> Capnp<'a> for AnnotationGroup {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
 #[model_select(table = "annotations", from_row = annotation_from_row)]
 pub struct Annotation {
     pub id: HashId,
@@ -95,9 +99,25 @@ pub struct Annotation {
     #[model_select(column = "annotation_group")]
     pub group: String,
     pub accession_id: HashId,
+    /// Runtime-only interval tree attached by a file annotation translator.
+    #[serde(skip)]
+    #[model_select(skip)]
+    pub cached_interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
     #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
 }
+
+impl PartialEq for Annotation {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.group == other.group
+            && self.accession_id == other.accession_id
+            && self.extra == other.extra
+    }
+}
+
+impl Eq for Annotation {}
 
 fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
     Ok(Annotation {
@@ -105,6 +125,7 @@ fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
         name: row.get(1)?,
         group: row.get(2)?,
         accession_id: row.get(3)?,
+        cached_interval_tree: None,
         extra: deserialize_annotation_extra(row.get(4)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
         })?,
@@ -245,6 +266,7 @@ impl<'a> Capnp<'a> for Annotation {
             name,
             group,
             accession_id,
+            cached_interval_tree: None,
             extra,
         }
     }
@@ -302,6 +324,7 @@ impl Annotation {
             name: annotation.name.to_string(),
             group: group.to_string(),
             accession_id: annotation.accession_id,
+            cached_interval_tree: None,
             extra: annotation.extra.cloned(),
         })
     }
@@ -325,6 +348,7 @@ impl Annotation {
             name: name.to_string(),
             group: group.to_string(),
             accession_id: *accession_id,
+            cached_interval_tree: None,
             extra: extra.cloned(),
         })
     }
@@ -553,7 +577,34 @@ impl Annotation {
     pub fn intervaltree(
         &self,
         conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, AnnotationError> {
+        IntervalTreeSource::intervaltree(self, conn)
+    }
+
+    pub fn length(&self, conn: &GraphConnection) -> Result<i64, AnnotationError> {
+        let interval_tree = self.intervaltree(conn)?;
+        crate::accession::intervaltree_length(&interval_tree).map_err(Into::into)
+    }
+}
+
+impl IntervalTreeSource for Annotation {
+    type Error = AnnotationError;
+
+    fn cached_interval_tree(&self) -> Option<&Arc<IntervalTree<i64, NodeIntervalBlock>>> {
+        self.cached_interval_tree.as_ref()
+    }
+
+    fn set_cached_interval_tree(
+        &mut self,
+        interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
+    ) {
+        self.cached_interval_tree = interval_tree;
+    }
+
+    fn load_interval_tree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, Self::Error> {
         let accession = Accession::select(conn)
             .id(self.accession_id)
             .load()?
@@ -892,9 +943,9 @@ pub fn add_annotation_file(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs, io::Read as _};
+    use std::{collections::HashSet, fs, io::Read as _, sync::Arc};
 
-    use gen_core::{HashId, region::RegionResolutionError};
+    use gen_core::{HashId, NodeIntervalBlock, Strand, region::RegionResolutionError};
 
     use super::*;
     use crate::{
@@ -924,6 +975,15 @@ mod tests {
                 BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
             let annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
+            assert!(annotation.cached_interval_tree().is_none());
+            assert!(
+                annotation
+                    .intervaltree(&conn)
+                    .expect("should load the persisted annotation tree")
+                    .query(0..5)
+                    .next()
+                    .is_some()
+            );
 
             let region = Region::parse("MREB").unwrap();
             let resolved = Annotation::resolve(&region, &conn, "test", "test").unwrap();
@@ -1780,5 +1840,120 @@ mod tests {
         );
         assert_ne!(index_asset.logical_path.as_deref(), Some(index_path));
         assert!(!index_asset.uri.contains(index_path));
+    }
+
+    #[test]
+    fn test_annotation_and_accession_interval_tree_caches_are_runtime_only() {
+        let conn = get_connection(None).unwrap();
+        let annotation_id = HashId::convert_str("cached-annotation");
+        let accession_id = HashId::convert_str("cached-accession");
+        let block_group_id = HashId::convert_str("cached-block-group");
+        let tree: IntervalTree<i64, NodeIntervalBlock> = [(
+            0..4,
+            NodeIntervalBlock {
+                node_id: HashId::convert_str("cached-node"),
+                start: 0,
+                end: 4,
+                sequence_start: 3,
+                sequence_end: 7,
+                strand: Strand::Reverse,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let shared_tree = Arc::new(tree);
+        let mut accession = Accession {
+            id: accession_id,
+            name: "cached-accession".to_string(),
+            block_group_id,
+            parent_accession_id: None,
+            cached_interval_tree: None,
+        };
+        accession.set_cached_interval_tree(Some(Arc::clone(&shared_tree)));
+        let mut annotation = Annotation {
+            id: annotation_id,
+            name: "cached-annotation".to_string(),
+            group: "test".to_string(),
+            accession_id,
+            cached_interval_tree: None,
+            extra: None,
+        };
+        annotation.set_cached_interval_tree(Some(Arc::clone(&shared_tree)));
+
+        assert!(
+            Accession::select(&conn)
+                .id(accession_id)
+                .load()
+                .expect("should query absent accession")
+                .is_empty()
+        );
+        assert!(
+            Annotation::select(&conn)
+                .id(annotation_id)
+                .load()
+                .expect("should query absent annotation")
+                .is_empty()
+        );
+        let annotation_tree = annotation
+            .intervaltree(&conn)
+            .expect("should return cached annotation tree without database rows");
+        let accession_tree = accession
+            .intervaltree(&conn)
+            .expect("should return cached accession tree without database rows");
+        assert!(Arc::ptr_eq(&annotation_tree, &shared_tree));
+        assert!(Arc::ptr_eq(&accession_tree, &shared_tree));
+        assert_eq!(
+            accession
+                .length(&conn)
+                .expect("should get cached accession length"),
+            4
+        );
+
+        let cloned_annotation = annotation.clone();
+        let cloned_accession = accession.clone();
+        assert!(Arc::ptr_eq(
+            &annotation_tree,
+            cloned_annotation
+                .cached_interval_tree()
+                .expect("should clone annotation cache")
+        ));
+        assert!(Arc::ptr_eq(
+            &accession_tree,
+            cloned_accession
+                .cached_interval_tree()
+                .expect("should clone accession cache")
+        ));
+
+        let mut uncached_annotation = annotation.clone();
+        uncached_annotation.set_cached_interval_tree(None);
+        let mut uncached_accession = accession.clone();
+        uncached_accession.set_cached_interval_tree(None);
+        assert_eq!(annotation, uncached_annotation);
+        assert_eq!(accession, uncached_accession);
+        assert_eq!(
+            serde_json::to_value(&annotation).expect("should serialize annotation"),
+            serde_json::to_value(&uncached_annotation)
+                .expect("should serialize uncached annotation")
+        );
+        assert_eq!(
+            serde_json::to_value(&accession).expect("should serialize accession"),
+            serde_json::to_value(&uncached_accession).expect("should serialize uncached accession")
+        );
+        assert!(
+            serde_json::from_value::<Annotation>(
+                serde_json::to_value(&annotation).expect("should serialize annotation")
+            )
+            .expect("should deserialize annotation")
+            .cached_interval_tree()
+            .is_none()
+        );
+        assert!(
+            serde_json::from_value::<Accession>(
+                serde_json::to_value(&accession).expect("should serialize accession")
+            )
+            .expect("should deserialize accession")
+            .cached_interval_tree()
+            .is_none()
+        );
     }
 }
