@@ -1613,6 +1613,7 @@ name = "gen-tui"
 version = "0.3.1"
 dependencies = [
  "crossterm",
+ "gen-graph",
  "itertools 0.14.0",
  "log",
  "petgraph 0.6.5",

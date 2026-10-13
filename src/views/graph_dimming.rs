@@ -6,9 +6,9 @@
 //! is loaded. Each verdict comes from one node's own edges, and is only drawn once the side it
 //! depends on is complete (see [`GraphSource::is_frontier`]):
 //!
-//! - An edge is pruned when a newer sibling with the same chromosome index leaves the same source
-//!   node, or when it is an edit-site marker. Every outgoing edge of a node leaves from its end
-//!   port, so once that side is complete all the siblings are loaded.
+//! - Projected routes use the survival decisions made before junction contraction. A connection
+//!   stays lit if any chromatid still uses it. Eager graphs without projection compare outgoing
+//!   records at each source once that side is complete.
 //! - A node is dimmed when its incoming side is complete and every incoming edge is pruned or
 //!   comes from a dimmed node. A node with an unloaded incoming edge stays lit, since the missing
 //!   edge may be the one that reaches it.
@@ -33,6 +33,30 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_tui::{crawl::GraphSource, graph_view::GraphViewState};
 use petgraph::{Direction, visit::NodeIndexable as _};
 
+use crate::views::lazy_graph_source::{EagerOrProjectedSource, ProjectedGraphSource};
+
+pub trait RouteSurvival {
+    fn surviving_routes(&self) -> Option<&GenGraph>;
+}
+
+impl RouteSurvival for gen_tui::crawl::EagerSource {
+    fn surviving_routes(&self) -> Option<&GenGraph> {
+        None
+    }
+}
+
+impl RouteSurvival for ProjectedGraphSource {
+    fn surviving_routes(&self) -> Option<&GenGraph> {
+        Some(self.surviving_routes())
+    }
+}
+
+impl RouteSurvival for EagerOrProjectedSource {
+    fn surviving_routes(&self) -> Option<&GenGraph> {
+        self.surviving_routes()
+    }
+}
+
 /// The dimming decided so far for one viewer's graph, mirrored into its `GraphViewState`
 /// lowlights. Viewers keep one next to their `LayoutEngine` and call [`Self::sync`] whenever the
 /// crawl may have grown the graph.
@@ -52,10 +76,20 @@ impl GraphDimming {
     /// Dim whatever became decidable since the last call, given what `source` has loaded into
     /// `graph`, and return whether any lowlight in `view_state` changed. Cheap when nothing
     /// changed: it only rechecks the nodes still waiting on unloaded edges.
-    pub fn sync<S: GraphSource<GenGraph>>(
+    pub fn sync<S: GraphSource<GenGraph> + RouteSurvival>(
         &mut self,
         graph: &GenGraph,
         source: &S,
+        view_state: &mut GraphViewState<GraphNode>,
+    ) -> bool {
+        self.sync_with_routes(graph, source, source.surviving_routes(), view_state)
+    }
+
+    pub fn sync_with_routes<S: GraphSource<GenGraph>>(
+        &mut self,
+        graph: &GenGraph,
+        source: &S,
+        surviving_routes: Option<&GenGraph>,
         view_state: &mut GraphViewState<GraphNode>,
     ) -> bool {
         let mut changed = false;
@@ -82,7 +116,18 @@ impl GraphDimming {
             .collect();
         for node in judged_sources {
             self.pending_sources.remove(&node);
-            for edge in superseded_edges(graph, node) {
+            let superseded = if let Some(surviving_routes) = surviving_routes {
+                graph
+                    .edges(node)
+                    .filter(|(edge_source, target, _)| {
+                        !surviving_routes.contains_edge(*edge_source, *target)
+                    })
+                    .map(|(edge_source, target, _)| (edge_source, target))
+                    .collect()
+            } else {
+                superseded_edges(graph, node)
+            };
+            for edge in superseded {
                 if self.pruned_edges.insert(edge) {
                     view_state.dim_edge(edge);
                     candidates.push(edge.1);
@@ -190,7 +235,7 @@ mod tests {
     use gen_tui::{graph_view::GraphViewState, layout_engine::LayoutEngine};
 
     use super::GraphDimming;
-    use crate::views::lazy_graph_source::{SqlGraphSource, seed_block_group_graph};
+    use crate::views::lazy_graph_source::{ProjectedGraphSource, seed_block_group_graph};
 
     /// `(source label, source coordinate, target label, target coordinate)`, where "start" and
     /// "end" name the path sentinels.
@@ -328,7 +373,7 @@ mod tests {
         let anchor = whole_node("n20");
         seed.add_node(anchor);
         let mut engine =
-            LayoutEngine::new_with_source(seed, SqlGraphSource::new(db_path, block_group_id));
+            LayoutEngine::new_with_source(seed, ProjectedGraphSource::new(db_path, block_group_id));
         engine
             .activate_batch_containing(anchor, 12)
             .expect("should claim a batch around the jump target");
@@ -377,7 +422,7 @@ mod tests {
         let mut seed = GenGraph::new();
         seed.add_node(start);
         let mut engine =
-            LayoutEngine::new_with_source(seed, SqlGraphSource::new(db_path, block_group_id));
+            LayoutEngine::new_with_source(seed, ProjectedGraphSource::new(db_path, block_group_id));
         engine
             .activate_batch_containing(start, 100)
             .expect("should claim the whole graph as one batch");
@@ -429,7 +474,7 @@ mod tests {
             "a circular group should seed on x"
         );
         let mut engine =
-            LayoutEngine::new_with_source(seed, SqlGraphSource::new(db_path, block_group_id));
+            LayoutEngine::new_with_source(seed, ProjectedGraphSource::new(db_path, block_group_id));
         engine
             .activate_batch_containing(anchor, 10)
             .expect("should claim the whole circle as one batch");

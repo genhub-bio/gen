@@ -1,5 +1,6 @@
 ---
 source: src/views/gen_graph_widget.rs
+assertion_line: 3810
 expression: "render_annotated_variant_fixture(\"hbb_reference_centering\", \"hbb_region.fa\",\n\"hbb_region.gff3\", \"hbb_variants.vcf\", \"HG00096\", 2600,)"
 ---
 "                                                                                                                                            "
@@ -22,9 +23,9 @@ expression: "render_annotated_variant_fixture(\"hbb_reference_centering\", \"hbb
 "                                                                                                                                            "
 "                                                                                                                                            "
 "                                                                                                                                            "
-"  ╭╌A─╮     ╭─G─╮              ╭─A─╮           ╭─C─╮       ╭─G─╮                           ╭─G─╮       ╭─A─╮     ╭─A─╮     ╭─AT─╮   ╭─A─╮   "
-"  ┊   │     │   │              │   │           │   │       │   │                           │   │       │   │     │   │     │    │   │   │   "
-"G───T─┴─C.A─╯╌T╌╰─TTGCAA.AGGAG─╯╌G╌╰─ATAT.ACTT─┴─A─┴─T.T.G─╯╌C╌╰─CCTGAA.GCAGC.CTGCCC.GTCAG─╯╌A╌╰─T.T.A─╯╌G╌╰─T.C─╯╌G╌╰─G.A─╯╌╌╌╌╰─A─┴─T─┴─A."
+"  ╭─A─╮     ╭─G─╮              ╭─A─╮           ╭─C─╮       ╭─G─╮                           ╭─G─╮       ╭─A─╮     ╭─A─╮     ╭─AT─╮   ╭─A─╮   "
+"  │   │     │   │              │   │           │   │       │   │                           │   │       │   │     │   │     │    │   │   │   "
+"G─┴─T─┴─C.A─╯╌T╌╰─TTGCAA.AGGAG─╯╌G╌╰─ATAT.ACTT─┴─A─┴─T.T.G─╯╌C╌╰─CCTGAA.GCAGC.CTGCCC.GTCAG─╯╌A╌╰─T.T.A─╯╌G╌╰─T.C─╯╌G╌╰─G.A─┴────┴─A─┴─T─┴─A."
 "                  <HBB exon 3]   ═   ═HBB-201═   ═   ═════   ═   ═════════════════════════   ═   ══]                                        "
 "                  <═══════════                                   <HBB exon 2] <HBB exon 1═   ═   ═════                                      "
 "                  ═══════════]                                   ═════════HBB CDS═════════   ═   ══]                                        "

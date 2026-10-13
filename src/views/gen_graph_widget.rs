@@ -464,7 +464,7 @@ impl<'a> SequenceSource for (&'a GraphConnection, &'a Workspace) {
 /// (`Connection` isn't `Clone`); the clone reopens lazily on its own first use.
 pub struct PathSequenceSource {
     db_path: PathBuf,
-    /// The branch the connection is opened on; see `SqlGraphSource`'s field of the same name.
+    /// The branch the connection is opened on; see `ProjectedGraphSource`'s field of the same name.
     branch: Option<String>,
     conn: std::sync::Mutex<Option<GraphConnection>>,
 }
@@ -1450,10 +1450,17 @@ fn build_gen_graph_engine<R>(
     graph: GenGraph,
     levels: Vec<(VisualDetail, R, GapSizes)>,
 ) -> GraphEngineSetup<R> {
+    let projection = crate::views::junction_projection::project_junctions(&graph);
+    let graph = projection.graph;
     let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
     let mut view_state = GraphViewState::default();
     // The graph never grows, so one sync decides all of its dimming.
-    GraphDimming::default().sync(&graph, &EagerSource, &mut view_state);
+    GraphDimming::default().sync_with_routes(
+        &graph,
+        &EagerSource,
+        Some(&projection.surviving_routes),
+        &mut view_state,
+    );
     apply_zoom_level(&mut view_state, starting_zoom_level(&graph), &levels);
     let mut engine = LayoutEngine::new(graph);
     if let Some(start_node) = start_node {
@@ -1473,7 +1480,7 @@ type GraphEngineSetupLazy<R, S> = (
 
 /// Like [`build_gen_graph_engine`], but for a `graph` that is only seeded (e.g. just its
 /// starting anchor) and grows lazily through `source` as the crawl reaches unloaded nodes -
-/// see [`crate::views::lazy_graph_source::SqlGraphSource`]. The seed can't tell how many nodes
+/// see [`crate::views::lazy_graph_source::ProjectedGraphSource`]. The seed can't tell how many nodes
 /// the graph has, so the caller picks `zoom_index` (see [`starting_zoom_level`]). The view
 /// state starts undimmed: callers keep a [`GraphDimming`] and sync it whenever the crawl may
 /// have grown `engine.graph()`, which any render can do.
@@ -1489,6 +1496,7 @@ where
     let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
     let mut view_state = GraphViewState::default();
     let mut engine = LayoutEngine::new_with_source(graph, source);
+    engine.set_batch_preparer(crate::views::lazy_graph_source::prepare_projected_batch::<S>);
     if let Some(start_node) = start_node {
         engine.set_preferred_initial_anchor(start_node);
     }
@@ -2412,7 +2420,7 @@ mod tests {
         );
     }
 
-    /// Renders through `SqlGraphSource` (the same lazy-crawl path the live TUI viewer uses for
+    /// Renders through `ProjectedGraphSource` (the same lazy-crawl path the live TUI viewer uses for
     /// every non-historical block group - see `views::block_group::load_block_group_graph`),
     /// not the eager `BlockGroup::get_graph`, which the viewers no longer use for this case.
     fn render_gfa_snapshot(gfa_fixture: &str, collection_name: &str) -> String {
@@ -2425,7 +2433,7 @@ mod tests {
         use crate::{
             imports::gfa::import_gfa,
             test_helpers::setup_gen_on_disk,
-            views::lazy_graph_source::{SqlGraphSource, seed_block_group_graph},
+            views::lazy_graph_source::{ProjectedGraphSource, seed_block_group_graph},
         };
 
         let context = setup_gen_on_disk();
@@ -2436,7 +2444,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(collection_name, Sample::DEFAULT_NAME, "", None);
         let db_path = PathBuf::from(conn.path().expect("graph database has no file path"));
-        let source = SqlGraphSource::new(db_path, block_group_id);
+        let source = ProjectedGraphSource::new(db_path, block_group_id);
         let seed = seed_block_group_graph(conn, &block_group_id);
         let (mut engine, zoom_levels, mut view_state) = create_annotated_gen_graph_engine_lazy(
             seed,

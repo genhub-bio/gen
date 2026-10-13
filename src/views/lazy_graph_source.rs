@@ -4,15 +4,86 @@
 //! because it is the shared `GenGraph`-viewer glue every binding sits on top of - see
 //! `gen_graph_widget`.
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{collections::HashSet, path::PathBuf};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{db::GraphConnection, edge::Edge, port_crawl::PortCrawler};
-use gen_tui::crawl::{EagerSource, GraphSource};
+use gen_models::{
+    db::GraphConnection,
+    edge::Edge,
+    port_crawl::{PortCrawler, PortGraphSource},
+};
+use gen_tui::crawl::{
+    GraphCursor, GraphSource, PreferredWormholeDoors, StructuralSubgraph, crawl_batch, subgraph_for,
+};
 use petgraph::Direction;
 
-use crate::get_connection_for_branch;
+use crate::{get_connection_for_branch, views::junction_projection::project_junctions};
+
+/// Prepare the complete projected window before the layout engine claims any of its nodes.
+/// The source resolves raw junctions while `crawl_batch` asks for adjacency; the returned
+/// edges and doors therefore refer only to stable projected identities.
+pub fn prepare_projected_batch<S: GraphSource<GenGraph>>(
+    anchor: GraphNode,
+    node_budget: usize,
+    graph: &mut GenGraph,
+    source: &mut S,
+    is_claimed: &dyn Fn(GraphNode) -> bool,
+    preferred_doors: &PreferredWormholeDoors<GraphNode>,
+) -> Result<StructuralSubgraph<GraphNode>, String> {
+    let members = crawl_batch(
+        anchor,
+        node_budget,
+        &mut GraphCursor::new(graph, source),
+        is_claimed,
+    )?;
+    Ok(subgraph_for(anchor, members, graph, preferred_doors))
+}
+
+/// Omit routes that the shared projection marked superseded, then discard nodes reached only
+/// through those routes once their incoming side is complete.
+fn prune_projected_graph(
+    projected: &GenGraph,
+    surviving_routes: &GenGraph,
+    is_frontier: impl Fn(GraphNode, Direction) -> bool,
+) -> GenGraph {
+    let mut hidden = HashSet::new();
+    loop {
+        let before = hidden.len();
+        for node in projected.nodes() {
+            if node.node_id == PATH_START_NODE_ID || is_frontier(node, Direction::Incoming) {
+                continue;
+            }
+            if projected
+                .neighbors_directed(node, Direction::Incoming)
+                .all(|predecessor| {
+                    !surviving_routes.contains_edge(predecessor, node)
+                        || hidden.contains(&predecessor)
+                })
+            {
+                hidden.insert(node);
+            }
+        }
+        if hidden.len() == before {
+            break;
+        }
+    }
+    let mut retained = GenGraph::new();
+    for node in projected.nodes() {
+        if !hidden.contains(&node) {
+            retained.add_node(node);
+        }
+    }
+    for (source, target, records) in projected.all_edges() {
+        if !hidden.contains(&source)
+            && !hidden.contains(&target)
+            && surviving_routes.contains_edge(source, target)
+        {
+            retained.add_edge(source, target, records.clone());
+        }
+    }
+    retained
+}
 
 /// The fixed `(node_id, 0, 0)` value a `PATH_START`/`PATH_END` sentinel always carries (see
 /// `GenGraphController::new` and how `Edge::create` records a `PATH_START`/`PATH_END` endpoint's own
@@ -104,7 +175,7 @@ fn discard_circular_marker_and_sentinels(graph: &mut GenGraph) {
 ///
 /// A circular block group cannot open on `PATH_START` the same way: once its attachment edges
 /// are discarded (see `discard_circular_marker_and_sentinels`, which every
-/// [`SqlGraphSource::expand_frontier`] call applies), `PATH_START` has no edges left to crawl
+/// [`ProjectedGraphSource::expand_frontier`] call applies), `PATH_START` has no edges left to crawl
 /// from at all. So this seeds with the genome's real first node instead, found by loading
 /// `PATH_START`'s outgoing side up front rather than guessing at its identity (a `GraphNode`
 /// is a slice whose bounds depend on the other edges on its node - see `AGENTS.md`'s
@@ -144,7 +215,7 @@ pub fn seed_block_group_graph(conn: &GraphConnection, block_group_id: &HashId) -
 /// Loads the start's successors, and when there is exactly one, completes both of its sides.
 /// The probe then holds a second data node whenever the block group has one reachable from the
 /// start, since it either follows the start directly or attaches to the only node that does.
-/// `prune` matches the viewer's source (see [`SqlGraphSource::new_pruned`]), so edges it would
+/// `prune` matches the viewer's source (see [`ProjectedGraphSource::new_pruned`]), so edges it would
 /// never load don't carve the node. At most three port lookups, whatever the graph's size.
 pub fn probe_block_group_start(
     conn: &GraphConnection,
@@ -173,73 +244,37 @@ pub fn probe_block_group_start(
 /// Grows a block group's `GenGraph` from SQLite as a crawl pushes past its frontier, one port
 /// at a time (see [`PortCrawler`]).
 ///
-/// Caches one open `GraphConnection` per `SqlGraphSource` instance, opened lazily on the first
-/// `expand_frontier` call and reused for the lifetime of a single crawl/view session - opening
-/// a fresh connection per call re-runs full migrations (including a `dolt_status` query) on
-/// every call, which made first-render of even a modest window painfully slow. This is
-/// safe because nothing in gen-tui's synchronous, single-threaded render loop (or the
-/// `render_gfa_snapshot` test helper in `gen_graph_widget.rs`, the only other caller) requires
-/// `Send` or `Clone` on this type - gen-python's own per-operation connection pattern
-/// (`gen-python/src/python_api/jupyter_widget.rs`) is unrelated and unaffected by this change.
-#[derive(Debug)]
-pub struct SqlGraphSource {
+/// Keep the raw graph paired with the fallible port source. Only the projected graph is passed
+/// to the layout engine; junctions and their pruning provenance stay here.
+#[derive(Clone, Debug)]
+pub struct ProjectedGraphSource {
     db_path: PathBuf,
-    /// The branch the connection is opened on. A fresh connection starts on the repository's
-    /// default branch, so a viewer plotting a graph from another branch must pin it here.
     branch: Option<String>,
     block_group_id: HashId,
-    /// Which ports of this block group are already in the graph. It describes the one
-    /// `GenGraph` this source grows, which is why a `LayoutEngine` owns and clones the two
-    /// together.
-    crawler: PortCrawler,
-    /// Whether this block group is circular, determined once (see
-    /// [`block_group_is_circular`]) and cached - `None` until the first `expand_frontier` call.
+    prune: bool,
+    raw_graph: GenGraph,
+    port_source: Option<PortGraphSource>,
     is_circular: Option<bool>,
-    /// The connection opened on the first `expand_frontier` call, reused thereafter. Wrapped in
-    /// a `Mutex` purely to make `SqlGraphSource` itself `Sync` - `rusqlite::Connection` holds a
-    /// `RefCell`-backed statement cache and so is `Send` but not `Sync` (see gen-python's
-    /// `jupyter_widget.rs`, whose `#[pyclass]` types must be both to survive ipykernel moving
-    /// them between its cell-execution thread pool and its asyncio ioloop thread). Every access
-    /// here goes through `&mut self` already, so this never actually contends - `get_mut`
-    /// reaches the connection directly, bypassing the lock.
-    connection: Mutex<Option<GraphConnection>>,
+    surviving_routes: GenGraph,
 }
 
-/// A `GraphConnection` can't itself be cloned (it wraps a live `rusqlite::Connection`), so a
-/// clone starts with no connection and opens its own lazily on its own first `expand_frontier`
-/// call - safe because nothing about the connection is observable state (see this struct's
-/// own doc on why it's cached at all).
-impl Clone for SqlGraphSource {
-    fn clone(&self) -> Self {
-        Self {
-            db_path: self.db_path.clone(),
-            branch: self.branch.clone(),
-            block_group_id: self.block_group_id,
-            crawler: self.crawler.clone(),
-            is_circular: self.is_circular,
-            connection: Mutex::new(None),
-        }
-    }
-}
-
-impl SqlGraphSource {
+impl ProjectedGraphSource {
     pub fn new(db_path: PathBuf, block_group_id: HashId) -> Self {
         Self {
             db_path,
             branch: None,
             block_group_id,
-            crawler: PortCrawler::new(block_group_id, false),
+            prune: false,
+            raw_graph: GenGraph::new(),
+            port_source: None,
             is_circular: None,
-            connection: Mutex::new(None),
+            surviving_routes: GenGraph::new(),
         }
     }
 
-    /// Like [`Self::new`], but never loads an edge `BlockGroup::prune_graph` would remove, so
-    /// pruned/retired edit-site edges (and anything only reachable through one) never enter the
-    /// crawled graph. This is what backs gen-python's `show_history=False`.
     pub fn new_pruned(db_path: PathBuf, block_group_id: HashId) -> Self {
         Self {
-            crawler: PortCrawler::new(block_group_id, true),
+            prune: true,
             ..Self::new(db_path, block_group_id)
         }
     }
@@ -249,73 +284,149 @@ impl SqlGraphSource {
         Self { branch, ..self }
     }
 
-    /// The block of `node_id` holding `coordinate`, added to `graph` as frontier if the crawl
-    /// hasn't reached it yet (see `PortCrawler::locate`). `None` on a connection or query
-    /// failure too, since the viewer then simply can't go there.
+    pub(crate) fn surviving_routes(&self) -> &GenGraph {
+        &self.surviving_routes
+    }
+
+    fn ensure_source(&mut self, graph: &GenGraph) -> Result<(), String> {
+        if self.port_source.is_none() {
+            let connection = get_connection_for_branch(&self.db_path, self.branch.as_deref())
+                .map_err(|error| error.to_string())?;
+            self.is_circular = Some(block_group_is_circular(&connection, &self.block_group_id));
+            self.raw_graph = graph.clone();
+            self.port_source = Some(PortGraphSource::new(connection, self.block_group_id, false));
+        }
+        Ok(())
+    }
+
+    fn refresh_projection(&mut self, graph: &mut GenGraph) {
+        let mut projection = project_junctions(&self.raw_graph);
+        if self.is_circular == Some(true) {
+            discard_circular_marker_and_sentinels(&mut projection.graph);
+            discard_circular_marker_and_sentinels(&mut projection.surviving_routes);
+        }
+        self.surviving_routes = projection.surviving_routes;
+        if self.prune {
+            *graph = prune_projected_graph(
+                &projection.graph,
+                &self.surviving_routes,
+                |node, direction| {
+                    self.port_source
+                        .as_ref()
+                        .is_some_and(|source| source.is_frontier(node, direction))
+                },
+            );
+        } else {
+            *graph = projection.graph;
+        }
+    }
+
+    fn resolve_junction_frontier(&mut self) -> Result<(), String> {
+        let source = self
+            .port_source
+            .as_mut()
+            .expect("should have initialized port source");
+        loop {
+            let junctions: Vec<_> = self
+                .raw_graph
+                .nodes()
+                .filter(|node| {
+                    !gen_core::is_terminal(node.node_id)
+                        && node.sequence_start == node.sequence_end
+                        && (source.is_frontier(*node, Direction::Incoming)
+                            || source.is_frontier(*node, Direction::Outgoing))
+                })
+                .collect();
+            if junctions.is_empty() {
+                return Ok(());
+            }
+            source
+                .expand_frontier(&mut self.raw_graph, &junctions)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    /// Add a backing-node position to the paired raw graph, then expose its projected slice.
     pub fn locate(
         &mut self,
         graph: &mut GenGraph,
         node_id: HashId,
         coordinate: i64,
     ) -> Option<GraphNode> {
-        let connection_slot = self
-            .connection
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if connection_slot.is_none() {
-            *connection_slot =
-                get_connection_for_branch(&self.db_path, self.branch.as_deref()).ok();
+        self.ensure_source(graph).ok()?;
+        let located = self
+            .port_source
+            .as_mut()?
+            .locate(&mut self.raw_graph, node_id, coordinate)
+            .ok()??;
+        if located.sequence_start == located.sequence_end && !gen_core::is_terminal(located.node_id)
+        {
+            self.resolve_junction_frontier().ok()?;
+            let mut adjacent: Vec<_> = self
+                .raw_graph
+                .neighbors_directed(located, Direction::Outgoing)
+                .chain(
+                    self.raw_graph
+                        .neighbors_directed(located, Direction::Incoming),
+                )
+                .filter(|node| node.sequence_start != node.sequence_end)
+                .collect();
+            adjacent.sort();
+            self.refresh_projection(graph);
+            return adjacent.into_iter().find(|node| graph.contains_node(*node));
         }
-        let conn = connection_slot.as_ref()?;
-        self.crawler
-            .locate(conn, graph, node_id, coordinate)
-            .ok()
-            .flatten()
+        self.refresh_projection(graph);
+        Some(located)
     }
 }
 
-impl GraphSource<GenGraph> for SqlGraphSource {
+impl GraphSource<GenGraph> for ProjectedGraphSource {
+    type Error = String;
+
     fn is_frontier(&self, node: GraphNode, direction: Direction) -> bool {
-        !self.crawler.is_complete(&node, direction)
+        self.port_source
+            .as_ref()
+            .is_none_or(|source| source.is_frontier(node, direction))
     }
 
-    /// A best-effort no-op on a connection or query failure - the nodes simply stay frontier,
-    /// since gen-tui's `GraphSource` contract has no error channel of its own.
-    fn expand_frontier(&mut self, graph: &mut GenGraph, frontier: &[GraphNode]) {
-        let connection_slot = self
-            .connection
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if connection_slot.is_none() {
-            *connection_slot =
-                get_connection_for_branch(&self.db_path, self.branch.as_deref()).ok();
-        }
-        let Some(conn) = connection_slot.as_ref() else {
-            return;
-        };
-        let _ = self.crawler.complete(conn, graph, frontier);
-        let is_circular = *self
-            .is_circular
-            .get_or_insert_with(|| block_group_is_circular(conn, &self.block_group_id));
-        if is_circular {
-            discard_circular_marker_and_sentinels(graph);
-        }
+    fn expand_frontier(
+        &mut self,
+        graph: &mut GenGraph,
+        frontier: &[GraphNode],
+    ) -> Result<(), Self::Error> {
+        self.ensure_source(graph)?;
+        let source = self
+            .port_source
+            .as_mut()
+            .expect("should have initialized port source");
+        source
+            .expand_frontier(&mut self.raw_graph, frontier)
+            .map_err(|error| error.to_string())?;
+        self.resolve_junction_frontier()?;
+        self.refresh_projection(graph);
+        Ok(())
     }
 }
 
 /// The one `GraphSource` a viewer's `LayoutEngine` is built with, whichever loading strategy
 /// this particular graph needed - so the engine has a single, fixed concrete type across its
 /// whole lifetime (including reassignment when the viewer switches to a different block group)
-/// regardless of which strategy any one graph actually used. [`SqlGraphSource`] only reads the
-/// live graph, so a historical view keeps using [`EagerSource`] over a fully materialized
-/// `BlockGroup::get_graph` instead.
+/// regardless of which strategy any one graph actually used. Historical views keep their eager
+/// graph and its projected route-survival decisions here.
 #[derive(Clone, Debug)]
-pub enum EagerOrSqlSource {
-    Eager(EagerSource),
-    Sql(Box<SqlGraphSource>),
+pub enum EagerOrProjectedSource {
+    Eager { surviving_routes: GenGraph },
+    Projected(Box<ProjectedGraphSource>),
 }
 
-impl EagerOrSqlSource {
+impl EagerOrProjectedSource {
+    pub(crate) fn surviving_routes(&self) -> Option<&GenGraph> {
+        match self {
+            Self::Eager { surviving_routes } => Some(surviving_routes),
+            Self::Projected(source) => Some(source.surviving_routes()),
+        }
+    }
+
     /// The loaded block of `node_id` holding `coordinate`, or, for a lazily crawled graph, the
     /// one the crawl would carve there, added as frontier.
     pub fn locate(
@@ -330,26 +441,30 @@ impl EagerOrSqlSource {
                 && coordinate < node.sequence_end
         });
         match self {
-            Self::Eager(_) => loaded,
-            Self::Sql(source) => loaded.or_else(|| source.locate(graph, node_id, coordinate)),
+            Self::Eager { .. } => loaded,
+            Self::Projected(source) => loaded.or_else(|| source.locate(graph, node_id, coordinate)),
         }
     }
 }
 
-impl GraphSource<GenGraph> for EagerOrSqlSource {
+impl GraphSource<GenGraph> for EagerOrProjectedSource {
+    type Error = String;
+
     fn is_frontier(&self, node: GraphNode, direction: Direction) -> bool {
         match self {
-            Self::Eager(source) => {
-                <EagerSource as GraphSource<GenGraph>>::is_frontier(source, node, direction)
-            }
-            Self::Sql(source) => source.is_frontier(node, direction),
+            Self::Eager { .. } => false,
+            Self::Projected(source) => source.is_frontier(node, direction),
         }
     }
 
-    fn expand_frontier(&mut self, graph: &mut GenGraph, frontier: &[GraphNode]) {
+    fn expand_frontier(
+        &mut self,
+        graph: &mut GenGraph,
+        frontier: &[GraphNode],
+    ) -> Result<(), Self::Error> {
         match self {
-            Self::Eager(source) => source.expand_frontier(graph, frontier),
-            Self::Sql(source) => source.expand_frontier(graph, frontier),
+            Self::Eager { .. } => Ok(()),
+            Self::Projected(source) => source.expand_frontier(graph, frontier),
         }
     }
 }
@@ -375,11 +490,60 @@ pub(crate) mod tests {
     };
 
     /// Build a tiny on-disk `start -> x -> y -> z -> end` block group and return its id, so
-    /// `SqlGraphSource` can be exercised against a real SQLite file (`SqlGraphSource` opens its
+    /// `ProjectedGraphSource` can be exercised against a real SQLite file (`ProjectedGraphSource` opens its
     /// own connection lazily via `get_connection`, which is why this needs a real file rather
     /// than an in-memory database).
     fn setup_chain_block_group(db_path: &std::path::Path) -> HashId {
         setup_labelled_chain_block_group(db_path, &["x", "y", "z"]).0
+    }
+
+    fn setup_junction_block_group(db_path: &std::path::Path) -> HashId {
+        let (block_group_id, _) = setup_labelled_chain_block_group(db_path, &["x", "y"]);
+        let connection = get_connection(db_path).unwrap();
+        let node_id = HashId::convert_str("x");
+        let edges = [(2, 4, 1), (2, 2, 0), (4, 4, 0)]
+            .into_iter()
+            .map(|(source_coordinate, target_coordinate, chromosome_index)| {
+                let edge = Edge::create(
+                    &connection,
+                    node_id,
+                    source_coordinate,
+                    Strand::Forward,
+                    node_id,
+                    target_coordinate,
+                    Strand::Forward,
+                )
+                .unwrap();
+                BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id: edge.id,
+                    chromosome_index,
+                    phased: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&connection, &edges);
+        block_group_id
+    }
+
+    #[test]
+    fn test_prune_projected_graph_omits_only_decided_superseded_routes() {
+        let start = start_sentinel();
+        let current = graph_node("current");
+        let retired = graph_node("retired");
+        let mut projected = GenGraph::new();
+        projected.add_edge(start, current, Vec::new());
+        projected.add_edge(start, retired, Vec::new());
+        let mut surviving = GenGraph::new();
+        surviving.add_edge(start, current, Vec::new());
+        let pruned = prune_projected_graph(&projected, &surviving, |_, _| false);
+        assert!(pruned.contains_edge(start, current));
+        assert!(!pruned.contains_node(retired));
+        let partial = prune_projected_graph(&projected, &surviving, |node, direction| {
+            node == retired && direction == Direction::Incoming
+        });
+        assert!(partial.contains_node(retired));
+        assert!(!partial.contains_edge(start, retired));
     }
 
     /// Build an on-disk `start -> labels[0] -> ... -> end` chain of 5-base nodes, each node id
@@ -485,7 +649,7 @@ pub(crate) mod tests {
     }
 
     /// Expand every node that is still frontier on either side until none is left.
-    fn crawl_everything(source: &mut SqlGraphSource, graph: &mut GenGraph) {
+    fn crawl_everything(source: &mut ProjectedGraphSource, graph: &mut GenGraph) {
         loop {
             let frontier: Vec<GraphNode> = graph
                 .nodes()
@@ -497,8 +661,109 @@ pub(crate) mod tests {
             if frontier.is_empty() {
                 return;
             }
-            source.expand_frontier(graph, &frontier);
+            source.expand_frontier(graph, &frontier).unwrap();
         }
+    }
+
+    #[test]
+    fn test_adjacent_junction_is_resolved_before_projected_batch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let db_path = temporary.path().join("graph.db");
+        let block_group_id = setup_junction_block_group(&db_path);
+        let connection = get_connection(&db_path).unwrap();
+        let mut graph = seed_block_group_graph(&connection, &block_group_id);
+        let start = graph.nodes().next().unwrap();
+        let mut source = ProjectedGraphSource::new(db_path, block_group_id);
+        source.expand_frontier(&mut graph, &[start]).unwrap();
+        let adjacent = graph
+            .nodes()
+            .find(|node| node.node_id == HashId::convert_str("x"))
+            .unwrap();
+        let batch = prepare_projected_batch(
+            adjacent,
+            1,
+            &mut graph,
+            &mut source,
+            &|_| false,
+            &PreferredWormholeDoors::new(),
+        )
+        .unwrap();
+        assert!(
+            source
+                .raw_graph
+                .nodes()
+                .any(|node| node.sequence_start == node.sequence_end
+                    && !gen_core::is_terminal(node.node_id))
+        );
+        assert!(
+            graph
+                .nodes()
+                .all(|node| node.sequence_start != node.sequence_end
+                    || gen_core::is_terminal(node.node_id))
+        );
+        assert!(batch.nodes.iter().all(|node| graph.contains_node(*node)));
+        assert!(
+            batch
+                .external_edges
+                .iter()
+                .all(|door| graph.contains_node(door.boundary) && graph.contains_node(door.target))
+        );
+    }
+
+    #[test]
+    fn test_frontier_on_junction_is_completed_before_projection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let db_path = temporary.path().join("graph.db");
+        let block_group_id = setup_junction_block_group(&db_path);
+        let connection = get_connection(&db_path).unwrap();
+        let mut graph = seed_block_group_graph(&connection, &block_group_id);
+        let start = graph.nodes().next().unwrap();
+        let mut source = ProjectedGraphSource::new(db_path, block_group_id);
+        source.ensure_source(&graph).unwrap();
+        let port_source = source.port_source.as_mut().unwrap();
+        port_source
+            .expand_frontier(&mut source.raw_graph, &[start])
+            .unwrap();
+        let first = source
+            .raw_graph
+            .nodes()
+            .find(|node| node.node_id == HashId::convert_str("x"))
+            .unwrap();
+        port_source
+            .expand_frontier(&mut source.raw_graph, &[first])
+            .unwrap();
+        let junctions = source
+            .raw_graph
+            .nodes()
+            .filter(|node| {
+                node.sequence_start == node.sequence_end && !gen_core::is_terminal(node.node_id)
+            })
+            .collect::<Vec<_>>();
+        assert!(!junctions.is_empty());
+        source.resolve_junction_frontier().unwrap();
+        for junction in junctions {
+            assert!(
+                !source
+                    .port_source
+                    .as_ref()
+                    .unwrap()
+                    .is_frontier(junction, Direction::Incoming)
+            );
+            assert!(
+                !source
+                    .port_source
+                    .as_ref()
+                    .unwrap()
+                    .is_frontier(junction, Direction::Outgoing)
+            );
+        }
+        source.refresh_projection(&mut graph);
+        assert!(
+            graph
+                .nodes()
+                .all(|node| node.sequence_start != node.sequence_end
+                    || gen_core::is_terminal(node.node_id))
+        );
     }
 
     #[test]
@@ -507,14 +772,14 @@ pub(crate) mod tests {
         let db_path = dir.path().join("graph.db");
         let block_group_id = setup_chain_block_group(&db_path);
 
-        let mut source = SqlGraphSource::new(db_path, block_group_id);
+        let mut source = ProjectedGraphSource::new(db_path, block_group_id);
         let mut graph = GenGraph::new();
         let anchor = graph_node("y");
         graph.add_node(anchor);
         assert!(source.is_frontier(anchor, Direction::Outgoing));
         assert!(source.is_frontier(anchor, Direction::Incoming));
 
-        source.expand_frontier(&mut graph, &[anchor]);
+        source.expand_frontier(&mut graph, &[anchor]).unwrap();
 
         assert!(graph.contains_edge(graph_node("x"), anchor));
         assert!(graph.contains_edge(anchor, graph_node("z")));
@@ -584,7 +849,7 @@ pub(crate) mod tests {
         let db_path = dir.path().join("graph.db");
         let (block_group_id, _) = setup_circular_block_group(&db_path);
 
-        let mut source = SqlGraphSource::new(db_path, block_group_id);
+        let mut source = ProjectedGraphSource::new(db_path, block_group_id);
         let mut graph = GenGraph::new();
         graph.add_node(graph_node("y"));
         crawl_everything(&mut source, &mut graph);
@@ -667,7 +932,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("graph.db");
         let block_group_id = setup_chain_block_group(&db_path);
-        let source = SqlGraphSource::new(db_path, block_group_id);
+        let source = ProjectedGraphSource::new(db_path, block_group_id);
 
         // Seed the graph with only the anchor - everything else must come from `source`.
         let mut graph = GenGraph::new();

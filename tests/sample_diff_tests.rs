@@ -220,8 +220,8 @@ fn sequence_update_sample_diff(
             .to_string(),
         collection_name,
         Sample::DEFAULT_NAME,
-        false,
-        &[],
+        None,
+        None,
     )
     .expect("should import simple FASTA fixture");
     for (parent, child, region, sequence) in updates {

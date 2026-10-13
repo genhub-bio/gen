@@ -1938,6 +1938,7 @@ version = "0.3.1"
 dependencies = [
  "crossterm",
  "env_logger 0.10.2",
+ "gen-graph",
  "insta",
  "itertools",
  "log",

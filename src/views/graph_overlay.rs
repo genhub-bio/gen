@@ -307,7 +307,7 @@ mod tests {
 
     use super::{LoadedPathRoute, PathMembership};
     use crate::views::lazy_graph_source::{
-        SqlGraphSource, seed_block_group_graph,
+        ProjectedGraphSource, seed_block_group_graph,
         tests::{setup_circular_block_group, setup_labelled_chain_block_group},
     };
 
@@ -424,7 +424,7 @@ mod tests {
         let seed = seed_block_group_graph(&conn, &block_group_id);
         let mut engine = LayoutEngine::new_with_source(
             seed,
-            SqlGraphSource::new(db_path.clone(), block_group_id),
+            ProjectedGraphSource::new(db_path.clone(), block_group_id),
         );
         engine
             .activate_batch_containing(sentinel(PATH_START_NODE_ID), 3)
@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(membership.loaded_route(&seed), LoadedPathRoute::default());
 
         let mut engine =
-            LayoutEngine::new_with_source(seed, SqlGraphSource::new(db_path, block_group_id));
+            LayoutEngine::new_with_source(seed, ProjectedGraphSource::new(db_path, block_group_id));
         engine
             .activate_batch_containing(slice("x", 0, 5), 10)
             .expect("should crawl the circular block group");

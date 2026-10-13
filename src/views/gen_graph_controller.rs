@@ -18,7 +18,6 @@ use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, path::Path};
 use gen_tui::{
-    crawl::EagerSource,
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
     layout_engine::{BatchId, LayoutEngine},
@@ -55,7 +54,7 @@ use crate::views::{
         has_path_overlay, remove_path_overlay, remove_track_overlays, replace_track_overlays,
         set_path_overlay,
     },
-    lazy_graph_source::EagerOrSqlSource,
+    lazy_graph_source::EagerOrProjectedSource,
 };
 
 /// How annotation names are drawn around the graph.
@@ -122,7 +121,7 @@ pub struct GenGraphController {
     prune_history: bool,
     /// Seeded with a block group's start and grown batch by batch from SQLite, so opening a
     /// large block group never materializes the whole graph.
-    engine: LayoutEngine<GenGraph, EagerOrSqlSource>,
+    engine: LayoutEngine<GenGraph, EagerOrProjectedSource>,
     zoom_levels: SendSyncZoomLevels,
     view_state: GraphViewState<GraphNode>,
     /// Pruned edges and the nodes only they lead into, synced whenever a draw or a door may
@@ -236,7 +235,9 @@ impl GenGraphController {
         let zoom_index = starting_zoom_level(&graph);
         let (engine, zoom_levels, view_state) = create_send_sync_annotated_gen_graph_engine_lazy(
             graph,
-            EagerOrSqlSource::Eager(EagerSource),
+            EagerOrProjectedSource::Eager {
+                surviving_routes: GenGraph::new(),
+            },
             database.sequence_source(),
             node_annotations.clone(),
             zoom_index,
@@ -583,7 +584,7 @@ impl GenGraphController {
         self.block_group.as_ref()
     }
 
-    pub fn engine(&self) -> &LayoutEngine<GenGraph, EagerOrSqlSource> {
+    pub fn engine(&self) -> &LayoutEngine<GenGraph, EagerOrProjectedSource> {
         &self.engine
     }
 
@@ -622,7 +623,7 @@ impl GenGraphController {
     pub fn engine_and_overlays_mut(
         &mut self,
     ) -> (
-        &LayoutEngine<GenGraph, EagerOrSqlSource>,
+        &LayoutEngine<GenGraph, EagerOrProjectedSource>,
         &mut Vec<GraphOverlay>,
     ) {
         self.overlays_dirty = true;

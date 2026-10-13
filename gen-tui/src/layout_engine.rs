@@ -17,7 +17,7 @@ use crate::{
     assembly::{AssembledLayout, assemble_window},
     crawl::{
         EagerSource, ExternalEdge, GraphCursor, GraphSource, PreferredWormholeDoors,
-        build_window_graph, crawl_batch, subgraph_for,
+        StructuralSubgraph, build_window_graph, crawl_batch, subgraph_for,
     },
     layout::NodeRole,
 };
@@ -32,7 +32,18 @@ pub struct BatchId(usize);
 struct Batch<NodeId> {
     anchor: NodeId,
     members: Vec<NodeId>,
+    prepared: Option<StructuralSubgraph<NodeId>>,
 }
+
+/// Callback through which a domain source supplies a fully projected structural batch.
+pub type BatchPreparer<G, S> = fn(
+    <G as GraphBase>::NodeId,
+    usize,
+    &mut G,
+    &mut S,
+    &dyn Fn(<G as GraphBase>::NodeId) -> bool,
+    &PreferredWormholeDoors<<G as GraphBase>::NodeId>,
+) -> Result<StructuralSubgraph<<G as GraphBase>::NodeId>, String>;
 
 /// Source of [`LoadedWorld::revision`]. Process-wide rather than per engine, so a view state
 /// that outlives its engine (a viewer switching block groups) never mistakes a new engine's
@@ -135,6 +146,7 @@ where
 {
     graph: G,
     source: S,
+    batch_preparer: Option<BatchPreparer<G, S>>,
     /// Anchor `ensure_initial_world` should open on instead of [`Self::default_anchor`]'s
     /// structural "index 0" guess - set by [`Self::set_preferred_initial_anchor`]. gen-tui has
     /// no notion of a domain-meaningful "start" (that's caller-specific, e.g. a sequence
@@ -212,6 +224,7 @@ where
         Self {
             graph,
             source,
+            batch_preparer: None,
             preferred_initial_anchor: None,
             explicit_backward_edges: None,
             batches: Vec::new(),
@@ -252,6 +265,12 @@ where
     /// reached yet (e.g. a position gone to directly) so a batch can then be claimed around it.
     pub fn source_and_graph_mut(&mut self) -> (&mut S, &mut G) {
         (&mut self.source, &mut self.graph)
+    }
+
+    /// Accept a source-specific projected batch preparation function. It supplies stable
+    /// projected members, edges, and doors; this engine only claims and lays out that batch.
+    pub fn set_batch_preparer(&mut self, preparer: BatchPreparer<G, S>) {
+        self.batch_preparer = Some(preparer);
     }
 
     /// The node budget for a new batch claimed while the viewport is the given width
@@ -312,12 +331,28 @@ where
         }
 
         let batch_of = &self.batch_of;
-        let members = crawl_batch(
-            node,
-            node_budget,
-            &mut GraphCursor::new(&mut self.graph, &mut self.source),
-            &|candidate| batch_of.contains_key(&candidate),
-        )?;
+        let prepared = if let Some(prepare) = self.batch_preparer {
+            Some(prepare(
+                node,
+                node_budget,
+                &mut self.graph,
+                &mut self.source,
+                &|candidate| batch_of.contains_key(&candidate),
+                &self.preferred_wormhole_doors,
+            )?)
+        } else {
+            None
+        };
+        let members = if let Some(batch) = &prepared {
+            batch.nodes.clone()
+        } else {
+            crawl_batch(
+                node,
+                node_budget,
+                &mut GraphCursor::new(&mut self.graph, &mut self.source),
+                &|candidate| batch_of.contains_key(&candidate),
+            )?
+        };
         #[cfg(test)]
         {
             self.build_counts.crawl += 1;
@@ -329,6 +364,7 @@ where
         self.batches.push(Batch {
             anchor: node,
             members,
+            prepared,
         });
         self.activate_batch(batch)?;
         Ok(batch)
@@ -349,12 +385,18 @@ where
             return Ok(());
         }
 
-        let Batch { anchor, members } = self
+        let Batch {
+            anchor,
+            members,
+            prepared,
+        } = self
             .batches
             .get(batch.0)
             .cloned()
             .ok_or_else(|| format!("unknown batch {batch:?}"))?;
-        let subgraph = subgraph_for(anchor, members, &self.graph, &self.preferred_wormhole_doors);
+        let subgraph = prepared.unwrap_or_else(|| {
+            subgraph_for(anchor, members, &self.graph, &self.preferred_wormhole_doors)
+        });
         let (window, backward_edges) = build_window_graph(
             &subgraph,
             &self.graph,

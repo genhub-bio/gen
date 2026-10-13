@@ -14,7 +14,7 @@ use gen_models::{db::GraphConnection, history::dolt::active_branch};
 
 use crate::{
     get_connection_for_branch,
-    views::{gen_graph_widget::PathSequenceSource, lazy_graph_source::SqlGraphSource},
+    views::{gen_graph_widget::PathSequenceSource, lazy_graph_source::ProjectedGraphSource},
 };
 
 #[derive(Debug)]
@@ -89,12 +89,12 @@ impl GraphDatabase {
     }
 
     /// A source that crawls `block_group_id` from this database; `prune` leaves out the edges
-    /// `BlockGroup::prune_graph` would remove (see `SqlGraphSource::new_pruned`).
-    pub fn graph_source(&self, block_group_id: HashId, prune: bool) -> SqlGraphSource {
+    /// `BlockGroup::prune_graph` would remove (see `ProjectedGraphSource::new_pruned`).
+    pub fn graph_source(&self, block_group_id: HashId, prune: bool) -> ProjectedGraphSource {
         let source = if prune {
-            SqlGraphSource::new_pruned(self.db_path.clone(), block_group_id)
+            ProjectedGraphSource::new_pruned(self.db_path.clone(), block_group_id)
         } else {
-            SqlGraphSource::new(self.db_path.clone(), block_group_id)
+            ProjectedGraphSource::new(self.db_path.clone(), block_group_id)
         };
         source.with_branch(self.branch.clone())
     }

@@ -3,6 +3,7 @@ use std::{
     hash::Hash,
 };
 
+pub use gen_graph::{EagerSource, GraphSource};
 use petgraph::{
     Direction,
     graph::NodeIndex,
@@ -70,32 +71,6 @@ impl<NodeId> ExternalEdge<NodeId> {
     }
 }
 
-/// Grows a domain graph `G` on demand. This is the one seam through which a crawl ever touches
-/// whatever backs `G`: gen-tui only sees a graph whose nodes either carry all their edges on a
-/// given side or are frontier on that side, and asks the source to push the frontier outward
-/// when a crawl needs to go past it. How the source finds those edges is its own business.
-pub trait GraphSource<G: GraphBase> {
-    /// Whether `graph` may still be missing some of `node`'s edges on its `direction` side.
-    fn is_frontier(&self, node: G::NodeId, direction: Direction) -> bool;
-
-    /// Load every edge on both sides of each node in `frontier`. Neighbours reached this way
-    /// enter `graph` as frontier nodes until their own edges are loaded.
-    fn expand_frontier(&mut self, graph: &mut G, frontier: &[G::NodeId]);
-}
-
-/// A source for a graph that is already fully loaded in memory, so no node is ever frontier.
-/// The default source for [`crate::layout_engine::LayoutEngine`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EagerSource;
-
-impl<G: GraphBase> GraphSource<G> for EagerSource {
-    fn is_frontier(&self, _node: G::NodeId, _direction: Direction) -> bool {
-        false
-    }
-
-    fn expand_frontier(&mut self, _graph: &mut G, _frontier: &[G::NodeId]) {}
-}
-
 /// The domain graph paired with its lazy-loading source for the duration of a crawl - bundled
 /// so the crawl functions below take one "the graph, however it gets loaded" parameter instead
 /// of two.
@@ -120,7 +95,7 @@ where
 
     /// Make sure every node in `nodes` carries all its edges on both sides, in one request to
     /// the source for whichever of them are still frontier.
-    fn complete(&mut self, nodes: &[G::NodeId])
+    fn complete(&mut self, nodes: &[G::NodeId]) -> Result<(), String>
     where
         G::NodeId: Copy,
     {
@@ -133,8 +108,11 @@ where
             })
             .collect();
         if !frontier.is_empty() {
-            self.source.expand_frontier(self.graph, &frontier);
+            self.source
+                .expand_frontier(self.graph, &frontier)
+                .map_err(|error| error.to_string())?;
         }
+        Ok(())
     }
 }
 
@@ -206,7 +184,7 @@ where
         return Err("Anchor node is not in the graph".to_string());
     }
 
-    let selected = crawl_neighborhood(anchor, node_budget, cursor, is_claimed);
+    let selected = crawl_neighborhood(anchor, node_budget, cursor, is_claimed)?;
     // Sorted by the domain node's own identity, not by wherever it landed in the underlying
     // graph structure - so window order is reproducible regardless of insertion order, which
     // a lazily-loaded graph never guarantees.
@@ -215,7 +193,7 @@ where
     // Every member's neighbours are read to find in-window edges and boundary doors, so none
     // of them may stay frontier, whichever ones the crawl itself went past (a zero-budget crawl
     // never looks past its own seed).
-    cursor.complete(&members);
+    cursor.complete(&members)?;
     Ok(members)
 }
 
@@ -456,7 +434,7 @@ fn crawl_neighborhood<G, S>(
     node_budget: usize,
     cursor: &mut GraphCursor<G, S>,
     is_claimed: &dyn Fn(G::NodeId) -> bool,
-) -> HashSet<G::NodeId>
+) -> Result<HashSet<G::NodeId>, String>
 where
     G: GraphBase,
     for<'b> &'b G: IntoNeighborsDirected<NodeId = G::NodeId>,
@@ -467,7 +445,7 @@ where
     let mut visited: HashSet<G::NodeId> = HashSet::from([anchor]);
     let mut shell = vec![anchor];
     while visited.len() < node_budget && !shell.is_empty() {
-        cursor.complete(&shell);
+        cursor.complete(&shell)?;
         let graph = cursor.graph();
         let [predecessors, successors] =
             [Direction::Incoming, Direction::Outgoing].map(|direction| {
@@ -510,7 +488,7 @@ where
         visited.extend(next_shell.iter().copied());
         shell = next_shell;
     }
-    visited
+    Ok(visited)
 }
 
 #[cfg(test)]
@@ -1111,11 +1089,17 @@ mod tests {
     }
 
     impl GraphSource<DiGraphMap<TestNode, ()>> for RevealingSource {
+        type Error = core::convert::Infallible;
+
         fn is_frontier(&self, node: TestNode, direction: Direction) -> bool {
             !self.loaded.contains(&(node, direction))
         }
 
-        fn expand_frontier(&mut self, graph: &mut DiGraphMap<TestNode, ()>, frontier: &[TestNode]) {
+        fn expand_frontier(
+            &mut self,
+            graph: &mut DiGraphMap<TestNode, ()>,
+            frontier: &[TestNode],
+        ) -> Result<(), Self::Error> {
             for &node in frontier {
                 for direction in [Direction::Outgoing, Direction::Incoming] {
                     if !self.loaded.insert((node, direction)) {
@@ -1129,6 +1113,7 @@ mod tests {
                     }
                 }
             }
+            Ok(())
         }
     }
 

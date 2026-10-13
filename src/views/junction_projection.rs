@@ -366,4 +366,21 @@ mod tests {
         assert!(!projection.surviving_routes.contains_edge(source, retired));
         assert!(projection.surviving_routes.contains_edge(source, current));
     }
+
+    #[test]
+    fn test_shared_connection_survives_when_one_chromosome_remains_current() {
+        let source = node("source", 0, 2);
+        let reference = node("reference", 0, 2);
+        let variant = node("variant", 0, 2);
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            source,
+            reference,
+            vec![edge("old-0", 0, 1), edge("reference-1", 1, 1)],
+        );
+        graph.add_edge(source, variant, vec![edge("new-0", 0, 2)]);
+        let projection = project_junctions(&graph);
+        assert!(projection.surviving_routes.contains_edge(source, reference));
+        assert!(projection.surviving_routes.contains_edge(source, variant));
+    }
 }

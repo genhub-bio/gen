@@ -11,9 +11,7 @@ use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    crawl::{EagerSource, GraphSource},
-    graph_view::GraphViewState,
-    layout_engine::LayoutEngine,
+    crawl::GraphSource, graph_view::GraphViewState, layout_engine::LayoutEngine,
     theme::current_theme,
 };
 use log::warn;
@@ -40,7 +38,7 @@ use crate::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
-        lazy_graph_source::{EagerOrSqlSource, seed_block_group_graph},
+        lazy_graph_source::{EagerOrProjectedSource, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
             RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
@@ -195,7 +193,7 @@ pub(crate) struct BlockGroupGraph {
     /// The full graph for a historical view, otherwise just the seed the crawl grows from.
     pub graph: GenGraph,
     /// What the viewer's `LayoutEngine` crawls through.
-    pub source: EagerOrSqlSource,
+    pub source: EagerOrProjectedSource,
 }
 
 /// Load `block_group_id`'s graph and the source its `LayoutEngine` crawls through.
@@ -203,7 +201,7 @@ pub(crate) struct BlockGroupGraph {
 /// A historical view (`history_ref: Some(_)`) always eager-loads the full graph up front:
 /// the port queries the lazy path below is built on can only answer for the live graph.
 /// Otherwise, the graph is seeded with just its `PATH_START` sentinel and grown lazily from
-/// SQLite as the viewer's crawl pushes past its frontier - see `SqlGraphSource`, which is what
+/// SQLite as the viewer's crawl pushes past its frontier - see `ProjectedGraphSource`, which is what
 /// turns opening a large block group from a full-graph-materializing stall into an
 /// near-instant open.
 pub(crate) fn load_block_group_graph(
@@ -220,16 +218,19 @@ pub(crate) fn load_block_group_graph(
             block_group_id,
             history_ref,
         )?;
+        let projection = crate::views::junction_projection::project_junctions(&graph);
         return Ok(BlockGroupGraph {
-            graph,
-            source: EagerOrSqlSource::Eager(EagerSource),
+            graph: projection.graph,
+            source: EagerOrProjectedSource::Eager {
+                surviving_routes: projection.surviving_routes,
+            },
         });
     }
     let source = database.graph_source(*block_group_id, prune_history);
     let conn = database.connection()?;
     Ok(BlockGroupGraph {
         graph: seed_block_group_graph(conn, block_group_id),
-        source: EagerOrSqlSource::Sql(Box::new(source)),
+        source: EagerOrProjectedSource::Projected(Box::new(source)),
     })
 }
 

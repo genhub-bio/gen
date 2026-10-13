@@ -8,7 +8,7 @@ use petgraph::{Direction, visit::GraphBase};
 /// when cloning them, and keep the backing store unchanged for the lifetime of that state.
 pub trait GraphSource<G: GraphBase> {
     /// The backing-store failure reported while loading adjacency.
-    type Error;
+    type Error: core::fmt::Display;
 
     /// Whether this side may still have unloaded edges. A known dead end is complete.
     fn is_frontier(&self, node: G::NodeId, direction: Direction) -> bool;
