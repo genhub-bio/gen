@@ -381,10 +381,8 @@ mod tests {
         //   node DNA:    ATCGATCGATCGATCGATCGGGAACACACAGAGA
         //   edge strand: ++++++++++++++++++++++++++++++++++
         //   node span:   ^---------------------------------^ [0,34)
-        //   GFF (-):         ^---------------^ input 5..20 = path [4,20)
+        //   GFF (-):         ^---------------^ input 5..20
         //   child edit:                 ^---------^ path [15,25)
-        // The feature is read in reverse index order 19..4. Propagation emits GFF 5..15 (-)
-        // while preserving ID=reverse-gene.
         std::fs::write(
             &input_path,
             "##gff-version 3\nm123\tgen-test\tGene\t5\t20\t.\t-\t.\tID=reverse-gene\n",
