@@ -424,7 +424,7 @@ impl GenGraphController {
         if let Some((node, raw)) = cursor {
             let renderer = &self.zoom_levels[index].1;
             let column = renderer.map_column(&node, raw);
-            let width = renderer.get_node_size(&node).0.saturating_sub(1).max(1) as f64;
+            let width = renderer.get_node_size(&node).0.max(1) as f64;
             self.view_state.cursor.fractional.0 = (column as f64 / width).clamp(0.0, 1.0);
             if index == FULL_ZOOM_LEVEL - 1 {
                 self.cursor_raw_before_truncation = Some((node, raw));
@@ -1362,10 +1362,13 @@ mod tests {
             controller.view_state_mut().go_to_node(target, (0.5, 0.5));
             draw(&mut controller, &mut terminal, display);
             let (full_rect, _) = cursor_rect_and_row(&controller);
-            let raw = full_rect
+            let full_column = full_rect
                 .point_at_fraction(controller.view_state().cursor.fractional)
                 .x
                 - full_rect.min.x;
+            let raw = controller.zoom_levels()[FULL_ZOOM_LEVEL]
+                .1
+                .raw_column(&target, full_column);
 
             controller.zoom_out();
             assert_eq!(controller.detail_level(), VisualDetail::Truncated);
@@ -1389,7 +1392,12 @@ mod tests {
                 .point_at_fraction(controller.view_state().cursor.fractional)
                 .x
                 - restored_rect.min.x;
-            assert_eq!(restored, raw);
+            assert_eq!(
+                restored,
+                controller.zoom_levels()[FULL_ZOOM_LEVEL]
+                    .1
+                    .map_column(&target, raw)
+            );
 
             controller.zoom_out();
             draw(&mut controller, &mut terminal, display);
