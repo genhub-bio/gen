@@ -14,7 +14,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 /// ones. `str(sequence)` is just the bases, and it compares, hashes, slices and measures like that
 /// string.
 #[gen_stub_pyclass]
-#[pyclass(name = "Sequence")]
+#[pyclass(name = "Sequence", from_py_object)]
 #[derive(Clone)]
 pub struct PySequence {
     pub name: Option<String>,

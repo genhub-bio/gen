@@ -475,8 +475,9 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         fs,
-        io::{Read as _, Write as _},
-        net::TcpListener,
+        io::{BufRead as _, BufReader, Read as _, Write as _},
+        net::{TcpListener, TcpStream},
+        panic::catch_unwind,
         path::PathBuf,
         sync::{
             Arc, Mutex,
@@ -534,11 +535,30 @@ mod tests {
                         thread::sleep(Duration::from_millis(2));
                         continue;
                     };
-                    let mut request_bytes = [0_u8; 8192];
-                    let length = stream
-                        .read(&mut request_bytes)
-                        .expect("should read remote FASTA request");
-                    let request = String::from_utf8_lossy(&request_bytes[..length]).to_string();
+                    // macOS inherits the listener's nonblocking mode on accepted sockets.
+                    // Only accepting connections should poll; request I/O must wait for bytes.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("should configure blocking remote FASTA request I/O");
+                    // TCP can split headers across reads, and sniffing clients can disconnect
+                    // before consuming a response. Neither should terminate the fixture server.
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut request = String::new();
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                request.push_str(&line);
+                                if line == "\r\n" {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !request.ends_with("\r\n\r\n") {
+                        continue;
+                    }
                     server_requests
                         .lock()
                         .expect("should lock remote FASTA request log")
@@ -554,11 +574,9 @@ mod tests {
                         .next()
                         .unwrap_or_default();
                     let Some(contents) = files.get(path) else {
-                        stream
-                            .write_all(
+                        let _ = stream.write_all(
                                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .expect("should write missing remote FASTA response");
+                            );
                         continue;
                     };
                     let range = request_lines.find_map(|line| {
@@ -594,16 +612,15 @@ mod tests {
                     } else {
                         String::new()
                     };
-                    write!(
+                    if write!(
                         stream,
                         "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{content_range}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
                         body.len()
-                    )
-                    .expect("should write remote FASTA response headers");
+                    ).is_err() {
+                        continue;
+                    }
                     if method != "HEAD" {
-                        stream
-                            .write_all(body)
-                            .expect("should write remote FASTA response body");
+                        let _ = stream.write_all(body);
                     }
                 }
             });
@@ -643,8 +660,57 @@ mod tests {
 
     impl Drop for TestHttpServer {
         fn drop(&mut self) {
-            self.stop();
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                // Preserve the original test failure if the server also panicked.
+                let _ = handle.join();
+            }
         }
+    }
+
+    #[test]
+    fn test_remote_fasta_server_reads_fragmented_headers() {
+        let mut server = TestHttpServer::new(HashMap::from([(
+            "/reference.fa".to_string(),
+            b">sequence\nACGT\n".to_vec(),
+        )]));
+        let mut stream =
+            TcpStream::connect(&server.address).expect("should connect to test server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("should limit response wait");
+        stream
+            .write_all(b"GET /reference.fa HTTP/1.1\r\nHost: ")
+            .expect("should send partial headers");
+        thread::sleep(Duration::from_millis(20));
+        stream
+            .write_all(b"localhost\r\n\r\n")
+            .expect("should finish request headers");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("should read complete response");
+        assert!(response.ends_with(">sequence\nACGT\n"));
+        assert!(server.requests()[0].ends_with("Host: localhost\r\n\r\n"));
+        server.stop();
+    }
+
+    #[test]
+    fn test_remote_fasta_server_drop_preserves_original_panic() {
+        let failure = catch_unwind(|| {
+            let _server = TestHttpServer {
+                address: String::new(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+                stop: Arc::new(AtomicBool::new(false)),
+                handle: Some(thread::spawn(|| panic!("server failure"))),
+            };
+            panic!("original test failure");
+        })
+        .expect_err("should preserve the test panic");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"original test failure")
+        );
     }
 
     #[test]
@@ -1203,20 +1269,36 @@ mod tests {
 
     #[test]
     fn test_add_remote_shallow_fasta_with_multiple_remote_indexes() {
-        let fasta_contents = fs::read(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz"),
-        )
-        .expect("should read BGZF FASTA fixture");
+        // Put the indexed sequence in a later BGZF block so lookup requires a nonzero seek.
+        // Readers can stream a block at byte zero without sending a Range header.
+        let padding = b">padding\nA\n";
+        let mut writer = bgzf::io::Writer::new(Vec::new());
+        writer
+            .write_all(padding)
+            .expect("should write padding block");
+        writer.flush().expect("should flush padding block");
+        let mut fasta_contents = writer.into_inner();
+        let compressed_offset = fasta_contents.len() as u64;
+        fasta_contents.extend(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz"),
+            )
+            .expect("should read BGZF FASTA fixture"),
+        );
+        let mut gzip_index = Vec::new();
+        gzi::io::Writer::new(&mut gzip_index)
+            .write_index(&gzi::Index::from(vec![(
+                compressed_offset,
+                padding.len() as u64,
+            )]))
+            .expect("should write gzip index for the second block");
         let server = TestHttpServer::new(HashMap::from([
             ("/reference.fa.gz".to_string(), fasta_contents),
             (
                 "/indexes/fasta-index".to_string(),
-                b"m123\t34\t6\t34\t35\n".to_vec(),
+                format!("m123\t34\t{}\t34\t35\n", padding.len() + 6).into_bytes(),
             ),
-            (
-                "/indexes/bgzf-index".to_string(),
-                0_u64.to_le_bytes().to_vec(),
-            ),
+            ("/indexes/bgzf-index".to_string(), gzip_index),
         ]));
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
@@ -1313,7 +1395,7 @@ mod tests {
                 request.starts_with("GET /reference.fa.gz ")
                     && request.to_ascii_lowercase().contains("\r\nrange: bytes=")
             }),
-            "indexed remote lookup should use a byte-range request"
+            "indexed remote lookup should use a byte-range request; requests: {requests:?}"
         );
     }
 

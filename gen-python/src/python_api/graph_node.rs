@@ -10,7 +10,7 @@ use super::hash_id::PyHashId;
 /// Obtain it from `position.node` or the keys of `SequenceGraph.to_dict()`. Read its bases with
 /// `.sequence`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Node", unsendable)] // pyclass includes  #[derive(IntoPyObject)]
+#[pyclass(name = "Node", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PyGraphNode {
     pub node_id: HashId,

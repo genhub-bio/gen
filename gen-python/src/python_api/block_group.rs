@@ -131,7 +131,7 @@ where
 ///         ...
 // unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
 #[gen_stub_pyclass]
-#[pyclass(name = "SequenceGraph", unsendable)]
+#[pyclass(name = "SequenceGraph", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PySequenceGraph {
     pub id: HashId,

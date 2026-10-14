@@ -19,7 +19,7 @@ use super::{block_group::PySequenceGraph, locus::GraphLocusExt as _, position::P
 /// `len(locus)` is the number of bases it covers, `locus[i]` is the `Position` of base `i` and
 /// `locus[a:b]` a sub-locus.
 #[gen_stub_pyclass]
-#[pyclass(name = "Locus", unsendable)]
+#[pyclass(name = "Locus", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PyGraphLocus {
     ranges: Vec<NodeRange>,

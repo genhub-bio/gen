@@ -29,7 +29,7 @@ mod metadata;
 /// index it, iterate it, or call ``len()`` on it. Each iteration uses the graphs present when that
 /// iteration starts. Indexing out of range raises ``IndexError``.
 #[gen_stub_pyclass]
-#[pyclass(name = "Sample", unsendable)]
+#[pyclass(name = "Sample", unsendable, from_py_object)]
 #[derive(Clone)]
 pub struct PySample {
     /// Collection this sample belongs to.
