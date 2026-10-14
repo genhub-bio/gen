@@ -45,6 +45,4 @@ pub enum FileAnnotationError {
     Translation(String),
     #[error("annotation has no translated records")]
     Empty,
-    #[error("translated annotation reference is not a node id: {0}")]
-    InvalidNode(String),
 }
