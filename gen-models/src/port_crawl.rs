@@ -21,15 +21,16 @@ use crate::{
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
     edge::{Edge, EdgeError, GroupBlock},
-    path::Path,
+    region::ResolvedGenRegion,
 };
 
-/// A zero-based position on a stored node or along a path in the requested block group.
+/// Where a crawl begins.
 pub enum CrawlStart<'a> {
     /// A coordinate in the backing node's stored sequence.
     Node { node_id: HashId, coordinate: i64 },
-    /// A coordinate along the path's assembled sequence.
-    Path { path: &'a Path, coordinate: i64 },
+    /// The start of a resolved region, which may name a path, block group, annotation or
+    /// accession. Coordinates count bases along the region's path, including reverse blocks.
+    Region(&'a ResolvedGenRegion),
 }
 
 #[derive(Debug, Error)]
@@ -40,14 +41,17 @@ pub enum CrawlError {
     /// The returned graph must be able to contain its starting slice.
     #[error("the crawl budget must contain at least one graph node")]
     EmptyBudget,
-    /// The requested path does not belong to the requested block group.
-    #[error("the starting path belongs to another block group")]
-    PathBlockGroupMismatch,
+    /// The requested region does not belong to the requested block group.
+    #[error("the starting region belongs to another block group")]
+    RegionBlockGroupMismatch,
+    /// Only regions anchored on a path have a position to start from.
+    #[error("the starting region has no path")]
+    RegionWithoutPath,
 }
 
 /// Return at most `node_budget` graph slices around a position, with all edges between them.
 /// A position outside the block group returns `None`. Node coordinates refer to the backing
-/// node's sequence; path coordinates count bases along the path, including reverse blocks.
+/// node's sequence; region coordinates count bases along its path, including reverse blocks.
 /// The crawl may temporarily discover adjacent frontier nodes while resolving the selected
 /// slices, but only selected slices and their internal edges appear in the returned graph.
 pub fn crawl_graph(
@@ -64,10 +68,12 @@ pub fn crawl_graph(
             node_id,
             coordinate,
         } => (node_id, coordinate),
-        CrawlStart::Path { path, coordinate } => {
-            if path.block_group_id != block_group_id {
-                return Err(CrawlError::PathBlockGroupMismatch);
+        CrawlStart::Region(region) => {
+            if region.block_group.id != block_group_id {
+                return Err(CrawlError::RegionBlockGroupMismatch);
             }
+            let path = region.path.as_ref().ok_or(CrawlError::RegionWithoutPath)?;
+            let coordinate = region.start;
             let Some(block) = path
                 .coordinate_blocks(conn, None)
                 .into_iter()
@@ -608,6 +614,7 @@ mod tests {
         edge::Edge,
         node::Node,
         path::Path,
+        region::{Region, resolve},
         sample::{NewSample, Sample},
         sequence::Sequence,
         test_helpers::{get_connection, test_workspace},
@@ -708,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_crawl_graph_starts_at_a_path_position() {
+    fn test_crawl_graph_starts_at_a_region_position() {
         let conn = get_connection(None).unwrap();
         let block_group_id = setup_block_group(
             &conn,
@@ -736,18 +743,11 @@ mod tests {
                 .edge
                 .id
         });
-        let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
-        let graph = crawl_graph(
-            &conn,
-            block_group_id,
-            CrawlStart::Path {
-                path: &path,
-                coordinate: 5,
-            },
-            1,
-        )
-        .unwrap()
-        .expect("should find a block at path coordinate five");
+        Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        let region = resolve(&Region::parse("chain:5").unwrap(), &conn, "test", "test").unwrap();
+        let graph = crawl_graph(&conn, block_group_id, CrawlStart::Region(&region), 1)
+            .unwrap()
+            .expect("should find a block at path coordinate five");
 
         assert_eq!(graph.node_count(), 1);
         assert!(graph.contains_node(block("b", 0, 4)));
