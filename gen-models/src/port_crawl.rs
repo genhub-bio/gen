@@ -28,8 +28,9 @@ use crate::{
 pub enum CrawlStart<'a> {
     /// A coordinate in the backing node's stored sequence.
     Node { node_id: HashId, coordinate: i64 },
-    /// The start of a resolved region, which may name a path, block group, annotation or
+    /// The midpoint of a resolved region, which may name a path, block group, annotation or
     /// accession. Coordinates count bases along the region's path, including reverse blocks.
+    /// To keep the crawl within the region, pass half its length as the radius.
     Region(&'a ResolvedGenRegion),
 }
 
@@ -51,14 +52,23 @@ pub enum CrawlError {
 
 /// Return at most `node_budget` graph slices around a position, with all edges between them.
 /// A position outside the block group returns `None`. Node coordinates refer to the backing
-/// node's sequence; region coordinates count bases along its path, including reverse blocks.
-/// The crawl may temporarily discover adjacent frontier nodes while resolving the selected
-/// slices, but only selected slices and their internal edges appear in the returned graph.
+/// node's sequence; region coordinates count bases along its path. The crawl may temporarily
+/// discover adjacent frontier nodes while resolving the selected slices, but only selected
+/// slices and their internal edges appear in the returned graph.
+///
+/// With a `radius`, each branch stops once a slice begins that many bases from the start,
+/// measured by the bases walked to reach it. Use it when the full sequence is on screen, or
+/// around a hub node that spans the genome and would otherwise fill the budget with distant
+/// slices. Insertions use up distance and deletions skip it. Turning around at a port is free,
+/// which keeps the other legs of a bubble the same distance away as the leg holding the start.
+/// A slice that straddles the limit is included whole. Without a radius the crawl follows
+/// ports regardless of how much sequence they skip.
 pub fn crawl_graph(
     conn: &GraphConnection,
     block_group_id: HashId,
     start: CrawlStart<'_>,
     node_budget: usize,
+    radius: Option<i64>,
 ) -> Result<Option<GenGraph>, CrawlError> {
     if node_budget == 0 {
         return Err(CrawlError::EmptyBudget);
@@ -73,15 +83,17 @@ pub fn crawl_graph(
                 return Err(CrawlError::RegionBlockGroupMismatch);
             }
             let path = region.path.as_ref().ok_or(CrawlError::RegionWithoutPath)?;
-            let coordinate = region.start;
+            let path_coordinate = region.start + (region.end - region.start) / 2;
             let Some(block) = path
                 .coordinate_blocks(conn, None)
                 .into_iter()
-                .find(|block| block.path_start <= coordinate && coordinate < block.path_end)
+                .find(|block| {
+                    block.path_start <= path_coordinate && path_coordinate < block.path_end
+                })
             else {
                 return Ok(None);
             };
-            let offset = coordinate - block.path_start;
+            let offset = path_coordinate - block.path_start;
             let node_coordinate = if block.strand == Strand::Reverse {
                 block.sequence_end - offset - 1
             } else {
@@ -97,23 +109,57 @@ pub fn crawl_graph(
         return Ok(None);
     };
     let mut selected = HashSet::from([anchor]);
+    // Bases from the start to each slice's incoming and outgoing port, tracked only when the
+    // crawl is bounded. The start sits inside the anchor, so its own offsets seed the walk.
+    let mut distances: HashMap<GraphNode, PortDistances> = HashMap::from([(
+        anchor,
+        PortDistances {
+            incoming: coordinate - anchor.sequence_start,
+            outgoing: anchor.sequence_end - coordinate,
+        },
+    )]);
     let mut queue = VecDeque::from([anchor]);
     while selected.len() < node_budget {
         let Some(node) = queue.pop_front() else {
             break;
         };
         crawler.complete(conn, &mut loaded, &[node])?;
-        let mut neighbors: Vec<GraphNode> = [Direction::Incoming, Direction::Outgoing]
+        let node_distances = distances.get(&node).copied().unwrap_or(PortDistances {
+            incoming: 0,
+            outgoing: 0,
+        });
+        let mut neighbors: Vec<(GraphNode, Direction)> = [Direction::Incoming, Direction::Outgoing]
             .into_iter()
-            .flat_map(|direction| loaded.neighbors_directed(node, direction))
+            .filter(|direction| radius.is_none_or(|radius| node_distances.at(*direction) < radius))
+            .flat_map(|direction| {
+                loaded
+                    .neighbors_directed(node, direction)
+                    .map(move |neighbor| (neighbor, direction))
+            })
             .collect();
         neighbors.sort();
         neighbors.dedup();
-        for neighbor in neighbors {
-            if selected.len() == node_budget {
-                break;
+        for (neighbor, direction) in neighbors {
+            if radius.is_some() {
+                let entry = node_distances.at(direction);
+                let length = neighbor.sequence_end - neighbor.sequence_start;
+                let reached = match direction {
+                    Direction::Outgoing => PortDistances {
+                        incoming: entry,
+                        outgoing: entry + length,
+                    },
+                    Direction::Incoming => PortDistances {
+                        incoming: entry + length,
+                        outgoing: entry,
+                    },
+                };
+                let known = distances.entry(neighbor).or_insert(reached);
+                let improved = known.merge(reached);
+                if improved && selected.contains(&neighbor) && !queue.contains(&neighbor) {
+                    queue.push_back(neighbor);
+                }
             }
-            if selected.insert(neighbor) {
+            if selected.len() < node_budget && selected.insert(neighbor) {
                 queue.push_back(neighbor);
             }
         }
@@ -133,6 +179,29 @@ pub fn crawl_graph(
         }
     }
     Ok(Some(result))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PortDistances {
+    incoming: i64,
+    outgoing: i64,
+}
+
+impl PortDistances {
+    fn at(&self, direction: Direction) -> i64 {
+        match direction {
+            Direction::Incoming => self.incoming,
+            Direction::Outgoing => self.outgoing,
+        }
+    }
+
+    /// Keep the shorter distance at each port; returns whether either shrank.
+    fn merge(&mut self, other: Self) -> bool {
+        let improved = other.incoming < self.incoming || other.outgoing < self.outgoing;
+        self.incoming = self.incoming.min(other.incoming);
+        self.outgoing = self.outgoing.min(other.outgoing);
+        improved
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -645,7 +714,7 @@ mod tests {
             node_id: node_id_for("b"),
             coordinate: 2,
         };
-        let graph = crawl_graph(&conn, block_group_id, start, 2)
+        let graph = crawl_graph(&conn, block_group_id, start, 2, None)
             .unwrap()
             .expect("should find the requested node position");
 
@@ -666,6 +735,7 @@ mod tests {
                     coordinate: 2,
                 },
                 0,
+                None,
             ),
             Err(CrawlError::EmptyBudget)
         ));
@@ -745,12 +815,136 @@ mod tests {
         });
         Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
         let region = resolve(&Region::parse("chain:5").unwrap(), &conn, "test", "test").unwrap();
-        let graph = crawl_graph(&conn, block_group_id, CrawlStart::Region(&region), 1)
+        let graph = crawl_graph(&conn, block_group_id, CrawlStart::Region(&region), 1, None)
             .unwrap()
             .expect("should find a block at path coordinate five");
 
         assert_eq!(graph.node_count(), 1);
         assert!(graph.contains_node(block("b", 0, 4)));
+    }
+
+    #[test]
+    fn test_crawl_graph_radius_stops_walking_past_the_requested_distance() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("b", 4, "c", 0, 0),
+                ("c", 4, "end", 0, 0),
+            ],
+        );
+        let start = || CrawlStart::Node {
+            node_id: node_id_for("b"),
+            coordinate: 2,
+        };
+        let unlimited = crawl_graph(&conn, block_group_id, start(), usize::MAX, None)
+            .unwrap()
+            .expect("should find the requested node position");
+        assert!(unlimited.contains_node(block("a", 0, 4)));
+        assert!(unlimited.contains_node(block("c", 0, 4)));
+
+        // Two bases remain on either side of the start inside `b`, so a span of three reaches
+        // the neighboring slices without walking on to their own neighbors.
+        let spanned = crawl_graph(&conn, block_group_id, start(), usize::MAX, Some(3))
+            .unwrap()
+            .expect("should find the requested node position");
+        assert!(spanned.contains_node(block("b", 0, 4)));
+        assert!(spanned.contains_node(block("a", 0, 4)));
+        assert!(spanned.contains_node(block("c", 0, 4)));
+        assert!(!spanned.contains_node(start_sentinel()));
+        assert!(!spanned.contains_node(block("end", 0, 0)));
+    }
+
+    #[test]
+    fn test_crawl_graph_radius_keeps_the_other_leg_of_a_bubble() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG"), ("d", "TTTT")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("a", 4, "c", 0, 0),
+                ("b", 4, "d", 0, 0),
+                ("c", 4, "d", 0, 0),
+                ("d", 4, "end", 0, 0),
+            ],
+        );
+        let graph = crawl_graph(
+            &conn,
+            block_group_id,
+            CrawlStart::Node {
+                node_id: node_id_for("b"),
+                coordinate: 2,
+            },
+            usize::MAX,
+            Some(3),
+        )
+        .unwrap()
+        .expect("should find the requested node position");
+
+        // The other leg hangs off the same ports as the start's leg, so it is as close as the
+        // leg that holds the start even though it is only reachable by turning around.
+        assert!(graph.contains_node(block("b", 0, 4)));
+        assert!(graph.contains_node(block("c", 0, 4)));
+        assert!(graph.contains_node(block("a", 0, 4)));
+        assert!(graph.contains_node(block("d", 0, 4)));
+        assert!(!graph.contains_node(start_sentinel()));
+        assert!(!graph.contains_node(block("end", 0, 0)));
+    }
+
+    #[test]
+    fn test_crawl_graph_region_start_uses_its_midpoint() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG"), ("d", "TTTT")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("b", 4, "c", 0, 0),
+                ("c", 4, "d", 0, 0),
+                ("d", 4, "end", 0, 0),
+            ],
+        );
+        let edge_ids = [
+            (PATH_START_NODE_ID, 0),
+            (node_id_for("a"), 4),
+            (node_id_for("b"), 4),
+            (node_id_for("c"), 4),
+            (node_id_for("d"), 4),
+        ]
+        .map(|(node_id, coordinate)| {
+            Edge::edges_at_port_direction(
+                &conn,
+                &block_group_id,
+                node_id,
+                coordinate,
+                Direction::Outgoing,
+            )
+            .unwrap()[0]
+                .edge
+                .id
+        });
+        Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        let region = resolve(&Region::parse("chain:5-11").unwrap(), &conn, "test", "test").unwrap();
+        let graph = crawl_graph(
+            &conn,
+            block_group_id,
+            CrawlStart::Region(&region),
+            usize::MAX,
+            Some(3),
+        )
+        .unwrap()
+        .expect("should find the region midpoint");
+
+        assert!(graph.contains_node(block("b", 0, 4)));
+        assert!(graph.contains_node(block("c", 0, 4)));
+        assert!(!graph.contains_node(block("a", 0, 4)));
+        assert!(!graph.contains_node(block("d", 0, 4)));
     }
 
     #[test]
@@ -766,6 +960,7 @@ mod tests {
                 coordinate: 9,
             },
             6,
+            None,
         )
         .unwrap()
         .expect("should locate a reference slice beside a junction");
