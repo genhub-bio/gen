@@ -2,7 +2,10 @@
 
 use std::cell::Cell;
 
-use gen_models::select::{Connection, Row};
+use gen_models::{
+    ForeignKeyCache,
+    select::{Connection, Row},
+};
 use gen_models_macros::ModelSelect;
 use rusqlite::{
     ToSql,
@@ -26,6 +29,55 @@ pub struct FixtureGroup {
     pub sample_name: String,
     pub name: String,
     pub collection_name: String,
+}
+
+#[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "fixture_foreign_targets")]
+pub struct FixtureForeignTarget {
+    pub id: i64,
+    pub name: String,
+}
+
+fn fixture_required_relation_from_row(row: &Row) -> rusqlite::Result<FixtureRequiredRelation> {
+    Ok(FixtureRequiredRelation {
+        id: row.get("id")?,
+        target_id: row.get("target_id")?,
+        cached_target: ForeignKeyCache::default(),
+    })
+}
+
+#[derive(Clone, Debug, ModelSelect)]
+#[model_select(
+    table = "fixture_required_relations",
+    from_row = fixture_required_relation_from_row
+)]
+pub struct FixtureRequiredRelation {
+    pub id: i64,
+    #[model_select(foreign_key(FixtureForeignTarget, cache = cached_target))]
+    pub target_id: i64,
+    #[model_select(skip)]
+    pub cached_target: ForeignKeyCache<FixtureForeignTarget>,
+}
+
+fn fixture_nullable_relation_from_row(row: &Row) -> rusqlite::Result<FixtureNullableRelation> {
+    Ok(FixtureNullableRelation {
+        id: row.get("id")?,
+        optional_target_id: row.get("optional_target_id")?,
+        cached_target: ForeignKeyCache::default(),
+    })
+}
+
+#[derive(Clone, Debug, ModelSelect)]
+#[model_select(
+    table = "fixture_nullable_relations",
+    from_row = fixture_nullable_relation_from_row
+)]
+pub struct FixtureNullableRelation {
+    pub id: i64,
+    #[model_select(foreign_key(FixtureForeignTarget, cache = cached_target))]
+    pub optional_target_id: Option<i64>,
+    #[model_select(skip)]
+    pub cached_target: ForeignKeyCache<FixtureForeignTarget>,
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
@@ -161,6 +213,21 @@ pub fn connection() -> Connection {
             name TEXT NOT NULL,
             collection_name TEXT NOT NULL
         );
+        CREATE TABLE fixture_foreign_targets (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        INSERT INTO fixture_foreign_targets (id, name) VALUES (1, 'target-one'), (2, 'target-two');
+        CREATE TABLE fixture_required_relations (
+            id INTEGER PRIMARY KEY,
+            target_id INTEGER NOT NULL
+        );
+        INSERT INTO fixture_required_relations (id, target_id) VALUES (1, 1), (2, 99);
+        CREATE TABLE fixture_nullable_relations (
+            id INTEGER PRIMARY KEY,
+            optional_target_id INTEGER
+        );
+        INSERT INTO fixture_nullable_relations (id, optional_target_id) VALUES (1, NULL), (2, 99);
         CREATE TABLE fixture_composite_keys (
             namespace TEXT NOT NULL,
             name TEXT NOT NULL,

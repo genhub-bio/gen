@@ -1,0 +1,5 @@
+error: a foreign_key cache field must be marked `#[model_select(skip)]`
+  --> tests/ui/foreign_key_cache_not_skipped.rs:15:55
+   |
+15 |     #[model_select(foreign_key(ForeignTarget, cache = cached_target))]
+   |                                                       ^^^^^^^^^^^^^

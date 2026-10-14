@@ -4,8 +4,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Error, ExprPath, Fields, Ident, LitBool, LitStr, Type,
-    parse_macro_input,
+    Attribute, Data, DeriveInput, Error, ExprPath, Field, Fields, Ident, LitBool, LitStr, Path,
+    Token, Type, parenthesized, parse_macro_input,
 };
 
 /// Adds a typed SQL query builder to a Gen model.
@@ -25,7 +25,9 @@ use syn::{
 /// `#[model_select(default_sort(field = "asc", tie_breaker = "desc"))]` configures default
 /// ordering in precedence order,
 /// `#[model_select(skip)]` excludes a field, and the struct-level `history`, `from_row`, `source`,
-/// `alias`, and `select` options support custom persistence behavior or aliased queries.
+/// `alias`, and `select` options support custom persistence behavior or aliased queries. A field
+/// can declare `foreign_key(Target, cache = cached_target)` to generate cache-aware relation
+/// accessors when its skipped cache field stores `ForeignKeyCache<Target>`.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -88,6 +90,82 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             quote! { #table }
         });
 
+    let parsed_fields = fields
+        .into_iter()
+        .map(|field| {
+            let options = FieldOptions::from_attributes(&field.attrs)?;
+            Ok((field, options))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    let mut relation_caches = Vec::new();
+    let mut relation_methods = Vec::new();
+    let mut relation_names = Vec::new();
+    for (field, field_options) in &parsed_fields {
+        let Some(relation) = field_options.foreign_key.as_ref() else {
+            continue;
+        };
+        let field_name = field.ident.as_ref().expect("should contain a named field");
+        let field_name_string = field_name_string(field_name);
+        let Some(relation_name) = field_name_string.strip_suffix("_id") else {
+            return Err(Error::new_spanned(
+                field_name,
+                "a foreign_key field name must end in `_id`",
+            ));
+        };
+        if field_options.skip {
+            return Err(Error::new_spanned(
+                field_name,
+                "a foreign_key field must be selectable",
+            ));
+        }
+        if relation_caches
+            .iter()
+            .any(|cache: &Ident| cache == &relation.cache)
+        {
+            return Err(Error::new_spanned(
+                &relation.cache,
+                "a runtime cache field can only be used by one foreign_key",
+            ));
+        }
+        let Some((_, cache_options)) = parsed_fields
+            .iter()
+            .find(|(candidate, _)| candidate.ident.as_ref() == Some(&relation.cache))
+        else {
+            return Err(Error::new_spanned(
+                &relation.cache,
+                "foreign_key cache field does not exist on this model",
+            ));
+        };
+        if !cache_options.skip {
+            return Err(Error::new_spanned(
+                &relation.cache,
+                "a foreign_key cache field must be marked `#[model_select(skip)]`",
+            ));
+        }
+        if &relation.cache == field_name {
+            return Err(Error::new_spanned(
+                field_name,
+                "a foreign_key field cannot also be its runtime cache field",
+            ));
+        }
+        let getter_name = format_ident!("get_{relation_name}");
+        let setter_name = format_ident!("set_{relation_name}");
+        if relation_names
+            .iter()
+            .any(|name: &Ident| name == &getter_name || name == &setter_name)
+        {
+            return Err(Error::new_spanned(
+                field_name,
+                "foreign_key fields generate conflicting relation method names",
+            ));
+        }
+        relation_names.push(getter_name);
+        relation_names.push(setter_name);
+        relation_caches.push(relation.cache.clone());
+        relation_methods.push(foreign_key_methods(field, relation));
+    }
+
     let mut selectable_fields = Vec::new();
     let mut column_constants = Vec::new();
     let mut filter_methods = Vec::new();
@@ -99,11 +177,10 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let mut inferred_primary_key = None;
     let mut selectable_columns = Vec::new();
 
-    for field in fields {
+    for (field, field_options) in parsed_fields {
         let Some(field_name) = field.ident else {
             continue;
         };
-        let field_options = FieldOptions::from_attributes(&field.attrs)?;
         if field_options.skip {
             if field_options.primary_key {
                 return Err(Error::new_spanned(
@@ -702,6 +779,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             > {
                 Self::select(conn).load()
             }
+
+            #(#relation_methods)*
         }
     })
 }
@@ -849,6 +928,12 @@ struct FieldOptions {
     column: Option<String>,
     primary_key: bool,
     skip: bool,
+    foreign_key: Option<ForeignKeyOptions>,
+}
+
+struct ForeignKeyOptions {
+    target: Path,
+    cache: Ident,
 }
 
 impl FieldOptions {
@@ -872,10 +957,128 @@ impl FieldOptions {
                     options.primary_key = true;
                     return Ok(());
                 }
+                if meta.path.is_ident("foreign_key") {
+                    if options.foreign_key.is_some() {
+                        return Err(meta.error("foreign_key can only be specified once per field"));
+                    }
+                    let relation;
+                    parenthesized!(relation in meta.input);
+                    let target: Path = relation.parse()?;
+                    relation.parse::<Token![,]>()?;
+                    let cache_option: Ident = relation.parse()?;
+                    if cache_option != "cache" {
+                        return Err(Error::new_spanned(
+                            cache_option,
+                            "foreign_key requires `cache = field_name`",
+                        ));
+                    }
+                    relation.parse::<Token![=]>()?;
+                    let cache: Ident = relation.parse()?;
+                    if !relation.is_empty() {
+                        return Err(Error::new(
+                            cache.span(),
+                            "foreign_key accepts only a target model and cache field",
+                        ));
+                    }
+                    options.foreign_key = Some(ForeignKeyOptions { target, cache });
+                    return Ok(());
+                }
                 Err(meta.error("unsupported model_select field option"))
             })?;
         }
         Ok(options)
+    }
+}
+
+fn foreign_key_methods(field: &Field, relation: &ForeignKeyOptions) -> proc_macro2::TokenStream {
+    let field_name = field
+        .ident
+        .as_ref()
+        .expect("should be a named foreign_key field");
+    let field_type = &field.ty;
+    let field_name_string = field_name_string(field_name);
+    let relation_name = field_name_string
+        .strip_suffix("_id")
+        .expect("should have a foreign_key field name ending in `_id`");
+    let getter = format_ident!("get_{relation_name}");
+    let setter = format_ident!("set_{relation_name}");
+    let target = &relation.target;
+    let cache = &relation.cache;
+
+    if option_inner(field_type).is_some() {
+        quote! {
+            /// Returns a matching cached relation or loads it; successful loads are retained at runtime.
+            /// A null foreign key returns `None` without querying the database.
+            pub fn #getter(
+                &self,
+                conn: &::gen_models::select::Connection,
+            ) -> ::core::result::Result<
+                ::core::option::Option<::std::sync::Arc<#target>>,
+                ::gen_models::ModelSelectError,
+            > {
+                let Some(foreign_key) = self.#field_name.as_ref() else {
+                    self.#cache.replace(::core::option::Option::None);
+                    return ::core::result::Result::Ok(::core::option::Option::None);
+                };
+                self.#cache
+                    .get_or_load(
+                        |cached| cached.id == *foreign_key,
+                        || {
+                            let related = #target::select(conn)
+                                .get_by_id(foreign_key.clone())?
+                                .ok_or_else(|| {
+                                    ::gen_models::ModelSelectError::DatabaseError(
+                                        ::gen_models::select::SqlError::QueryReturnedNoRows,
+                                    )
+                                })?;
+                            ::core::result::Result::Ok(::std::sync::Arc::new(related))
+                        },
+                    )
+                    .map(::core::option::Option::Some)
+            }
+
+            /// Synchronizes the foreign key and runtime cache without writing to the database.
+            /// Other model caches are not invalidated.
+            pub fn #setter(
+                &mut self,
+                related: ::core::option::Option<::std::sync::Arc<#target>>,
+            ) {
+                self.#field_name = related.as_ref().map(|related| related.id.clone());
+                self.#cache.replace(related);
+            }
+        }
+    } else {
+        quote! {
+            /// Returns a matching cached relation or loads it; successful loads are retained at runtime.
+            pub fn #getter(
+                &self,
+                conn: &::gen_models::select::Connection,
+            ) -> ::core::result::Result<
+                ::std::sync::Arc<#target>,
+                ::gen_models::ModelSelectError,
+            > {
+                self.#cache.get_or_load(
+                    |cached| cached.id == self.#field_name,
+                    || {
+                        let related = #target::select(conn)
+                            .get_by_id(self.#field_name.clone())?
+                            .ok_or_else(|| {
+                                ::gen_models::ModelSelectError::DatabaseError(
+                                    ::gen_models::select::SqlError::QueryReturnedNoRows,
+                                )
+                            })?;
+                        ::core::result::Result::Ok(::std::sync::Arc::new(related))
+                    },
+                )
+            }
+
+            /// Synchronizes the foreign key and runtime cache without writing to the database.
+            /// Other model caches are not invalidated.
+            pub fn #setter(&mut self, related: ::std::sync::Arc<#target>) {
+                self.#field_name = related.id.clone();
+                self.#cache.replace(::core::option::Option::Some(related));
+            }
+        }
     }
 }
 

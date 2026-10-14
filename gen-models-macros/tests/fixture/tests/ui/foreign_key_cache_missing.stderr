@@ -1,0 +1,5 @@
+error: foreign_key cache field does not exist on this model
+  --> tests/ui/foreign_key_cache_missing.rs:13:55
+   |
+13 |     #[model_select(foreign_key(ForeignTarget, cache = cached_target))]
+   |                                                       ^^^^^^^^^^^^^

@@ -1,7 +1,10 @@
 //! Read-only graph projection and region resolution shared by navigation and editing.
 
 use core::ops::Range;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
@@ -46,6 +49,7 @@ pub(crate) fn locus_from_region(
     let tree = match (resolved.kind, &resolved.path) {
         (ResolvedRegionKind::BlockGroup, Some(path)) => path
             .intervaltree(conn)
+            .map(Arc::new)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
         _ => resolved
             .intervaltree(conn, context.workspace())

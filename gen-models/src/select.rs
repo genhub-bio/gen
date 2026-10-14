@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
-pub use rusqlite::{Connection, Result as SqlResult, Row};
+pub use rusqlite::{Connection, Error as SqlError, Result as SqlResult, Row};
 use rusqlite::{
     Params, ToSql, params_from_iter,
     types::{FromSql, ToSqlOutput, Value},
