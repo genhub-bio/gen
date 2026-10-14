@@ -34,7 +34,39 @@ jobs:
         run: sudo apt-get update && sudo apt-get install capnproto clang mold
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install capnproto
+        shell: pwsh
+        run: |
+          $capnpVerified = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install capnproto -y
+            $installExitCode = $LASTEXITCODE
+
+            if ($installExitCode -eq 0) {
+              $capnpCommand = Get-Command capnp -ErrorAction SilentlyContinue
+              if ($null -ne $capnpCommand) {
+                capnp --version
+                $versionExitCode = $LASTEXITCODE
+                if ($versionExitCode -eq 0) {
+                  $capnpVerified = $true
+                  break
+                }
+                Write-Warning "capnp --version exited with code $versionExitCode on attempt $attempt."
+              } else {
+                Write-Warning "capnp was not found after installation attempt $attempt."
+              }
+            } else {
+              Write-Warning "choco install exited with code $installExitCode on attempt $attempt."
+            }
+
+            if ($attempt -lt 3) {
+              Start-Sleep -Seconds 5
+            }
+          }
+
+          if (-not $capnpVerified) {
+            throw "Could not install and verify capnproto after 3 attempts."
+          }
+          exit 0
       - name: Test
         working-directory: gen-python
         run: cargo test
