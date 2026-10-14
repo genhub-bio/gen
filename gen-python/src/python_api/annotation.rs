@@ -2,7 +2,7 @@ use r#gen::views::annotation_track::AnnotationSpan;
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
 use gen_graph::{GraphNode, GraphNodeSlice};
-use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
+use gen_models::{ForeignKeyCache, annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
@@ -60,6 +60,8 @@ impl PyAnnotation {
                 name: span.name.clone(),
                 group: group.to_string(),
                 accession_id: HashId([0u8; 16]),
+                cached_accession: ForeignKeyCache::default(),
+                cached_interval_tree: None,
                 extra: None,
             },
             context: sequence_graph.context.clone(),
@@ -102,6 +104,7 @@ impl PyAnnotation {
                 name: name.to_string(),
                 group: String::new(),
                 accession_id: HashId([0u8; 16]),
+                cached_accession: ForeignKeyCache::default(),
                 cached_interval_tree: None,
                 extra: None,
             },

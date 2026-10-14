@@ -168,10 +168,9 @@ pub fn resolve_all(
     }
 
     for annotation in Annotation::resolve_candidates(region, conn, collection_name, sample_name)? {
-        let accession = Accession::select(conn)
-            .get_by_id(annotation.accession_id)
-            .map_err(AccessionError::from)?
-            .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
+        let accession = annotation
+            .get_accession(conn)
+            .map_err(AnnotationError::from)?;
         resolved_regions.push(resolve_target(
             region,
             target_from_accession(
@@ -180,7 +179,7 @@ pub fn resolve_all(
                 collection_name,
                 sample_name,
                 RegionTargetKind::Annotation,
-                accession,
+                (*accession).clone(),
                 Some(annotation),
                 false,
             )?,
@@ -313,17 +312,16 @@ pub fn resolve_annotation(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    let accession = Accession::select(conn)
-        .get_by_id(annotation.accession_id)
-        .map_err(AccessionError::from)?
-        .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
+    let accession = annotation
+        .get_accession(conn)
+        .map_err(AnnotationError::from)?;
     let target = target_from_accession(
         region,
         conn,
         collection_name,
         sample_name,
         RegionTargetKind::Annotation,
-        accession,
+        (*accession).clone(),
         Some(annotation),
         false,
     )?;
@@ -481,16 +479,18 @@ impl ResolvedGenRegion {
     pub fn from_annotation(
         conn: &GraphConnection,
         annotation: &Annotation,
-        accession: &Accession,
         start: i64,
         end: i64,
-    ) -> Result<Self, BlockGroupError> {
+    ) -> Result<Self, GenRegionError> {
+        let accession = annotation
+            .get_accession(conn)
+            .map_err(AnnotationError::from)?;
         let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id, None)?;
         let annotation_length = annotation.length(conn)?;
         Ok(ResolvedGenRegion {
             block_group,
             path: None,
-            accession: Some(accession.clone()),
+            accession: Some((*accession).clone()),
             annotation: Some(annotation.clone()),
             kind: ResolvedRegionKind::Annotation,
             anchor_start: 0,

@@ -15,6 +15,7 @@ pub mod db;
 pub mod edge;
 pub mod errors;
 pub mod file_types;
+pub mod foreign_key_cache;
 #[allow(clippy::all)]
 pub mod generated;
 pub mod graph;
@@ -36,6 +37,7 @@ pub mod sample_metadata;
 #[doc(hidden)]
 pub mod select;
 pub mod sequence;
+pub use foreign_key_cache::ForeignKeyCache;
 pub use interval_tree::IntervalTreeSource;
 #[cfg(test)]
 pub mod test_helpers;

@@ -2472,13 +2472,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let annotation_accession = Accession::select(&conn)
-            .get_by_id(annotation.accession_id)
-            .expect("should query annotation accession")
-            .expect("should find annotation accession");
-        let region =
-            ResolvedGenRegion::from_annotation(&conn, &annotation, &annotation_accession, 5, 15)
-                .unwrap();
+        let region = ResolvedGenRegion::from_annotation(&conn, &annotation, 5, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,

@@ -113,6 +113,36 @@ let roots = BlockGroup::select(conn)
     .expect("should load root block groups");
 ```
 
+## Cacheable foreign keys
+
+Opt a foreign-key field into generated relation accessors by naming its target model and a skipped
+runtime cache field:
+
+```rust
+use gen_models::{ForeignKeyCache, ModelSelect};
+
+#[derive(ModelSelect)]
+#[model_select(table = "annotations", from_row = annotation_from_row)]
+struct Annotation {
+    #[model_select(foreign_key(Accession, cache = cached_accession))]
+    accession_id: HashId,
+    #[model_select(skip)]
+    cached_accession: ForeignKeyCache<Accession>,
+}
+```
+
+This generates `get_accession(conn)` and `set_accession(Arc<Accession>)`. The getter returns the
+attached object when its `id` still matches the foreign key, otherwise it loads the target by its
+`id`; a missing required target is reported as `QueryReturnedNoRows`. An `Option<Id>` foreign key
+instead generates a getter and setter using `Option<Arc<Target>>`; a null ID returns `None`, while
+a dangling non-null ID remains an error. Foreign-key field names must end in `_id`, the named cache
+field must exist, use `#[model_select(skip)]`, and have type `ForeignKeyCache<Target>`; the target
+model must expose an `id` field. The target's `id` field is its primary key because the getter loads it with `get_by_id`. A getter
+returns a matching cached object or loads and retains a successful database result at runtime;
+failed loads are not cached. Cloning a model copies its current cached Arc into an independent cache
+cell. The setter updates the in-memory foreign key and cache without writing to the database; it
+does not invalidate other model caches.
+
 ## Loading one model or all models
 
 Use `get` when a selector must match at most one model. It returns

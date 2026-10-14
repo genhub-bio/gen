@@ -4,7 +4,7 @@ use std::{
     io, str,
 };
 
-use gen_core::{HashId, NodeIntervalBlock, PathBlock, Strand, is_terminal};
+use gen_core::{HashId, PathBlock, Strand, is_terminal};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange, BlockGroupData, IntervalTreeCache, PathCache},
     block_group_edge::BlockGroupEdge,

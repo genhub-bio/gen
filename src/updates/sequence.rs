@@ -289,8 +289,7 @@ mod tests {
             Annotation::get_or_create(&conn, "target-ann", "genes", &accession.id, None).unwrap();
         Path::delete(&conn, "chr1", &block_group_id);
 
-        let region =
-            ResolvedGenRegion::from_annotation(&conn, &annotation, &accession, -5, 25).unwrap();
+        let region = ResolvedGenRegion::from_annotation(&conn, &annotation, -5, 25).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
