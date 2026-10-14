@@ -481,24 +481,37 @@ impl Edge {
     /// direction. Source and target endpoints are seeked through their own indexes and merged,
     /// so a port lookup stays bounded even on chromosome-length nodes.
     fn nearest_port_subquery(comparison: &str, order: &str, aggregate: &str) -> String {
-        let candidates = ["source", "target"]
-            .map(|side| {
-                format!(
-                    "SELECT * FROM (
-                        SELECT e.{side}_coordinate AS coordinate FROM {edges} e
-                        CROSS JOIN {block_group_edges} bge
-                        WHERE e.{side}_node_id = :node_id
-                          AND e.{side}_coordinate {comparison} :coordinate
-                          AND bge.block_group_id = :block_group_id
-                          AND bge.edge_id = e.id
-                        ORDER BY e.{side}_coordinate {order} LIMIT 1
-                    )",
-                    edges = Self::table_name_with_history_ref(None),
-                    block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+        format!(
+            "(
+            SELECT {aggregate}(coordinate) FROM (
+                SELECT * FROM (
+                    SELECT e.source_coordinate AS coordinate
+                    FROM {edges} e
+                    CROSS JOIN {block_group_edges} bge
+                    WHERE e.source_node_id = :node_id
+                      AND e.source_coordinate {comparison} :coordinate
+                      AND bge.block_group_id = :block_group_id
+                      AND bge.edge_id = e.id
+                    ORDER BY e.source_coordinate {order}
+                    LIMIT 1
                 )
-            })
-            .join(" UNION ALL ");
-        format!("(SELECT {aggregate}(coordinate) FROM ({candidates}))")
+                UNION ALL
+                SELECT * FROM (
+                    SELECT e.target_coordinate AS coordinate
+                    FROM {edges} e
+                    CROSS JOIN {block_group_edges} bge
+                    WHERE e.target_node_id = :node_id
+                      AND e.target_coordinate {comparison} :coordinate
+                      AND bge.block_group_id = :block_group_id
+                      AND bge.edge_id = e.id
+                    ORDER BY e.target_coordinate {order}
+                    LIMIT 1
+                )
+            )
+        )",
+            edges = Self::table_name_with_history_ref(None),
+            block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+        )
     }
 
     /// The closest coordinate with any edge endpoint on this node.
