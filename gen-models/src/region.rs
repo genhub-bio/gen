@@ -433,8 +433,10 @@ impl ResolvedGenRegion {
     ) -> Result<Self, BlockGroupError> {
         let block_group = path.get_block_group(conn)?;
         let mut path = path.clone();
-        let interval_tree = path.intervaltree(conn)?;
-        path.set_cached_interval_tree(Some(interval_tree));
+        if path.cached_interval_tree().is_none() {
+            let interval_tree = path.intervaltree(conn)?;
+            path.set_cached_interval_tree(Some(interval_tree));
+        }
         let path_length = path.length(conn, None)?;
         Ok(ResolvedGenRegion {
             block_group: block_group.as_ref().clone(),
@@ -928,6 +930,28 @@ mod tests {
             .intervaltree(&conn, test_workspace())
             .expect("should reuse the historical path tree");
         assert!(Arc::ptr_eq(&first_tree, &second_tree));
+    }
+
+    #[test]
+    fn test_from_path_reuses_attached_interval_tree() {
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (_, path) = setup_block_group(&conn);
+        let first_region = ResolvedGenRegion::from_path(&conn, &path, 0, 40)
+            .expect("should resolve the first path region");
+        let cached_path = first_region
+            .path
+            .as_ref()
+            .expect("should retain the first path");
+        let cached_tree = cached_path
+            .cached_interval_tree()
+            .expect("should cache the first path tree");
+        let second_region = ResolvedGenRegion::from_path(&conn, cached_path, 5, 15)
+            .expect("should resolve a second region from the cached path");
+        let second_tree = second_region
+            .intervaltree(&conn, test_workspace())
+            .expect("should use the second region's path tree");
+
+        assert!(Arc::ptr_eq(cached_tree, &second_tree));
     }
 
     #[test]
