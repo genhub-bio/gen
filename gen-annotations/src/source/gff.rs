@@ -216,6 +216,7 @@ mod tests {
     };
 
     use super::{AnnotationTranslationContext, parse_gff_annotation, translate_gff_annotation};
+    use crate::{test_helpers::create_reverse_test_block_group, translate::gff::translate_gff};
 
     #[test]
     fn test_gff_annotation_matches_metadata_and_resolves_slices() {
@@ -382,5 +383,114 @@ mod tests {
             .get_accession(&conn)
             .expect("should get translated accession");
         assert!(accession.length(&conn).expect("should measure accession") > 0);
+    }
+
+    #[test]
+    fn test_translates_reverse_split_gff_to_exact_node_local_spans() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        // Path edges traverse B then A with negative edge strands; input feature strand is +.
+        //   path index:  01234567890123456
+        //   path nodes:  BBBBBBBBAAAAAAAAA
+        //   path DNA:    TGCAACGGTAACCGGTT
+        //   feature:            ^^ [7,9) = GT
+        //
+        // Stored node B:
+        //   index:     012345678
+        //   DNA:       CCGTTGCAT
+        //   span:      ^-------^ [0,8)
+        //   selected:  ^ [0,1) = C
+        //
+        // Stored node A:
+        //   index:     012345678
+        //   DNA:       AACCGGTTA
+        //   span:      ^--------^ [0,9)
+        //   selected:          ^ [8,9) = A
+        let input = format!(
+            "##gff-version 3\n{}\tsource\tgene\t8\t9\t.\t+\t.\tID=cross-boundary;Name=cross-boundary\n",
+            block_group.name
+        );
+        let mut translated = Vec::new();
+        translate_gff(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate GFF input");
+        let translated = String::from_utf8(translated).expect("should write UTF-8 GFF output");
+        assert_eq!(
+            translated,
+            format!(
+                "{node_b_id}\tsource\tgene\t1\t1\t.\t+\t.\tID=cross-boundary;Name=cross-boundary\n{node_a_id}\tsource\tgene\t9\t9\t.\t+\t.\tID=cross-boundary;Name=cross-boundary\n"
+            ),
+            "GFF fragments should map to stored-node spans in path order and preserve the input feature strand"
+        );
+    }
+
+    #[test]
+    fn test_translates_single_base_gff_before_node_boundary() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, _, node_b_id) = create_reverse_test_block_group(&conn);
+        // The reverse edge maps path position 7 to stored B [0,1); feature strand stays +.
+        let input = format!(
+            "{}\tsource\tgene\t8\t8\t.\t+\t.\tID=before-boundary;Name=before-boundary\n",
+            block_group.name
+        );
+        let mut translated = Vec::new();
+        translate_gff(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate GFF input");
+        let translated = String::from_utf8(translated).expect("should write UTF-8 GFF output");
+        assert_eq!(
+            translated,
+            format!(
+                "{node_b_id}\tsource\tgene\t1\t1\t.\t+\t.\tID=before-boundary;Name=before-boundary\n"
+            ),
+            "GFF coordinate 8 should map to the final base of the first path node"
+        );
+    }
+
+    #[test]
+    fn test_translates_single_base_gff_after_node_boundary() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, _) = create_reverse_test_block_group(&conn);
+        // The reverse edge maps path position 8 to stored A [8,9); feature strand stays +.
+        let input = format!(
+            "{}\tsource\tgene\t9\t9\t.\t+\t.\tID=after-boundary;Name=after-boundary\n",
+            block_group.name
+        );
+        let mut translated = Vec::new();
+        translate_gff(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate GFF input");
+        let translated = String::from_utf8(translated).expect("should write UTF-8 GFF output");
+        assert_eq!(
+            translated,
+            format!(
+                "{node_a_id}\tsource\tgene\t9\t9\t.\t+\t.\tID=after-boundary;Name=after-boundary\n"
+            ),
+            "GFF coordinate 9 should map to the first base of the second path node"
+        );
     }
 }

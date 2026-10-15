@@ -226,12 +226,13 @@ fn translated_bed_interval_tree(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, sync::Arc};
+    use std::{fs::File, io::Cursor, sync::Arc};
 
     use gen_core::{HashId, Strand};
     use gen_models::{interval_tree::IntervalTreeSource as _, sample::Sample};
 
     use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
+    use crate::{test_helpers::create_reverse_test_block_group, translate::bed::translate_bed};
 
     #[test]
     fn test_bed_annotation_matches_identifier_and_preserves_metadata() {
@@ -380,5 +381,53 @@ mod tests {
         assert_eq!(interval.value.sequence_start, 5);
         assert_eq!(interval.value.sequence_end, 8);
         assert_eq!(interval.value.strand, Strand::Reverse);
+    }
+
+    #[test]
+    fn test_translates_reverse_split_bed_to_exact_node_local_spans() {
+        // This test has 2 nodes connected by a negative edge strand while the feature's annotated strand is +.
+        // So this is a translation with a graph of the negative strand with a feature annotated on the + strand.
+        // Path edges traverse B then A
+        //   path index:  01234567890123456
+        //   path nodes:  BBBBBBBBAAAAAAAAA
+        //   path DNA:    TGCAACGGTAACCGGTT
+        //   feature:            ^^ [7,9) = GT
+        //
+        // Stored node B:
+        //   index:     012345678
+        //   DNA:       CCGTTGCAT
+        //   span:      ^-------^ [0,8)
+        //   feature:   ^ [0,1) = C
+        //
+        // Stored node A:
+        //   index:     012345678
+        //   DNA:       AACCGGTTA
+        //   span:      ^--------^ [0,9)
+        //   feature:           ^ [8,9) = A
+
+        // BED [7,9) maps to path [7,9), producing B [0,1) then A [8,9) with feature strand +.
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
+        let input = format!("{}\t7\t9\tcross-boundary\t0\t+\n", block_group.name);
+        let mut translated = Vec::new();
+        translate_bed(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate BED input");
+        let translated = String::from_utf8(translated).expect("should write UTF-8 BED output");
+        assert_eq!(
+            translated,
+            format!(
+                "{node_b_id}\t0\t1\tcross-boundary\t0\t+\n{node_a_id}\t8\t9\tcross-boundary\t0\t+\n"
+            ),
+            "BED fragments should map to stored-node spans in path order and preserve the input feature strand"
+        );
     }
 }
