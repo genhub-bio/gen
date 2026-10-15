@@ -133,12 +133,6 @@ impl<'a> Capnp<'a> for Path {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct PathData {
-    pub name: String,
-    pub block_group_id: HashId,
-}
-
 impl PathSelect<'_> {
     pub fn collection_name(self, collection_name: impl Into<String>) -> Self {
         let conn = self.conn;

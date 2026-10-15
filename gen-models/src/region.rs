@@ -869,7 +869,7 @@ mod tests {
     use crate::{
         accession::{AccessionSpan, NewAccession},
         annotations::Annotation,
-        block_group::{BlockGroup, PathCache},
+        block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         edge::Edge,
         history::dolt::commit_all,
@@ -886,9 +886,7 @@ mod tests {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
         let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "mreB", 10, 30, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "mreB", 10, 30).unwrap();
         let annotation =
             Annotation::get_or_create(&conn, "gene-mreB", "genes", &accession.id, None).unwrap();
         (conn, block_group, path, accession, annotation)
@@ -1472,7 +1470,7 @@ mod tests {
 
         use super::*;
         use crate::{
-            block_group::{BlockGroup, NewBlockGroup, PathCache},
+            block_group::{BlockGroup, NewBlockGroup},
             block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
             collection::Collection,
             edge::Edge,
@@ -1628,9 +1626,7 @@ mod tests {
                 }
             }
             let path = Path::create(conn, name, &block_group_id, &ordered).unwrap();
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
         }
@@ -1644,9 +1640,7 @@ mod tests {
             end: i64,
         ) -> Accession {
             let path = Path::create(conn, name, &block_group_id, edge_ids).unwrap();
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
         }
