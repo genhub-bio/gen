@@ -24,10 +24,12 @@ use syn::{
 /// `#[model_select(primary_key)]` marks each field in an explicit primary key,
 /// `#[model_select(default_sort(field = "asc", tie_breaker = "desc"))]` configures default
 /// ordering in precedence order,
-/// `#[model_select(skip)]` excludes a field, and the struct-level `history`, `from_row`, `source`,
-/// `alias`, and `select` options support custom persistence behavior or aliased queries. A field
-/// can declare `foreign_key(Target, cache = cached_target)` to generate cache-aware relation
-/// accessors when its skipped cache field stores `ForeignKeyCache<Target>`.
+/// `#[model_select(skip)]` excludes a field from SQL columns. Without a custom `from_row`, skipped
+/// fields are initialized with `Default::default()`; a custom decoder remains responsible for
+/// constructing them. The struct-level `history`, `from_row`, `source`, `alias`, and `select`
+/// options support custom persistence behavior or aliased queries. A field can declare
+/// `foreign_key(Target, cache = cached_target)` to generate cache-aware relation accessors when its
+/// skipped cache field stores `ForeignKeyCache<Target>`.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -189,6 +191,14 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 ));
             }
             has_skipped_field = true;
+            if options.from_row.is_none() {
+                model_initializers.push(quote! {
+                    #field_name: ::core::default::Default::default()
+                });
+                query_initializers.push(quote! {
+                    #field_name: ::core::default::Default::default()
+                });
+            }
             continue;
         }
 
@@ -199,7 +209,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let column_literal = LitStr::new(&column, Span::call_site());
         let field_type = &field.ty;
         let value_type = option_inner(field_type).unwrap_or(field_type);
-        let field_index = model_initializers.len();
+        let field_index = model_columns.len();
 
         let primary_key = PrimaryKeyField {
             field: field_name.clone(),
@@ -291,12 +301,6 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let process_row = if let Some(from_row) = options.from_row.as_ref() {
         quote! { #from_row(row) }
     } else {
-        if has_skipped_field {
-            return Err(Error::new_spanned(
-                model,
-                "ModelSelect requires `from_row = path` when a model skips fields",
-            ));
-        }
         quote! {
             ::core::result::Result::Ok(Self {
                 #(#query_initializers),*
@@ -358,7 +362,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 )
             }
         });
-    let selectable_model_impl = if has_skipped_field {
+    let selectable_model_impl = if has_skipped_field && options.from_row.is_some() {
         quote! {}
     } else {
         quote! {

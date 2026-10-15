@@ -32,6 +32,20 @@ pub struct FixtureGroup {
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "fixture_defaulted_models")]
+pub struct FixtureDefaultedModel {
+    #[model_select(skip)]
+    pub before: Option<String>,
+    pub id: i64,
+    pub sample_name: String,
+    #[model_select(skip)]
+    pub middle: String,
+    pub label: String,
+    #[model_select(skip)]
+    pub after: bool,
+}
+
+#[derive(Debug, ModelSelect, PartialEq)]
 #[model_select(table = "fixture_foreign_targets")]
 pub struct FixtureForeignTarget {
     pub id: i64,
@@ -212,6 +226,11 @@ pub fn connection() -> Connection {
             sample_name TEXT NOT NULL,
             name TEXT NOT NULL,
             collection_name TEXT NOT NULL
+        );
+        CREATE TABLE fixture_defaulted_models (
+            id INTEGER PRIMARY KEY,
+            sample_name TEXT NOT NULL,
+            label TEXT NOT NULL
         );
         CREATE TABLE fixture_foreign_targets (
             id INTEGER PRIMARY KEY,
