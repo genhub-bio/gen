@@ -427,16 +427,18 @@ fn target_from_accession(
 impl ResolvedGenRegion {
     pub fn from_path(
         conn: &GraphConnection,
-        block_group_id: HashId,
         path: &Path,
         start: i64,
         end: i64,
     ) -> Result<Self, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &block_group_id, None)?;
+        let block_group = path.get_block_group(conn)?;
+        let mut path = path.clone();
+        let interval_tree = path.intervaltree(conn)?;
+        path.set_cached_interval_tree(Some(interval_tree));
         let path_length = path.length(conn, None)?;
         Ok(ResolvedGenRegion {
-            block_group,
-            path: Some(path.clone()),
+            block_group: block_group.as_ref().clone(),
+            path: Some(path),
             accession: None,
             annotation: None,
             kind: ResolvedRegionKind::Path,
@@ -570,7 +572,7 @@ impl ResolvedGenRegion {
                     .path
                     .as_ref()
                     .ok_or_else(|| GenRegionError::NotFound("No path for region".to_string()))?;
-                Ok(Arc::new(path.intervaltree(conn)?))
+                Ok(path.intervaltree(conn)?)
             }
             ResolvedRegionKind::Annotation => {
                 let annotation = self.annotation.as_ref().ok_or_else(|| {
@@ -599,20 +601,24 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
     ) -> Result<GraphLocus, GenRegionError> {
         let interval_tree = self.intervaltree(conn, workspace)?;
+        if self.start >= self.end {
+            return Ok(GraphLocus { slices: Vec::new() });
+        }
+
         let mut slices = interval_tree
-            .iter()
+            .query(self.start..self.end)
             .filter_map(|entry| {
                 let block = entry.value;
                 if is_terminal(block.node_id) {
                     return None;
                 }
-                let clipped_start = self.start.max(block.start);
-                let clipped_end = self.end.min(block.end);
-                if clipped_start >= clipped_end {
+                let overlap_start = self.start.max(block.start);
+                let overlap_end = self.end.min(block.end);
+                if overlap_start >= overlap_end {
                     return None;
                 }
-                let local_start = clipped_start - block.start;
-                let local_end = clipped_end - block.start;
+                let local_start = overlap_start - block.start;
+                let local_end = overlap_end - block.start;
                 let (sequence_start, sequence_end) = if block.strand == Strand::Reverse {
                     (
                         block.sequence_end - local_end,
@@ -625,15 +631,17 @@ impl ResolvedGenRegion {
                     )
                 };
                 Some((
-                    clipped_start,
+                    overlap_start,
                     GraphNodeSlice {
                         block: GraphNode {
                             node_id: block.node_id,
                             sequence_start: block.sequence_start,
                             sequence_end: block.sequence_end,
                         },
-                        start: (sequence_start - block.sequence_start) as usize,
-                        end: (sequence_end - block.sequence_start) as usize,
+                        start: usize::try_from(sequence_start - block.sequence_start)
+                            .expect("should convert the stored-node start to a slice offset"),
+                        end: usize::try_from(sequence_end - block.sequence_start)
+                            .expect("should convert the stored-node end to a slice offset"),
                         strand: block.strand,
                     },
                 ))
@@ -853,6 +861,8 @@ impl ResolvedGenRegion {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use gen_core::range::Range;
 
     use super::*;
@@ -860,6 +870,9 @@ mod tests {
         accession::{AccessionSpan, NewAccession},
         annotations::Annotation,
         block_group::{BlockGroup, PathCache},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
+        history::dolt::commit_all,
         test_helpers::{get_connection, setup_block_group, test_workspace},
     };
 
@@ -879,6 +892,301 @@ mod tests {
         let annotation =
             Annotation::get_or_create(&conn, "gene-mreB", "genes", &accession.id, None).unwrap();
         (conn, block_group, path, accession, annotation)
+    }
+
+    #[test]
+    fn test_path_region_uses_model_history_for_tree_and_owner() {
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (block_group_id, path) = setup_block_group(&conn);
+        let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None)
+            .expect("should load the original block group");
+        let initial_branch =
+            crate::history::dolt::active_branch(&conn).expect("should load the active branch");
+        // Historical path has four 10-base nodes; shortening retains only the first.
+        // Nodes: A[0,10) T[10,20) C[20,30) G[30,40)
+        // Index: 0000000000111111111122222222223333333333
+        // DNA:   AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG
+        // Query: ............^^^......................... [12,15) on T
+        // Cached current path: A[0,10) after current rows are deleted.
+        let history_ref = commit_all(&conn, "path before shortening")
+            .expect("should commit the original path")
+            .to_string();
+
+        let current_path = Path::get_by_id(&conn, &path.id);
+        let first_edge_id = Path::edge_ids_for_path(&conn, &path.id, None)[0];
+        let terminal_edge = Edge::create(
+            &conn,
+            HashId::convert_str("test-a-node"),
+            10,
+            Strand::Forward,
+            gen_core::PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create a shorter current path edge");
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: terminal_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+        current_path
+            .update_edges(&conn, &[first_edge_id, terminal_edge.id])
+            .expect("should shorten the current path");
+
+        let mut current_path = Path::get_by_id(&conn, &path.id);
+        let current_tree = current_path
+            .intervaltree(&conn)
+            .expect("should load the shortened current tree");
+        current_path.set_cached_interval_tree(Some(Arc::clone(&current_tree)));
+        assert_eq!(current_path.length(&conn, None).unwrap(), 10);
+        assert_eq!(
+            current_path.length(&conn, Some(&history_ref)).unwrap(),
+            40,
+            "should measure historical length from historical edges"
+        );
+
+        conn.execute("DELETE FROM paths WHERE id = ?1", [&path.id])
+            .expect("should delete the current path");
+        conn.execute(
+            "DELETE FROM block_group_edges WHERE block_group_id = ?1",
+            [&block_group_id],
+        )
+        .expect("should delete the current graph edges");
+        BlockGroup::delete(
+            &conn,
+            &block_group.collection_name,
+            &block_group.sample_name,
+            &block_group.name,
+        )
+        .expect("should delete the current block group");
+        assert!(
+            BlockGroup::get_by_id(&conn, &block_group_id, None).is_err(),
+            "the block group should be absent from the current view"
+        );
+        assert!(
+            Path::select(&conn)
+                .id(path.id)
+                .load()
+                .expect("should query current paths")
+                .is_empty(),
+            "the path should be absent from the current view"
+        );
+
+        let historical_block_group =
+            BlockGroup::get_by_id(&conn, &block_group.id, Some(&history_ref))
+                .expect("should load block group metadata from history");
+
+        let historical_path = Path::select(&conn)
+            .with_ref(history_ref.as_str())
+            .id(path.id)
+            .get()
+            .expect("should load the path from history")
+            .expect("should find the historical path");
+        assert_eq!(historical_path.history_ref(), Some(history_ref.as_str()));
+        assert!(historical_path.cached_interval_tree.is_none());
+        let region = ResolvedGenRegion::from_path(&conn, &historical_path, 12, 15)
+            .expect("should resolve the selected historical path region");
+        assert!(historical_path.cached_interval_tree.is_none());
+        let selected_block_group = historical_path
+            .get_block_group(&conn)
+            .expect("should load the related block group from the selected history");
+        assert_eq!(selected_block_group.as_ref(), &historical_block_group);
+
+        let historical_current_path =
+            BlockGroup::get_current_path(&conn, &block_group.id, Some(&history_ref))
+                .expect("should load the historical path and tree");
+        assert_eq!(
+            historical_current_path.history_ref(),
+            Some(history_ref.as_str())
+        );
+        assert!(historical_current_path.cached_interval_tree.is_some());
+        let historical_tree = region
+            .intervaltree(&conn, test_workspace())
+            .expect("should reuse the path's attached historical tree");
+        assert!(Arc::ptr_eq(
+            &historical_tree,
+            region
+                .path
+                .as_ref()
+                .expect("should retain the historical path model")
+                .cached_interval_tree
+                .as_ref()
+                .expect("should attach the historical tree to the resolved path")
+        ));
+        assert!(!Arc::ptr_eq(&current_tree, &historical_tree));
+
+        assert_eq!(region.block_group, historical_block_group);
+        assert_eq!(region.feature_length, 40);
+        assert_eq!(region.anchor_end, 40);
+        let region_path = region
+            .path
+            .as_ref()
+            .expect("should retain the resolved historical path");
+        assert_eq!(region_path.history_ref(), Some(history_ref.as_str()));
+        assert_eq!(region_path.length(&conn, None).unwrap(), 40);
+        assert_eq!(
+            region_path
+                .get_block_group(&conn)
+                .expect("should load the path owner from its selected history")
+                .as_ref(),
+            &historical_block_group
+        );
+        assert!(Arc::ptr_eq(
+            current_path
+                .cached_interval_tree
+                .as_ref()
+                .expect("should keep the input path's current tree"),
+            &current_tree
+        ));
+        assert_eq!(current_path.length(&conn, None).unwrap(), 10);
+        assert_eq!(
+            crate::history::dolt::active_branch(&conn).expect("should retain the active branch"),
+            initial_branch,
+            "historical reads should not switch the active checkout"
+        );
+
+        let locus = region
+            .graph_locus(&conn, test_workspace())
+            .expect("should retrieve the historical path slice");
+        assert_eq!(locus.slices.len(), 1);
+        assert_eq!(
+            locus.slices[0].block.node_id,
+            HashId::convert_str("test-t-node")
+        );
+        assert_eq!(
+            (
+                locus.slices[0].block.sequence_start,
+                locus.slices[0].block.sequence_end,
+                locus.slices[0].start,
+                locus.slices[0].end,
+                locus.slices[0].strand,
+            ),
+            (0, 10, 2, 5, Strand::Forward),
+            "should retrieve historical coordinates and strand"
+        );
+    }
+
+    #[test]
+    fn test_path_region_clips_both_interval_orientations_to_positive_stored_bounds() {
+        // Region coordinates: 01234567
+        // Interval blocks:   AAAABBBB
+        // Interval strands:  ++++----
+        // Query [2,6):        ..^^^^..
+        // Node A stored [2,6), overlap [4,6), slice offsets [2,4).
+        // Node B stored [10,14), overlap [12,14), slice offsets [2,4).
+        let (conn, _block_group, path, _, _) = setup_targets();
+        let mut region = ResolvedGenRegion::from_path(&conn, &path, 2, 6)
+            .expect("should resolve the path region");
+        let interval_tree: IntervalTree<i64, NodeIntervalBlock> = [
+            (
+                0..4,
+                NodeIntervalBlock {
+                    node_id: HashId::convert_str("region-projection-forward"),
+                    start: 0,
+                    end: 4,
+                    sequence_start: 2,
+                    sequence_end: 6,
+                    strand: Strand::Forward,
+                },
+            ),
+            (
+                4..8,
+                NodeIntervalBlock {
+                    node_id: HashId::convert_str("region-projection-reverse"),
+                    start: 4,
+                    end: 8,
+                    sequence_start: 10,
+                    sequence_end: 14,
+                    strand: Strand::Reverse,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        region
+            .path
+            .as_mut()
+            .expect("should retain the path model")
+            .set_cached_interval_tree(Some(Arc::new(interval_tree)));
+        assert_eq!(
+            region
+                .path
+                .as_ref()
+                .expect("should retain the path model")
+                .length(&conn, None)
+                .unwrap(),
+            8,
+            "should derive the path length from its cached finite intervals"
+        );
+
+        let locus = region
+            .graph_locus(&conn, test_workspace())
+            .expect("should clip intervals through graph_locus");
+
+        assert_eq!(locus.slices.len(), 2);
+        assert_eq!(
+            (
+                locus.slices[0].block.node_id,
+                locus.slices[0].block.sequence_start,
+                locus.slices[0].block.sequence_end,
+                locus.slices[0].start,
+                locus.slices[0].end,
+                locus.slices[0].strand,
+            ),
+            (
+                HashId::convert_str("region-projection-forward"),
+                2,
+                6,
+                2,
+                4,
+                Strand::Forward,
+            ),
+            "should clip forward intervals from sequence_start"
+        );
+        assert_eq!(
+            (
+                locus.slices[1].block.node_id,
+                locus.slices[1].block.sequence_start,
+                locus.slices[1].block.sequence_end,
+                locus.slices[1].start,
+                locus.slices[1].end,
+                locus.slices[1].strand,
+            ),
+            (
+                HashId::convert_str("region-projection-reverse"),
+                10,
+                14,
+                2,
+                4,
+                Strand::Reverse,
+            ),
+            "should clip reverse intervals back from sequence_end"
+        );
+
+        region.start = 4;
+        region.end = 4;
+        assert!(
+            region
+                .graph_locus(&conn, test_workspace())
+                .expect("should resolve an empty range")
+                .slices
+                .is_empty(),
+            "should return no slices for an empty range"
+        );
+        region.start = 6;
+        region.end = 2;
+        assert!(
+            region
+                .graph_locus(&conn, test_workspace())
+                .expect("should resolve a reversed range")
+                .slices
+                .is_empty(),
+            "should return no slices for an inverted range"
+        );
     }
 
     #[test]

@@ -185,7 +185,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
         )),
     )
     .unwrap();
-    let region = ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 3, 4).unwrap();
+    let region = ResolvedGenRegion::from_path(conn, &sample_path, 3, 4).unwrap();
     let change = BlockGroupChange {
         region,
         path_accession: None,

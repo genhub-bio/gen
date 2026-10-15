@@ -148,8 +148,7 @@ where
                 for edit in locus.changes_to_wt() {
                     let start = edit.start;
                     let end = edit.end;
-                    let region =
-                        ResolvedGenRegion::from_path(conn, block_group.id, &path, start, end)?;
+                    let region = ResolvedGenRegion::from_path(conn, &path, start, end)?;
                     let change = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()

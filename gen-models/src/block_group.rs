@@ -189,7 +189,7 @@ pub type IntervalTreeCache =
 
 pub struct PathCache<'a> {
     pub cache: HashMap<PathData, Path>,
-    pub intervaltree_cache: HashMap<Path, IntervalTree<i64, NodeIntervalBlock>>,
+    pub intervaltree_cache: HashMap<Path, Arc<IntervalTree<i64, NodeIntervalBlock>>>,
     pub conn: &'a GraphConnection,
 }
 
@@ -197,7 +197,7 @@ impl<'a> PathCache<'a> {
     pub fn new(conn: &'a GraphConnection) -> PathCache<'a> {
         PathCache {
             cache: HashMap::<PathData, Path>::new(),
-            intervaltree_cache: HashMap::<Path, IntervalTree<i64, NodeIntervalBlock>>::new(),
+            intervaltree_cache: HashMap::<Path, Arc<IntervalTree<i64, NodeIntervalBlock>>>::new(),
             conn,
         }
     }
@@ -216,15 +216,16 @@ impl<'a> PathCache<'a> {
             Ok(path.clone())
         } else {
             let conn = path_cache.conn;
-            let new_path = Path::select(conn)
+            let mut new_path = Path::select(conn)
                 .block_group_id(*block_group_id)
                 .name(name)
                 .load()
                 .expect("should load path for cache")[0]
                 .clone();
 
-            path_cache.cache.insert(path_key, new_path.clone());
             let tree = new_path.intervaltree(conn)?;
+            new_path.set_cached_interval_tree(Some(Arc::clone(&tree)));
+            path_cache.cache.insert(path_key, new_path.clone());
             path_cache.intervaltree_cache.insert(new_path.clone(), tree);
             Ok(new_path)
         }
@@ -239,9 +240,13 @@ impl<'a> PathCache<'a> {
             path_cache.intervaltree_cache.insert(path.clone(), tree);
         }
 
-        path_cache.intervaltree_cache.get(path).ok_or_else(|| {
-            PathError::Missing(format!("Missing interval tree for path {}", path.id))
-        })
+        path_cache
+            .intervaltree_cache
+            .get(path)
+            .ok_or_else(|| {
+                PathError::Missing(format!("Missing interval tree for path {}", path.id))
+            })
+            .map(Arc::as_ref)
     }
 }
 
@@ -1205,6 +1210,7 @@ impl BlockGroup {
         Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
 
+    /// Loads the selected path and prepares its tree when reading a historical graph view.
     pub fn get_current_path(
         conn: &GraphConnection,
         block_group_id: &HashId,
@@ -1217,11 +1223,16 @@ impl BlockGroup {
             .limit(1)
             .with_ref(history_ref);
         let paths = select.load()?;
-        paths.first().cloned().ok_or_else(|| {
+        let mut path = paths.first().cloned().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                 "No current path found for block group {block_group_id}"
             )))
-        })
+        })?;
+        if history_ref.is_some() {
+            let interval_tree = path.intervaltree(conn)?;
+            path.set_cached_interval_tree(Some(interval_tree));
+        }
+        Ok(path)
     }
 
     pub fn get_path_by_name(
@@ -1431,8 +1442,7 @@ mod tests {
                 path_end: end,
                 strand: Strand::Forward,
             };
-            let region =
-                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let region = ResolvedGenRegion::from_path(conn, &path, start, end).unwrap();
             let change = BlockGroupChange {
                 region,
                 path_accession: None,
@@ -2515,7 +2525,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 7, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2553,7 +2563,7 @@ mod tests {
             strand: Strand::Forward,
         };
 
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 31).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 19, 31).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2596,7 +2606,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 7, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2638,7 +2648,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 15, 15).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 15, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2680,7 +2690,7 @@ mod tests {
             path_end: 17,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 12, 17).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 12, 17).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2722,7 +2732,7 @@ mod tests {
             path_end: 10,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 10).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 10, 10).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2764,7 +2774,7 @@ mod tests {
             path_end: 9,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 9, 9).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 9, 9).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2806,7 +2816,7 @@ mod tests {
             path_end: 20,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 20).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 10, 20).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2848,7 +2858,7 @@ mod tests {
             path_end: 25,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 15, 25).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 15, 25).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2890,7 +2900,7 @@ mod tests {
             path_end: 35,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 5, 35).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 5, 35).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2933,7 +2943,7 @@ mod tests {
             strand: Strand::Forward,
         };
 
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 31).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 19, 31).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -2976,7 +2986,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 7, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3029,7 +3039,7 @@ mod tests {
             path_end: 0,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 0, 0).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 0, 0).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3071,7 +3081,7 @@ mod tests {
             path_end: 0,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 0, 0).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 0, 0).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3113,7 +3123,7 @@ mod tests {
             path_end: 40,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 40, 40).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 40, 40).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3155,7 +3165,7 @@ mod tests {
             path_end: 11,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 11).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 10, 11).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3197,7 +3207,7 @@ mod tests {
             path_end: 20,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 20).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 19, 20).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3239,7 +3249,7 @@ mod tests {
             path_end: 1,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 0, 1).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 0, 1).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3281,7 +3291,7 @@ mod tests {
             path_end: 40,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 35, 40).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 35, 40).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3306,7 +3316,7 @@ mod tests {
     #[test]
     fn error_on_out_of_bounds_change() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn);
+        let (_block_group_id, path) = setup_block_group(&conn);
         let deletion_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("")
@@ -3323,8 +3333,7 @@ mod tests {
             path_end: 400,
             strand: Strand::Forward,
         };
-        let after_end_region =
-            ResolvedGenRegion::from_path(&conn, block_group_id, &path, 350, 400).unwrap();
+        let after_end_region = ResolvedGenRegion::from_path(&conn, &path, 350, 400).unwrap();
         let after_end_change = BlockGroupChange {
             region: after_end_region,
             path_accession: None,
@@ -3333,8 +3342,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        let before_start_region =
-            ResolvedGenRegion::from_path(&conn, block_group_id, &path, -300, 400).unwrap();
+        let before_start_region = ResolvedGenRegion::from_path(&conn, &path, -300, 400).unwrap();
         let before_start_change = BlockGroupChange {
             region: before_start_region,
             path_accession: None,
@@ -3369,7 +3377,7 @@ mod tests {
             path_end: 12,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 10, 12).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 10, 12).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3411,7 +3419,7 @@ mod tests {
             path_end: 20,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 18, 20).unwrap();
+        let region = ResolvedGenRegion::from_path(&conn, &path, 18, 20).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -3658,7 +3666,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(conn, new_bg_id, &new_path[0], 7, 15).unwrap();
+        let region = ResolvedGenRegion::from_path(conn, &new_path[0], 7, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -4716,7 +4724,6 @@ mod tests {
 
     fn insert_test_edit(
         conn: &GraphConnection,
-        block_group_id: HashId,
         path: &Path,
         start: i64,
         end: i64,
@@ -4748,7 +4755,7 @@ mod tests {
             path_end: end,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(conn, block_group_id, path, start, end).unwrap();
+        let region = ResolvedGenRegion::from_path(conn, path, start, end).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,
@@ -4780,8 +4787,8 @@ mod tests {
         ] {
             let conn = &get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(conn);
-            insert_test_edit(conn, block_group_id, &path, 8, 12, "", true);
-            insert_test_edit(conn, block_group_id, &path, start, end, bases, true);
+            insert_test_edit(conn, &path, 8, 12, "", true);
+            insert_test_edit(conn, &path, start, end, bases, true);
 
             let sequences =
                 BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
@@ -4840,7 +4847,7 @@ mod tests {
             );
             alternatives.push(bases);
         }
-        insert_test_edit(conn, block_group_id, &path, 10, 12, "", true);
+        insert_test_edit(conn, &path, 10, 12, "", true);
 
         let sequences =
             BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
@@ -4871,8 +4878,8 @@ mod tests {
     fn test_second_insertion_at_one_point_goes_in_front_of_the_first() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(conn);
-        insert_test_edit(conn, block_group_id, &path, 10, 10, "GG", true);
-        insert_test_edit(conn, block_group_id, &path, 10, 10, "CC", true);
+        insert_test_edit(conn, &path, 10, 10, "GG", true);
+        insert_test_edit(conn, &path, 10, 10, "CC", true);
 
         let sequences =
             BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
@@ -4901,15 +4908,7 @@ mod tests {
                 let conn = &get_connection(None).unwrap();
                 let (block_group_id, path) = setup_block_group(conn);
                 for (start, end, bases, preserve_edge) in edits {
-                    insert_test_edit(
-                        conn,
-                        block_group_id,
-                        &path,
-                        start,
-                        end,
-                        bases,
-                        preserve_edge,
-                    );
+                    insert_test_edit(conn, &path, start, end, bases, preserve_edge);
                 }
 
                 let sequences =
@@ -4929,7 +4928,7 @@ mod tests {
     fn test_homozygous_edit_retires_the_replaced_edge() {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(conn);
-        insert_test_edit(conn, block_group_id, &path, 10, 12, "NNNN", false);
+        insert_test_edit(conn, &path, 10, 12, "NNNN", false);
 
         let sequences =
             BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
@@ -4954,15 +4953,7 @@ mod tests {
             let conn = &get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(conn);
             for (start, end, bases, preserve_edge) in edits {
-                insert_test_edit(
-                    conn,
-                    block_group_id,
-                    &path,
-                    start,
-                    end,
-                    bases,
-                    preserve_edge,
-                );
+                insert_test_edit(conn, &path, start, end, bases, preserve_edge);
             }
 
             let sequences =
@@ -5009,7 +5000,7 @@ mod tests {
         for ((start, end), deleted) in [(0, 2), (38, 40)].into_iter().zip(expected_deleted) {
             let conn = &get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(conn);
-            insert_test_edit(conn, block_group_id, &path, start, end, "", true);
+            insert_test_edit(conn, &path, start, end, "", true);
 
             let sequences =
                 BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
@@ -5038,7 +5029,7 @@ mod tests {
         ] {
             let conn = &get_connection(None).unwrap();
             let (block_group_id, path) = setup_block_group(conn);
-            insert_test_edit(conn, block_group_id, &path, position, position, "GG", true);
+            insert_test_edit(conn, &path, position, position, "GG", true);
 
             let sequences =
                 BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
