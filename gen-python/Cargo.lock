@@ -1489,7 +1489,6 @@ dependencies = [
  "interavl",
  "intervaltree",
  "itertools 0.14.0",
- "libdoltlite-sys",
  "log",
  "md-5 0.10.6",
  "noodles",

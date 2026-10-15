@@ -1,3 +1,7 @@
+//! Progress reporting for remote pushes that spend time inside synchronous Dolt and storage calls.
+//! The CLI needs separate signals for logical Dolt chunks, physical GCS blocks, and asset request
+//! bytes because those counters become available at different stages and do not mean publication.
+
 use std::{
     io::{self, IsTerminal as _, Write as _},
     sync::{
@@ -40,6 +44,10 @@ impl TransferProgress {
         self.output.println(line);
     }
 
+    /// Keeps users informed during remote push phases that block without emitting progress callbacks.
+    ///
+    /// `push_graph_through_direct_session_inner` and asset upload phases use this around waits
+    /// that have no native progress callback.
     pub(crate) fn heartbeat(&self, phase: &str) -> ProgressHeartbeat {
         ProgressHeartbeat::start(
             self.output.clone(),
@@ -486,6 +494,11 @@ impl GraphUploadProgressReporter {
         }
     }
 
+    /// Direct GCS sessions expose physical block work separately from Dolt's logical chunk plan,
+    /// so users can distinguish uploaded blocks from reused ones.
+    ///
+    /// `push_graph_through_direct_session_inner` supplies the session callback that keeps this
+    /// storage-level activity visible during a graph push.
     pub(crate) fn report(&self, progress: UploadProgress) {
         let mut latest = self
             .latest
@@ -510,6 +523,11 @@ impl GraphUploadProgressReporter {
         }
     }
 
+    /// Dolt's missing-chunk plan provides a usable total before BlockCacheVFS has reported its
+    /// aggregate physical GCS block plan.
+    ///
+    /// `push_graph_branch_with_progress` forwards the callback events so the CLI can show that
+    /// early logical progress during a loopback push.
     pub(crate) fn report_dolt_progress(&self, event: DoltPushProgressEvent) {
         let is_plan = matches!(&event, DoltPushProgressEvent::Plan { .. });
         let now = Instant::now();
@@ -623,6 +641,10 @@ impl GraphUploadProgressReporter {
         }
     }
 
+    /// Loopback push completion is a different boundary from later branch validation, checkpointing,
+    /// and manifest publication, which can fail after Dolt has finished its transfer.
+    ///
+    /// `push_graph_branch_with_progress` records the logical outcome when the callback scope ends.
     pub(crate) fn finish_dolt_progress(&self, push_succeeded: bool) {
         let Some(progress) = *self
             .logical_chunks
@@ -691,6 +713,11 @@ impl GraphUploadProgressReporter {
         }
     }
 
+    /// Long graph uploads can fail after progress callbacks stop, so the last phase and counters
+    /// are needed to make the final CLI error diagnosable.
+    ///
+    /// `push_graph_through_direct_session` calls this after its inner attempt returns; any opened
+    /// server has already gone through cleanup.
     pub(crate) fn failed(&self) {
         let phase = self
             .phase
@@ -729,6 +756,11 @@ impl GraphUploadProgressReporter {
         }
     }
 
+    /// Staging can finish before the manifest is published, so complete block counters must not
+    /// imply that the remote branch is already available.
+    ///
+    /// `push_graph_through_direct_session_inner` calls this as staged or reused sessions leave the
+    /// graph-transfer phase.
     pub(crate) fn finish(&self) {
         let latest = *self
             .latest
@@ -919,6 +951,10 @@ impl AssetUploadProgressReporter {
         }
     }
 
+    /// Asset uploads need visible activity while the HTTP client consumes the body, before storage
+    /// acceptance is known.
+    ///
+    /// `UploadBodyReader` supplies this count; it must not be presented as cloud acceptance.
     pub(crate) fn upload_bytes(&self, bytes: u64) {
         let previous = self.request_body_bytes.swap(bytes, Ordering::Relaxed);
         if bytes > previous {
@@ -931,6 +967,10 @@ impl AssetUploadProgressReporter {
         }
     }
 
+    /// A successful storage response is distinct from bytes consumed and from GenHub's later asset
+    /// verification and push completion.
+    ///
+    /// `upload_asset_with_progress` calls this after the PUT succeeds.
     pub(crate) fn upload_accepted(&self) {
         let request_body_bytes = self.request_body_bytes.load(Ordering::Relaxed);
         self.set_phase("asset upload accepted by storage");
