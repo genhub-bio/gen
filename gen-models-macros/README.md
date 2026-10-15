@@ -279,9 +279,11 @@ The tuple order determines both the SQL column order and the returned tuple orde
 be the base selector or one of its joins. Like field projections, model tuples support one through
 16 entries. Write a one-element tuple such as `.models::<(Sample,)>()` when needed.
 
-The derive generates an offset-aware, fallible row decoder for this API. A model containing a
-`#[model_select(skip)]` field does not receive that decoder because a complete value cannot be
-constructed from the selected columns.
+The derive generates an offset-aware, fallible row decoder for this API. If a model has skipped
+fields and no custom `from_row`, those fields are initialized with `Default::default()` in both
+direct loads and joined model tuples. A model with a custom `from_row` and skipped fields keeps its
+custom construction path and must provide a manual `SelectableModel` implementation to participate
+in `.models()`.
 
 ## Ordering and pagination
 
@@ -509,8 +511,9 @@ pub struct Sample {
 - `history = false` disables historical reads. If omitted, historical reads use the configured
   table name.
 - `from_row = path::to::function` supplies a `fn(&Row) -> rusqlite::Result<Model>` for models that
-  need custom row decoding. This is required when any field uses `skip`; otherwise the derive reads
-  every field by its configured SQL column name.
+  need custom row decoding. Without `from_row`, skipped fields are initialized with
+  `Default::default()`; with it, the custom decoder must construct every skipped field. The derive
+  reads selectable fields by their configured SQL column names.
 - `alias = "..."` sets the SQL alias used to qualify generated columns. Aliases and field-level
   `column` values are single SQL identifiers; generated SQL always double-quotes them and treats
   punctuation such as `.` as part of the identifier.
@@ -593,6 +596,7 @@ without expanding every derive.
 - Each `join_on` call expresses one equality; composite join conditions are not yet supported.
 - A source alias can only refer to one source and join condition in a query.
 - `only` supports projections of one through 16 fields from selected and joined models.
-- `models` supports tuples of one through 16 selected and joined models without skipped fields.
+- `models` supports generated decoders for skipped fields that implement `Default`. Models with
+  skipped fields and a custom `from_row` need a manual `SelectableModel` implementation to join.
 - Generated code references `gen_models`, so downstream consumers should use the macro through the
   `gen-models` crate under its standard crate name.
