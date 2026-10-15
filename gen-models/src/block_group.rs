@@ -1146,7 +1146,7 @@ impl BlockGroup {
         Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
 
-    /// Loads the selected path and prepares its tree when reading a historical graph view.
+    /// Loads the most recently created path from the selected graph view.
     pub fn get_current_path(
         conn: &GraphConnection,
         block_group_id: &HashId,
@@ -1159,16 +1159,11 @@ impl BlockGroup {
             .limit(1)
             .with_ref(history_ref);
         let paths = select.load()?;
-        let mut path = paths.first().cloned().ok_or_else(|| {
+        paths.into_iter().next().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                 "No current path found for block group {block_group_id}"
             )))
-        })?;
-        if history_ref.is_some() {
-            let interval_tree = path.intervaltree(conn)?;
-            path.set_cached_interval_tree(Some(interval_tree));
-        }
-        Ok(path)
+        })
     }
 
     pub fn get_path_by_name(
