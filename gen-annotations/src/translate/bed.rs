@@ -1,25 +1,25 @@
 use std::{
-    cmp::{max, min},
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     io::{Read, Write},
 };
 
-use gen_core::{HashId, Strand, Workspace, is_terminal};
-use gen_graph::{GraphNode, project_path};
+use gen_core::{Strand, Workspace};
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
     errors::{BlockGroupError, PathError},
     reference_alias::{ReferenceAlias, ReferenceAliasError},
+    region::{GenRegionError, ResolvedGenRegion},
     sample::Sample,
 };
-use interavl::IntervalTree;
 use noodles::{
     bed,
     bed::feature::record_buf::{OtherFields, other_fields::Value},
     core::Position,
 };
 use thiserror::Error;
+
+use super::compose_strand;
 
 #[derive(Debug, Error)]
 pub enum BedError {
@@ -31,6 +31,8 @@ pub enum BedError {
     PathError(#[from] PathError),
     #[error("Error loading block group graph: {0}")]
     BlockGroupError(#[from] BlockGroupError),
+    #[error("Error resolving path region: {0}")]
+    RegionError(#[from] GenRegionError),
 }
 
 pub fn translate_bed<R, W>(
@@ -49,78 +51,77 @@ where
     let mut record = bed::Record::<6>::default();
     let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
     let mut bed_writer = bed::io::Writer::<6, _>::new(writer);
-
-    let bgs = Sample::get_block_groups(conn, collection, sample, history_ref);
-    let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
-        bgs.iter()
-            .map(|bg| (bg.name.clone(), bg))
-            .collect::<Vec<(String, &BlockGroup)>>(),
-    );
-
-    // Load all reference aliases, to accommodate alternate reference names in the GFF file
-    let references = sample_bgs.keys().cloned().collect::<Vec<String>>();
+    let sample_block_groups = Sample::get_block_groups(conn, collection, sample, history_ref)
+        .into_iter()
+        .map(|block_group| (block_group.name, block_group.id))
+        .collect::<HashMap<_, _>>();
+    let references = sample_block_groups.keys().cloned().collect();
     let references_by_alias =
         ReferenceAlias::get_references_by_alias(conn, references, history_ref)?;
-
-    let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
+    let mut regions_by_reference = HashMap::<String, ResolvedGenRegion>::new();
 
     while bed_reader.read_record(&mut record)? != 0 {
         let ref_name = record.reference_sequence_name().to_string();
-        let ref_name = references_by_alias
-            .get(&ref_name)
-            .unwrap_or(&ref_name)
-            .to_string();
         // noodles converts to 1 index, keep it 0.
         let start = record.feature_start().unwrap().get() as i64 - 1;
         let end = record.feature_end().unwrap().unwrap().get() as i64;
-        if let Some(bg) = sample_bgs.get(&ref_name) {
-            let projection = match paths.entry(bg.id) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
-                    let graph = BlockGroup::get_graph(conn, workspace, &bg.id, history_ref)?;
-                    let mut tree = IntervalTree::default();
-                    let mut position: i64 = 0;
-                    for (node, strand) in
-                        project_path(&graph, &path.coordinate_blocks(conn, history_ref))
-                    {
-                        if !is_terminal(node.node_id) {
-                            let end_position = position + node.length();
-                            tree.insert(position..end_position, (node, strand));
-                            position = end_position;
-                        }
-                    }
-                    entry.insert(tree)
-                }
-            };
-            let range = start..end;
-            let values: Vec<_> = record.other_fields().iter().map(Value::from).collect();
-            let other_fields = OtherFields::from(values);
-            let name = record
-                .name()
-                .map(|name| String::from_utf8_lossy(name.as_ref()).to_string());
-            let score = record.score().ok();
-            let strand = record.strand().ok().flatten();
-            for (overlap, (node, _strand)) in projection.iter_overlaps(&range) {
-                let overlap_start = max(start, overlap.start) as usize;
-                let overlap_end = min(end, overlap.end) as usize;
-                let mut out_record = bed::feature::RecordBuf::<6>::builder()
-                    .set_reference_sequence_name(format!("{nid}", nid = node.node_id))
-                    .set_feature_start(Position::try_from(overlap_start + 1).unwrap())
-                    .set_feature_end(Position::try_from(overlap_end).unwrap())
-                    .set_other_fields(other_fields.clone());
-                if let Some(name) = &name {
-                    out_record = out_record.set_name(name.clone());
-                }
-                if let Some(score) = score {
-                    out_record = out_record.set_score(score);
-                }
-                if let Some(strand) = strand {
-                    out_record = out_record.set_strand(strand);
-                }
-                let out_record = out_record.build();
-                bed_writer.write_feature_record(&out_record)?;
+        let values: Vec<_> = record.other_fields().iter().map(Value::from).collect();
+        let other_fields = OtherFields::from(values);
+        let name = record
+            .name()
+            .map(|name| String::from_utf8_lossy(name.as_ref()).to_string());
+        let score = record.score().ok();
+        let feature_strand = record.strand().ok().flatten().map(|strand| match strand {
+            bed::feature::record::Strand::Forward => Strand::Forward,
+            bed::feature::record::Strand::Reverse => Strand::Reverse,
+        });
+        let resolved_reference = references_by_alias
+            .get(&ref_name)
+            .map_or(ref_name.as_str(), String::as_str);
+        let Some(block_group_id) = sample_block_groups.get(resolved_reference) else {
+            continue;
+        };
+        let mut region = match regions_by_reference.get(resolved_reference) {
+            Some(region) => region.clone(),
+            None => {
+                let path = BlockGroup::get_current_path(conn, block_group_id, history_ref)?;
+                let region = ResolvedGenRegion::from_path(conn, &path, 0, 0)?;
+                regions_by_reference.insert(resolved_reference.to_string(), region.clone());
+                region
             }
+        };
+        region.start = start;
+        region.end = end;
+        let slices = region.graph_locus(conn, workspace)?.slices;
+        for slice in slices {
+            let mut out_record = bed::feature::RecordBuf::<6>::builder()
+                .set_reference_sequence_name(format!("{nid}", nid = slice.block.node_id))
+                .set_feature_start(
+                    Position::try_from((slice.block.sequence_start as usize + slice.start) + 1)
+                        .expect("should convert the stored-node start to a BED position"),
+                )
+                .set_feature_end(
+                    Position::try_from(slice.block.sequence_start as usize + slice.end)
+                        .expect("should convert the stored-node end to a BED position"),
+                )
+                .set_other_fields(other_fields.clone());
+            if let Some(name) = &name {
+                out_record = out_record.set_name(name.clone());
+            }
+            if let Some(score) = score {
+                out_record = out_record.set_score(score);
+            }
+            let output_strand =
+                match compose_strand(feature_strand.unwrap_or(Strand::Unknown), slice.strand) {
+                    Strand::Forward => Some(bed::feature::record::Strand::Forward),
+                    Strand::Reverse => Some(bed::feature::record::Strand::Reverse),
+                    Strand::Unknown | Strand::ImportantButUnknown => None,
+                };
+            if let Some(output_strand) = output_strand {
+                out_record = out_record.set_strand(output_strand);
+            }
+            let out_record = out_record.build();
+            bed_writer.write_feature_record(&out_record)?;
         }
     }
     Ok(())
@@ -128,12 +129,33 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, path::PathBuf};
+    use std::{fs::File, io::Cursor, path::PathBuf};
 
-    use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
+    use gen_core::Strand;
+    use gen_models::{
+        block_group::BlockGroup, history::dolt::commit_all, reference_alias::ReferenceAlias,
+        sample::Sample,
+    };
 
     use super::translate_bed;
-    use crate::test_helpers::{get_connection, setup_test_data, test_workspace};
+    use crate::test_helpers::{
+        create_sliced_test_block_group, get_connection, setup_test_data, test_workspace,
+    };
+
+    fn translate_bed_input(conn: &gen_models::db::GraphConnection, input: &str) -> String {
+        let mut translated = Vec::new();
+        translate_bed(
+            conn,
+            test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate BED input");
+        String::from_utf8(translated).expect("should write UTF-8 BED output")
+    }
 
     #[test]
     fn translates_coordinates_to_nodes() {
@@ -155,16 +177,16 @@ mod tests {
         )
         .expect("should translate bed for sample foo");
         let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
+        // This selected Path stores one interval for the first node; the feature bounds clip that
+        // interval without splitting it at graph edges.
         assert_eq!(
             results,
             concat!(
-                "b59698a422128d20462c44537b2d23ef\t1\t3\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "b59698a422128d20462c44537b2d23ef\t3\t4\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "b59698a422128d20462c44537b2d23ef\t4\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
+                "b59698a422128d20462c44537b2d23ef\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
                 "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
                 "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
                 "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t0\t6\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
 
@@ -187,7 +209,7 @@ mod tests {
                 "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
                 "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
                 "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t0\t6\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
     }
@@ -234,8 +256,106 @@ mod tests {
                 "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
                 "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
                 "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t0\t6\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
+        );
+    }
+
+    #[test]
+    fn test_translates_sliced_graph_nodes_to_stored_sequence_coordinates() {
+        let conn = get_connection();
+        setup_test_data(&conn);
+
+        for (name, traversal_strand, output_strand) in [
+            ("sliced-forward", Strand::Forward, "+"),
+            ("sliced-reverse", Strand::Reverse, "-"),
+        ] {
+            let (block_group, node_id) =
+                create_sliced_test_block_group(&conn, name, traversal_strand);
+            let input = format!("{}\t1\t3\tsliced-feature\t0\t+\n", block_group.name);
+            assert_eq!(
+                translate_bed_input(&conn, &input),
+                format!("{node_id}\t4\t6\tsliced-feature\t0\t{output_strand}\n"),
+                "BED overlaps should map to the backing sequence span on {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_translates_off_center_sliced_graph_nodes_to_stored_coordinates() {
+        let conn = get_connection();
+        setup_test_data(&conn);
+
+        // Stored sequence and path slice:
+        // stored index: 0123456789
+        // stored DNA:   AACCGGTTAA
+        // stored slice:    [3,7) CGGT
+        // Edge + path:     [0,4) CGGT; query [0,2) CG maps to stored [3,5).
+        // Edge - path:     [0,4) ACCG; query [0,2) AC maps to stored [5,7).
+        // With feature strand +, the emitted edge strands are + and - respectively.
+        for (name, traversal_strand, start, end, output_strand) in [
+            ("sliced-forward", Strand::Forward, 3, 5, "+"),
+            ("sliced-reverse", Strand::Reverse, 5, 7, "-"),
+        ] {
+            let (block_group, node_id) =
+                create_sliced_test_block_group(&conn, name, traversal_strand);
+            let input = format!("{}\t0\t2\tsliced-feature\t0\t+\n", block_group.name);
+            assert_eq!(
+                translate_bed_input(&conn, &input),
+                format!("{node_id}\t{start}\t{end}\tsliced-feature\t0\t{output_strand}\n"),
+                "BED query [0,2) should map to the off-center stored bases on {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_translates_bed_from_historical_path_after_current_path_deletion() {
+        let conn = get_connection();
+        setup_test_data(&conn);
+        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find the test block group");
+        let history_ref = commit_all(&conn, "store BED translator path")
+            .expect("should commit the BED translator path")
+            .to_string();
+
+        // The path has two forward-traversed nodes; this feature selects the first node only.
+        //   Node 1 stored index: 01234567890123456
+        //   Node 1 stored DNA:   ATCGATCGATCGATCGA [path 0..17)
+        //   Edge strand:        +
+        //   BED [5,8):          .....^^^......... raw TCG, feature strand -.
+        //   Node 2 stored DNA:  TCGGGAACACACAGAGA [path 17..34), not selected.
+        let input = "m123\t5\t8\thistory-feature\t0\t-\n";
+        conn.execute(
+            "DELETE FROM paths WHERE block_group_id = ?1",
+            [block_group.id],
+        )
+        .expect("should delete the current path row");
+        assert!(
+            BlockGroup::get_current_path(&conn, &block_group.id, None).is_err(),
+            "should not find a current path after deletion"
+        );
+
+        let mut output = Vec::new();
+        translate_bed(
+            &conn,
+            test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            Some(&history_ref),
+            Cursor::new(input.as_bytes()),
+            &mut output,
+        )
+        .expect("should translate BED coordinates from the historical path");
+        assert_eq!(
+            String::from_utf8(output).expect("should encode BED output as UTF-8"),
+            "b59698a422128d20462c44537b2d23ef\t5\t8\thistory-feature\t0\t-\n",
+            "should retain the exact stored-node span and reverse strand"
+        );
+        assert!(
+            BlockGroup::get_current_path(&conn, &block_group.id, None).is_err(),
+            "historical translation should leave the current path deleted"
         );
     }
 }
