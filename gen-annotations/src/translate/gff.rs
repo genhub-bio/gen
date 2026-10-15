@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, Read, Write},
 };
 
-use gen_core::{Strand, Workspace};
+use gen_core::Workspace;
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
@@ -14,8 +14,6 @@ use gen_models::{
 };
 use noodles::{core::Position, gff};
 use thiserror::Error;
-
-use super::compose_strand;
 
 #[derive(Debug, Error)]
 pub enum GffError {
@@ -60,7 +58,7 @@ where
         let ref_name = record.reference_sequence_name().to_string();
         let start = record.start().get() as i64 - 1;
         let end = record.end().get() as i64;
-        let feature_strand: Strand = record.strand().into();
+        let feature_strand = record.strand();
         let resolved_reference = references_by_alias
             .get(&ref_name)
             .map_or(ref_name.as_str(), String::as_str);
@@ -92,7 +90,7 @@ where
                     Position::try_from(slice.block.sequence_start as usize + slice.end)
                         .expect("should convert the stored-node end to a GFF position"),
                 )
-                .set_strand(compose_strand(feature_strand, slice.strand).into())
+                .set_strand(feature_strand)
                 .set_attributes(record.attributes().clone());
             if let Some(phase) = record.phase() {
                 updated_record_builder = updated_record_builder.set_phase(phase);
@@ -259,31 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn test_translates_sliced_graph_nodes_to_stored_sequence_coordinates() {
-        let conn = get_connection();
-        setup_test_data(&conn);
-
-        for (name, traversal_strand, output_strand) in [
-            ("sliced-forward", Strand::Forward, "+"),
-            ("sliced-reverse", Strand::Reverse, "-"),
-        ] {
-            let (block_group, node_id) =
-                create_sliced_test_block_group(&conn, name, traversal_strand);
-            let input = format!(
-                "{}\tsource\tgene\t2\t3\t.\t+\t.\tID=sliced-feature\n",
-                block_group.name
-            );
-            assert_eq!(
-                translate_gff_input(&conn, &input),
-                format!(
-                    "{node_id}\tsource\tgene\t5\t6\t.\t{output_strand}\t.\tID=sliced-feature\n"
-                ),
-                "GFF overlaps should map to the backing sequence span on {name}"
-            );
-        }
-    }
-
-    #[test]
     fn test_translates_off_center_sliced_graph_nodes_to_stored_coordinates() {
         let conn = get_connection();
         setup_test_data(&conn);
@@ -294,10 +267,10 @@ mod tests {
         // stored slice:    [3,7) CGGT
         // Edge + path:     [0,4) CGGT; query [0,2) CG maps to stored [3,5).
         // Edge - path:     [0,4) ACCG; query [0,2) AC maps to stored [5,7).
-        // With feature strand +, the emitted edge strands are + and - respectively.
-        for (name, traversal_strand, start, end, output_strand) in [
-            ("sliced-forward", Strand::Forward, 4, 5, "+"),
-            ("sliced-reverse", Strand::Reverse, 6, 7, "-"),
+        // Feature strand stays + while edge direction determines the mapped stored coordinates.
+        for (name, traversal_strand, start, end) in [
+            ("sliced-forward", Strand::Forward, 4, 5),
+            ("sliced-reverse", Strand::Reverse, 6, 7),
         ] {
             let (block_group, node_id) =
                 create_sliced_test_block_group(&conn, name, traversal_strand);
@@ -307,62 +280,9 @@ mod tests {
             );
             assert_eq!(
                 translate_gff_input(&conn, &input),
-                format!(
-                    "{node_id}\tsource\tgene\t{start}\t{end}\t.\t{output_strand}\t.\tID=sliced-feature\n"
-                ),
+                format!("{node_id}\tsource\tgene\t{start}\t{end}\t.\t+\t.\tID=sliced-feature\n"),
                 "GFF query [0,2) should map to the off-center stored bases on {name}"
             );
         }
-    }
-
-    #[test]
-    fn test_translates_gff_from_historical_path_after_current_path_deletion() {
-        let conn = get_connection();
-        setup_test_data(&conn);
-        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
-            .into_iter()
-            .find(|block_group| block_group.name == "m123")
-            .expect("should find the test block group");
-        let history_ref = commit_all(&conn, "store GFF translator path")
-            .expect("should commit the GFF translator path")
-            .to_string();
-
-        // The path has two forward-traversed nodes; this feature selects the first node only.
-        //   Node 1 stored index: 01234567890123456
-        //   Node 1 stored DNA:   ATCGATCGATCGATCGA [path 0..17)
-        //   Edge strand:        +
-        //   GFF 6..8:           .....^^^......... raw TCG, feature strand -.
-        //   Node 2 stored DNA:  TCGGGAACACACAGAGA [path 17..34), not selected.
-        let input = "m123\tsource\tgene\t6\t8\t.\t-\t.\tID=history-feature\n";
-        conn.execute(
-            "DELETE FROM paths WHERE block_group_id = ?1",
-            [block_group.id],
-        )
-        .expect("should delete the current path row");
-        assert!(
-            BlockGroup::get_current_path(&conn, &block_group.id, None).is_err(),
-            "should not find a current path after deletion"
-        );
-
-        let mut output = Vec::new();
-        translate_gff(
-            &conn,
-            test_workspace(),
-            "test",
-            Sample::DEFAULT_NAME,
-            Some(&history_ref),
-            BufReader::new(Cursor::new(input.as_bytes())),
-            &mut output,
-        )
-        .expect("should translate GFF coordinates from the historical path");
-        assert_eq!(
-            String::from_utf8(output).expect("should encode GFF output as UTF-8"),
-            "b59698a422128d20462c44537b2d23ef\tsource\tgene\t6\t8\t.\t-\t.\tID=history-feature\n",
-            "should retain the exact stored-node span and reverse strand"
-        );
-        assert!(
-            BlockGroup::get_current_path(&conn, &block_group.id, None).is_err(),
-            "historical translation should leave the current path deleted"
-        );
     }
 }

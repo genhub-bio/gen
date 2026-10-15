@@ -390,7 +390,7 @@ mod tests {
         let conn = crate::test_helpers::get_connection();
         crate::test_helpers::setup_test_data(&conn);
         let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
-        // Path edges traverse B then A; edge endpoint strands at B/A are -. Feature strand is +.
+        // Path edges traverse B then A with negative edge strands; input feature strand is +.
         //   path index:  01234567890123456
         //   path nodes:  BBBBBBBBAAAAAAAAA
         //   path DNA:    TGCAACGGTAACCGGTT
@@ -407,9 +407,6 @@ mod tests {
         //   DNA:       AACCGGTTA
         //   span:      ^--------^ [0,9)
         //   selected:          ^ [8,9) = A
-        // Edge strand - maps stored C to G and A to T; feature strand + emits fragments B then A.
-        // GFF 8..9 maps to path [7,9), producing B 1..1 (-) then A 9..9 (-).
-        // This explains orientation; the assertion checks emitted records, not fetched DNA.
         let input = format!(
             "##gff-version 3\n{}\tsource\tgene\t8\t9\t.\t+\t.\tID=cross-boundary;Name=cross-boundary\n",
             block_group.name
@@ -429,9 +426,9 @@ mod tests {
         assert_eq!(
             translated,
             format!(
-                "{node_b_id}\tsource\tgene\t1\t1\t.\t-\t.\tID=cross-boundary;Name=cross-boundary\n{node_a_id}\tsource\tgene\t9\t9\t.\t-\t.\tID=cross-boundary;Name=cross-boundary\n"
+                "{node_b_id}\tsource\tgene\t1\t1\t.\t+\t.\tID=cross-boundary;Name=cross-boundary\n{node_a_id}\tsource\tgene\t9\t9\t.\t+\t.\tID=cross-boundary;Name=cross-boundary\n"
             ),
-            "positive-coordinate GFF fragments should clip to each reverse-oriented node in path order"
+            "GFF fragments should map to stored-node spans in path order and preserve the input feature strand"
         );
     }
 
@@ -440,8 +437,7 @@ mod tests {
         let conn = crate::test_helpers::get_connection();
         crate::test_helpers::setup_test_data(&conn);
         let (block_group, _, node_b_id) = create_reverse_test_block_group(&conn);
-        // Fixture edge endpoints at B and A have strand -; this GFF feature has strand +.
-        // GFF coordinate 8 selects path position 7 and maps to stored B [0,1), slice strand -.
+        // The reverse edge maps path position 7 to stored B [0,1); feature strand stays +.
         let input = format!(
             "{}\tsource\tgene\t8\t8\t.\t+\t.\tID=before-boundary;Name=before-boundary\n",
             block_group.name
@@ -461,7 +457,7 @@ mod tests {
         assert_eq!(
             translated,
             format!(
-                "{node_b_id}\tsource\tgene\t1\t1\t.\t-\t.\tID=before-boundary;Name=before-boundary\n"
+                "{node_b_id}\tsource\tgene\t1\t1\t.\t+\t.\tID=before-boundary;Name=before-boundary\n"
             ),
             "GFF coordinate 8 should map to the final base of the first path node"
         );
@@ -472,8 +468,7 @@ mod tests {
         let conn = crate::test_helpers::get_connection();
         crate::test_helpers::setup_test_data(&conn);
         let (block_group, node_a_id, _) = create_reverse_test_block_group(&conn);
-        // Fixture edge endpoints at B and A have strand -; this GFF feature has strand +.
-        // GFF coordinate 9 selects path position 8 and maps to stored A [8,9), slice strand -.
+        // The reverse edge maps path position 8 to stored A [8,9); feature strand stays +.
         let input = format!(
             "{}\tsource\tgene\t9\t9\t.\t+\t.\tID=after-boundary;Name=after-boundary\n",
             block_group.name
@@ -493,7 +488,7 @@ mod tests {
         assert_eq!(
             translated,
             format!(
-                "{node_a_id}\tsource\tgene\t9\t9\t.\t-\t.\tID=after-boundary;Name=after-boundary\n"
+                "{node_a_id}\tsource\tgene\t9\t9\t.\t+\t.\tID=after-boundary;Name=after-boundary\n"
             ),
             "GFF coordinate 9 should map to the first base of the second path node"
         );

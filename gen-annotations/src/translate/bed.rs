@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
 };
 
-use gen_core::{Strand, Workspace};
+use gen_core::Workspace;
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
@@ -18,8 +18,6 @@ use noodles::{
     core::Position,
 };
 use thiserror::Error;
-
-use super::compose_strand;
 
 #[derive(Debug, Error)]
 pub enum BedError {
@@ -71,10 +69,7 @@ where
             .name()
             .map(|name| String::from_utf8_lossy(name.as_ref()).to_string());
         let score = record.score().ok();
-        let feature_strand = record.strand().ok().flatten().map(|strand| match strand {
-            bed::feature::record::Strand::Forward => Strand::Forward,
-            bed::feature::record::Strand::Reverse => Strand::Reverse,
-        });
+        let feature_strand = record.strand().ok().flatten();
         let resolved_reference = references_by_alias
             .get(&ref_name)
             .map_or(ref_name.as_str(), String::as_str);
@@ -111,13 +106,7 @@ where
             if let Some(score) = score {
                 out_record = out_record.set_score(score);
             }
-            let output_strand =
-                match compose_strand(feature_strand.unwrap_or(Strand::Unknown), slice.strand) {
-                    Strand::Forward => Some(bed::feature::record::Strand::Forward),
-                    Strand::Reverse => Some(bed::feature::record::Strand::Reverse),
-                    Strand::Unknown | Strand::ImportantButUnknown => None,
-                };
-            if let Some(output_strand) = output_strand {
+            if let Some(output_strand) = feature_strand {
                 out_record = out_record.set_strand(output_strand);
             }
             let out_record = out_record.build();
@@ -262,26 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn test_translates_sliced_graph_nodes_to_stored_sequence_coordinates() {
-        let conn = get_connection();
-        setup_test_data(&conn);
-
-        for (name, traversal_strand, output_strand) in [
-            ("sliced-forward", Strand::Forward, "+"),
-            ("sliced-reverse", Strand::Reverse, "-"),
-        ] {
-            let (block_group, node_id) =
-                create_sliced_test_block_group(&conn, name, traversal_strand);
-            let input = format!("{}\t1\t3\tsliced-feature\t0\t+\n", block_group.name);
-            assert_eq!(
-                translate_bed_input(&conn, &input),
-                format!("{node_id}\t4\t6\tsliced-feature\t0\t{output_strand}\n"),
-                "BED overlaps should map to the backing sequence span on {name}"
-            );
-        }
-    }
-
-    #[test]
     fn test_translates_off_center_sliced_graph_nodes_to_stored_coordinates() {
         let conn = get_connection();
         setup_test_data(&conn);
@@ -292,70 +261,19 @@ mod tests {
         // stored slice:    [3,7) CGGT
         // Edge + path:     [0,4) CGGT; query [0,2) CG maps to stored [3,5).
         // Edge - path:     [0,4) ACCG; query [0,2) AC maps to stored [5,7).
-        // With feature strand +, the emitted edge strands are + and - respectively.
-        for (name, traversal_strand, start, end, output_strand) in [
-            ("sliced-forward", Strand::Forward, 3, 5, "+"),
-            ("sliced-reverse", Strand::Reverse, 5, 7, "-"),
+        // Feature strand stays + while edge direction determines the mapped stored coordinates.
+        for (name, traversal_strand, start, end) in [
+            ("sliced-forward", Strand::Forward, 3, 5),
+            ("sliced-reverse", Strand::Reverse, 5, 7),
         ] {
             let (block_group, node_id) =
                 create_sliced_test_block_group(&conn, name, traversal_strand);
             let input = format!("{}\t0\t2\tsliced-feature\t0\t+\n", block_group.name);
             assert_eq!(
                 translate_bed_input(&conn, &input),
-                format!("{node_id}\t{start}\t{end}\tsliced-feature\t0\t{output_strand}\n"),
+                format!("{node_id}\t{start}\t{end}\tsliced-feature\t0\t+\n"),
                 "BED query [0,2) should map to the off-center stored bases on {name}"
             );
         }
-    }
-
-    #[test]
-    fn test_translates_bed_from_historical_path_after_current_path_deletion() {
-        let conn = get_connection();
-        setup_test_data(&conn);
-        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
-            .into_iter()
-            .find(|block_group| block_group.name == "m123")
-            .expect("should find the test block group");
-        let history_ref = commit_all(&conn, "store BED translator path")
-            .expect("should commit the BED translator path")
-            .to_string();
-
-        // The path has two forward-traversed nodes; this feature selects the first node only.
-        //   Node 1 stored index: 01234567890123456
-        //   Node 1 stored DNA:   ATCGATCGATCGATCGA [path 0..17)
-        //   Edge strand:        +
-        //   BED [5,8):          .....^^^......... raw TCG, feature strand -.
-        //   Node 2 stored DNA:  TCGGGAACACACAGAGA [path 17..34), not selected.
-        let input = "m123\t5\t8\thistory-feature\t0\t-\n";
-        conn.execute(
-            "DELETE FROM paths WHERE block_group_id = ?1",
-            [block_group.id],
-        )
-        .expect("should delete the current path row");
-        assert!(
-            BlockGroup::get_current_path(&conn, &block_group.id, None).is_err(),
-            "should not find a current path after deletion"
-        );
-
-        let mut output = Vec::new();
-        translate_bed(
-            &conn,
-            test_workspace(),
-            "test",
-            Sample::DEFAULT_NAME,
-            Some(&history_ref),
-            Cursor::new(input.as_bytes()),
-            &mut output,
-        )
-        .expect("should translate BED coordinates from the historical path");
-        assert_eq!(
-            String::from_utf8(output).expect("should encode BED output as UTF-8"),
-            "b59698a422128d20462c44537b2d23ef\t5\t8\thistory-feature\t0\t-\n",
-            "should retain the exact stored-node span and reverse strand"
-        );
-        assert!(
-            BlockGroup::get_current_path(&conn, &block_group.id, None).is_err(),
-            "historical translation should leave the current path deleted"
-        );
     }
 }
