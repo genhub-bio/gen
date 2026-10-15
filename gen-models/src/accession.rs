@@ -33,6 +33,10 @@ pub struct Accession {
     #[serde(skip)]
     #[model_select(skip)]
     pub cached_interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
+    /// History ref this runtime model was selected from.
+    #[serde(skip)]
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
 }
 
 impl PartialEq for Accession {
@@ -53,6 +57,7 @@ fn accession_from_row(row: &Row) -> SqlResult<Accession> {
         block_group_id: row.get(2)?,
         parent_accession_id: row.get(3)?,
         cached_interval_tree: None,
+        history_ref: None,
     })
 }
 
@@ -130,6 +135,7 @@ impl<'a> Capnp<'a> for Accession {
             block_group_id,
             parent_accession_id,
             cached_interval_tree: None,
+            history_ref: None,
         }
     }
 }
@@ -362,6 +368,7 @@ impl Accession {
                 block_group_id: new.block_group_id,
                 parent_accession_id: new.parent_accession_id,
                 cached_interval_tree: None,
+                history_ref: None,
             },
             Err(rusqlite::Error::SqliteFailure(err, _details))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -427,6 +434,7 @@ impl Accession {
                     block_group_id: new.block_group_id,
                     parent_accession_id: new.parent_accession_id,
                     cached_interval_tree: None,
+                    history_ref: None,
                 };
                 let nodes = Self::get_nodes_by_id(conn, &accession.id, None);
                 if nodes.is_empty() {
@@ -489,7 +497,7 @@ impl Accession {
     }
 
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
-        let nodes = Self::get_nodes_by_id(conn, &self.id, None);
+        let nodes = Self::get_nodes_by_id(conn, &self.id, self.history_ref());
         if nodes.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
         }
@@ -534,7 +542,7 @@ impl Accession {
             return intervaltree_length(interval_tree);
         }
 
-        let nodes = Self::get_nodes_by_id(conn, &self.id, None);
+        let nodes = Self::get_nodes_by_id(conn, &self.id, self.history_ref());
         if nodes.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
         }
@@ -881,6 +889,7 @@ mod tests {
             block_group_id: HashId::pad_str(150),
             parent_accession_id: Some(HashId::pad_str(100)),
             cached_interval_tree: None,
+            history_ref: Some("saved-ref".to_string()),
         };
 
         let mut message = TypedBuilder::<accession::Owned>::new_default();
@@ -889,6 +898,7 @@ mod tests {
 
         let deserialized = Accession::read_capnp(root.into_reader());
         assert_eq!(accession, deserialized);
+        assert_eq!(deserialized.history_ref(), None);
     }
 
     #[test]
@@ -899,6 +909,7 @@ mod tests {
             block_group_id: HashId::pad_str(151),
             parent_accession_id: None,
             cached_interval_tree: None,
+            history_ref: None,
         };
 
         let mut message = TypedBuilder::<accession::Owned>::new_default();
@@ -972,6 +983,7 @@ mod tests {
                 block_group_id,
                 parent_accession_id: None,
                 cached_interval_tree: None,
+                history_ref: None,
             }]
         );
     }

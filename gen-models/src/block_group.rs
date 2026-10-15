@@ -2352,6 +2352,7 @@ mod tests {
                 block_group_id: path.block_group_id,
                 parent_accession_id: None,
                 cached_interval_tree: None,
+                history_ref: None,
             }]
         );
 

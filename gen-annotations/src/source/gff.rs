@@ -86,6 +86,7 @@ where
         accession_id: id,
         cached_accession: ForeignKeyCache::default(),
         cached_interval_tree: None,
+        history_ref: None,
         extra: Some(AnnotationExtra {
             gff: Some(gff),
             ..AnnotationExtra::default()
@@ -148,6 +149,7 @@ where
         block_group_id: context.block_group_id,
         parent_accession_id: None,
         cached_interval_tree: None,
+        history_ref: None,
     };
     accession.set_cached_interval_tree(Some(interval_tree));
     translated_annotation.set_accession(Arc::new(accession));

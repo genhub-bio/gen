@@ -1,5 +1,8 @@
 use core::ops::Range as RustRange;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
+};
 
 use gen_core::{
     HASH_ID_SIZE, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock,
@@ -26,13 +29,37 @@ use crate::{
     sequence::SequenceError,
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
 #[model_select(table = "paths")]
 pub struct Path {
     pub id: HashId,
     pub block_group_id: HashId,
     pub name: String,
     pub created_on: i64,
+    /// History ref this runtime model was selected from.
+    #[serde(skip)]
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
+}
+
+impl PartialEq for Path {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.block_group_id == other.block_group_id
+            && self.name == other.name
+            && self.created_on == other.created_on
+    }
+}
+
+impl Eq for Path {}
+
+impl Hash for Path {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.block_group_id.hash(state);
+        self.name.hash(state);
+        self.created_on.hash(state);
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -87,6 +114,7 @@ impl<'a> Capnp<'a> for Path {
             block_group_id,
             name,
             created_on,
+            history_ref: None,
         }
     }
 }
@@ -433,6 +461,7 @@ impl Path {
                 name: name.to_string(),
                 block_group_id: *block_group_id,
                 created_on: timestamp,
+                history_ref: None,
             },
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -442,6 +471,7 @@ impl Path {
                     name: name.to_string(),
                     block_group_id: *block_group_id,
                     created_on: timestamp,
+                    history_ref: None,
                 }
             }
             Err(e) => {
@@ -641,7 +671,7 @@ impl Path {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, PathError> {
-        let blocks = self.coordinate_blocks(conn, None);
+        let blocks = self.coordinate_blocks(conn, self.history_ref());
         let tree: IntervalTree<i64, NodeIntervalBlock> = blocks
             .into_iter()
             .map(|block| {
@@ -1518,7 +1548,14 @@ mod tests {
             block_group_id: HashId::pad_str(50),
             name: "test_path".to_string(),
             created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            history_ref: Some("saved-ref".to_string()),
         };
+
+        let serialized = serde_json::to_value(&path).expect("should serialize path");
+        assert!(serialized.get("history_ref").is_none());
+        let deserialized_path: Path =
+            serde_json::from_value(serialized).expect("should deserialize path");
+        assert_eq!(deserialized_path.history_ref(), None);
 
         let mut message = TypedBuilder::<PathCapnp::Owned>::new_default();
         let mut root = message.init_root();
@@ -1526,6 +1563,7 @@ mod tests {
 
         let deserialized = Path::read_capnp(root.into_reader());
         assert_eq!(path, deserialized);
+        assert_eq!(deserialized.history_ref(), None);
     }
 
     #[test]

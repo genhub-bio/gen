@@ -213,6 +213,20 @@ let samples = Sample::all(conn).expect("should load all samples");
 `Sample::all(conn)` is exactly `Sample::select(conn).load()`. For a historical read, construct the
 selector explicitly and call `.with_ref(history_ref).load()`.
 
+Models that need to retain the selected view can declare a runtime-only field:
+
+```rust
+#[model_select(history_ref)]
+pub history_ref: Option<String>,
+```
+
+The field is omitted from SQL columns and starts as `None`; selector loads stamp it with the ref
+passed to `.with_ref(...)`. Joined model projections retain the same ref. Generated foreign-key
+getters pass their owning model's ref to related selectors, so lazy relation lookups stay in the
+view from which the owner was loaded. Models with a custom row decoder should initialize this field
+to `None`; the selector fills it after decoding. Keep runtime origin metadata out of serialized and
+Cap'n Proto representations.
+
 ## Selecting specific fields
 
 Call `only` after configuring the query to return selected fields instead of complete models. A
@@ -510,6 +524,9 @@ pub struct Sample {
   defines sort precedence, and each entry names a selectable Rust model field.
 - `history = false` disables historical reads. If omitted, historical reads use the configured
   table name.
+- `#[model_select(history_ref)]` marks an `Option<String>` model field that records the selector's
+  history ref at runtime. It is excluded from SQL columns and is not persisted. Custom row decoders
+  should initialize it to `None`; the selector fills it after decoding.
 - `from_row = path::to::function` supplies a `fn(&Row) -> rusqlite::Result<Model>` for models that
   need custom row decoding. Without `from_row`, skipped fields are initialized with
   `Default::default()`; with it, the custom decoder must construct every skipped field. The derive

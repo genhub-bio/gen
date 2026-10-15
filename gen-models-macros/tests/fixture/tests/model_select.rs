@@ -606,16 +606,48 @@ fn test_generated_history_ref_applies_to_every_source() {
         .expect("should load historical joined fixture samples");
 
     assert_eq!(samples[0].name, "historical-sample");
+    assert_eq!(samples[0].history_ref(), Some(historical_ref.as_str()));
+    assert_eq!(
+        samples[0].clone().history_ref(),
+        Some(historical_ref.as_str())
+    );
+
+    let joined_models: Vec<(FixtureSample, FixtureGroup)> = FixtureSample::select(&conn)
+        .join_filtered_on(
+            FixtureSampleSelect::Name,
+            FixtureGroupSelect::SampleName,
+            FixtureGroup::select(&conn).name("matching-group"),
+        )
+        .with_ref(historical_ref.as_str())
+        .models::<(FixtureSample, FixtureGroup)>()
+        .load()
+        .expect("should retain the history ref on joined models");
+
+    assert_eq!(
+        joined_models[0].0.history_ref(),
+        Some(historical_ref.as_str())
+    );
+    assert_eq!(
+        joined_models[0].1.history_ref(),
+        Some(historical_ref.as_str())
+    );
+    assert_eq!(
+        joined_models[0].0.skipped_label, "",
+        "should default ordinary skipped fields alongside the runtime history ref"
+    );
 
     let current_sample = FixtureSample::select(&conn)
         .name("current-sample")
         .with_ref(None::<&str>)
         .get()
-        .expect("should load from the current state when the optional ref is absent");
+        .expect("should load from the current state when the optional ref is absent")
+        .expect("should find the current sample");
 
+    assert_eq!(current_sample.name, "current-sample");
+    assert_eq!(current_sample.history_ref(), None);
     assert_eq!(
-        current_sample.expect("should find current sample").name,
-        "current-sample"
+        current_sample.clone().history_ref(),
+        current_sample.history_ref()
     );
 }
 

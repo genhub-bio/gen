@@ -14,11 +14,15 @@ use rusqlite::{
 
 pub const IDENTIFIER_INJECTED_BRANCH: &str = "selector_identifier_injection";
 
-#[derive(Debug, ModelSelect, PartialEq)]
+#[derive(Clone, Debug, ModelSelect, PartialEq)]
 #[model_select(table = "fixture_samples")]
 pub struct FixtureSample {
     #[model_select(primary_key)]
     pub name: String,
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
+    #[model_select(skip)]
+    pub skipped_label: String,
     pub is_reference: bool,
 }
 
@@ -26,6 +30,8 @@ pub struct FixtureSample {
 #[model_select(table = "fixture_groups")]
 pub struct FixtureGroup {
     pub id: i64,
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
     pub sample_name: String,
     pub name: String,
     pub collection_name: String,
@@ -49,6 +55,8 @@ pub struct FixtureDefaultedModel {
 #[model_select(table = "fixture_foreign_targets")]
 pub struct FixtureForeignTarget {
     pub id: i64,
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
     pub name: String,
 }
 
@@ -57,6 +65,7 @@ fn fixture_required_relation_from_row(row: &Row) -> rusqlite::Result<FixtureRequ
         id: row.get("id")?,
         target_id: row.get("target_id")?,
         cached_target: ForeignKeyCache::default(),
+        history_ref: None,
     })
 }
 
@@ -71,6 +80,8 @@ pub struct FixtureRequiredRelation {
     pub target_id: i64,
     #[model_select(skip)]
     pub cached_target: ForeignKeyCache<FixtureForeignTarget>,
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
 }
 
 fn fixture_nullable_relation_from_row(row: &Row) -> rusqlite::Result<FixtureNullableRelation> {
@@ -78,6 +89,7 @@ fn fixture_nullable_relation_from_row(row: &Row) -> rusqlite::Result<FixtureNull
         id: row.get("id")?,
         optional_target_id: row.get("optional_target_id")?,
         cached_target: ForeignKeyCache::default(),
+        history_ref: None,
     })
 }
 
@@ -92,6 +104,8 @@ pub struct FixtureNullableRelation {
     pub optional_target_id: Option<i64>,
     #[model_select(skip)]
     pub cached_target: ForeignKeyCache<FixtureForeignTarget>,
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
