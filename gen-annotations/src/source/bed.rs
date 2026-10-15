@@ -4,25 +4,21 @@
 //! Read trait and converting them into Annotation objects. This lets us provide BED files from
 //! a variety of sources.
 
-use std::{
-    io::{Cursor, Read},
-    sync::Arc,
-};
+use std::io::Read;
 
-use gen_core::{HashId, NodeIntervalBlock, Strand, is_terminal};
+use gen_core::{HashId, Strand};
 use gen_models::{
     ForeignKeyCache,
-    accession::Accession,
-    annotations::{Annotation, AnnotationExtra, BedExtra},
-    interval_tree::IntervalTreeSource as _,
+    annotations::{Annotation, AnnotationExtra, AnnotationLocation, BedExtra},
 };
-use intervaltree::IntervalTree;
 use noodles::bed;
 
 use super::{AnnotationTranslationContext, FileAnnotationError};
-use crate::translate::bed::translate_bed;
+use crate::translate::translate_annotation;
 
-/// Parse one BED name's matching records into the existing annotation model.
+/// Parse matching BED records into an annotation with metadata and source coordinates.
+///
+/// The reader is consumed once, and the returned annotation can be translated after it is dropped.
 pub fn parse_bed_annotation<R>(
     identifier: impl Into<String>,
     reader: R,
@@ -42,7 +38,20 @@ where
     parse_bed_annotation_records(identifier, records)
 }
 
-/// Build a BED annotation from records already matched by an upstream lookup provider.
+/// Translate matching BED records into an annotation with attached graph interval caches.
+pub fn translate_bed_annotation<R>(
+    context: &AnnotationTranslationContext<'_>,
+    identifier: impl Into<String>,
+    reader: R,
+) -> Result<Annotation, FileAnnotationError>
+where
+    R: Read,
+{
+    let annotation = parse_bed_annotation(identifier, reader)?;
+    translate_annotation(context, &annotation)
+}
+
+/// Parse preselected BED records into an annotation with metadata and source coordinates.
 pub fn parse_bed_annotation_records<I>(
     identifier: impl Into<String>,
     records: I,
@@ -51,7 +60,7 @@ where
     I: IntoIterator<Item = bed::Record<6>>,
 {
     let identifier = identifier.into();
-    let records: Vec<_> = records.into_iter().collect();
+    let records = records.into_iter().collect::<Vec<_>>();
     let first = records.first().ok_or(FileAnnotationError::Empty)?;
     let fields = bed_other_fields(first);
     let bed = BedExtra {
@@ -70,6 +79,30 @@ where
             .filter(|values| !values.is_empty()),
         other_fields: fields.get(6..).unwrap_or_default().to_vec(),
     };
+    let source_locations = records
+        .iter()
+        .map(|record| {
+            let start = record.feature_start()?.get() as i64 - 1;
+            let end = record
+                .feature_end()
+                .ok_or_else(|| {
+                    FileAnnotationError::Translation("BED record has no end".to_string())
+                })??
+                .get() as i64;
+            let strand = match record.strand() {
+                Ok(Some(bed::feature::record::Strand::Forward)) => Strand::Forward,
+                Ok(Some(bed::feature::record::Strand::Reverse)) => Strand::Reverse,
+                Ok(None) | Err(_) => Strand::Unknown,
+            };
+            Ok(AnnotationLocation {
+                reference_sequence_name: record.reference_sequence_name().to_string(),
+                start,
+                end,
+                strand,
+            })
+        })
+        .collect::<Result<Vec<_>, FileAnnotationError>>()?;
+
     let id = HashId::convert_str(&identifier);
     Ok(Annotation {
         id,
@@ -79,6 +112,7 @@ where
         cached_accession: ForeignKeyCache::default(),
         cached_interval_tree: None,
         history_ref: None,
+        source_locations,
         extra: Some(AnnotationExtra {
             bed: Some(bed),
             ..AnnotationExtra::default()
@@ -86,67 +120,17 @@ where
     })
 }
 
-/// Translate matching BED records and return an annotation with cached graph intervals and accession.
-pub fn translate_bed_annotation<R>(
-    context: &AnnotationTranslationContext<'_>,
-    annotation: &Annotation,
-    reader: R,
-) -> Result<Annotation, FileAnnotationError>
-where
-    R: Read,
-{
-    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
-    let mut record = bed::Record::<6>::default();
-    let mut records = Vec::new();
-    while bed_reader.read_record(&mut record)? != 0 {
-        if matching_bed_record(&record, &annotation.name) {
-            records.push(record.clone());
-        }
-    }
-    translate_bed_annotation_records(context, annotation, records)
-}
-
-/// Translate selected BED records and return an annotation with cached graph intervals and accession.
+/// Parse preselected BED records and translate their source coordinates onto the sample graph.
 pub fn translate_bed_annotation_records<I>(
     context: &AnnotationTranslationContext<'_>,
-    annotation: &Annotation,
+    identifier: impl Into<String>,
     records: I,
 ) -> Result<Annotation, FileAnnotationError>
 where
     I: IntoIterator<Item = bed::Record<6>>,
 {
-    let mut translated_annotation = annotation.clone();
-    let mut input = Vec::new();
-    {
-        let mut writer = bed::io::Writer::<6, _>::new(&mut input);
-        for record in records {
-            writer.write_record(&record)?;
-        }
-    }
-    let mut translated = Vec::new();
-    translate_bed(
-        context.conn,
-        context.workspace,
-        context.collection_name,
-        context.sample_name,
-        context.history_ref,
-        Cursor::new(input),
-        &mut translated,
-    )
-    .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
-    let interval_tree = Arc::new(translated_bed_interval_tree(&translated)?);
-    translated_annotation.set_cached_interval_tree(Some(Arc::clone(&interval_tree)));
-    let mut accession = Accession {
-        id: translated_annotation.accession_id,
-        name: translated_annotation.name.clone(),
-        block_group_id: context.block_group_id,
-        parent_accession_id: None,
-        cached_interval_tree: None,
-        history_ref: None,
-    };
-    accession.set_cached_interval_tree(Some(interval_tree));
-    translated_annotation.set_accession(Arc::new(accession));
-    Ok(translated_annotation)
+    let annotation = parse_bed_annotation_records(identifier, records)?;
+    translate_annotation(context, &annotation)
 }
 
 fn matching_bed_record(record: &bed::Record<6>, identifier: &str) -> bool {
@@ -172,67 +156,28 @@ fn parse_bed_list(value: &str) -> Vec<i64> {
         .collect()
 }
 
-fn translated_bed_interval_tree(
-    translated: &[u8],
-) -> Result<IntervalTree<i64, NodeIntervalBlock>, FileAnnotationError> {
-    let mut reader = bed::io::reader::Builder::<6>.build_from_reader(Cursor::new(translated));
-    let mut record = bed::Record::<6>::default();
-    let mut position = 0;
-    let mut blocks = Vec::new();
-    while reader.read_record(&mut record)? != 0 {
-        let node_name = String::from_utf8_lossy(record.reference_sequence_name().as_ref());
-        let node_id = HashId::try_from(node_name.as_ref())
-            .map_err(|_| FileAnnotationError::InvalidNode(node_name.to_string()))?;
-        if is_terminal(node_id) {
-            continue;
-        }
-        let start = record
-            .feature_start()
-            .map_err(|error| FileAnnotationError::Translation(error.to_string()))?
-            .get() as i64
-            - 1;
-        let end = record
-            .feature_end()
-            .ok_or_else(|| FileAnnotationError::Translation("BED record has no end".to_string()))?
-            .map_err(|error| FileAnnotationError::Translation(error.to_string()))?
-            .get() as i64;
-        if end <= start {
-            continue;
-        }
-        let strand = match record.strand() {
-            Ok(Some(bed::feature::record::Strand::Forward)) => Strand::Forward,
-            Ok(Some(bed::feature::record::Strand::Reverse)) => Strand::Reverse,
-            Ok(None) | Err(_) => Strand::Unknown,
-        };
-        let block = NodeIntervalBlock {
-            node_id,
-            start: position,
-            end: position + end - start,
-            sequence_start: start,
-            sequence_end: end,
-            strand,
-        };
-        position = block.end;
-        blocks.push(block);
-    }
-    if blocks.is_empty() {
-        return Err(FileAnnotationError::Empty);
-    }
-    Ok(blocks
-        .into_iter()
-        .map(|block| (block.start..block.end, block))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Cursor, sync::Arc};
+    use std::{
+        io::{BufReader, Cursor},
+        sync::Arc,
+    };
 
     use gen_core::{HashId, Strand};
-    use gen_models::{interval_tree::IntervalTreeSource as _, sample::Sample};
+    use gen_models::{
+        annotations::AnnotationLocation, db::GraphConnection,
+        interval_tree::IntervalTreeSource as _, sample::Sample,
+    };
+    use noodles::bed;
 
-    use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
-    use crate::{test_helpers::create_reverse_test_block_group, translate::bed::translate_bed};
+    use super::{
+        AnnotationTranslationContext, FileAnnotationError, parse_bed_annotation,
+        parse_bed_annotation_records, translate_bed_annotation, translate_bed_annotation_records,
+    };
+    use crate::{
+        test_helpers::create_reverse_test_block_group,
+        translate::{bed::translate_bed, translate_annotation},
+    };
 
     #[test]
     fn test_bed_annotation_matches_identifier_and_preserves_metadata() {
@@ -251,11 +196,45 @@ mod tests {
             history_ref: None,
         };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
-        let annotation = parse_bed_annotation(
-            "abc123.1",
-            File::open(path).expect("should open simple BED fixture"),
-        )
-        .expect("should parse the matching BED record");
+        let input = std::fs::read(path).expect("should read simple BED fixture");
+        // BED source offsets are zero-based and half-open:
+        //   source offset: 01234567890
+        //   record:         ^--------^ [1,10), strand -
+        let parsed = parse_bed_annotation("abc123.1", BufReader::new(input.as_slice()))
+            .expect("should parse the matching BED record from one reader");
+        assert_eq!(
+            parsed.source_locations,
+            vec![AnnotationLocation {
+                reference_sequence_name: "m123".to_string(),
+                start: 1,
+                end: 10,
+                strand: Strand::Reverse,
+            }]
+        );
+        assert!(parsed.cached_interval_tree.is_none());
+        assert!(parsed.cached_accession.snapshot().is_none());
+        let annotation = translate_annotation(&context, &parsed)
+            .expect("should translate parsed BED coordinates after the reader is dropped");
+        let via_reader_wrapper =
+            translate_bed_annotation(&context, "abc123.1", BufReader::new(input.as_slice()))
+                .expect("should translate BED through its reader convenience API");
+        assert_eq!(via_reader_wrapper.source_locations, parsed.source_locations);
+        assert!(matches!(
+            translate_bed_annotation(&context, "missing", BufReader::new(input.as_slice())),
+            Err(FileAnnotationError::Empty)
+        ));
+        assert!(matches!(
+            translate_bed_annotation(&context, "missing", BufReader::new(&b""[..])),
+            Err(FileAnnotationError::Empty)
+        ));
+        assert!(matches!(
+            translate_bed_annotation(
+                &context,
+                "malformed",
+                BufReader::new(&b"m123\tbad\t5\tmalformed\t0\t+\n"[..]),
+            ),
+            Err(FileAnnotationError::Io(_))
+        ));
         assert_eq!(annotation.name, "abc123.1");
         assert_eq!(annotation.id, HashId::convert_str("abc123.1"));
         assert_eq!(annotation.accession_id, annotation.id);
@@ -275,25 +254,34 @@ mod tests {
             metadata.block_starts.as_deref(),
             Some([0, 3508, 4691].as_slice())
         );
-        let translated_annotation = translate_bed_annotation(
-            &context,
-            &annotation,
-            File::open(path).expect("should reopen simple BED fixture"),
-        )
-        .expect("should translate the matching BED record");
-        assert!(annotation.cached_interval_tree().is_none());
-        assert!(annotation.cached_accession.snapshot().is_none());
-        let accession = translated_annotation
-            .get_accession(&conn)
+        let empty_conn = GraphConnection(
+            rusqlite::Connection::open_in_memory().expect("should open empty database"),
+        );
+        let accession = annotation
+            .get_accession(&empty_conn)
             .expect("should return translated BED accession");
-        assert_eq!(accession.id, translated_annotation.accession_id);
+        assert_eq!(accession.id, annotation.accession_id);
+        let annotation_tree = annotation
+            .intervaltree(&empty_conn)
+            .expect("should get translated BED tree without database queries");
+        let accession_tree = accession
+            .intervaltree(&empty_conn)
+            .expect("should get translated BED accession tree without database queries");
+        assert!(Arc::ptr_eq(&annotation_tree, &accession_tree));
+        assert_eq!(annotation_tree.iter().count(), 1);
         assert_eq!(
-            translated_annotation
-                .intervaltree(&conn)
-                .expect("should get translated BED tree")
-                .iter()
-                .count(),
-            1
+            annotation
+                .length(&empty_conn)
+                .expect("should measure BED annotation"),
+            accession
+                .length(&empty_conn)
+                .expect("should measure BED accession")
+        );
+        assert!(
+            annotation
+                .length(&empty_conn)
+                .expect("should measure BED annotation")
+                > 0
         );
     }
 
@@ -314,29 +302,48 @@ mod tests {
             history_ref: None,
         };
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
-        let annotation = parse_bed_annotation(
-            "xyz.1",
-            File::open(path).expect("should open simple BED fixture"),
-        )
-        .expect("should parse the negative-strand BED record");
-        assert_eq!(annotation.name, "xyz.1");
-
-        let translated_annotation = translate_bed_annotation(
-            &context,
-            &annotation,
-            File::open(path).expect("should reopen simple BED fixture"),
-        )
-        .expect("should translate the negative-strand BED record");
+        let input = std::fs::read(path).expect("should read simple BED fixture");
+        let mut reader = bed::io::reader::Builder::<6>.build_from_reader(Cursor::new(input));
+        let mut record = bed::Record::<6>::default();
+        let mut records = Vec::new();
+        while reader
+            .read_record(&mut record)
+            .expect("should read BED record")
+            != 0
+        {
+            if super::matching_bed_record(&record, "xyz.1") {
+                records.push(record.clone());
+            }
+        }
+        assert_eq!(records.len(), 1, "should select the matching BED record");
+        let parsed = parse_bed_annotation_records("selected-name", records.clone())
+            .expect("should parse selected one-shot BED records without a graph context");
+        assert_eq!(parsed.name, "selected-name");
+        assert_eq!(parsed.source_locations[0].reference_sequence_name, "m123");
+        assert_eq!(parsed.source_locations[0].start, 5);
+        assert_eq!(parsed.source_locations[0].end, 8);
+        assert_eq!(parsed.source_locations[0].strand, Strand::Reverse);
+        let translated_annotation =
+            translate_annotation(&context, &parsed).expect("should translate parsed BED records");
+        let via_records_wrapper = translate_bed_annotation_records(&context, "xyz.1", records)
+            .expect("should translate BED through its one-shot records API");
+        assert_eq!(
+            via_records_wrapper.source_locations,
+            parsed.source_locations
+        );
+        let empty_conn = GraphConnection(
+            rusqlite::Connection::open_in_memory().expect("should open empty database"),
+        );
         let accession = translated_annotation
-            .get_accession(&conn)
+            .get_accession(&empty_conn)
             .expect("should return translated BED accession");
-        assert_eq!(accession.name, "xyz.1");
+        assert_eq!(accession.name, "selected-name");
         let annotation_tree = translated_annotation
-            .intervaltree(&conn)
-            .expect("should get the cached BED annotation tree");
+            .intervaltree(&empty_conn)
+            .expect("should get the cached BED annotation tree without database queries");
         let accession_tree = accession
-            .intervaltree(&conn)
-            .expect("should get the cached BED accession tree");
+            .intervaltree(&empty_conn)
+            .expect("should get the cached BED accession tree without database queries");
         assert!(Arc::ptr_eq(&annotation_tree, &accession_tree));
         assert!(Arc::ptr_eq(
             &annotation_tree,
@@ -350,7 +357,12 @@ mod tests {
                 .cached_interval_tree()
                 .expect("should find the cached BED accession tree")
         ));
-        assert_eq!(accession.length(&conn).expect("should get BED length"), 3);
+        assert_eq!(
+            accession
+                .length(&empty_conn)
+                .expect("should get BED length"),
+            3
+        );
         let cloned_annotation = translated_annotation.clone();
         assert!(Arc::ptr_eq(
             &annotation_tree,

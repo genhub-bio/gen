@@ -1,9 +1,7 @@
-//! Source-specific annotation records and their translated graph intervals.
+//! Source-specific annotation parsing and graph translation.
 //!
-//! The application chooses and opens an annotation asset. These adapters only receive the
-//! selected records (or a reader for the selected asset), match one identifier, and hand the
-//! matching records to the existing graph translators. A future attribute index can provide the
-//! same matched records without changing the downstream interval-tree or region-resolution layers.
+//! Parsers retain format-neutral source locations on `Annotation`; translation then resolves
+//! those locations against the selected sample's graph.
 
 mod bed;
 mod gff;
@@ -20,9 +18,9 @@ pub use gff::{
 };
 use thiserror::Error;
 
-/// Context used while translating records selected by the application.
+/// Graph context used to translate a parsed annotation's source locations.
 pub struct AnnotationTranslationContext<'a> {
-    /// Database connection used by the existing translators.
+    /// Database connection used to load the selected sample graph.
     pub conn: &'a GraphConnection,
     /// Workspace used by graph/path loading.
     pub workspace: &'a Workspace,
@@ -30,21 +28,21 @@ pub struct AnnotationTranslationContext<'a> {
     pub collection_name: &'a str,
     /// Sample whose graph receives the translated records.
     pub sample_name: &'a str,
-    /// Block group receiving the translated records.
+    /// Block group assigned to the translated annotation's synthetic accession.
     pub block_group_id: HashId,
     /// Optional history reference for graph lookup.
     pub history_ref: Option<&'a str>,
 }
 
-/// Errors raised while building a file-backed annotation from matched records.
+/// Errors raised while parsing or translating source annotations.
 #[derive(Debug, Error)]
 pub enum FileAnnotationError {
     #[error("annotation record I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("annotation translation error: {0}")]
     Translation(String),
-    #[error("annotation has no translated records")]
+    #[error("annotation has no records or translated graph intervals")]
     Empty,
-    #[error("translated annotation reference is not a node id: {0}")]
-    InvalidNode(String),
+    #[error("annotation has no source locations to translate")]
+    MissingSourceLocations,
 }

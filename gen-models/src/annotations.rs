@@ -4,7 +4,7 @@ use std::{
 };
 
 use gen_core::{
-    DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
+    DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, Strand, calculate_hash,
     config::Workspace,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -112,8 +112,25 @@ pub struct Annotation {
     #[serde(skip)]
     #[model_select(history_ref)]
     pub history_ref: Option<String>,
+    /// Original reference coordinates retained for graph translation.
+    #[serde(skip)]
+    #[model_select(skip)]
+    pub source_locations: Vec<AnnotationLocation>,
     #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
+}
+
+/// A format-neutral source interval retained for translating a parsed annotation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotationLocation {
+    /// Reference sequence name from the source record.
+    pub reference_sequence_name: String,
+    /// Zero-based inclusive start coordinate.
+    pub start: i64,
+    /// Zero-based exclusive end coordinate.
+    pub end: i64,
+    /// Strand supplied by the source record.
+    pub strand: Strand,
 }
 
 impl PartialEq for Annotation {
@@ -137,6 +154,7 @@ fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
         cached_accession: ForeignKeyCache::default(),
         cached_interval_tree: None,
         history_ref: None,
+        source_locations: Vec::new(),
         extra: deserialize_annotation_extra(row.get(4)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
         })?,
@@ -280,6 +298,7 @@ impl<'a> Capnp<'a> for Annotation {
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
             history_ref: None,
+            source_locations: Vec::new(),
             extra,
         }
     }
@@ -340,6 +359,7 @@ impl Annotation {
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
             history_ref: None,
+            source_locations: Vec::new(),
             extra: annotation.extra.cloned(),
         })
     }
@@ -366,6 +386,7 @@ impl Annotation {
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
             history_ref: None,
+            source_locations: Vec::new(),
             extra: extra.cloned(),
         })
     }
@@ -1839,6 +1860,12 @@ mod tests {
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
             history_ref: Some("saved-ref".to_string()),
+            source_locations: vec![AnnotationLocation {
+                reference_sequence_name: "source-reference".to_string(),
+                start: 2,
+                end: 6,
+                strand: Strand::Reverse,
+            }],
             extra: None,
         };
         annotation.set_cached_interval_tree(Some(Arc::clone(&shared_tree)));
@@ -1936,6 +1963,24 @@ mod tests {
                 .expect("should serialize annotation")
                 .get("history_ref")
                 .is_none()
+        );
+        let serialized_annotation =
+            serde_json::to_value(&annotation).expect("should serialize annotation");
+        assert!(serialized_annotation.get("source_locations").is_none());
+        let deserialized_annotation: Annotation = serde_json::from_value(serialized_annotation)
+            .expect("should deserialize annotation without runtime source locations");
+        assert!(deserialized_annotation.source_locations.is_empty());
+        let mut annotation_without_source_locations = annotation.clone();
+        annotation_without_source_locations.source_locations.clear();
+        assert_eq!(annotation, annotation_without_source_locations);
+        assert_eq!(
+            annotation.clone().source_locations,
+            vec![AnnotationLocation {
+                reference_sequence_name: "source-reference".to_string(),
+                start: 2,
+                end: 6,
+                strand: Strand::Reverse,
+            }]
         );
         assert!(
             serde_json::to_value(&accession)

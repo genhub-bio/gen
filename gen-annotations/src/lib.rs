@@ -11,3 +11,4 @@ pub use source::{
     translate_bed_annotation, translate_bed_annotation_records, translate_gff_annotation,
     translate_gff_annotation_records,
 };
+pub use translate::translate_annotation;
