@@ -108,6 +108,10 @@ pub struct Annotation {
     #[serde(skip)]
     #[model_select(skip)]
     pub cached_interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
+    /// History ref this runtime model was selected from.
+    #[serde(skip)]
+    #[model_select(history_ref)]
+    pub history_ref: Option<String>,
     #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
 }
@@ -132,6 +136,7 @@ fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
         accession_id: row.get(3)?,
         cached_accession: ForeignKeyCache::default(),
         cached_interval_tree: None,
+        history_ref: None,
         extra: deserialize_annotation_extra(row.get(4)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
         })?,
@@ -274,6 +279,7 @@ impl<'a> Capnp<'a> for Annotation {
             accession_id,
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
+            history_ref: None,
             extra,
         }
     }
@@ -333,6 +339,7 @@ impl Annotation {
             accession_id: annotation.accession_id,
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
+            history_ref: None,
             extra: annotation.extra.cloned(),
         })
     }
@@ -358,6 +365,7 @@ impl Annotation {
             accession_id: *accession_id,
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
+            history_ref: None,
             extra: extra.cloned(),
         })
     }
@@ -1887,6 +1895,7 @@ mod tests {
             block_group_id,
             parent_accession_id: None,
             cached_interval_tree: None,
+            history_ref: Some("saved-ref".to_string()),
         };
         accession.set_cached_interval_tree(Some(Arc::clone(&shared_tree)));
         let mut annotation = Annotation {
@@ -1896,6 +1905,7 @@ mod tests {
             accession_id,
             cached_accession: ForeignKeyCache::default(),
             cached_interval_tree: None,
+            history_ref: Some("saved-ref".to_string()),
             extra: None,
         };
         annotation.set_cached_interval_tree(Some(Arc::clone(&shared_tree)));
@@ -1989,6 +1999,18 @@ mod tests {
             serde_json::to_value(&uncached_accession).expect("should serialize uncached accession")
         );
         assert!(
+            serde_json::to_value(&annotation)
+                .expect("should serialize annotation")
+                .get("history_ref")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(&accession)
+                .expect("should serialize accession")
+                .get("history_ref")
+                .is_none()
+        );
+        assert!(
             serde_json::from_value::<Annotation>(
                 serde_json::to_value(&annotation).expect("should serialize annotation")
             )
@@ -2005,6 +2027,14 @@ mod tests {
             .snapshot()
             .is_none()
         );
+        assert_eq!(
+            serde_json::from_value::<Annotation>(
+                serde_json::to_value(&annotation).expect("should serialize annotation")
+            )
+            .expect("should deserialize annotation")
+            .history_ref(),
+            None
+        );
         assert!(
             serde_json::from_value::<Accession>(
                 serde_json::to_value(&accession).expect("should serialize accession")
@@ -2012,6 +2042,55 @@ mod tests {
             .expect("should deserialize accession")
             .cached_interval_tree()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn test_annotation_history_ref_loads_historical_accession_nodes() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(&conn);
+        let mut cache = PathCache::new(&conn);
+        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "history-accession", 0, 10, &mut cache)
+                .unwrap();
+        let annotation =
+            Annotation::get_or_create(&conn, "history-annotation", "test", &accession.id, None)
+                .unwrap();
+        let history_ref: String = conn
+            .query_row(
+                "SELECT dolt_commit('-A', '-m', 'save historical annotation accession')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        conn.execute(
+            "DELETE FROM accession_nodes WHERE accession_id = ?1",
+            [accession.id],
+        )
+        .unwrap();
+        assert!(Accession::get_nodes_by_id(&conn, &accession.id, None).is_empty());
+
+        let annotation = Annotation::select(&conn)
+            .id(annotation.id)
+            .with_ref(history_ref.as_str())
+            .get()
+            .unwrap()
+            .unwrap();
+        assert_eq!(annotation.history_ref(), Some(history_ref.as_str()));
+
+        let accession = annotation.get_accession(&conn).unwrap();
+        assert_eq!(accession.history_ref(), Some(history_ref.as_str()));
+        assert_eq!(accession.length(&conn).unwrap(), 10);
+        assert_eq!(annotation.length(&conn).unwrap(), 10);
+        assert!(
+            annotation
+                .intervaltree(&conn)
+                .unwrap()
+                .query(0..10)
+                .next()
+                .is_some()
         );
     }
 }

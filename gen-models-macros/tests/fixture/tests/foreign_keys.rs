@@ -11,11 +11,13 @@ fn test_required_foreign_key_cache_and_setter_synchronize_id() {
     let cached = Arc::new(FixtureForeignTarget {
         id: 42,
         name: "runtime-target".to_string(),
+        history_ref: None,
     });
     let mut relation = FixtureRequiredRelation {
         id: 9,
         target_id: 1,
         cached_target: Default::default(),
+        history_ref: None,
     };
 
     relation.set_target(Arc::clone(&cached));
@@ -282,4 +284,108 @@ fn test_nullable_foreign_key_reports_missing_target_for_non_null_id() {
             rusqlite::Error::QueryReturnedNoRows
         ))
     ));
+}
+
+#[test]
+fn test_required_foreign_key_uses_the_owning_models_history_ref() {
+    let conn = connection();
+    let historical_ref: String = conn
+        .query_row(
+            "SELECT dolt_commit('-A', '-m', 'save historical relation targets')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("should commit the historical relation fixture");
+
+    conn.execute(
+        "UPDATE fixture_foreign_targets SET name = 'current-target' WHERE id = 1",
+        [],
+    )
+    .expect("should update the target in the current view");
+    conn.execute(
+        "INSERT INTO fixture_foreign_targets (id, name) VALUES (99, 'current-only-target')",
+        [],
+    )
+    .expect("should add a target that is absent from the historical view");
+
+    let relation = FixtureRequiredRelation::select(&conn)
+        .id(1)
+        .with_ref(historical_ref.as_str())
+        .get()
+        .expect("should load the historical relation")
+        .expect("should find the historical relation");
+    assert_eq!(relation.history_ref(), Some(historical_ref.as_str()));
+    assert_eq!(
+        relation.clone().history_ref(),
+        Some(historical_ref.as_str())
+    );
+
+    let target = relation
+        .get_target(&conn)
+        .expect("should load the related target from the same historical view");
+    assert_eq!(target.name, "target-one");
+    assert_eq!(target.history_ref(), Some(historical_ref.as_str()));
+
+    let dangling_relation = FixtureRequiredRelation::select(&conn)
+        .id(2)
+        .with_ref(historical_ref.as_str())
+        .get()
+        .expect("should load the historical relation with a missing target")
+        .expect("should find the historical dangling relation");
+    assert!(matches!(
+        dangling_relation.get_target(&conn),
+        Err(ModelSelectError::DatabaseError(
+            rusqlite::Error::QueryReturnedNoRows
+        ))
+    ));
+    assert!(dangling_relation.cached_target.snapshot().is_none());
+}
+
+#[test]
+fn test_nullable_foreign_key_uses_the_owning_models_history_ref() {
+    let conn = connection();
+    conn.execute(
+        "UPDATE fixture_nullable_relations SET optional_target_id = 1 WHERE id = 1",
+        [],
+    )
+    .expect("should point the nullable relation at a target before committing");
+    let historical_ref: String = conn
+        .query_row(
+            "SELECT dolt_commit('-A', '-m', 'save historical nullable relation target')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("should commit the historical nullable relation fixture");
+
+    conn.execute(
+        "UPDATE fixture_foreign_targets SET name = 'current-target' WHERE id = 1",
+        [],
+    )
+    .expect("should update the target in the current view");
+    conn.execute(
+        "INSERT INTO fixture_foreign_targets (id, name) VALUES (99, 'current-only-target')",
+        [],
+    )
+    .expect("should add a target that is absent from the historical view");
+
+    let relation = FixtureNullableRelation::select(&conn)
+        .id(1)
+        .with_ref(historical_ref.as_str())
+        .get()
+        .expect("should load the historical nullable relation")
+        .expect("should find the historical nullable relation");
+    let target = relation
+        .get_optional_target(&conn)
+        .expect("should load the related target from the same historical view")
+        .expect("should find the historical target");
+    assert_eq!(target.name, "target-one");
+    assert_eq!(target.history_ref(), Some(historical_ref.as_str()));
+
+    let null_relation = FixtureNullableRelation::select(&conn)
+        .id(1)
+        .with_ref(None::<&str>)
+        .get()
+        .expect("should load the current nullable relation")
+        .expect("should find the current nullable relation");
+    assert_eq!(null_relation.history_ref(), None);
 }
