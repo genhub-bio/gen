@@ -572,8 +572,7 @@ where
                 for edit in wt_changes {
                     let start = edit.start;
                     let end = edit.end;
-                    let region =
-                        ResolvedGenRegion::from_path(conn, block_group.id, &path, start, end)?;
+                    let region = ResolvedGenRegion::from_path(conn, &path, start, end)?;
                     let (change, change_node_id) = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()

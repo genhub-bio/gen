@@ -990,7 +990,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let region = ResolvedGenRegion::from_path(conn, block_group_id, &path, 7, 15).unwrap();
+        let region = ResolvedGenRegion::from_path(conn, &path, 7, 15).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,

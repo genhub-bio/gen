@@ -2,11 +2,12 @@ use core::ops::Range as RustRange;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
+    sync::Arc,
 };
 
 use gen_core::{
     HASH_ID_SIZE, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock,
-    Strand, Workspace, calculate_hash, is_end_node, is_start_node,
+    Strand, Workspace, calculate_hash, is_end_node, is_start_node, is_terminal,
     range::{Range, RangeMapping},
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -24,7 +25,9 @@ use crate::{
     db::GraphConnection,
     edge::{Edge, EdgeData},
     errors::QueryError,
+    foreign_key_cache::ForeignKeyCache,
     gen_models_capnp::path as PathCapnp,
+    interval_tree::IntervalTreeSource,
     node::Node,
     sequence::SequenceError,
 };
@@ -33,6 +36,7 @@ use crate::{
 #[model_select(table = "paths")]
 pub struct Path {
     pub id: HashId,
+    #[model_select(foreign_key(BlockGroup, cache = cached_block_group))]
     pub block_group_id: HashId,
     pub name: String,
     pub created_on: i64,
@@ -40,6 +44,14 @@ pub struct Path {
     #[serde(skip)]
     #[model_select(history_ref)]
     pub history_ref: Option<String>,
+    /// Runtime-only block-group cache loaded from this path's selected model view.
+    #[serde(skip)]
+    #[model_select(skip)]
+    pub cached_block_group: ForeignKeyCache<BlockGroup>,
+    /// Runtime path-coordinate tree, excluded from persisted model identity.
+    #[serde(skip)]
+    #[model_select(skip)]
+    pub cached_interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
 }
 
 impl PartialEq for Path {
@@ -115,6 +127,8 @@ impl<'a> Capnp<'a> for Path {
             name,
             created_on,
             history_ref: None,
+            cached_block_group: ForeignKeyCache::default(),
+            cached_interval_tree: None,
         }
     }
 }
@@ -462,6 +476,8 @@ impl Path {
                 block_group_id: *block_group_id,
                 created_on: timestamp,
                 history_ref: None,
+                cached_block_group: ForeignKeyCache::default(),
+                cached_interval_tree: None,
             },
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -472,6 +488,8 @@ impl Path {
                     block_group_id: *block_group_id,
                     created_on: timestamp,
                     history_ref: None,
+                    cached_block_group: ForeignKeyCache::default(),
+                    cached_interval_tree: None,
                 }
             }
             Err(e) => {
@@ -564,6 +582,19 @@ impl Path {
         conn: &GraphConnection,
         history_ref: Option<&str>,
     ) -> Result<i64, PathError> {
+        if history_ref.is_none()
+            && let Some(interval_tree) = &self.cached_interval_tree
+        {
+            return Ok(interval_tree
+                .iter()
+                .map(|entry| entry.value)
+                .filter(|block| !is_terminal(block.node_id))
+                .map(|block| block.end)
+                .max()
+                .unwrap_or(0));
+        }
+
+        let history_ref = history_ref.or(self.history_ref());
         let edges = Path::edges_for_path(conn, &self.id, history_ref);
         Ok(edges
             .into_iter()
@@ -670,25 +701,8 @@ impl Path {
     pub fn intervaltree(
         &self,
         conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, PathError> {
-        let blocks = self.coordinate_blocks(conn, self.history_ref());
-        let tree: IntervalTree<i64, NodeIntervalBlock> = blocks
-            .into_iter()
-            .map(|block| {
-                (
-                    block.path_start..block.path_end,
-                    NodeIntervalBlock {
-                        node_id: block.node_id,
-                        start: block.path_start,
-                        end: block.path_end,
-                        sequence_start: block.sequence_start,
-                        sequence_end: block.sequence_end,
-                        strand: block.strand,
-                    },
-                )
-            })
-            .collect();
-        Ok(tree)
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, PathError> {
+        IntervalTreeSource::intervaltree(self, conn)
     }
 
     pub fn find_block_mappings(
@@ -1166,6 +1180,45 @@ impl Path {
     }
 }
 
+impl IntervalTreeSource for Path {
+    type Error = PathError;
+
+    fn cached_interval_tree(&self) -> Option<&Arc<IntervalTree<i64, NodeIntervalBlock>>> {
+        self.cached_interval_tree.as_ref()
+    }
+
+    fn set_cached_interval_tree(
+        &mut self,
+        interval_tree: Option<Arc<IntervalTree<i64, NodeIntervalBlock>>>,
+    ) {
+        self.cached_interval_tree = interval_tree;
+    }
+
+    fn load_interval_tree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, Self::Error> {
+        let blocks = self.coordinate_blocks(conn, self.history_ref());
+        let tree: IntervalTree<i64, NodeIntervalBlock> = blocks
+            .into_iter()
+            .map(|block| {
+                (
+                    block.path_start..block.path_end,
+                    NodeIntervalBlock {
+                        node_id: block.node_id,
+                        start: block.path_start,
+                        end: block.path_end,
+                        sequence_start: block.sequence_start,
+                        sequence_end: block.sequence_end,
+                        strand: block.strand,
+                    },
+                )
+            })
+            .collect();
+        Ok(Arc::new(tree))
+    }
+}
+
 impl RegionResolver for Path {
     type Connection = GraphConnection;
     type Error = PathError;
@@ -1543,19 +1596,46 @@ mod tests {
 
     #[test]
     fn test_path_capnp_serialization() {
+        let interval_tree = Arc::new(
+            [(
+                0..4,
+                NodeIntervalBlock {
+                    node_id: HashId::pad_str(20),
+                    start: 0,
+                    end: 4,
+                    sequence_start: 0,
+                    sequence_end: 4,
+                    strand: Strand::Forward,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
         let path = Path {
             id: HashId::pad_str(100),
             block_group_id: HashId::pad_str(50),
             name: "test_path".to_string(),
             created_on: Utc::now().timestamp_nanos_opt().unwrap(),
             history_ref: Some("saved-ref".to_string()),
+            cached_block_group: ForeignKeyCache::default(),
+            cached_interval_tree: Some(Arc::clone(&interval_tree)),
         };
 
         let serialized = serde_json::to_value(&path).expect("should serialize path");
         assert!(serialized.get("history_ref").is_none());
+        assert!(serialized.get("cached_block_group").is_none());
+        assert!(serialized.get("cached_interval_tree").is_none());
         let deserialized_path: Path =
             serde_json::from_value(serialized).expect("should deserialize path");
         assert_eq!(deserialized_path.history_ref(), None);
+        assert!(deserialized_path.cached_interval_tree.is_none());
+
+        let conn = get_connection(None).expect("should create a test connection");
+        let loaded_interval_tree = path
+            .intervaltree(&conn)
+            .expect("should return the attached path interval tree");
+        assert!(Arc::ptr_eq(&loaded_interval_tree, &interval_tree));
+        assert_eq!(path.length(&conn, None).unwrap(), 4);
 
         let mut message = TypedBuilder::<PathCapnp::Owned>::new_default();
         let mut root = message.init_root();
@@ -1564,6 +1644,10 @@ mod tests {
         let deserialized = Path::read_capnp(root.into_reader());
         assert_eq!(path, deserialized);
         assert_eq!(deserialized.history_ref(), None);
+        assert!(
+            std::collections::HashMap::from([(path.clone(), ())]).contains_key(&deserialized),
+            "runtime caches should not change path hash identity"
+        );
     }
 
     #[test]
