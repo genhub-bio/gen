@@ -1,11 +1,45 @@
-use std::fs;
+use std::{
+    fs,
+    ops::{Deref, DerefMut},
+    rc::Rc,
+};
 
 use gen_core::errors::ConnectionError;
 use gen_models::{
-    db::{ConfigConnection, GraphConnection},
+    db::{ConfigConnection, DbContext, GraphConnection},
     migrations::{run_config_migrations, run_migrations},
 };
 use rusqlite::Connection;
+use tempfile::TempDir;
+
+#[derive(Clone)]
+pub(crate) struct TestContext {
+    context: DbContext,
+    _temp_dir: Rc<TempDir>,
+}
+
+impl TestContext {
+    pub(crate) fn new(context: DbContext, temp_dir: TempDir) -> Self {
+        Self {
+            context,
+            _temp_dir: Rc::new(temp_dir),
+        }
+    }
+}
+
+impl Deref for TestContext {
+    type Target = DbContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl DerefMut for TestContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.context
+    }
+}
 
 pub fn get_connection<'a>(
     db_path: impl Into<Option<&'a str>>,

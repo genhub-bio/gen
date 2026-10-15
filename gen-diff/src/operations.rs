@@ -682,7 +682,10 @@ impl BlockGroupEdgeChange {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+    };
 
     use gen_core::{
         BranchName, CommitRef, DoltHashId, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
@@ -714,18 +717,57 @@ mod tests {
             DiffChangeKind, DiffGenGraph, DiffInputGraph, GraphEdgeKey, build_diff_input_graph,
             build_unified_diff_graph, path_end_graph_node, path_start_graph_node,
         },
-        test_helpers::{get_config_connection, get_connection as test_get_connection},
+        test_helpers::{TestContext, get_config_connection, get_connection as test_get_connection},
     };
 
-    fn setup_history_context() -> DbContext {
-        let tmp_dir = tempdir().expect("should create temp dir").keep();
-        let workspace = Workspace::new(tmp_dir);
+    fn setup_history_context() -> TestContext {
+        let tmp_dir = tempdir().expect("should create temp dir");
+        let workspace = Workspace::new(tmp_dir.path());
         workspace.ensure_gen_dir();
         let graph_conn = test_get_connection(workspace.graph_db_path().unwrap().to_str().unwrap())
             .expect("should create graph database");
         let config_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str().unwrap())
             .expect("should create config database");
-        DbContext::new(workspace, graph_conn, config_conn).expect("should create db context")
+        TestContext::new(
+            DbContext::new(workspace, graph_conn, config_conn).expect("should create db context"),
+            tmp_dir,
+        )
+    }
+
+    #[test]
+    fn test_setup_history_context_temp_dir_cleanup() {
+        let context = setup_history_context();
+        let base_dir = context.workspace().base_dir().to_path_buf();
+        let nested_asset = context
+            .workspace()
+            .asset_dir()
+            .expect("should resolve workspace asset directory")
+            .join("nested/fixture.txt");
+        fs::create_dir_all(
+            nested_asset
+                .parent()
+                .expect("should have a parent directory"),
+        )
+        .expect("should create nested fixture asset directory");
+        fs::write(&nested_asset, "temporary workspace asset")
+            .expect("should write nested fixture asset");
+
+        let context_clone = context.clone();
+        drop(context);
+        assert!(
+            base_dir.is_dir(),
+            "context clone should keep workspace alive"
+        );
+        assert_eq!(
+            fs::read_to_string(nested_asset).expect("should read nested fixture asset"),
+            "temporary workspace asset"
+        );
+
+        drop(context_clone);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after its last context drops"
+        );
     }
 
     fn create_linear_block_group(
@@ -905,7 +947,7 @@ mod tests {
     }
 
     struct DivergentHistory {
-        context: DbContext,
+        context: TestContext,
         source_block_group: BlockGroup,
         target_block_group: BlockGroup,
         source_hash: DoltHashId,

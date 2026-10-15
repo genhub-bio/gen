@@ -1,7 +1,9 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use r#gen::{
-    imports::fasta::import_fasta, test_helpers::setup_gen, updates::vcf::update_with_vcf,
+    imports::fasta::import_fasta,
+    test_helpers::{TestContext, setup_gen},
+    updates::vcf::update_with_vcf,
     views::diff_graph::build_diff_graph_component,
 };
 use gen_diff::{
@@ -11,7 +13,7 @@ use gen_diff::{
 use gen_models::{db::DbContext, node::Node};
 use ratatui::style::Color;
 
-fn simple_vcf_sample_diff(query_name: &str, base_name: &str) -> (DbContext, SampleDiff) {
+fn simple_vcf_sample_diff(query_name: &str, base_name: &str) -> (TestContext, SampleDiff) {
     let context = setup_gen();
     let collection_name = "test";
     let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");

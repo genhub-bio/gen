@@ -699,7 +699,7 @@ impl PySuperPosition {
 mod tests {
     use std::collections::HashMap;
 
-    use r#gen::test_helpers::{create_bg, setup_gen_on_disk};
+    use r#gen::test_helpers::{TestContext, create_bg, setup_gen_on_disk};
     use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -717,7 +717,7 @@ mod tests {
 
     /// `ABCD` forks into `EFGH` and `IJKL`, which rejoin at `MNOP`. The current path reads
     /// `ABCD`, `EFGH`, `MNOP`, leaving `IJKL` as the other branch of the fork.
-    fn bubble() -> (DbContext, PySequenceGraph, HashMap<&'static str, HashId>) {
+    fn bubble() -> (TestContext, PySequenceGraph, HashMap<&'static str, HashId>) {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         Collection::create(conn, "test").expect("should create collection");
@@ -776,7 +776,7 @@ mod tests {
             collection_name: "test".to_string(),
             sample_name: "test".to_string(),
             name: "chr1".to_string(),
-            context: Some(context.clone()),
+            context: Some(context.db_context().clone()),
         };
         (context, sequence_graph, nodes)
     }

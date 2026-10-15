@@ -1185,7 +1185,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{get_sample_bg, setup_gen},
+        test_helpers::{TestContext, get_sample_bg, setup_gen},
     };
     #[test]
     fn test_update_vcf_stores_sample_metadata_scores() {
@@ -1319,7 +1319,7 @@ mod tests {
         }
     }
 
-    fn setup_sample_path_changes(alternate: &str) -> (DbContext, Path, [BlockGroupChange; 2]) {
+    fn setup_sample_path_changes(alternate: &str) -> (TestContext, Path, [BlockGroupChange; 2]) {
         let context = setup_gen();
         let conn = context.graph().conn();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");

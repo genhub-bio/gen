@@ -267,9 +267,9 @@ mod tests {
             .expect("should query sample existence")
     }
 
-    fn setup_branch_restore_repo() -> Workspace {
+    fn setup_branch_restore_repo() -> (Workspace, tempfile::TempDir) {
         let temp_dir = tempdir().expect("should create temp repo");
-        let workspace = Workspace::new(temp_dir.keep());
+        let workspace = Workspace::new(temp_dir.path());
         workspace.ensure_gen_dir();
         let graph_path = workspace
             .graph_db_path()
@@ -298,12 +298,13 @@ mod tests {
         Defaults::set_current_branch(&config_conn, Some("feature"))
             .expect("should persist current branch intent");
 
-        workspace
+        (workspace, temp_dir)
     }
 
     #[test]
     fn test_new_restores_saved_current_branch() {
-        let workspace = setup_branch_restore_repo();
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let base_dir = workspace.base_dir().to_path_buf();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -325,11 +326,18 @@ mod tests {
             branch_has_sample(&context, "feature-sample"),
             "default DbContext construction should restore the saved branch contents"
         );
+        drop(context);
+        drop(temp_dir);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after context drops"
+        );
     }
 
     #[test]
     fn test_new_with_ref_overrides_saved_current_branch() {
-        let workspace = setup_branch_restore_repo();
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let base_dir = workspace.base_dir().to_path_buf();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -350,6 +358,12 @@ mod tests {
         assert!(
             !branch_has_sample(&context, "feature-sample"),
             "explicit ref checkout should override the saved branch intent"
+        );
+        drop(context);
+        drop(temp_dir);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after context drops"
         );
     }
 

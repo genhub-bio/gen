@@ -106,9 +106,12 @@ mod tests {
     use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
 
     use super::*;
-    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen};
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{TestContext, setup_gen},
+    };
 
-    fn setup_with_chunks() -> DbContext {
+    fn setup_with_chunks() -> TestContext {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
         let config_conn = context.config().conn();

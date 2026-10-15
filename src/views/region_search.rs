@@ -4,8 +4,6 @@ use std::path::PathBuf;
 use gen_core::{HashId, Strand, Workspace, region::Region};
 use gen_graph::GenGraph;
 #[cfg(test)]
-use gen_models::db::DbContext;
-#[cfg(test)]
 use gen_models::{
     annotations::{Annotation, add_annotation},
     block_group::{BlockGroup, PathCache},
@@ -21,6 +19,8 @@ use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::style::Color;
 
+#[cfg(test)]
+use crate::test_helpers::TestContext;
 use crate::views::{
     annotation_track::{
         AnnotationSegment, AnnotationSpan, annotation_span_from_resolved_region,
@@ -194,7 +194,7 @@ pub(super) fn activate_search_match(
 
 #[cfg(test)]
 pub(super) struct RegionSearchFixture {
-    pub(super) context: DbContext,
+    pub(super) context: TestContext,
     pub(super) graph: GenGraph,
 }
 

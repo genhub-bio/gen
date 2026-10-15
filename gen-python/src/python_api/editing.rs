@@ -1487,7 +1487,7 @@ fn edit_error(error: OperationError) -> PyErr {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use r#gen::test_helpers::setup_gen_on_disk;
+    use r#gen::test_helpers::{TestContext, setup_gen_on_disk};
     use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
         block_group::{BlockGroup, NewBlockGroup},
@@ -1517,9 +1517,9 @@ mod tests {
 
     /// A sequence graph whose nodes are named by their sequences.
     struct Fixture {
-        context: DbContext,
         graph: PySequenceGraph,
         nodes: HashMap<&'static str, HashId>,
+        context: TestContext,
     }
 
     impl Fixture {
@@ -1657,7 +1657,7 @@ mod tests {
     /// the first position of the next on a chromosome index. The current path reads the nodes in
     /// `path`.
     fn build_graph(
-        context: &DbContext,
+        context: &TestContext,
         name: &str,
         edges: &[(&'static str, &'static str, i64)],
         path: &[&'static str],
@@ -1728,15 +1728,15 @@ mod tests {
         Path::create_with_validated_edges(conn, name, &block_group.id, &path_edges)
             .expect("should create current path");
         Fixture {
-            context: context.clone(),
             graph: PySequenceGraph {
                 id: block_group.id,
                 collection_name: "collection".to_string(),
                 sample_name: "sample".to_string(),
                 name: name.to_string(),
-                context: Some(context.clone()),
+                context: Some(context.db_context().clone()),
             },
             nodes,
+            context: context.clone(),
         }
     }
 
@@ -1857,7 +1857,7 @@ mod tests {
                 let repository = Py::new(
                     python,
                     PyRepository {
-                        context: context.clone(),
+                        context: context.db_context().clone(),
                     },
                 )
                 .expect("should wrap repository");

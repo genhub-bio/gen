@@ -1526,7 +1526,7 @@ pub fn build_widget(
 #[cfg(test)]
 mod tests {
     use r#gen::{
-        test_helpers::{setup_block_group, setup_gen_on_disk},
+        test_helpers::{TestContext, setup_block_group, setup_gen_on_disk},
         views::graph_overlay::OverlayContent,
     };
     use gen_core::{BranchName, Strand};
@@ -1548,7 +1548,8 @@ mod tests {
     fn test_widget_loci_and_annotation_entry_points_use_absolute_spans() {
         Python::initialize();
         Python::attach(|python| {
-            let mut controller = make_controller(None).expect("should create the widget");
+            let context = setup_gen_on_disk();
+            let mut controller = make_controller(&context, None).expect("should create the widget");
             let page = controller.active().expect("should load the page");
             let node = page
                 .controller
@@ -1626,7 +1627,7 @@ mod tests {
             collection_name: block_group.collection_name,
             sample_name: block_group.sample_name,
             name: block_group.name,
-            context: Some(context.clone()),
+            context: Some(context.db_context().clone()),
         };
         let mut graph_controller = PyGraphController::for_sequence_graph(&sequence_graph, true)
             .expect("should create graph widget on design branch");
@@ -1649,8 +1650,7 @@ mod tests {
         );
     }
 
-    fn make_controller(detail: Option<&str>) -> PyResult<PyGraphController> {
-        let ctx = setup_gen_on_disk();
+    fn make_controller(ctx: &TestContext, detail: Option<&str>) -> PyResult<PyGraphController> {
         let graph_handle = ctx.graph();
         let db_path = graph_handle
             .conn()
@@ -1670,7 +1670,8 @@ mod tests {
     #[test]
     fn test_detail_invalid_raises_value_error() {
         Python::initialize();
-        let result = make_controller(Some("bad"));
+        let context = setup_gen_on_disk();
+        let result = make_controller(&context, Some("bad"));
         Python::attach(|py| match result {
             Ok(_) => panic!("expected a PyValueError for invalid detail value"),
             Err(e) => assert!(e.is_instance_of::<PyValueError>(py)),
@@ -1680,7 +1681,8 @@ mod tests {
     #[test]
     fn test_detail_all_valid_values_accepted() {
         for detail in [None, Some("normal"), Some("full"), Some("minimal")] {
-            let result = make_controller(detail);
+            let context = setup_gen_on_disk();
+            let result = make_controller(&context, detail);
             assert!(result.is_ok(), "detail={detail:?} should be accepted");
         }
     }
@@ -1689,7 +1691,8 @@ mod tests {
     fn test_render_frame_returns_valid_json() {
         Python::initialize();
         Python::attach(|_py| {
-            let mut ctrl = make_controller(None).unwrap();
+            let context = setup_gen_on_disk();
+            let mut ctrl = make_controller(&context, None).unwrap();
             let json_str = ctrl
                 .render_frame(80, 24)
                 .expect("render_frame should succeed");
