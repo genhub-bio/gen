@@ -603,8 +603,12 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
     ) -> Result<GraphLocus, GenRegionError> {
         let interval_tree = self.intervaltree(conn, workspace)?;
+        if self.start >= self.end {
+            return Ok(GraphLocus { slices: Vec::new() });
+        }
+
         let mut slices = interval_tree
-            .iter()
+            .query(self.start..self.end)
             .filter_map(|entry| {
                 let block = entry.value;
                 if is_terminal(block.node_id) {
@@ -636,8 +640,10 @@ impl ResolvedGenRegion {
                             sequence_start: block.sequence_start,
                             sequence_end: block.sequence_end,
                         },
-                        start: (sequence_start - block.sequence_start) as usize,
-                        end: (sequence_end - block.sequence_start) as usize,
+                        start: usize::try_from(sequence_start - block.sequence_start)
+                            .expect("should convert the stored-node start to a slice offset"),
+                        end: usize::try_from(sequence_end - block.sequence_start)
+                            .expect("should convert the stored-node end to a slice offset"),
                         strand: block.strand,
                     },
                 ))
@@ -992,6 +998,102 @@ mod tests {
         );
         assert_eq!((slice.start, slice.end), (1, 4));
         assert_eq!(slice.strand, Strand::Reverse);
+    }
+
+    #[test]
+    fn test_graph_locus_clips_forward_and_reverse_accession_spans() {
+        // This makes an annotation comprised of part of the stored AA...
+        // and TT... nodes for our standard test block group. Notably,
+        // we mix the accession strands.
+        // Accession offset: 01234567
+        // Span membership:  AAAATTTT (A[2-6] + T[3-7])
+        // Span strands:     ++++----
+        // Query [2,6):      ..^^^^..
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (block_group_id, _) = setup_block_group(&conn);
+        let accession = Accession::create(
+            &conn,
+            &NewAccession {
+                name: "clipped-feature".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-a-node"),
+                        range: Range { start: 2, end: 6 },
+                        strand: Strand::Forward,
+                    },
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-t-node"),
+                        range: Range { start: 3, end: 7 },
+                        strand: Strand::Reverse,
+                    },
+                ],
+            },
+        )
+        .expect("should create a two-span accession");
+        let mut region = ResolvedGenRegion::from_accession(&conn, &accession, 2, 6)
+            .expect("should resolve the accession query");
+
+        let locus = region
+            .graph_locus(&conn, test_workspace())
+            .expect("should clip each span to the selected accession range");
+        let slices = locus
+            .slices
+            .iter()
+            .map(|slice| {
+                (
+                    slice.block.node_id,
+                    slice.block.sequence_start,
+                    slice.block.sequence_end,
+                    slice.start,
+                    slice.end,
+                    slice.strand,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slices,
+            vec![
+                (
+                    HashId::convert_str("test-a-node"),
+                    2,
+                    6,
+                    2,
+                    4,
+                    Strand::Forward,
+                ),
+                // This is our reverse strand, the stored sequence + accession is like:
+                // 0123456789
+                // TTTTTTTTTT
+                //    |--|
+                // Given that this is on the negative strand, the bases
+                // to extract for the slice are actually on the end of
+                // the sequence, not the first 2 Ts of the accession, so our slice here is
+                // 3 + 2, 3+4, giving 5-7 of our initial sequence
+                (
+                    HashId::convert_str("test-t-node"),
+                    3,
+                    7,
+                    2,
+                    4,
+                    Strand::Reverse,
+                ),
+            ]
+        );
+
+        for (start, end) in [(4, 4), (6, 2)] {
+            region.start = start;
+            region.end = end;
+            assert!(
+                region
+                    .graph_locus(&conn, test_workspace())
+                    .expect("should resolve an empty or inverted range")
+                    .slices
+                    .is_empty(),
+                "should produce no slices for {start}..{end}"
+            );
+        }
     }
 
     mod region_resolver {
