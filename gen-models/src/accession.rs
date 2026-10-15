@@ -809,7 +809,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_group::{BlockGroup, PathCache},
+        block_group::BlockGroup,
         block_group_edge::{AugmentedEdgeData, BlockGroupEdgeData},
         edge::EdgeData,
         path::Path,
@@ -823,9 +823,7 @@ mod tests {
         fn test_resolves_accession_by_name_case_insensitively() {
             let conn = &get_connection(None).unwrap();
             let (_bg, path) = setup_block_group(conn);
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, "mreB", 5, 15).unwrap();
 
             let region = Region::parse("MREB").unwrap();
             let resolved = Accession::resolve(&region, conn, "test", "test").unwrap();
@@ -849,8 +847,7 @@ mod tests {
         fn test_returns_ambiguous_for_multiple_matching_accessions() {
             let conn = &get_connection(None).unwrap();
             let (_bg, path) = setup_block_group(conn);
-            let mut path_cache = PathCache::new(conn);
-            let _ = BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
+            let _ = BlockGroup::add_accession(conn, &path, "mreB", 5, 15).unwrap();
 
             let other_block_group = create_bg(conn, "test", "test", "other");
             let edge_ids = Path::edges_for_path(conn, &path.id, None)
@@ -869,8 +866,7 @@ mod tests {
             crate::block_group_edge::BlockGroupEdge::bulk_create(conn, &block_group_edges);
             let other_path =
                 Path::create(conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
-            let _ = BlockGroup::add_accession(conn, &other_path, "MREB", 5, 15, &mut path_cache)
-                .unwrap();
+            let _ = BlockGroup::add_accession(conn, &other_path, "MREB", 5, 15).unwrap();
 
             let region = Region::parse("mreB").unwrap();
             let err = Accession::resolve(&region, conn, "test", "test").unwrap_err();
@@ -1117,9 +1113,7 @@ mod tests {
     fn test_intervaltree() {
         let conn = &get_connection(None).unwrap();
         let (_bg, path) = setup_block_group(conn);
-        let mut path_cache = PathCache::new(conn);
-        let accession =
-            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(conn, &path, "test", 5, 35).unwrap();
 
         let tree = accession.intervaltree(conn).unwrap();
         interval_tree_verify(
@@ -1399,9 +1393,7 @@ mod tests {
     fn test_length() {
         let conn = &get_connection(None).unwrap();
         let (_bg, path) = setup_block_group(conn);
-        let mut path_cache = PathCache::new(conn);
-        let accession =
-            BlockGroup::add_accession(conn, &path, "test", 5, 35, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(conn, &path, "test", 5, 35).unwrap();
 
         assert_eq!(accession.length(conn).unwrap(), 30);
     }

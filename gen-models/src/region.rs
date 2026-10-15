@@ -427,16 +427,20 @@ fn target_from_accession(
 impl ResolvedGenRegion {
     pub fn from_path(
         conn: &GraphConnection,
-        block_group_id: HashId,
         path: &Path,
         start: i64,
         end: i64,
     ) -> Result<Self, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &block_group_id, None)?;
+        let block_group = path.get_block_group(conn)?;
+        let mut path = path.clone();
+        if path.cached_interval_tree().is_none() {
+            let interval_tree = path.intervaltree(conn)?;
+            path.set_cached_interval_tree(Some(interval_tree));
+        }
         let path_length = path.length(conn, None)?;
         Ok(ResolvedGenRegion {
-            block_group,
-            path: Some(path.clone()),
+            block_group: block_group.as_ref().clone(),
+            path: Some(path),
             accession: None,
             annotation: None,
             kind: ResolvedRegionKind::Path,
@@ -570,7 +574,7 @@ impl ResolvedGenRegion {
                     .path
                     .as_ref()
                     .ok_or_else(|| GenRegionError::NotFound("No path for region".to_string()))?;
-                Ok(Arc::new(path.intervaltree(conn)?))
+                Ok(path.intervaltree(conn)?)
             }
             ResolvedRegionKind::Annotation => {
                 let annotation = self.annotation.as_ref().ok_or_else(|| {
@@ -853,13 +857,16 @@ impl ResolvedGenRegion {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use gen_core::range::Range;
 
     use super::*;
     use crate::{
         accession::{AccessionSpan, NewAccession},
         annotations::Annotation,
-        block_group::{BlockGroup, PathCache},
+        block_group::BlockGroup,
+        history::dolt::commit_all,
         test_helpers::{get_connection, setup_block_group, test_workspace},
     };
 
@@ -873,12 +880,78 @@ mod tests {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
         let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "mreB", 10, 30, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "mreB", 10, 30).unwrap();
         let annotation =
             Annotation::get_or_create(&conn, "gene-mreB", "genes", &accession.id, None).unwrap();
         (conn, block_group, path, accession, annotation)
+    }
+
+    #[test]
+    fn test_path_region_uses_model_history_for_tree_and_owner() {
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (block_group_id, path) = setup_block_group(&conn);
+        let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None)
+            .expect("should load the original block group");
+        // Commit the 40-base path before deleting its current rows.
+        let history_ref = commit_all(&conn, "path before deletion")
+            .expect("should commit the original path")
+            .to_string();
+
+        conn.execute("DELETE FROM paths WHERE id = ?1", [&path.id])
+            .expect("should delete the current path");
+        conn.execute(
+            "DELETE FROM block_group_edges WHERE block_group_id = ?1",
+            [&block_group_id],
+        )
+        .expect("should delete the current graph edges");
+        BlockGroup::delete(
+            &conn,
+            &block_group.collection_name,
+            &block_group.sample_name,
+            &block_group.name,
+        )
+        .expect("should delete the current block group");
+
+        let historical_path =
+            BlockGroup::get_current_path(&conn, &block_group_id, Some(&history_ref))
+                .expect("should load the historical path");
+        assert_eq!(historical_path.history_ref(), Some(history_ref.as_str()));
+        assert!(historical_path.cached_interval_tree.is_none());
+
+        let region = ResolvedGenRegion::from_path(&conn, &historical_path, 0, 40)
+            .expect("should resolve the historical whole-path region");
+        assert_eq!(region.block_group, block_group);
+        assert_eq!(region.feature_length, 40);
+
+        let first_tree = region
+            .intervaltree(&conn, test_workspace())
+            .expect("should load the historical path tree");
+        let second_tree = region
+            .intervaltree(&conn, test_workspace())
+            .expect("should reuse the historical path tree");
+        assert!(Arc::ptr_eq(&first_tree, &second_tree));
+    }
+
+    #[test]
+    fn test_from_path_reuses_attached_interval_tree() {
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (_, path) = setup_block_group(&conn);
+        let first_region = ResolvedGenRegion::from_path(&conn, &path, 0, 40)
+            .expect("should resolve the first path region");
+        let cached_path = first_region
+            .path
+            .as_ref()
+            .expect("should retain the first path");
+        let cached_tree = cached_path
+            .cached_interval_tree()
+            .expect("should cache the first path tree");
+        let second_region = ResolvedGenRegion::from_path(&conn, cached_path, 5, 15)
+            .expect("should resolve a second region from the cached path");
+        let second_tree = second_region
+            .intervaltree(&conn, test_workspace())
+            .expect("should use the second region's path tree");
+
+        assert!(Arc::ptr_eq(cached_tree, &second_tree));
     }
 
     #[test]
@@ -1164,7 +1237,7 @@ mod tests {
 
         use super::*;
         use crate::{
-            block_group::{BlockGroup, NewBlockGroup, PathCache},
+            block_group::{BlockGroup, NewBlockGroup},
             block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
             collection::Collection,
             edge::Edge,
@@ -1320,9 +1393,7 @@ mod tests {
                 }
             }
             let path = Path::create(conn, name, &block_group_id, &ordered).unwrap();
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
         }
@@ -1336,9 +1407,7 @@ mod tests {
             end: i64,
         ) -> Accession {
             let path = Path::create(conn, name, &block_group_id, edge_ids).unwrap();
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
         }
