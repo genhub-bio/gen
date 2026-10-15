@@ -2,6 +2,7 @@ use std::{ops::Deref, path::Path, rc::Rc, sync::Arc};
 
 use gen_core::{config::Workspace, errors::ConfigError};
 use rusqlite::{Connection, limits::Limit};
+use tempfile::TempDir;
 
 use crate::{
     history::dolt::{active_branch, checkout, connect_branch},
@@ -118,6 +119,8 @@ pub fn get_config_connection(path: impl AsRef<Path>) -> Result<ConfigConnection,
 pub struct DbHandle<C> {
     workspace: Arc<Workspace>,
     conn: Rc<C>,
+    // Keep this after conn so the database connection closes before temporary files are removed.
+    temp_dir: Option<Arc<TempDir>>,
 }
 
 impl<C> Clone for DbHandle<C> {
@@ -125,13 +128,18 @@ impl<C> Clone for DbHandle<C> {
         Self {
             workspace: self.workspace.clone(),
             conn: self.conn.clone(),
+            temp_dir: self.temp_dir.as_ref().map(Arc::clone),
         }
     }
 }
 
 impl<C> DbHandle<C> {
     pub fn new(workspace: Arc<Workspace>, conn: Rc<C>) -> Self {
-        Self { workspace, conn }
+        Self {
+            workspace,
+            conn,
+            temp_dir: None,
+        }
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -152,6 +160,8 @@ pub struct DbContext {
     workspace: Arc<Workspace>,
     graph: GraphHandle,
     config: ConfigHandle,
+    // Keep this after both database handles so their connections close before directory cleanup.
+    temp_dir: Option<Arc<TempDir>>,
 }
 
 impl DbContext {
@@ -167,6 +177,7 @@ impl DbContext {
             workspace,
             graph,
             config,
+            temp_dir: None,
         }
     }
 
@@ -216,8 +227,20 @@ impl DbContext {
         Self::build(workspace, graph_conn, config_conn)
     }
 
+    /// Keeps a temporary workspace directory alive until the last owning context or cloned
+    /// handle drops.
+    pub fn with_temp_dir(mut self, temp_dir: TempDir) -> Self {
+        let temp_dir = Arc::new(temp_dir);
+        self.graph.temp_dir = Some(Arc::clone(&temp_dir));
+        self.config.temp_dir = Some(Arc::clone(&temp_dir));
+        self.temp_dir = Some(temp_dir);
+        self
+    }
+
     pub fn set_graph(&mut self, graph_conn: GraphConnection) {
-        self.graph = DbHandle::new(self.workspace.clone(), graph_conn.into());
+        let mut graph = DbHandle::new(self.workspace.clone(), graph_conn.into());
+        graph.temp_dir = self.temp_dir.as_ref().map(Arc::clone);
+        self.graph = graph;
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -252,7 +275,7 @@ mod tests {
         history::dolt::{active_branch, commit_all, connect_branch, create_branch},
         operations::Defaults,
         sample::{NewSample, Sample},
-        test_helpers::get_connection as test_graph_connection,
+        test_helpers::{get_connection as test_graph_connection, setup_gen_on_disk},
     };
 
     fn branch_has_sample(context: &DbContext, sample_name: &str) -> bool {
@@ -267,9 +290,9 @@ mod tests {
             .expect("should query sample existence")
     }
 
-    fn setup_branch_restore_repo() -> Workspace {
+    fn setup_branch_restore_repo() -> (Workspace, tempfile::TempDir) {
         let temp_dir = tempdir().expect("should create temp repo");
-        let workspace = Workspace::new(temp_dir.keep());
+        let workspace = Workspace::new(temp_dir.path());
         workspace.ensure_gen_dir();
         let graph_path = workspace
             .graph_db_path()
@@ -298,12 +321,13 @@ mod tests {
         Defaults::set_current_branch(&config_conn, Some("feature"))
             .expect("should persist current branch intent");
 
-        workspace
+        (workspace, temp_dir)
     }
 
     #[test]
     fn test_new_restores_saved_current_branch() {
-        let workspace = setup_branch_restore_repo();
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let base_dir = workspace.base_dir().to_path_buf();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -315,7 +339,8 @@ mod tests {
             get_config_connection(&config_path).expect("should reopen config connection");
 
         let context = DbContext::new(workspace, graph_conn, config_conn)
-            .expect("should restore current branch when opening context");
+            .expect("should restore current branch when opening context")
+            .with_temp_dir(temp_dir);
 
         assert_eq!(
             active_branch(context.graph().conn()).expect("should resolve active branch"),
@@ -325,11 +350,17 @@ mod tests {
             branch_has_sample(&context, "feature-sample"),
             "default DbContext construction should restore the saved branch contents"
         );
+        drop(context);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after context drops"
+        );
     }
 
     #[test]
     fn test_new_with_ref_overrides_saved_current_branch() {
-        let workspace = setup_branch_restore_repo();
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let base_dir = workspace.base_dir().to_path_buf();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -341,7 +372,8 @@ mod tests {
             get_config_connection(&config_path).expect("should reopen config connection");
 
         let context = DbContext::new_with_ref(workspace, graph_conn, config_conn, "main")
-            .expect("should open context on explicit ref");
+            .expect("should open context on explicit ref")
+            .with_temp_dir(temp_dir);
 
         assert_eq!(
             active_branch(context.graph().conn()).expect("should resolve active branch"),
@@ -350,6 +382,40 @@ mod tests {
         assert!(
             !branch_has_sample(&context, "feature-sample"),
             "explicit ref checkout should override the saved branch intent"
+        );
+        drop(context);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after context drops"
+        );
+    }
+
+    #[test]
+    fn test_set_graph_preserves_temp_dir_for_cloned_handle() {
+        let mut context = setup_gen_on_disk();
+        let base_dir = context.workspace().base_dir().to_path_buf();
+        let replacement_connection =
+            test_graph_connection(None).expect("should create replacement graph connection");
+        context.set_graph(replacement_connection);
+        let graph_handle = context.graph().clone();
+
+        drop(context);
+        assert!(
+            base_dir.is_dir(),
+            "cloned graph handle should keep workspace alive"
+        );
+        assert_eq!(
+            graph_handle
+                .conn()
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .expect("should query through replacement graph handle"),
+            1
+        );
+
+        drop(graph_handle);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after handle drops"
         );
     }
 

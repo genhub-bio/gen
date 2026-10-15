@@ -131,8 +131,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.fa");
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let filename = tmp_dir.path().join("out.fa");
         export_fasta(
             conn,
             context.workspace(),
@@ -196,8 +196,8 @@ mod tests {
             false,
         );
 
-        let tmp_dir = tempfile::tempdir().unwrap().keep();
-        let filename = tmp_dir.join("out.fa");
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let filename = tmp_dir.path().join("out.fa");
         export_fasta(
             conn,
             context.workspace(),

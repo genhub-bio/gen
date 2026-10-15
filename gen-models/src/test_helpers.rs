@@ -84,21 +84,25 @@ pub fn get_config_connection<'a>(
 }
 
 pub fn setup_gen() -> DbContext {
-    let tmp_dir = tempdir().unwrap().keep();
-    let workspace = Workspace::new(tmp_dir);
+    let tmp_dir = tempdir().unwrap();
+    let workspace = Workspace::new(tmp_dir.path());
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(None).unwrap();
     let config_conn = get_config_connection(None).unwrap();
-    DbContext::new(workspace, graph_conn, config_conn).unwrap()
+    DbContext::new(workspace, graph_conn, config_conn)
+        .unwrap()
+        .with_temp_dir(tmp_dir)
 }
 
 pub fn setup_gen_on_disk() -> DbContext {
-    let tmp_dir = tempdir().unwrap().keep();
-    let workspace = Workspace::new(tmp_dir);
+    let tmp_dir = tempdir().unwrap();
+    let workspace = Workspace::new(tmp_dir.path());
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(workspace.graph_db_path().unwrap().to_str().unwrap()).unwrap();
     let config_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str()).unwrap();
-    DbContext::new(workspace, graph_conn, config_conn).unwrap()
+    DbContext::new(workspace, graph_conn, config_conn)
+        .unwrap()
+        .with_temp_dir(tmp_dir)
 }
 
 pub fn test_workspace() -> &'static Workspace {
@@ -265,4 +269,114 @@ pub fn run_query(conn: &Connection, query: &str) {
         })
         .unwrap()
     {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, panic::AssertUnwindSafe};
+
+    use super::{setup_gen, setup_gen_on_disk};
+    use crate::db::DbContext;
+
+    fn assert_temp_dir_lives_until_last_context_or_handle_drop(context: DbContext) {
+        let base_dir = context.workspace().base_dir().to_path_buf();
+        let nested_asset = context
+            .workspace()
+            .asset_dir()
+            .expect("should resolve workspace asset directory")
+            .join("nested/fixture.txt");
+        fs::create_dir_all(
+            nested_asset
+                .parent()
+                .expect("should have a parent directory"),
+        )
+        .expect("should create nested fixture asset directory");
+        fs::write(&nested_asset, "temporary workspace asset")
+            .expect("should write nested fixture asset");
+
+        let context_clone = context.clone();
+        let graph_handle = context.graph().clone();
+        let config_handle = context.config().clone();
+        drop(context);
+        assert!(
+            base_dir.is_dir(),
+            "context clone should keep workspace alive"
+        );
+        assert_eq!(
+            fs::read_to_string(&nested_asset).expect("should read nested fixture asset"),
+            "temporary workspace asset"
+        );
+
+        drop(context_clone);
+        assert!(
+            base_dir.is_dir(),
+            "cloned handles should keep workspace alive"
+        );
+        assert_eq!(
+            graph_handle
+                .conn()
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .expect("should query through cloned graph handle"),
+            1
+        );
+        assert_eq!(
+            config_handle
+                .conn()
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .expect("should query through cloned config handle"),
+            1
+        );
+
+        drop(graph_handle);
+        assert!(
+            base_dir.is_dir(),
+            "config handle should keep workspace alive"
+        );
+
+        drop(config_handle);
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed after its last owner drops"
+        );
+    }
+
+    #[test]
+    fn test_setup_gen_temp_dir_cleanup() {
+        assert_temp_dir_lives_until_last_context_or_handle_drop(setup_gen());
+    }
+
+    #[test]
+    fn test_setup_gen_on_disk_temp_dir_cleanup() {
+        assert_temp_dir_lives_until_last_context_or_handle_drop(setup_gen_on_disk());
+    }
+
+    #[test]
+    fn test_setup_gen_on_disk_temp_dir_cleanup_during_unwind() {
+        let mut base_dir = None;
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let context = setup_gen_on_disk();
+            base_dir = Some(context.workspace().base_dir().to_path_buf());
+            let fixture_asset = context
+                .workspace()
+                .asset_dir()
+                .expect("should resolve workspace asset directory")
+                .join("nested/fixture.txt");
+            fs::create_dir_all(
+                fixture_asset
+                    .parent()
+                    .expect("should have a parent directory"),
+            )
+            .expect("should create nested fixture asset directory");
+            fs::write(fixture_asset, "temporary workspace asset")
+                .expect("should write nested fixture asset");
+            panic!("exercise temporary workspace cleanup during unwind");
+        }));
+
+        assert!(result.is_err(), "closure should unwind");
+        let base_dir = base_dir.expect("should reach panic after workspace setup");
+        assert!(
+            !base_dir.exists(),
+            "workspace should be removed during unwind"
+        );
+    }
 }
