@@ -1002,12 +1002,13 @@ mod tests {
 
     #[test]
     fn test_graph_locus_clips_forward_and_reverse_accession_spans() {
+        // This makes an annotation comprised of part of the stored AA...
+        // and TT... nodes for our standard test block group. Notably,
+        // we mix the accession strands.
         // Accession offset: 01234567
-        // Span membership:  AAAATTTT
+        // Span membership:  AAAATTTT (A[2-6] + T[3-7])
         // Span strands:     ++++----
         // Query [2,6):      ..^^^^..
-        // A stored [2,6) selects [4,6), local slice [2,4).
-        // T stored [3,7) selects [5,7), local slice [2,4).
         let conn = get_connection(None).expect("should create an in-memory database");
         let (block_group_id, _) = setup_block_group(&conn);
         let accession = Accession::create(
@@ -1062,6 +1063,14 @@ mod tests {
                     4,
                     Strand::Forward,
                 ),
+                // This is our reverse strand, the stored sequence + accession is like:
+                // 0123456789
+                // TTTTTTTTTT
+                //    |--|
+                // Given that this is on the negative strand, the bases
+                // to extract for the slice are actually on the end of
+                // the sequence, not the first 2 Ts of the accession, so our slice here is
+                // 3 + 2, 3+4, giving 5-7 of our initial sequence
                 (
                     HashId::convert_str("test-t-node"),
                     3,
