@@ -9,6 +9,7 @@ use gen_models::{
     db::DbContext,
     edge::Edge,
     errors::CollectionError,
+    interval_tree::IntervalTreeSource as _,
     node::Node,
     operations::{OperationInfo, OperationSummary},
     path::Path,
@@ -92,7 +93,7 @@ where
                         },
                     )?
                 };
-                let path = if let Some(path) =
+                let mut path = if let Some(path) =
                     BlockGroup::get_path_by_name(conn, &block_group.id, &locus.name)?
                 {
                     path
@@ -145,7 +146,13 @@ where
                         &[edge_into.id, edge_out_of.id],
                     )?
                 };
-                for edit in locus.changes_to_wt() {
+                let changes = locus.changes_to_wt();
+                if !changes.is_empty() {
+                    // Regions clone the Path, so attach its tree once before resolving the edits.
+                    let interval_tree = path.intervaltree(conn)?;
+                    path.set_cached_interval_tree(Some(interval_tree));
+                }
+                for edit in changes {
                     let start = edit.start;
                     let end = edit.end;
                     let region = ResolvedGenRegion::from_path(conn, &path, start, end)?;

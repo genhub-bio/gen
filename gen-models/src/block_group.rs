@@ -36,7 +36,7 @@ use crate::{
         SequenceError,
     },
     gen_models_capnp::block_group,
-    path::{Path, PathData, PathSelect},
+    path::{Path, PathSelect},
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::{Sample, SampleSelect},
 };
@@ -186,69 +186,6 @@ pub struct BlockGroupChange {
 
 pub type IntervalTreeCache =
     HashMap<(HashId, ResolvedRegionKind), Arc<IntervalTree<i64, NodeIntervalBlock>>>;
-
-pub struct PathCache<'a> {
-    pub cache: HashMap<PathData, Path>,
-    pub intervaltree_cache: HashMap<Path, Arc<IntervalTree<i64, NodeIntervalBlock>>>,
-    pub conn: &'a GraphConnection,
-}
-
-impl<'a> PathCache<'a> {
-    pub fn new(conn: &'a GraphConnection) -> PathCache<'a> {
-        PathCache {
-            cache: HashMap::<PathData, Path>::new(),
-            intervaltree_cache: HashMap::<Path, Arc<IntervalTree<i64, NodeIntervalBlock>>>::new(),
-            conn,
-        }
-    }
-
-    pub fn lookup(
-        path_cache: &mut PathCache,
-        block_group_id: &HashId,
-        name: String,
-    ) -> Result<Path, PathError> {
-        let path_key = PathData {
-            name: name.clone(),
-            block_group_id: *block_group_id,
-        };
-        let path_lookup = path_cache.cache.get(&path_key);
-        if let Some(path) = path_lookup {
-            Ok(path.clone())
-        } else {
-            let conn = path_cache.conn;
-            let mut new_path = Path::select(conn)
-                .block_group_id(*block_group_id)
-                .name(name)
-                .load()
-                .expect("should load path for cache")[0]
-                .clone();
-
-            let tree = new_path.intervaltree(conn)?;
-            new_path.set_cached_interval_tree(Some(Arc::clone(&tree)));
-            path_cache.cache.insert(path_key, new_path.clone());
-            path_cache.intervaltree_cache.insert(new_path.clone(), tree);
-            Ok(new_path)
-        }
-    }
-
-    pub fn get_intervaltree<'b>(
-        path_cache: &'b mut PathCache<'_>,
-        path: &Path,
-    ) -> Result<&'b IntervalTree<i64, NodeIntervalBlock>, PathError> {
-        if !path_cache.intervaltree_cache.contains_key(path) {
-            let tree = path.intervaltree(path_cache.conn)?;
-            path_cache.intervaltree_cache.insert(path.clone(), tree);
-        }
-
-        path_cache
-            .intervaltree_cache
-            .get(path)
-            .ok_or_else(|| {
-                PathError::Missing(format!("Missing interval tree for path {}", path.id))
-            })
-            .map(Arc::as_ref)
-    }
-}
 
 impl BlockGroup {
     pub(crate) fn resolve_candidates(
@@ -757,9 +694,8 @@ impl BlockGroup {
         name: &str,
         start: i64,
         end: i64,
-        cache: &mut PathCache,
     ) -> Result<Accession, BlockGroupError> {
-        let tree = PathCache::get_intervaltree(cache, path)?;
+        let tree = path.intervaltree(conn)?;
         let start_blocks: Vec<&NodeIntervalBlock> =
             tree.query_point(start).map(|x| &x.value).collect();
         assert_eq!(start_blocks.len(), 1);
@@ -2244,36 +2180,19 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-
-        let mut path_cache = PathCache::new(conn);
         let parent_a_path_len = parent_a_path.length(conn, None).unwrap();
         let parent_b_path_len = parent_b_path.length(conn, None).unwrap();
         let parent_b_alt_path_len = parent_b_alt_path.length(conn, None).unwrap();
-        BlockGroup::add_accession(
-            conn,
-            &parent_a_path,
-            "parent-a-acc",
-            0,
-            parent_a_path_len,
-            &mut path_cache,
-        )
-        .unwrap();
-        BlockGroup::add_accession(
-            conn,
-            &parent_b_path,
-            "parent-b-acc",
-            0,
-            parent_b_path_len,
-            &mut path_cache,
-        )
-        .unwrap();
+        BlockGroup::add_accession(conn, &parent_a_path, "parent-a-acc", 0, parent_a_path_len)
+            .unwrap();
+        BlockGroup::add_accession(conn, &parent_b_path, "parent-b-acc", 0, parent_b_path_len)
+            .unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_b_alt_path,
             "parent-b-alt-acc",
             0,
             parent_b_alt_path_len,
-            &mut path_cache,
         )
         .unwrap();
 
@@ -2349,8 +2268,7 @@ mod tests {
     fn test_blockgroup_clone_does_not_copy_accessions() {
         let conn = &get_connection(None).unwrap();
         let (_bg_1, path) = setup_block_group(conn);
-        let mut path_cache = PathCache::new(conn);
-        let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache).unwrap();
+        let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7).unwrap();
         assert_eq!(
             Accession::select(conn)
                 .name("test")
@@ -2389,10 +2307,8 @@ mod tests {
     fn test_accession_end_coordinate_is_not_included() {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, path) = setup_block_group(conn);
-        let mut path_cache = PathCache::new(conn);
 
-        let accession =
-            BlockGroup::add_accession(conn, &path, "test", 3, 10, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(conn, &path, "test", 3, 10).unwrap();
         let nodes = Accession::get_nodes_by_id(conn, &accession.id, None);
 
         assert_eq!(accession.length(conn).unwrap(), 7);
@@ -2406,10 +2322,7 @@ mod tests {
     fn insert_accession_change_get_all() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "test-accession", 10, 30, &mut path_cache)
-                .unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "test-accession", 10, 30).unwrap();
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -2456,10 +2369,7 @@ mod tests {
     fn insert_annotation_change_get_all() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "test-accession", 10, 30, &mut path_cache)
-                .unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "test-accession", 10, 30).unwrap();
         let annotation =
             ModelAnnotation::get_or_create(&conn, "gene-1", "track-1", &accession.id, None)
                 .unwrap();

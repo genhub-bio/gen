@@ -6,7 +6,7 @@ use gen_graph::GenGraph;
 #[cfg(test)]
 use gen_models::{
     annotations::{Annotation, add_annotation},
-    block_group::{BlockGroup, PathCache},
+    block_group::BlockGroup,
     path::Path,
     sample::Sample,
 };
@@ -233,20 +233,13 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
     let path_edge_ids = Path::edge_ids_for_path(conn, &duplicate_path.id, None);
     Path::create(conn, "chr1", &duplicate_block_group.id, &path_edge_ids)
         .expect("should create a distinct path search fixture");
-    let mut path_cache = PathCache::new(conn);
     for (accession_name, start, end) in [
         ("duplicate-accession-a", 0, 5),
         ("duplicate-accession-b", 20, 25),
     ] {
-        let accession = BlockGroup::add_accession(
-            conn,
-            &duplicate_path,
-            accession_name,
-            start,
-            end,
-            &mut path_cache,
-        )
-        .expect("should create duplicate annotation accession");
+        let accession =
+            BlockGroup::add_accession(conn, &duplicate_path, accession_name, start, end)
+                .expect("should create duplicate annotation accession");
         Annotation::get_or_create(conn, "duplicate-gene", "default", &accession.id, None)
             .expect("should create duplicate model annotation");
     }

@@ -962,7 +962,7 @@ mod tests {
     use super::*;
     use crate::{
         assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
-        block_group::{BlockGroup, PathCache},
+        block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
         operations::{
@@ -980,11 +980,8 @@ mod tests {
         #[test]
         fn resolves_annotation_by_name_case_insensitively() {
             let conn = get_connection(None).unwrap();
-            let (block_group_id, path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
-            let accession =
-                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let (_block_group_id, path) = setup_block_group(&conn);
+            let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5).unwrap();
             let annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
             assert!(annotation.cached_interval_tree().is_none());
@@ -1018,11 +1015,8 @@ mod tests {
         #[test]
         fn returns_ambiguous_for_multiple_matching_annotations() {
             let conn = get_connection(None).unwrap();
-            let (block_group_id, path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
-            let accession =
-                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let (_block_group_id, path) = setup_block_group(&conn);
+            let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5).unwrap();
             let _ = Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
             let other_block_group = create_bg(&conn, "test", "test", "other");
@@ -1043,8 +1037,7 @@ mod tests {
             let other_path =
                 Path::create(&conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
             let other_accession =
-                BlockGroup::add_accession(&conn, &other_path, "ann-accession-2", 0, 5, &mut cache)
-                    .unwrap();
+                BlockGroup::add_accession(&conn, &other_path, "ann-accession-2", 0, 5).unwrap();
             let _ = Annotation::get_or_create(&conn, "MREB", "genes", &other_accession.id, None)
                 .unwrap();
 
@@ -1059,19 +1052,9 @@ mod tests {
         #[test]
         fn resolves_closest_annotation_in_sample_lineage() {
             let conn = get_connection(None).unwrap();
-            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
-                .unwrap();
-            let parent_accession = BlockGroup::add_accession(
-                &conn,
-                &parent_path,
-                "parent-accession",
-                0,
-                5,
-                &mut cache,
-            )
-            .unwrap();
+            let (_parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let parent_accession =
+                BlockGroup::add_accession(&conn, &parent_path, "parent-accession", 0, 5).unwrap();
             let _parent_annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
                     .unwrap();
@@ -1094,8 +1077,7 @@ mod tests {
             let child_path =
                 Path::create(&conn, "child-path", &child_block_group.id, &edge_ids).unwrap();
             let child_accession =
-                BlockGroup::add_accession(&conn, &child_path, "child-accession", 0, 5, &mut cache)
-                    .unwrap();
+                BlockGroup::add_accession(&conn, &child_path, "child-accession", 0, 5).unwrap();
             let child_annotation =
                 Annotation::get_or_create(&conn, "MREB", "genes", &child_accession.id, None)
                     .unwrap();
@@ -1110,19 +1092,10 @@ mod tests {
         #[test]
         fn falls_back_to_parent_annotation_when_child_has_none() {
             let conn = get_connection(None).unwrap();
-            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
-                .unwrap();
-            let parent_accession = BlockGroup::add_accession(
-                &conn,
-                &parent_path,
-                "parent-only-accession",
-                0,
-                5,
-                &mut cache,
-            )
-            .unwrap();
+            let (_parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let parent_accession =
+                BlockGroup::add_accession(&conn, &parent_path, "parent-only-accession", 0, 5)
+                    .unwrap();
             let parent_annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
                     .unwrap();
@@ -1158,11 +1131,9 @@ mod tests {
 
         /// Attach a block group that shares `parent_path`'s edges, give it its
         /// own path and accession, and annotate it. Returns the annotation.
-        #[expect(clippy::too_many_arguments, reason = "test helper wiring")]
         fn annotate_block_group(
             conn: &GraphConnection,
             parent_path: &Path,
-            cache: &mut PathCache,
             collection_name: &str,
             sample_name: &str,
             block_group_name: &str,
@@ -1185,19 +1156,15 @@ mod tests {
                 .collect::<Vec<_>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
             let path = Path::create(conn, accession_name, &block_group.id, &edge_ids).unwrap();
-            let accession =
-                BlockGroup::add_accession(conn, &path, accession_name, 0, 5, cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, accession_name, 0, 5).unwrap();
             Annotation::get_or_create(conn, annotation_name, "genes", &accession.id, None).unwrap()
         }
 
         #[test]
         fn test_lists_annotations_on_block_group() {
             let conn = get_connection(None).unwrap();
-            let (block_group_id, path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
-            let accession =
-                BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+            let (_block_group_id, path) = setup_block_group(&conn);
+            let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5).unwrap();
             let annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
@@ -1224,19 +1191,9 @@ mod tests {
         #[test]
         fn test_includes_parent_annotations_via_lineage() {
             let conn = get_connection(None).unwrap();
-            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
-                .unwrap();
-            let parent_accession = BlockGroup::add_accession(
-                &conn,
-                &parent_path,
-                "parent-accession",
-                0,
-                5,
-                &mut cache,
-            )
-            .unwrap();
+            let (_parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let parent_accession =
+                BlockGroup::add_accession(&conn, &parent_path, "parent-accession", 0, 5).unwrap();
             let parent_annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
                     .unwrap();
@@ -1244,7 +1201,6 @@ mod tests {
             let child_annotation = annotate_block_group(
                 &conn,
                 &parent_path,
-                &mut cache,
                 "test",
                 "child",
                 "chr1",
@@ -1265,19 +1221,15 @@ mod tests {
         #[test]
         fn test_excludes_annotations_on_other_block_group_names() {
             let conn = get_connection(None).unwrap();
-            let (block_group_id, path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let (_block_group_id, path) = setup_block_group(&conn);
             let accession =
-                BlockGroup::add_accession(&conn, &path, "chr1-accession", 0, 5, &mut cache)
-                    .unwrap();
+                BlockGroup::add_accession(&conn, &path, "chr1-accession", 0, 5).unwrap();
             let chr1_annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
             let _chr2_annotation = annotate_block_group(
                 &conn,
                 &path,
-                &mut cache,
                 "test",
                 "test",
                 "chr2",
@@ -1293,19 +1245,15 @@ mod tests {
         #[test]
         fn test_excludes_annotations_from_samples_outside_the_lineage() {
             let conn = get_connection(None).unwrap();
-            let (block_group_id, path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+            let (_block_group_id, path) = setup_block_group(&conn);
             let accession =
-                BlockGroup::add_accession(&conn, &path, "test-accession", 0, 5, &mut cache)
-                    .unwrap();
+                BlockGroup::add_accession(&conn, &path, "test-accession", 0, 5).unwrap();
             let test_annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
             let _unrelated_annotation = annotate_block_group(
                 &conn,
                 &path,
-                &mut cache,
                 "test",
                 "unrelated",
                 "chr1",
@@ -1321,19 +1269,9 @@ mod tests {
         #[test]
         fn test_keeps_both_when_parent_and_child_share_an_annotation_name() {
             let conn = get_connection(None).unwrap();
-            let (parent_block_group_id, parent_path) = setup_block_group(&conn);
-            let mut cache = PathCache::new(&conn);
-            let _ = PathCache::lookup(&mut cache, &parent_block_group_id, parent_path.name.clone())
-                .unwrap();
-            let parent_accession = BlockGroup::add_accession(
-                &conn,
-                &parent_path,
-                "parent-accession",
-                0,
-                5,
-                &mut cache,
-            )
-            .unwrap();
+            let (_parent_block_group_id, parent_path) = setup_block_group(&conn);
+            let parent_accession =
+                BlockGroup::add_accession(&conn, &parent_path, "parent-accession", 0, 5).unwrap();
             let parent_annotation =
                 Annotation::get_or_create(&conn, "mreB", "genes", &parent_accession.id, None)
                     .unwrap();
@@ -1341,7 +1279,6 @@ mod tests {
             let child_annotation = annotate_block_group(
                 &conn,
                 &parent_path,
-                &mut cache,
                 "test",
                 "child",
                 "chr1",
@@ -1381,7 +1318,7 @@ mod tests {
     #[test]
     fn create_annotation_with_samples() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn);
+        let (_block_group_id, path) = setup_block_group(&conn);
 
         let _ = Sample::create(
             &conn,
@@ -1399,11 +1336,7 @@ mod tests {
             },
         )
         .unwrap();
-
-        let mut cache = PathCache::new(&conn);
-        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5).unwrap();
 
         let annotations = [NewAnnotation {
             name: "gene-a",
@@ -2048,12 +1981,9 @@ mod tests {
     #[test]
     fn test_annotation_history_ref_loads_historical_accession_nodes() {
         let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn);
-        let mut cache = PathCache::new(&conn);
-        let _ = PathCache::lookup(&mut cache, &block_group_id, path.name.clone()).unwrap();
+        let (_block_group_id, path) = setup_block_group(&conn);
         let accession =
-            BlockGroup::add_accession(&conn, &path, "history-accession", 0, 10, &mut cache)
-                .unwrap();
+            BlockGroup::add_accession(&conn, &path, "history-accession", 0, 10).unwrap();
         let annotation =
             Annotation::get_or_create(&conn, "history-annotation", "test", &accession.id, None)
                 .unwrap();

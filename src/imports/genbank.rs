@@ -20,6 +20,7 @@ use gen_models::{
     db::DbContext,
     edge::Edge,
     errors::CollectionError,
+    interval_tree::IntervalTreeSource as _,
     node::Node,
     operations::{OperationInfo, OperationSummary},
     path::Path,
@@ -560,7 +561,7 @@ where
                         },
                     ],
                 );
-                let path = Path::create(
+                let mut path = Path::create(
                     conn,
                     &locus.name,
                     &block_group.id,
@@ -568,6 +569,11 @@ where
                 )?;
 
                 let wt_changes = locus.changes_to_wt();
+                if !wt_changes.is_empty() {
+                    // Regions clone the Path, so attach its tree once before resolving the edits.
+                    let interval_tree = path.intervaltree(conn)?;
+                    path.set_cached_interval_tree(Some(interval_tree));
+                }
                 let mut applied_changes = Vec::with_capacity(wt_changes.len());
                 for edit in wt_changes {
                     let start = edit.start;
