@@ -385,10 +385,9 @@ mod tests {
 
     #[test]
     fn test_translates_reverse_split_bed_to_exact_node_local_spans() {
-        let conn = crate::test_helpers::get_connection();
-        crate::test_helpers::setup_test_data(&conn);
-        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
-        // Path edges traverse B then A; edge endpoint strands at B/A are -. Feature strand is +.
+        // This test has 2 nodes connected by a negative edge strand while the feature's annotated strand is +.
+        // So this is a translation with a graph of the negative strand with a feature annotated on the + strand.
+        // Path edges traverse B then A
         //   path index:  01234567890123456
         //   path nodes:  BBBBBBBBAAAAAAAAA
         //   path DNA:    TGCAACGGTAACCGGTT
@@ -398,16 +397,18 @@ mod tests {
         //   index:     012345678
         //   DNA:       CCGTTGCAT
         //   span:      ^-------^ [0,8)
-        //   selected:  ^ [0,1) = C
+        //   feature:   ^ [0,1) = C
         //
         // Stored node A:
         //   index:     012345678
         //   DNA:       AACCGGTTA
         //   span:      ^--------^ [0,9)
-        //   selected:          ^ [8,9) = A
-        // Edge strand - maps stored C to G and A to T; feature strand + emits fragments B then A.
-        // BED [7,9) maps to path [7,9), producing B [0,1) (-) then A [8,9) (-).
-        // This explains orientation; the assertion checks emitted records, not fetched DNA.
+        //   feature:           ^ [8,9) = A
+
+        // BED [7,9) maps to path [7,9), producing B [0,1) then A [8,9) with feature strand +.
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let (block_group, node_a_id, node_b_id) = create_reverse_test_block_group(&conn);
         let input = format!("{}\t7\t9\tcross-boundary\t0\t+\n", block_group.name);
         let mut translated = Vec::new();
         translate_bed(
@@ -424,9 +425,9 @@ mod tests {
         assert_eq!(
             translated,
             format!(
-                "{node_b_id}\t0\t1\tcross-boundary\t0\t-\n{node_a_id}\t8\t9\tcross-boundary\t0\t-\n"
+                "{node_b_id}\t0\t1\tcross-boundary\t0\t+\n{node_a_id}\t8\t9\tcross-boundary\t0\t+\n"
             ),
-            "positive-coordinate BED fragments should clip to each reverse-oriented node in path order"
+            "BED fragments should map to stored-node spans in path order and preserve the input feature strand"
         );
     }
 }
