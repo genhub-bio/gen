@@ -600,17 +600,19 @@ mod tests {
 
     use super::PyRepository;
 
-    fn make_repository() -> PyRepository {
-        PyRepository {
-            context: r#gen::test_helpers::setup_gen_on_disk(),
-        }
+    fn make_repository() -> (r#gen::test_helpers::TestContext, PyRepository) {
+        let context = r#gen::test_helpers::setup_gen_on_disk();
+        let repository = PyRepository {
+            context: context.db_context().clone(),
+        };
+        (context, repository)
     }
 
     #[test]
     fn test_branch_merge_and_reset_workflow() {
         Python::initialize();
         Python::attach(|python| {
-            let repository = make_repository();
+            let (_context, repository) = make_repository();
             Collection::create(repository.context.graph().conn(), "base")
                 .expect("should create base collection");
             DoltHistoryStore::new(repository.context.graph().conn())

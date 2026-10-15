@@ -897,7 +897,7 @@ mod tests {
     use crate::{
         graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
-        test_helpers::{setup_gen, setup_gen_on_disk},
+        test_helpers::{TestContext, setup_gen, setup_gen_on_disk},
         updates::{library::update_with_library, sequence::update_with_sequence},
         views::{
             annotation_files::{
@@ -1567,8 +1567,7 @@ mod tests {
         assert!(!cached_bytes.is_empty());
     }
 
-    fn setup_versioned_annotation_assets()
-    -> (gen_models::db::DbContext, tempfile::TempDir, String, String) {
+    fn setup_versioned_annotation_assets() -> (TestContext, tempfile::TempDir, String, String) {
         let context = setup_gen_on_disk();
         let mut fasta_file = NamedTempFile::new().expect("should create temporary FASTA file");
         fasta_file

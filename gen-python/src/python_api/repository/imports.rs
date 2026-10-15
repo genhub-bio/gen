@@ -681,8 +681,9 @@ mod tests {
     fn test_import_sequence_circular_closes_graph_and_preserves_path() {
         Python::initialize();
         Python::attach(|python| {
+            let context = setup_gen_on_disk();
             let repository = PyRepository {
-                context: setup_gen_on_disk(),
+                context: context.db_context().clone(),
             };
             let sequence = PyString::new(python, "ATCG");
             for circular in [false, true] {

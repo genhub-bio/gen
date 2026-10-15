@@ -717,10 +717,10 @@ mod tests {
             DiffChangeKind, DiffGenGraph, DiffInputGraph, GraphEdgeKey, build_diff_input_graph,
             build_unified_diff_graph, path_end_graph_node, path_start_graph_node,
         },
-        test_helpers::{get_config_connection, get_connection as test_get_connection},
+        test_helpers::{TestContext, get_config_connection, get_connection as test_get_connection},
     };
 
-    fn setup_history_context() -> DbContext {
+    fn setup_history_context() -> TestContext {
         let tmp_dir = tempdir().expect("should create temp dir");
         let workspace = Workspace::new(tmp_dir.path());
         workspace.ensure_gen_dir();
@@ -728,9 +728,10 @@ mod tests {
             .expect("should create graph database");
         let config_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str().unwrap())
             .expect("should create config database");
-        DbContext::new(workspace, graph_conn, config_conn)
-            .expect("should create db context")
-            .with_temp_dir(tmp_dir)
+        TestContext::new(
+            DbContext::new(workspace, graph_conn, config_conn).expect("should create db context"),
+            tmp_dir,
+        )
     }
 
     #[test]
@@ -946,7 +947,7 @@ mod tests {
     }
 
     struct DivergentHistory {
-        context: DbContext,
+        context: TestContext,
         source_block_group: BlockGroup,
         target_block_group: BlockGroup,
         source_hash: DoltHashId,

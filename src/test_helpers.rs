@@ -1,4 +1,11 @@
-use std::{fmt::Debug, fs, io::Write, ops::Add, sync::OnceLock};
+use std::{
+    fmt::Debug,
+    fs,
+    io::Write,
+    ops::{Add, Deref, DerefMut},
+    rc::Rc,
+    sync::OnceLock,
+};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
@@ -45,7 +52,48 @@ pub fn create_bg(
 }
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
+
+/// Owns a database context and the temporary workspace created for a test.
+///
+/// Cloned fixtures share the workspace guard. Raw context or handle clones must not outlive their
+/// owning fixture because production database models do not own test directories.
+#[derive(Clone)]
+pub struct TestContext {
+    context: DbContext,
+    _temp_dir: Rc<TempDir>,
+}
+
+impl TestContext {
+    /// Keeps the temporary workspace alive until the final fixture clone drops.
+    pub fn new(context: DbContext, temp_dir: TempDir) -> Self {
+        Self {
+            context,
+            _temp_dir: Rc::new(temp_dir),
+        }
+    }
+
+    /// Borrows the context for runtime structures that store a raw database context.
+    ///
+    /// Keep this fixture alive as long as any raw context or handle clone is used.
+    pub fn db_context(&self) -> &DbContext {
+        &self.context
+    }
+}
+
+impl Deref for TestContext {
+    type Target = DbContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl DerefMut for TestContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.context
+    }
+}
 
 pub fn test_workspace() -> &'static Workspace {
     static WORKSPACE: OnceLock<Workspace> = OnceLock::new();
@@ -93,18 +141,19 @@ pub fn get_config_connection<'a>(
     Ok(ConfigConnection(conn))
 }
 
-pub fn setup_gen() -> DbContext {
+pub fn setup_gen() -> TestContext {
     let tmp_dir = tempdir().unwrap();
     let workspace = Workspace::new(tmp_dir.path());
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(None).expect("unable to open graph connection");
     let config_conn = get_config_connection(None).expect("unable to open config connection");
-    DbContext::new(workspace, graph_conn, config_conn)
-        .unwrap()
-        .with_temp_dir(tmp_dir)
+    TestContext::new(
+        DbContext::new(workspace, graph_conn, config_conn).unwrap(),
+        tmp_dir,
+    )
 }
 
-pub fn setup_gen_on_disk() -> DbContext {
+pub fn setup_gen_on_disk() -> TestContext {
     let tmp_dir = tempdir().unwrap();
     let workspace = Workspace::new(tmp_dir.path());
     workspace.ensure_gen_dir();
@@ -113,9 +162,10 @@ pub fn setup_gen_on_disk() -> DbContext {
     let config_conn =
         get_config_connection(workspace.ensure_gen_dir().join("gen.db").to_str().unwrap())
             .expect("unable to open config connection");
-    DbContext::new(workspace, graph_conn, config_conn)
-        .unwrap()
-        .with_temp_dir(tmp_dir)
+    TestContext::new(
+        DbContext::new(workspace, graph_conn, config_conn).unwrap(),
+        tmp_dir,
+    )
 }
 
 pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
@@ -323,11 +373,9 @@ pub fn get_sample_bg(
 mod tests {
     use std::fs;
 
-    use gen_models::db::DbContext;
+    use super::{TestContext, setup_gen, setup_gen_on_disk};
 
-    use super::{setup_gen, setup_gen_on_disk};
-
-    fn assert_temp_dir_lives_until_last_context_or_handle_drop(context: DbContext) {
+    fn assert_temp_dir_lives_until_last_context_clone_drop(context: TestContext) {
         let base_dir = context.workspace().base_dir().to_path_buf();
         let nested_asset = context
             .workspace()
@@ -344,8 +392,6 @@ mod tests {
             .expect("should write nested fixture asset");
 
         let context_clone = context.clone();
-        let graph_handle = context.graph().clone();
-        let config_handle = context.config().clone();
         drop(context);
         assert!(
             base_dir.is_dir(),
@@ -356,33 +402,15 @@ mod tests {
             "temporary workspace asset"
         );
 
+        assert_eq!(
+            context_clone
+                .graph()
+                .conn()
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .expect("should query through cloned context"),
+            1
+        );
         drop(context_clone);
-        assert!(
-            base_dir.is_dir(),
-            "cloned handles should keep workspace alive"
-        );
-        assert_eq!(
-            graph_handle
-                .conn()
-                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                .expect("should query through cloned graph handle"),
-            1
-        );
-        assert_eq!(
-            config_handle
-                .conn()
-                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                .expect("should query through cloned config handle"),
-            1
-        );
-
-        drop(graph_handle);
-        assert!(
-            base_dir.is_dir(),
-            "config handle should keep workspace alive"
-        );
-
-        drop(config_handle);
         assert!(
             !base_dir.exists(),
             "workspace should be removed after its last owner drops"
@@ -391,11 +419,11 @@ mod tests {
 
     #[test]
     fn test_root_setup_gen_temp_dir_cleanup() {
-        assert_temp_dir_lives_until_last_context_or_handle_drop(setup_gen());
+        assert_temp_dir_lives_until_last_context_clone_drop(setup_gen());
     }
 
     #[test]
     fn test_root_setup_gen_on_disk_temp_dir_cleanup() {
-        assert_temp_dir_lives_until_last_context_or_handle_drop(setup_gen_on_disk());
+        assert_temp_dir_lives_until_last_context_clone_drop(setup_gen_on_disk());
     }
 }

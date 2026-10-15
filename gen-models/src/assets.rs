@@ -2150,9 +2150,9 @@ mod tests {
 
         use super::{AssetRef, AssetRole, AssetView};
         use crate::{
-            db::{DbContext, GraphConnection},
+            db::GraphConnection,
             history::dolt::{checkout, commit_all, create_branch},
-            test_helpers::setup_gen,
+            test_helpers::{TestContext, setup_gen},
         };
 
         /// Builds a linear history where `alpha.fa` gains a replacement, its superseded reference
@@ -2162,7 +2162,7 @@ mod tests {
         /// The saved commit hashes let each test isolate materialized, cumulative, and bounded
         /// history behavior without repeating the setup.
         struct AssetHistoryFixture {
-            context: DbContext,
+            context: TestContext,
             first_alpha: AssetRef,
             second_alpha: AssetRef,
             beta: AssetRef,

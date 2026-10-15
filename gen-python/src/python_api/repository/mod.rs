@@ -451,7 +451,7 @@ impl PyRepository {
 mod python_tests {
     use std::fs;
 
-    use r#gen::test_helpers::setup_gen_on_disk;
+    use r#gen::test_helpers::{TestContext, setup_gen_on_disk};
     use pyo3::{PyTypeInfo, prelude::*, py_run};
     use tempfile::tempdir;
 
@@ -459,9 +459,16 @@ mod python_tests {
     #[cfg(unix)]
     use crate::python_api::repository::clone_repository;
 
-    fn make_repo(py: Python<'_>) -> Py<PyRepository> {
+    fn make_repo(py: Python<'_>) -> (TestContext, Py<PyRepository>) {
         let ctx = setup_gen_on_disk();
-        Py::new(py, PyRepository { context: ctx }).unwrap()
+        let repository = Py::new(
+            py,
+            PyRepository {
+                context: ctx.db_context().clone(),
+            },
+        )
+        .unwrap();
+        (ctx, repository)
     }
 
     fn write_fasta(
@@ -504,7 +511,7 @@ mod python_tests {
     fn test_clone_returns_open_repository() {
         Python::initialize();
         Python::attach(|py| {
-            let source = make_repo(py);
+            let (_context, source) = make_repo(py);
             let fasta_dir = tempdir().unwrap();
             let fasta = write_fasta(&fasta_dir, "test.fa", "chr1", "ACGTACGT");
             source
@@ -543,7 +550,7 @@ mod python_tests {
     fn test_import_fasta_creates_block_group() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
 
@@ -571,7 +578,7 @@ mod python_tests {
     fn test_import_fasta_accepts_explicit_fai_and_gzi_keywords() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
             let fasta = fasta.to_str().unwrap().replace('\\', "\\\\");
@@ -616,7 +623,7 @@ mod python_tests {
     fn test_import_fasta_duplicate_gives_specific_error() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
             let path = fasta.to_str().unwrap().to_string();
@@ -647,7 +654,7 @@ mod python_tests {
     fn test_import_sequence_returns_graph_and_builds_sample_in_a_loop() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             py_run!(
                 py,
                 py_repo,
@@ -678,7 +685,7 @@ mod python_tests {
     fn test_import_sequence_rejects_bad_input() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             py_run!(
                 py,
                 py_repo,
@@ -705,7 +712,7 @@ mod python_tests {
     fn test_import_sequence_duplicate_gives_specific_error() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             py_run!(
                 py,
                 py_repo,
@@ -726,7 +733,7 @@ mod python_tests {
     fn test_import_sequence_reusing_a_name_with_new_contents_fails() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             py_run!(
                 py,
                 py_repo,
@@ -748,7 +755,7 @@ mod python_tests {
     fn test_import_sequence_circular_and_reference() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             py_run!(
                 py,
                 py_repo,
@@ -772,7 +779,7 @@ mod python_tests {
     fn test_search_finds_exact_match() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
 
@@ -799,7 +806,7 @@ mod python_tests {
     fn test_search_no_match() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
 
@@ -823,7 +830,7 @@ mod python_tests {
     fn test_build_index_creates_file() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
 
@@ -864,7 +871,7 @@ mod python_tests {
     fn test_search_with_index_finds_match() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
 
@@ -889,7 +896,7 @@ mod python_tests {
     fn test_clear_index_removes_file() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
 
@@ -932,7 +939,7 @@ mod python_tests {
     fn test_blockgroup_build_and_clear_index() {
         Python::initialize();
         Python::attach(|py| {
-            let py_repo = make_repo(py);
+            let (_context, py_repo) = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
 

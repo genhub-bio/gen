@@ -148,23 +148,35 @@ mod tests {
             let repository = Py::new(
                 python,
                 PyRepository {
-                    context: context.clone(),
+                    context: context.db_context().clone(),
                 },
             )
             .expect("should create Python repository");
             let sample = Py::new(
                 python,
-                PySample::new("default".to_string(), "sample".to_string(), context.clone()),
+                PySample::new(
+                    "default".to_string(),
+                    "sample".to_string(),
+                    context.db_context().clone(),
+                ),
             )
             .expect("should create Python sample");
             let other = Py::new(
                 python,
-                PySample::new("default".to_string(), "other".to_string(), context.clone()),
+                PySample::new(
+                    "default".to_string(),
+                    "other".to_string(),
+                    context.db_context().clone(),
+                ),
             )
             .expect("should create other Python sample");
             let missing = Py::new(
                 python,
-                PySample::new("default".to_string(), "missing".to_string(), context),
+                PySample::new(
+                    "default".to_string(),
+                    "missing".to_string(),
+                    context.db_context().clone(),
+                ),
             )
             .expect("should create missing Python sample");
             py_run!(python, repository sample other missing, r#"
