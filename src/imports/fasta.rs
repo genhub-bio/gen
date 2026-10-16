@@ -106,6 +106,7 @@ pub fn import_fasta(
                 compression: compression_type,
                 checksum_override: None,
             },
+            false,
         )?;
         let logical_path = if is_local {
             Some(OperationFile::storage_file_path(
