@@ -150,3 +150,68 @@ impl<'a> AnnotationTranslationContext<'a> {
         Ok((region.block_group.id, interval_tree))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gen_core::Strand;
+    use gen_models::sample::Sample;
+
+    use super::AnnotationTranslationContext;
+    use crate::test_helpers::{
+        create_reverse_test_block_group, create_sliced_test_block_group, get_connection,
+        setup_test_data, test_workspace,
+    };
+
+    #[test]
+    fn test_intervaltree_maps_sliced_nodes_to_stored_coordinates() {
+        // A region is a GraphNodeSlice -- this ensures that we convert it to blocks correctly.
+        let conn = get_connection();
+        setup_test_data(&conn);
+        let (forward_block_group, forward_node_id) =
+            create_sliced_test_block_group(&conn, "sliced-forward", Strand::Forward);
+        let (reverse_block_group, reverse_node_id) =
+            create_sliced_test_block_group(&conn, "sliced-reverse", Strand::Reverse);
+        let mut context = AnnotationTranslationContext::new(
+            &conn,
+            test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+        )
+        .expect("should create annotation translation context");
+
+        // The GraphNodeSlices are from position 3 and position 5. So here we're just taking the first 2 bases for an ITree and making
+        // sure we get the correct values for sequence_start/end in the interval
+        for (reference_name, expected_block_group_id, expected_node_id, sequence_start, strand) in [
+            (
+                "sliced-forward",
+                forward_block_group.id,
+                forward_node_id,
+                3,
+                Strand::Reverse,
+            ),
+            (
+                "sliced-reverse",
+                reverse_block_group.id,
+                reverse_node_id,
+                5,
+                Strand::Forward,
+            ),
+        ] {
+            let (block_group_id, tree) = context
+                .intervaltree(reference_name, 0, 2, strand)
+                .expect("should map the sliced path interval");
+            assert_eq!(block_group_id, expected_block_group_id);
+
+            let intervals = tree.iter().collect::<Vec<_>>();
+            assert_eq!(intervals.len(), 1);
+            assert_eq!(intervals[0].range, 0..2);
+            assert_eq!(intervals[0].value.node_id, expected_node_id);
+            assert_eq!(intervals[0].value.start, 0);
+            assert_eq!(intervals[0].value.end, 2);
+            assert_eq!(intervals[0].value.sequence_start, sequence_start);
+            assert_eq!(intervals[0].value.sequence_end, sequence_start + 2);
+            assert_eq!(intervals[0].value.strand, strand);
+        }
+    }
+}
