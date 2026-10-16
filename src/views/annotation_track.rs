@@ -5,7 +5,7 @@ use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, region::ResolvedGenRegion};
 use petgraph::visit::IntoNodeIdentifiers;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationSegment {
     pub node_id: HashId,
     pub start: i64,
@@ -13,7 +13,7 @@ pub struct AnnotationSegment {
     pub strand: Strand,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationSpan {
     pub id: HashId,
     pub name: String,
@@ -31,6 +31,141 @@ impl AnnotationTrack {
         AnnotationTrack {
             name: name.into(),
             annotations,
+        }
+    }
+}
+
+/// Reuses the current graph's node fragments while resolving many annotation spans.
+pub(crate) struct GraphNodeFragmentLookup {
+    fragments_by_id: HashMap<HashId, Vec<GraphNode>>,
+}
+
+impl GraphNodeFragmentLookup {
+    pub(crate) fn new(graph: &GenGraph) -> Self {
+        let mut fragments_by_id: HashMap<HashId, Vec<GraphNode>> = HashMap::new();
+        for node in graph.node_identifiers() {
+            fragments_by_id.entry(node.node_id).or_default().push(node);
+        }
+        for fragments in fragments_by_id.values_mut() {
+            fragments.sort_unstable_by_key(|fragment| fragment.sequence_start);
+        }
+        Self { fragments_by_id }
+    }
+
+    pub(crate) fn locus_for_span(&self, span: &AnnotationSpan) -> Option<GraphLocus> {
+        if span.segments.is_empty() {
+            return None;
+        }
+
+        let mut slices = Vec::new();
+        for segment in &span.segments {
+            let fragments = self.fragments_by_id.get(&segment.node_id)?;
+            let mut segment_slices = fragments
+                .iter()
+                .filter_map(|fragment| {
+                    let start = segment.start.max(fragment.sequence_start);
+                    let end = segment.end.min(fragment.sequence_end);
+                    (start < end).then_some(GraphNodeSlice {
+                        block: *fragment,
+                        start: (start - fragment.sequence_start) as usize,
+                        end: (end - fragment.sequence_start) as usize,
+                        strand: segment.strand,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if segment_slices.is_empty() {
+                return None;
+            }
+            // Split reverse-strand features traverse fragments from high to low coordinates.
+            if segment.strand == Strand::Reverse {
+                segment_slices.reverse();
+            }
+            slices.extend(segment_slices);
+        }
+        Some(GraphLocus { slices })
+    }
+}
+
+/// Prefix maximum of interval ends, queried by an inclusive upper bound on interval starts.
+pub(crate) struct CoordinatePrefixMaximumIndex {
+    starts: Vec<i64>,
+    maximum_ends: Vec<i64>,
+}
+
+impl CoordinatePrefixMaximumIndex {
+    pub(crate) fn new(mut starts: Vec<i64>) -> Self {
+        starts.sort_unstable();
+        starts.dedup();
+        let maximum_ends = vec![i64::MIN; starts.len() + 1];
+        Self {
+            starts,
+            maximum_ends,
+        }
+    }
+
+    /// Return the greatest indexed interval end whose start is at most `start`.
+    pub(crate) fn maximum_end_for_start_at_most(&self, start: i64) -> i64 {
+        let mut index = self.starts.partition_point(|candidate| *candidate <= start);
+        let mut maximum_end = i64::MIN;
+        while index > 0 {
+            maximum_end = maximum_end.max(self.maximum_ends[index]);
+            index &= index - 1;
+        }
+        maximum_end
+    }
+
+    /// Add an interval whose start was included when this index was built.
+    pub(crate) fn insert(&mut self, start: i64, end: i64) {
+        let Ok(position) = self.starts.binary_search(&start) else {
+            return;
+        };
+        let mut index = position + 1;
+        while index < self.maximum_ends.len() {
+            self.maximum_ends[index] = self.maximum_ends[index].max(end);
+            let low_bit = index & (!index + 1);
+            index += low_bit;
+        }
+    }
+}
+
+/// Tracks later annotation segments by node so coverage checks take logarithmic time.
+pub(crate) struct SegmentContainmentIndex {
+    by_node: HashMap<HashId, CoordinatePrefixMaximumIndex>,
+}
+
+impl SegmentContainmentIndex {
+    pub(crate) fn for_spans(spans: &[&AnnotationSpan]) -> Self {
+        let mut starts_by_node: HashMap<HashId, Vec<i64>> = HashMap::new();
+        for span in spans {
+            for segment in &span.segments {
+                starts_by_node
+                    .entry(segment.node_id)
+                    .or_default()
+                    .push(segment.start);
+            }
+        }
+        let by_node = starts_by_node
+            .into_iter()
+            .map(|(node_id, starts)| (node_id, CoordinatePrefixMaximumIndex::new(starts)))
+            .collect();
+        Self { by_node }
+    }
+
+    /// Check each segment against one later segment, allowing different covers per segment.
+    pub(crate) fn covers_every_segment(&self, span: &AnnotationSpan) -> bool {
+        !span.segments.is_empty()
+            && span.segments.iter().all(|segment| {
+                self.by_node.get(&segment.node_id).is_some_and(|index| {
+                    index.maximum_end_for_start_at_most(segment.start) >= segment.end
+                })
+            })
+    }
+
+    pub(crate) fn insert_span(&mut self, span: &AnnotationSpan) {
+        for segment in &span.segments {
+            if let Some(index) = self.by_node.get_mut(&segment.node_id) {
+                index.insert(segment.start, segment.end);
+            }
         }
     }
 }
@@ -79,45 +214,7 @@ pub fn graph_locus_from_annotation_span(
     span: &AnnotationSpan,
     graph: &GenGraph,
 ) -> Option<GraphLocus> {
-    if span.segments.is_empty() {
-        return None;
-    }
-    let mut node_map: HashMap<HashId, Vec<GraphNode>> = HashMap::new();
-    for node in graph.node_identifiers() {
-        node_map.entry(node.node_id).or_default().push(node);
-    }
-    for candidates in node_map.values_mut() {
-        candidates.sort_unstable_by_key(|block| block.sequence_start);
-    }
-
-    let mut slices = Vec::new();
-    for segment in &span.segments {
-        let candidates = node_map.get(&segment.node_id)?;
-        let mut segment_slices = candidates
-            .iter()
-            .filter_map(|block| {
-                let start = segment.start.max(block.sequence_start);
-                let end = segment.end.min(block.sequence_end);
-                (start < end).then_some(GraphNodeSlice {
-                    block: *block,
-                    start: (start - block.sequence_start) as usize,
-                    end: (end - block.sequence_start) as usize,
-                    strand: segment.strand,
-                })
-            })
-            .collect::<Vec<_>>();
-        if segment_slices.is_empty() {
-            return None;
-        }
-        // Candidates are collected in ascending sequence-coordinate order, but a reverse-strand
-        // segment traverses split graph fragments from higher to lower coordinates. Reversing
-        // the fragment order changes traversal order, not bases or coordinates.
-        if segment.strand == Strand::Reverse {
-            segment_slices.reverse();
-        }
-        slices.extend(segment_slices);
-    }
-    Some(GraphLocus { slices })
+    GraphNodeFragmentLookup::new(graph).locus_for_span(span)
 }
 
 /// Compute the display label for a span, appending a strand arrow when all
@@ -159,16 +256,19 @@ pub fn span_is_single_node(span: &AnnotationSpan, graph: &GenGraph) -> bool {
 /// small annotations that lie within the truncated sequence, but still show
 /// the annotations that get interrupted by variants since those are relevant.
 pub fn span_should_show_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
-    if !span_is_single_node(span, graph) {
-        return true;
-    }
-    let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+    let Some(locus) = GraphNodeFragmentLookup::new(graph).locus_for_span(span) else {
         return true;
     };
+    locus_should_show_in_truncated(&locus)
+}
+
+/// Return whether a resolved locus crosses a node or covers its complete single node.
+pub(crate) fn locus_should_show_in_truncated(locus: &GraphLocus) -> bool {
     let Some(first) = locus.slices.first() else {
         return true;
     };
-    first.start == 0 && first.end as i64 >= first.block.length()
+    !locus.slices.iter().all(|slice| slice.block == first.block)
+        || (first.start == 0 && first.end as i64 >= first.block.length())
 }
 
 /// Return `true` if every segment of `span` at `idx` is fully contained within
@@ -364,6 +464,70 @@ mod tests {
             start,
             end,
             strand,
+        }
+    }
+
+    fn make_span(name: &str, segments: Vec<AnnotationSegment>) -> AnnotationSpan {
+        AnnotationSpan {
+            id: HashId::convert_str(name),
+            name: name.to_string(),
+            segments,
+        }
+    }
+
+    #[test]
+    fn test_segment_containment_index_matches_later_span_reference() {
+        let cases = vec![
+            vec![
+                make_span("long", vec![make_segment("a", 0, 10, Strand::Forward)]),
+                make_span("duplicate", vec![make_segment("a", 0, 10, Strand::Reverse)]),
+            ],
+            vec![
+                make_span(
+                    "multi-node",
+                    vec![
+                        make_segment("a", 0, 5, Strand::Forward),
+                        make_segment("b", 0, 5, Strand::Forward),
+                    ],
+                ),
+                make_span("cover-a", vec![make_segment("a", 0, 5, Strand::Reverse)]),
+                make_span("cover-b", vec![make_segment("b", 0, 5, Strand::Reverse)]),
+            ],
+            vec![
+                make_span("union", vec![make_segment("a", 0, 10, Strand::Forward)]),
+                make_span("left-half", vec![make_segment("a", 0, 5, Strand::Reverse)]),
+                make_span(
+                    "right-half",
+                    vec![make_segment("a", 5, 10, Strand::Reverse)],
+                ),
+            ],
+            vec![
+                make_span("disjoint", vec![make_segment("a", 0, 5, Strand::Forward)]),
+                make_span("touching", vec![make_segment("a", 5, 10, Strand::Reverse)]),
+                make_span(
+                    "other-node",
+                    vec![make_segment("b", 0, 10, Strand::Reverse)],
+                ),
+            ],
+            vec![make_span(
+                "not-self-covered",
+                vec![make_segment("a", 0, 10, Strand::Forward)],
+            )],
+        ];
+
+        for spans in cases {
+            let span_refs = spans.iter().collect::<Vec<_>>();
+            let mut index = SegmentContainmentIndex::for_spans(&span_refs);
+            for span_index in (0..spans.len()).rev() {
+                let expected = span_covered_by_later(&spans[span_index], span_index, &span_refs);
+                assert_eq!(
+                    index.covers_every_segment(&spans[span_index]),
+                    expected,
+                    "indexed coverage should match the public reference helper for span {}",
+                    spans[span_index].name
+                );
+                index.insert_span(&spans[span_index]);
+            }
         }
     }
 

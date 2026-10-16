@@ -491,13 +491,12 @@ where
         &self.viewport_graph.cell_highlights
     }
 
-    /// Clear all highlights
+    /// Clear persistent and current-viewport highlights without requesting a graph rebuild.
     pub fn clear_all_highlights(&mut self) {
         self.highlights.clear();
         self.viewport_graph.node_highlights.clear();
         self.viewport_graph.edge_highlights.clear();
         self.viewport_graph.cell_highlights.clear();
-        self.trigger_rebuild();
     }
 
     /// Dim an edge: store in domain terms so it survives viewport rebuilds.
@@ -899,44 +898,44 @@ where
             // Graph navigation controls - move cursor with node awareness
             KeyCode::Left | KeyCode::Char('h') => {
                 let vp_w = self.viewport_state.viewport_bounds.width as i64;
-                let delta = if self.cursor.is_coarse_mode() {
-                    -vp_w
-                } else {
-                    -1
-                };
+                let was_coarse = self.cursor.is_coarse_mode();
+                let previous_node = self.cursor.node_idx();
+                let delta = if was_coarse { -vp_w } else { -1 };
                 self.navigate_horizontal(delta)?;
-                self.trigger_rebuild();
+                if was_coarse || self.cursor.node_idx() != previous_node {
+                    self.trigger_rebuild();
+                }
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 let vp_w = self.viewport_state.viewport_bounds.width as i64;
-                let delta = if self.cursor.is_coarse_mode() {
-                    vp_w
-                } else {
-                    1
-                };
+                let was_coarse = self.cursor.is_coarse_mode();
+                let previous_node = self.cursor.node_idx();
+                let delta = if was_coarse { vp_w } else { 1 };
                 self.navigate_horizontal(delta)?;
-                self.trigger_rebuild();
+                if was_coarse || self.cursor.node_idx() != previous_node {
+                    self.trigger_rebuild();
+                }
             }
             // Note: In world coordinates, Y increases upward
             KeyCode::Up | KeyCode::Char('k') => {
                 let vp_h = self.viewport_state.viewport_bounds.height as i64;
-                let delta = if self.cursor.is_coarse_mode() {
-                    vp_h
-                } else {
-                    1
-                };
+                let was_coarse = self.cursor.is_coarse_mode();
+                let previous_node = self.cursor.node_idx();
+                let delta = if was_coarse { vp_h } else { 1 };
                 self.navigate_vertical(delta)?;
-                self.trigger_rebuild();
+                if was_coarse || self.cursor.node_idx() != previous_node {
+                    self.trigger_rebuild();
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let vp_h = self.viewport_state.viewport_bounds.height as i64;
-                let delta = if self.cursor.is_coarse_mode() {
-                    -vp_h
-                } else {
-                    -1
-                };
+                let was_coarse = self.cursor.is_coarse_mode();
+                let previous_node = self.cursor.node_idx();
+                let delta = if was_coarse { -vp_h } else { -1 };
                 self.navigate_vertical(delta)?; // Move down = negative Y
-                self.trigger_rebuild();
+                if was_coarse || self.cursor.node_idx() != previous_node {
+                    self.trigger_rebuild();
+                }
             }
 
             // Zoom/Scale controls
@@ -1457,38 +1456,6 @@ mod tests {
     };
 
     #[test]
-    fn test_default_node_sizer_keeps_legacy_detail_zoom_steps() {
-        #[derive(Clone)]
-        struct TestNodeSizer;
-
-        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
-            fn get_node_size(&self, _node: &NodeIndex, detail_level: VisualDetail) -> (u64, u64) {
-                match detail_level {
-                    VisualDetail::Minimal => (1, 1),
-                    VisualDetail::Truncated => (13, 1),
-                    VisualDetail::Full => (100, 1),
-                }
-            }
-        }
-
-        let mut graph = MockDomainGraph::new();
-        graph.add_node(());
-        let mut controller = GraphController::new(graph, TestNodeSizer);
-        controller.set_detail_level(VisualDetail::Full);
-
-        assert_eq!(controller.zoom_scale(), 1);
-        controller.zoom_out();
-        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
-        controller.zoom_out();
-        assert_eq!(controller.get_detail_level(), VisualDetail::Minimal);
-        controller.zoom_in();
-        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
-        controller.zoom_in();
-        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
-        assert_eq!(controller.zoom_scale(), 1);
-    }
-
-    #[test]
     fn test_coordinate_conversions() {
         let mut state = ViewportState::new();
         state.camera_current = WorldPos::new(100, 100);
@@ -1538,6 +1505,198 @@ mod tests {
         // Test scroll without focus (should be ignored)
         state.handle_mouse_scroll(5, 5, Duration::from_millis(100));
         assert!(state.camera_anim.is_none());
+    }
+
+    #[test]
+    fn test_default_node_sizer_keeps_legacy_detail_zoom_steps() {
+        #[derive(Clone)]
+        struct TestNodeSizer;
+
+        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, detail_level: VisualDetail) -> (u64, u64) {
+                match detail_level {
+                    VisualDetail::Minimal => (1, 1),
+                    VisualDetail::Truncated => (13, 1),
+                    VisualDetail::Full => (100, 1),
+                }
+            }
+        }
+
+        let mut graph = MockDomainGraph::new();
+        graph.add_node(());
+        let mut controller = GraphController::new(graph, TestNodeSizer);
+        controller.set_detail_level(VisualDetail::Full);
+
+        assert_eq!(controller.zoom_scale(), 1);
+        controller.zoom_out();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
+        controller.zoom_out();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Minimal);
+        controller.zoom_in();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
+        controller.zoom_in();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
+        assert_eq!(controller.zoom_scale(), 1);
+    }
+
+    #[test]
+    fn test_clear_all_highlights_does_not_request_graph_rebuild() {
+        #[derive(Clone)]
+        struct TestNodeSizer;
+
+        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, _detail_level: VisualDetail) -> (u64, u64) {
+                (1, 1)
+            }
+        }
+
+        let mut graph = MockDomainGraph::new();
+        let first_node = graph.add_node(());
+        let second_node = graph.add_node(());
+        graph.add_edge(first_node, second_node, ());
+        let mut controller = GraphController::new(graph, TestNodeSizer);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 20, 10);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+        assert!(!controller.needs_rebuild());
+
+        controller.set_node_highlight(first_node, PathStyle::new(Color::Red));
+        controller.set_edge_highlight((first_node, second_node), PathStyle::new(Color::Green));
+        controller.set_path_highlight(PathStyle::new(Color::Blue), vec![first_node, second_node]);
+        controller.set_cell_highlight(first_node, (0, 0), (0, 0), PathStyle::new(Color::Yellow));
+        assert_eq!(controller.highlights.len(), 4);
+        assert!(!controller.get_node_highlights().is_empty());
+        assert!(!controller.get_edge_highlights().is_empty());
+        assert!(!controller.get_cell_highlights().is_empty());
+
+        controller.clear_all_highlights();
+
+        assert!(controller.highlights.is_empty());
+        assert!(controller.get_node_highlights().is_empty());
+        assert!(controller.get_edge_highlights().is_empty());
+        assert!(controller.get_cell_highlights().is_empty());
+        assert!(
+            !controller.needs_rebuild(),
+            "should not rebuild graph geometry just to remove highlight state"
+        );
+
+        controller.trigger_rebuild();
+        controller.clear_all_highlights();
+        assert!(
+            controller.needs_rebuild(),
+            "should preserve a rebuild requested for an unrelated geometry change"
+        );
+    }
+
+    #[test]
+    fn test_fine_character_steps_within_one_node_do_not_request_graph_rebuild() {
+        #[derive(Clone)]
+        struct WideNodeSizer;
+
+        impl NodeSizer<MockDomainGraph> for WideNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, _detail_level: VisualDetail) -> (u64, u64) {
+                (1_000, 10)
+            }
+        }
+
+        let mut graph = MockDomainGraph::new();
+        graph.add_node(());
+        let mut controller = GraphController::new(graph, WideNodeSizer);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 20, 10);
+        controller.set_detail_level(VisualDetail::Full);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+        controller.cursor.set_coarse_mode(false);
+        assert!(!controller.needs_rebuild());
+
+        let initial_position = controller
+            .cursor
+            .to_world_pos(controller.get_viewport_graph())
+            .expect("should position the fine cursor within the visible node");
+
+        controller
+            .handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(controller.cursor.node_idx(), Some(NodeIndex::new(0)));
+        assert_eq!(
+            controller
+                .cursor
+                .to_world_pos(controller.get_viewport_graph()),
+            Some(WorldPos::new(initial_position.x + 1, initial_position.y))
+        );
+        assert!(
+            !controller.needs_rebuild(),
+            "should leave viewport geometry ready when stepping within a node"
+        );
+
+        controller
+            .handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            controller
+                .cursor
+                .to_world_pos(controller.get_viewport_graph()),
+            Some(initial_position)
+        );
+        assert!(
+            !controller.needs_rebuild(),
+            "should preserve the same viewport graph when stepping back within a node"
+        );
+
+        controller.trigger_rebuild();
+        controller
+            .handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            controller.needs_rebuild(),
+            "should preserve a rebuild requested before a fine character step"
+        );
+
+        controller.rebuild_viewport_graph().unwrap();
+        controller.cursor.set_coarse_mode(true);
+        controller
+            .handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            controller.needs_rebuild(),
+            "should still rebuild after coarse movement within a node"
+        );
+    }
+
+    #[test]
+    fn test_fine_character_step_to_another_node_requests_graph_rebuild() {
+        #[derive(Clone)]
+        struct SmallNodeSizer;
+
+        impl NodeSizer<MockDomainGraph> for SmallNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, _detail_level: VisualDetail) -> (u64, u64) {
+                (2, 1)
+            }
+        }
+
+        let mut graph = MockDomainGraph::new();
+        let first_node = graph.add_node(());
+        let second_node = graph.add_node(());
+        graph.add_edge(first_node, second_node, ());
+        let mut controller = GraphController::new(graph, SmallNodeSizer);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 20, 10);
+        controller.set_detail_level(VisualDetail::Full);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+        controller.cursor.set_node(first_node, (1.0, 0.5));
+        controller.cursor.set_coarse_mode(false);
+        assert!(!controller.needs_rebuild());
+
+        controller
+            .handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(controller.cursor.node_idx(), Some(second_node));
+        assert!(
+            controller.needs_rebuild(),
+            "should rebuild viewport geometry after crossing into another node"
+        );
     }
 
     #[test]

@@ -403,21 +403,23 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             draw_edge_with_style(buffer, source, target, theme[0x05], LineStyle::Dashed);
         }
     }
-
     // Draw nodes
     for (world_pos, node) in viewport_graph.nodes() {
         match &node.role {
             NodeRole::Data(domain_idx) => {
-                let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
+                let Some(visible_rect) = buffer.calculate_visible_area(world_rect) else {
+                    continue;
+                };
+                let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 renderer.render_node(buffer, world_rect, &node_id, detail_level);
 
                 // If lowlighted, dim the node background to theme[0x04].
                 // Applied before highlights so highlights take priority.
                 if node_lowlights.contains(world_pos) {
                     let dim = theme[0x04];
-                    for y in world_rect.min.y..=world_rect.max.y {
-                        for x in world_rect.min.x..=world_rect.max.x {
+                    for y in visible_rect.min.y..=visible_rect.max.y {
+                        for x in visible_rect.min.x..=visible_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let new_style = if ch == NODE_GLYPH {
@@ -446,8 +448,8 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         Color::Reset => theme[0x07],
                         c => c,
                     };
-                    for y in world_rect.min.y..=world_rect.max.y {
-                        for x in world_rect.min.x..=world_rect.max.x {
+                    for y in visible_rect.min.y..=visible_rect.max.y {
+                        for x in visible_rect.min.x..=visible_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let new_style = if ch == NODE_GLYPH {
@@ -474,8 +476,18 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     let x1 = (world_rect.min.x + br.0).min(world_rect.max.x);
                     let y0 = (world_rect.min.y + tl.1).max(world_rect.min.y);
                     let y1 = (world_rect.min.y + br.1).min(world_rect.max.y);
-                    for y in y0..=y1 {
-                        for x in x0..=x1 {
+                    if x0 > x1 || y0 > y1 {
+                        continue;
+                    }
+                    let highlighted_rect =
+                        WorldRect::from_corners(WorldPos::new(x0, y0), WorldPos::new(x1, y1));
+                    let Some(visible_highlighted_rect) =
+                        highlighted_rect.intersection(&visible_rect)
+                    else {
+                        continue;
+                    };
+                    for y in visible_highlighted_rect.min.y..=visible_highlighted_rect.max.y {
+                        for x in visible_highlighted_rect.min.x..=visible_highlighted_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let new_style = if ch == NODE_GLYPH {
@@ -665,9 +677,14 @@ fn draw_edge_with_style(
         } else {
             (target.y, source.y)
         };
-
-        for y in min_y..=max_y {
-            buffer.set_char_styled(WorldPos::new(source.x, y), v_ch, style);
+        let edge_rect = WorldRect::from_corners(
+            WorldPos::new(source.x, min_y),
+            WorldPos::new(source.x, max_y),
+        );
+        if let Some(visible_edge) = buffer.calculate_visible_area(edge_rect) {
+            for y in visible_edge.min.y..=visible_edge.max.y {
+                buffer.set_char_styled(WorldPos::new(source.x, y), v_ch, style);
+            }
         }
     } else if source.y == target.y {
         // Horizontal edge
@@ -676,14 +693,19 @@ fn draw_edge_with_style(
         } else {
             (target.x, source.x)
         };
+        let edge_rect = WorldRect::from_corners(
+            WorldPos::new(min_x, source.y),
+            WorldPos::new(max_x, source.y),
+        );
+        if let Some(visible_edge) = buffer.calculate_visible_area(edge_rect) {
+            for x in visible_edge.min.x..=visible_edge.max.x {
+                let pos = WorldPos::new(x, source.y);
 
-        for x in min_x..=max_x {
-            let pos = WorldPos::new(x, source.y);
-
-            // Don't overwrite a vertical line with a horizontal one.
-            // Vertical edges take priority at crossings (normal, heavy, and dashed).
-            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊')) {
-                buffer.set_char_styled(pos, h_ch, style);
+                // Don't overwrite a vertical line with a horizontal one.
+                // Vertical edges take priority at crossings (normal, heavy, and dashed).
+                if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊')) {
+                    buffer.set_char_styled(pos, h_ch, style);
+                }
             }
         }
     }
@@ -790,4 +812,287 @@ where
     }
 
     Ok((result, width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use petgraph::graph::{Graph, NodeIndex};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Style},
+    };
+
+    use super::{
+        LineStyle, NodeRenderer, PathStyle, draw_edge_with_style,
+        plot_viewport_graph_with_highlights,
+    };
+    use crate::{
+        geometry::{LocalPos, WorldPos, WorldRect},
+        graph_controller::WorldBuffer,
+        layout::{LayoutNode, VisualDetail},
+        theme::Theme,
+        viewport_graph::CroppedGraph,
+        viewport_state::ViewportState,
+    };
+
+    struct SequenceRenderer {
+        sequence: String,
+        calls: usize,
+    }
+
+    impl NodeRenderer<Graph<(), ()>> for SequenceRenderer {
+        fn render_node(
+            &mut self,
+            buffer: &mut WorldBuffer<'_>,
+            area: WorldRect,
+            _node_id: &NodeIndex,
+            _detail_level: VisualDetail,
+        ) {
+            self.calls += 1;
+            let Some(visible_area) = buffer.calculate_visible_area(area) else {
+                return;
+            };
+            let visible_start = (visible_area.min.x - area.min.x) as usize;
+            let visible_end = (visible_area.max.x - area.min.x + 1) as usize;
+            let visible_sequence = self
+                .sequence
+                .as_bytes()
+                .get(visible_start..visible_end)
+                .and_then(|bases| std::str::from_utf8(bases).ok())
+                .unwrap_or_default();
+            buffer.set_string_styled(
+                WorldPos::new(visible_area.min.x, area.left_center().y),
+                visible_sequence,
+                Style::default().fg(Color::White),
+            );
+        }
+    }
+
+    fn test_plotter_viewport(camera_center_x: i64) -> ViewportState {
+        let mut state = ViewportState::new();
+        state.viewport_bounds = Rect::new(0, 0, 5, 1);
+        state.camera_current = WorldPos::new(camera_center_x, 0);
+        state.camera_target = state.camera_current;
+        state
+    }
+
+    fn test_square_plotter_viewport() -> ViewportState {
+        let mut state = ViewportState::new();
+        state.viewport_bounds = Rect::new(0, 0, 5, 5);
+        state.camera_current = WorldPos::new(0, 0);
+        state.camera_target = state.camera_current;
+        state
+    }
+
+    #[test]
+    fn test_draw_edge_with_style_clips_huge_crossing_edges_and_preserves_glyphs() {
+        let viewport_state = test_square_plotter_viewport();
+        for (coordinate, line_style, horizontal, vertical) in [
+            (-2, LineStyle::Normal, '─', '│'),
+            (0, LineStyle::Bold, '━', '┃'),
+            (2, LineStyle::Dashed, '╌', '┊'),
+        ] {
+            let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+            {
+                let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+                draw_edge_with_style(
+                    &mut world_buffer,
+                    WorldPos::new(coordinate, 50_000_000),
+                    WorldPos::new(coordinate, -50_000_000),
+                    Color::Yellow,
+                    line_style,
+                );
+                draw_edge_with_style(
+                    &mut world_buffer,
+                    WorldPos::new(50_000_000, coordinate),
+                    WorldPos::new(-50_000_000, coordinate),
+                    Color::Yellow,
+                    line_style,
+                );
+
+                for position in [-2, -1, 0, 1, 2] {
+                    let expected_horizontal = if position == coordinate {
+                        vertical
+                    } else {
+                        horizontal
+                    };
+                    assert_eq!(
+                        world_buffer.get_char(WorldPos::new(position, coordinate)),
+                        Some(expected_horizontal),
+                        "should clip long horizontal edges and preserve vertical crossing priority"
+                    );
+                    assert_eq!(
+                        world_buffer.get_char(WorldPos::new(coordinate, position)),
+                        Some(vertical),
+                        "should clip long vertical edges with their original glyph style"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_draw_edge_with_style_skips_huge_offscreen_edges() {
+        let viewport_state = test_square_plotter_viewport();
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        {
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+            draw_edge_with_style(
+                &mut world_buffer,
+                WorldPos::new(-50_000_000, 100),
+                WorldPos::new(50_000_000, 100),
+                Color::White,
+                LineStyle::Normal,
+            );
+            draw_edge_with_style(
+                &mut world_buffer,
+                WorldPos::new(100, -50_000_000),
+                WorldPos::new(100, 50_000_000),
+                Color::White,
+                LineStyle::Dashed,
+            );
+        }
+        assert!(
+            buffer.content().iter().all(|cell| cell.symbol() == " "),
+            "should leave the viewport unchanged for long offscreen edges"
+        );
+    }
+
+    #[test]
+    fn test_large_data_node_highlights_only_visit_visible_cells() {
+        const NODE_LENGTH: i64 = 1_000_000;
+        const NODE_START: i64 = 100;
+        const VISIBLE_OFFSET: i64 = 123_457;
+
+        let sequence = "ACGT".repeat(NODE_LENGTH as usize / 4);
+        let mut original_graph = Graph::<(), ()>::new();
+        let domain_node = original_graph.add_node(());
+        let node_position = WorldPos::new(NODE_START + (NODE_LENGTH - 1) / 2, 0);
+        let mut viewport_graph = CroppedGraph::empty();
+        viewport_graph.node_data_by_pos.insert(
+            node_position,
+            LayoutNode::data(
+                domain_node,
+                LocalPos::new_xy(0, 0, 0),
+                (NODE_LENGTH as u64, 1),
+                None,
+            ),
+        );
+
+        let node_highlights = [(node_position, PathStyle::new(Color::Blue))];
+        let cell_highlights = [
+            (
+                node_position,
+                (VISIBLE_OFFSET - 100_000, 0),
+                (VISIBLE_OFFSET + 100_000, 0),
+                PathStyle::new(Color::Red),
+            ),
+            (
+                node_position,
+                (VISIBLE_OFFSET + 3, 0),
+                (VISIBLE_OFFSET + 8, 0),
+                PathStyle::new(Color::Green),
+            ),
+        ];
+        let node_lowlights = [node_position];
+        let theme = Theme::default();
+        let mut renderer = SequenceRenderer { sequence, calls: 0 };
+
+        let visible_start = NODE_START + VISIBLE_OFFSET;
+        let viewport_state = test_plotter_viewport(visible_start + 2);
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        {
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+            plot_viewport_graph_with_highlights(
+                &viewport_graph,
+                &mut world_buffer,
+                &mut renderer,
+                &original_graph,
+                VisualDetail::Full,
+                &node_highlights,
+                &[],
+                &cell_highlights,
+                &[],
+                &node_lowlights,
+                &theme,
+            );
+
+            for offset in 0..5i64 {
+                let (base, style) = world_buffer
+                    .get_char_styled(WorldPos::new(visible_start + offset, 0))
+                    .expect("should render a visible world base");
+                assert_eq!(base, b"CGTAC"[offset as usize] as char);
+                let expected_background = if offset < 3 { Color::Red } else { Color::Green };
+                assert_eq!(style.bg, Some(expected_background));
+            }
+        }
+        assert_eq!(renderer.calls, 1);
+
+        let left_boundary_state = test_plotter_viewport(NODE_START);
+        let mut left_boundary_buffer = Buffer::empty(left_boundary_state.viewport_bounds);
+        {
+            let mut world_buffer =
+                WorldBuffer::new(&mut left_boundary_buffer, &left_boundary_state);
+            plot_viewport_graph_with_highlights(
+                &viewport_graph,
+                &mut world_buffer,
+                &mut renderer,
+                &original_graph,
+                VisualDetail::Full,
+                &node_highlights,
+                &[],
+                &cell_highlights,
+                &[],
+                &node_lowlights,
+                &theme,
+            );
+
+            assert_eq!(
+                world_buffer.get_char(WorldPos::new(NODE_START - 2, 0)),
+                Some(' ')
+            );
+            assert_eq!(
+                world_buffer.get_char(WorldPos::new(NODE_START - 1, 0)),
+                Some(' ')
+            );
+            for offset in 0..3i64 {
+                let (base, style) = world_buffer
+                    .get_char_styled(WorldPos::new(NODE_START + offset, 0))
+                    .expect("should render a node boundary base");
+                assert_eq!(base, b"ACG"[offset as usize] as char);
+                assert_eq!(style.bg, Some(Color::Blue));
+            }
+        }
+        assert_eq!(renderer.calls, 2);
+
+        let offscreen_state = test_plotter_viewport(NODE_START + NODE_LENGTH + 10);
+        let mut offscreen_buffer = Buffer::empty(offscreen_state.viewport_bounds);
+        let mut offscreen_renderer = SequenceRenderer {
+            sequence: String::new(),
+            calls: 0,
+        };
+        {
+            let mut world_buffer = WorldBuffer::new(&mut offscreen_buffer, &offscreen_state);
+            plot_viewport_graph_with_highlights(
+                &viewport_graph,
+                &mut world_buffer,
+                &mut offscreen_renderer,
+                &original_graph,
+                VisualDetail::Full,
+                &node_highlights,
+                &[],
+                &cell_highlights,
+                &[],
+                &node_lowlights,
+                &theme,
+            );
+
+            for offset in 0..5i64 {
+                let world_x = NODE_START + NODE_LENGTH + 8 + offset;
+                assert_eq!(world_buffer.get_char(WorldPos::new(world_x, 0)), Some(' '));
+            }
+        }
+        assert_eq!(offscreen_renderer.calls, 0);
+    }
 }

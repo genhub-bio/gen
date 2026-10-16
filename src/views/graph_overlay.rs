@@ -11,11 +11,10 @@ use ratatui::style::Color;
 use crate::views::annotation_track::AnnotationSpan;
 
 /// Remembers the color last chosen for each annotation id by the greedy conflict-avoiding
-/// assignment in `gen_graph_widget::reapply_overlays`. That pass reruns every frame (the
-/// live TUI viewers repaint whenever the overlay set changes with scrolling), so without
-/// this cache an annotation's color could reshuffle between frames even when nothing near
-/// it actually changed. Owned alongside the `Vec<GraphOverlay>` it colors, by whichever
-/// viewer (full-screen, inline, Jupyter) owns that list.
+/// assignment in `gen_graph_widget::reapply_overlays`. Viewers may reapply highlights when
+/// overlays change or the viewport is rebuilt; this cache keeps colors stable across those
+/// passes. It is owned alongside the `Vec<GraphOverlay>` it colors by the viewer that owns
+/// that list.
 #[derive(Clone, Default)]
 pub struct AnnotationColorCache {
     colors: HashMap<HashId, Color>,
@@ -70,7 +69,7 @@ pub fn project_path_overlay_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -
 /// `Search` overlays for explicit region-search highlights. `Adhoc` is the Jupyter widget's
 /// ephemeral highlight, produced by its `show()` entry point for both named and anonymous
 /// (`Locus`/`Position`) targets; the TUI viewers don't expose an equivalent.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum OverlaySource {
     /// Loaded as a member of a named track: an annotation file or annotation group.
     Track(String),
@@ -88,7 +87,7 @@ pub enum OverlaySource {
 /// are both entries in one highlight list (a `HighlightKind::Path` vs `Cells`/`Edge`),
 /// so both are repainted the same way every frame. They differ only in payload — a span
 /// is a labelled sub-node byte range, a path is a route through whole nodes.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum OverlayContent {
     /// A labelled annotation span, painted as a sub-node cell highlight.
     Span(AnnotationSpan),
@@ -98,7 +97,7 @@ pub enum OverlayContent {
 
 /// Something painted onto the graph canvas as a colour highlight: an annotation span
 /// (with or without a label) or the current path.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct GraphOverlay {
     pub content: OverlayContent,
     pub source: OverlaySource,
