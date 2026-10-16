@@ -58,7 +58,7 @@ mod tests {
             ..Default::default()
         };
 
-        let node_sizer = GenGraphNodeSizer;
+        let node_sizer = GenGraphNodeSizer::default();
         let mut controller = GraphController::new_with_config(gen_graph, node_sizer, config);
 
         // Load all partitions

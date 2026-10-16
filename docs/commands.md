@@ -107,6 +107,12 @@ being downloaded in full when the server supports range requests. Otherwise,
 the file is streamed into the cache and reused locally. Run `gen cache-clear` to
 remove the cache. Local repository files and `.gen/assets` are not affected.
 
+# Full-screen viewer zoom
+
+In the full-screen graph viewer, `-` doubles the number of bases represented by
+each cell and `+` halves it. Zooming remains proportional within full detail;
+zoomed-out nodes use aggregate `·` cells.
+
 # FASTA import
 
 Use `gen import fasta <path-or-uri>` to import a FASTA. BGZF-compressed inputs
