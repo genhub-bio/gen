@@ -945,6 +945,7 @@ fn prepare_local_sorted_annotation(
             archive_checksum,
             materialized_checksum,
         },
+        true,
     )?;
 
     let sidecar_temp_dir = TempDir::new_in(&cache_dir)?;
@@ -1730,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_annotation_file_sorts_local_gff_and_builds_csi() {
+    fn test_add_annotation_file_sorts_local_gff() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
         let annotation_path = context
@@ -1740,9 +1741,9 @@ mod tests {
             .join("features.gff3");
         let input = concat!(
             "##gff-version 3\n",
-            "m123\tsource\tgene\t600000020\t600000025\t.\t+\t.\tName=Beta-feature\n",
-            "m123\tsource\tgene\t600000002\t600000004\t.\t+\t.\tName=Alpha-feature\n",
-            "m123\tsource\tgene\t600000010\t600000012\t.\t-\t.\tName=Gamma-feature\n",
+            "m123\tsource\tgene\t20\t25\t.\t+\t.\tName=Beta-feature\n",
+            "m123\tsource\tgene\t2\t4\t.\t+\t.\tName=Alpha-feature\n",
+            "m123\tsource\tgene\t10\t12\t.\t-\t.\tName=Gamma-feature\n",
         );
         let source_checksum = calculate_reader_checksum(input.as_bytes())
             .expect("should checksum original unsorted GFF input");
@@ -1766,18 +1767,10 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&annotation_path).unwrap(), input);
         let assets = AssetRef::all(graph_conn).expect("should load generated annotation assets");
-        assert_eq!(assets.len(), 2);
         let annotation = assets
             .iter()
             .find(|asset| asset.role == AssetRole::Annotation)
             .expect("should track GFF source");
-        let coordinate_index = assets
-            .iter()
-            .find(|asset| asset.role == AssetRole::AnnotationIndex)
-            .expect("should track CSI coordinate index");
-        assert!(annotation.uri.ends_with(".gff3.bgz"));
-        assert!(coordinate_index.uri.ends_with(".csi"));
-        assert_eq!(coordinate_index.file_type, FileTypes::Tabix.as_str());
 
         let source_path = annotation
             .versioned_store_path(context.workspace())
@@ -1786,9 +1779,6 @@ mod tests {
         let archive_checksum = calculate_reader_checksum(retained_bgzf_bytes.as_slice())
             .expect("should checksum retained BGZF archive bytes");
         assert_eq!(annotation.checksum, Some(archive_checksum));
-        let coordinate_index_path = coordinate_index
-            .versioned_store_path(context.workspace())
-            .expect("should resolve retained CSI index");
         let mut bgzf_reader = noodles::bgzf::io::Reader::new(
             fs::File::open(&source_path).expect("should open retained BGZF source"),
         );
@@ -1805,8 +1795,63 @@ mod tests {
             .filter(|line| !line.starts_with('#'))
             .map(|line| line.split('\t').nth(3).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(sorted_positions, ["600000002", "600000010", "600000020"]);
+        assert_eq!(sorted_positions, ["2", "10", "20"]);
+    }
 
+    #[test]
+    fn test_add_annotation_file_builds_local_gff_csi() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let annotation_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("features.gff3");
+        let input = concat!(
+            "##gff-version 3\n",
+            "m123\tsource\tgene\t600000002\t600000004\t.\t+\t.\tName=Alpha-feature\n",
+            "m123\tsource\tgene\t600000020\t600000025\t.\t+\t.\tName=Beta-feature\n",
+        );
+        fs::write(&annotation_path, input).expect("should write sorted GFF input");
+
+        add_annotation_file(
+            &context,
+            annotation_path
+                .to_str()
+                .expect("should encode annotation path"),
+            None,
+            None,
+            Some("indexed-gff"),
+            None,
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should index local GFF input");
+
+        let assets = AssetRef::all(graph_conn).expect("should load generated annotation assets");
+        assert_eq!(assets.len(), 2);
+        let annotation = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::Annotation)
+            .expect("should track GFF source");
+        let coordinate_index = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::AnnotationIndex)
+            .expect("should track CSI coordinate index");
+        assert!(annotation.uri.ends_with(".gff3.bgz"));
+        assert!(coordinate_index.uri.ends_with(".csi"));
+        assert_eq!(coordinate_index.file_type, FileTypes::Tabix.as_str());
+        assert_eq!(
+            coordinate_index.upstream_asset_ref_id,
+            Some(annotation.id),
+            "CSI metadata should link to its annotation source"
+        );
+
+        let source_path = annotation
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained BGZF source");
+        let coordinate_index_path = coordinate_index
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained CSI index");
         let coordinate_index = noodles::csi::fs::read(&coordinate_index_path)
             .expect("should read coordinate index generated from BGZF bytes");
         let mut indexed_reader = noodles::csi::io::IndexedReader::new(

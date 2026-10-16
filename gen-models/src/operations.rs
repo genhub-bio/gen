@@ -86,10 +86,7 @@ pub enum FileSource {
     },
     /// A finalized BGZF file with checksums calculated while it was produced.
     StagedBgzf {
-        /// Path to the staged BGZF file on the workspace asset directory's filesystem.
-        ///
-        /// The retained asset shares its inode with this file. Do not modify its contents after
-        /// preparation; removing this path is safe.
+        /// Path to the staged BGZF file.
         path: PathBuf,
         /// SHA-256 of the exact compressed BGZF bytes.
         archive_checksum: Sha256Hash,
@@ -491,6 +488,7 @@ impl FileAddition {
                     compression: compression_type,
                     checksum_override,
                 },
+                false,
             );
         }
 
@@ -511,13 +509,15 @@ impl FileAddition {
 
     /// Prepares a source as a retained BGZF asset.
     ///
-    /// Reader sources use the established streaming archive path. Staged BGZF sources retain their
-    /// already-finalized bytes and use the supplied compressed and decoded checksums.
+    /// Reader sources use the established streaming archive path. For staged BGZF sources,
+    /// Staged BGZF files are moved when `move_file` is true and copied otherwise. Reader sources
+    /// always use the streaming archive path regardless of `move_file`.
     pub fn prepare_from_source(
         workspace: &Workspace,
         source_uri: &str,
         file_type: FileTypes,
         source: FileSource,
+        move_file: bool,
     ) -> Result<FileAddition, FileAdditionError> {
         if LocalAssetUri::is_index_path(source_uri) {
             return Err(FileAdditionError::FileReadError(io::Error::new(
@@ -563,10 +563,18 @@ impl FileAddition {
         ));
         if let Some(staged_path) = staged_path {
             fs::create_dir_all(&asset_dir).map_err(FileAdditionError::FileReadError)?;
-            match fs::hard_link(staged_path, &asset_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(FileAdditionError::FileReadError(error)),
+            let same_asset_path = staged_path == asset_path
+                || (asset_path.exists()
+                    && fs::canonicalize(&staged_path).map_err(FileAdditionError::FileReadError)?
+                        == fs::canonicalize(&asset_path)
+                            .map_err(FileAdditionError::FileReadError)?);
+            if !same_asset_path {
+                if move_file {
+                    fs::rename(staged_path, &asset_path)
+                        .map_err(FileAdditionError::FileReadError)?;
+                } else {
+                    fs::copy(staged_path, &asset_path).map_err(FileAdditionError::FileReadError)?;
+                }
             }
         }
 
@@ -1970,18 +1978,14 @@ mod tests {
     }
 
     #[test]
-    fn test_file_addition_prepare_from_source_retains_staged_bgzf() {
+    fn test_file_addition_prepare_from_source_copies_staged_bgzf_independently() {
         let context = setup_gen();
         let asset_dir = context.workspace().asset_dir().unwrap();
         fs::create_dir_all(&asset_dir).expect("should create asset directory");
-        let staged_path = asset_dir.join("sorted-source.gff3.bgz");
-        let materialized_contents =
-            b"##gff-version 3\nchr1\tsource\tgene\t1\t5\t.\t+\t.\tID=gene1\n";
-        let mut bgzf_writer = noodles::bgzf::io::Writer::new(Vec::new());
-        bgzf_writer
-            .write_all(materialized_contents)
-            .expect("should write finalized BGZF source");
-        let bgzf_contents = bgzf_writer.finish().expect("should finish BGZF source");
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/simple.fa.bgz");
+        let bgzf_contents = fs::read(fixture_path).expect("should read BGZF fixture");
+        let staged_path = asset_dir.join("staged-source.fa.bgz");
         fs::write(&staged_path, &bgzf_contents).expect("should write ordinary staged file");
         let archive_checksum = calculate_reader_checksum(bgzf_contents.as_slice())
             .expect("should checksum compressed BGZF bytes");
@@ -1991,15 +1995,16 @@ mod tests {
 
         let addition = FileAddition::prepare_from_source(
             context.workspace(),
-            "sorted-source.gff3",
-            FileTypes::Gff3,
+            "sorted-source.fa",
+            FileTypes::Fasta,
             FileSource::StagedBgzf {
                 path: staged_path.clone(),
                 archive_checksum,
                 materialized_checksum,
             },
+            false,
         )
-        .expect("should retain a regular staged BGZF path");
+        .expect("should copy a regular staged BGZF path");
         let asset_path = asset_dir.join(
             addition
                 .hashed_filename()
@@ -2010,6 +2015,73 @@ mod tests {
         assert_eq!(addition.materialized_checksum, Some(materialized_checksum));
         assert_eq!(fs::read(&asset_path).unwrap(), bgzf_contents);
         assert_eq!(fs::read(&staged_path).unwrap(), bgzf_contents);
+
+        fs::write(&staged_path, b"modified staged source")
+            .expect("should modify the retained source after copying");
+        assert_eq!(
+            fs::read(&asset_path).unwrap(),
+            bgzf_contents,
+            "the retained copy should not share the source file"
+        );
+    }
+
+    #[test]
+    fn test_file_addition_prepare_from_source_moves_staged_bgzf() {
+        let context = setup_gen();
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        fs::create_dir_all(&asset_dir).expect("should create asset directory");
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/simple.fa.bgz");
+        let bgzf_contents = fs::read(fixture_path).expect("should read BGZF fixture");
+        let staged_path = asset_dir.join("staged-source.fa.bgz");
+        fs::write(&staged_path, &bgzf_contents).expect("should write ordinary staged file");
+        let archive_checksum = calculate_reader_checksum(bgzf_contents.as_slice())
+            .expect("should checksum compressed BGZF bytes");
+        let materialized_checksum =
+            calculate_reader_checksum(noodles::bgzf::io::Reader::new(Cursor::new(&bgzf_contents)))
+                .expect("should checksum decoded BGZF contents");
+
+        let addition = FileAddition::prepare_from_source(
+            context.workspace(),
+            "sorted-source.fa",
+            FileTypes::Fasta,
+            FileSource::StagedBgzf {
+                path: staged_path.clone(),
+                archive_checksum,
+                materialized_checksum,
+            },
+            true,
+        )
+        .expect("should move a regular staged BGZF path");
+        let asset_path = asset_dir.join(
+            addition
+                .hashed_filename()
+                .expect("should derive content-addressed BGZF filename"),
+        );
+
+        assert!(
+            !staged_path.exists(),
+            "moving should consume the source path"
+        );
+        assert_eq!(fs::read(&asset_path).unwrap(), bgzf_contents);
+
+        let addition_from_asset_path = FileAddition::prepare_from_source(
+            context.workspace(),
+            "sorted-source.fa",
+            FileTypes::Fasta,
+            FileSource::StagedBgzf {
+                path: asset_path.clone(),
+                archive_checksum,
+                materialized_checksum,
+            },
+            false,
+        )
+        .expect("should copy an already-canonical staged path without truncating it");
+        assert_eq!(addition, addition_from_asset_path);
+        assert!(
+            asset_path.exists(),
+            "same-path move should preserve the asset"
+        );
     }
 
     #[test]
