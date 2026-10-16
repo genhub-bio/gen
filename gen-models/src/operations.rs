@@ -15,8 +15,9 @@
 //! contents live in the workspace asset store or remote object storage addressed by the URI.
 
 use std::{
-    io::{self, BufReader},
-    path::Path,
+    fs,
+    io::{self, BufReader, Read},
+    path::{Path, PathBuf},
 };
 
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
@@ -70,6 +71,31 @@ pub struct OperationFileInfo {
     pub checksum: Option<Sha256Hash>,
     #[serde(default)]
     pub materialized_checksum: Option<Sha256Hash>,
+}
+
+/// Describes a file source that can be prepared as a content-addressed operation asset.
+pub enum FileSource {
+    /// A classified stream that will be archived with the existing BGZF staging path.
+    Reader {
+        /// Stream containing the source bytes.
+        reader: Box<dyn Read>,
+        /// Compression format already detected for the source stream.
+        compression: CompressionType,
+        /// Expected SHA-256 of the original source bytes, if supplied by the caller.
+        checksum_override: Option<Sha256Hash>,
+    },
+    /// A finalized BGZF file with checksums calculated while it was produced.
+    StagedBgzf {
+        /// Path to the staged BGZF file on the workspace asset directory's filesystem.
+        ///
+        /// The retained asset shares its inode with this file. Do not modify its contents after
+        /// preparation; removing this path is safe.
+        path: PathBuf,
+        /// SHA-256 of the exact compressed BGZF bytes.
+        archive_checksum: Sha256Hash,
+        /// SHA-256 of the decoded BGZF content.
+        materialized_checksum: Sha256Hash,
+    },
 }
 
 impl OperationFile {
@@ -456,13 +482,15 @@ impl FileAddition {
             let source_reader = asset_uri.reader(workspace)?;
             let (compression_type, replayed_reader) =
                 CompressionType::sniff(source_reader).map_err(FileAdditionError::FileReadError)?;
-            return Self::prepare_from_reader(
+            return Self::prepare_from_source(
                 workspace,
                 file_path,
                 file_type,
-                replayed_reader,
-                compression_type,
-                checksum_override,
+                FileSource::Reader {
+                    reader: Box::new(replayed_reader),
+                    compression: compression_type,
+                    checksum_override,
+                },
             );
         }
 
@@ -481,17 +509,15 @@ impl FileAddition {
         })
     }
 
-    /// Stores an asset from a source stream that has already been classified.
+    /// Prepares a source as a retained BGZF asset.
     ///
-    /// Streaming importers can inspect a bounded prefix once, then send the replayed reader through
-    /// the same content-addressed archive path used by ordinary local preparation.
-    pub fn prepare_from_reader(
+    /// Reader sources use the established streaming archive path. Staged BGZF sources retain their
+    /// already-finalized bytes and use the supplied compressed and decoded checksums.
+    pub fn prepare_from_source(
         workspace: &Workspace,
         source_uri: &str,
         file_type: FileTypes,
-        reader: impl io::Read + 'static,
-        compression_type: CompressionType,
-        source_checksum_override: Option<Sha256Hash>,
+        source: FileSource,
     ) -> Result<FileAddition, FileAdditionError> {
         if LocalAssetUri::is_index_path(source_uri) {
             return Err(FileAdditionError::FileReadError(io::Error::new(
@@ -500,24 +526,51 @@ impl FileAddition {
             )));
         }
 
-        let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
-            workspace,
-            file_type,
-            reader,
-            compression_type,
-            source_checksum_override,
-        )
-        .map_err(|error| match error {
-            FileAdditionError::ChecksumError(message) => {
-                FileAdditionError::ChecksumError(format!("{message}: {source_uri}"))
+        let (archive_checksum, materialized_checksum, staged_path) = match source {
+            FileSource::Reader {
+                reader,
+                compression,
+                checksum_override,
+            } => {
+                let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
+                    workspace,
+                    file_type,
+                    reader,
+                    compression,
+                    checksum_override,
+                )
+                .map_err(|error| match error {
+                    FileAdditionError::ChecksumError(message) => {
+                        FileAdditionError::ChecksumError(format!("{message}: {source_uri}"))
+                    }
+                    error => error,
+                })?;
+                let materialized_checksum =
+                    (compression == CompressionType::Plain).then_some(source_checksum);
+                (archive_checksum, materialized_checksum, None)
             }
-            error => error,
-        })?;
-        let repo_root = workspace.repo_root()?;
-        let asset_path = workspace.asset_dir()?.join(format!(
+            FileSource::StagedBgzf {
+                path,
+                archive_checksum,
+                materialized_checksum,
+            } => (archive_checksum, Some(materialized_checksum), Some(path)),
+        };
+
+        let asset_dir = workspace.asset_dir()?;
+        let asset_path = asset_dir.join(format!(
             "{archive_checksum}.{}.bgz",
             FileTypes::suffix(file_type)
         ));
+        if let Some(staged_path) = staged_path {
+            fs::create_dir_all(&asset_dir).map_err(FileAdditionError::FileReadError)?;
+            match fs::hard_link(staged_path, &asset_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(FileAdditionError::FileReadError(error)),
+            }
+        }
+
+        let repo_root = workspace.repo_root()?;
         let relative_path = asset_path
             .strip_prefix(&repo_root)
             .map_err(|_| FileAdditionError::PathOutsideRepo {
@@ -527,8 +580,6 @@ impl FileAddition {
             .to_string_lossy();
         let stored_asset_uri = LocalAssetUri::asset_uri(&relative_path);
         let checksum = Some(archive_checksum);
-        let materialized_checksum =
-            (compression_type == CompressionType::Plain).then_some(source_checksum);
 
         Ok(FileAddition {
             id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),
@@ -2210,6 +2261,49 @@ mod tests {
         std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
             .expect("should decode retained BGZF archive");
         assert_eq!(decoded_contents, source_contents);
+    }
+
+    #[test]
+    fn test_file_addition_prepare_from_source_retains_staged_bgzf() {
+        let context = setup_gen();
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        fs::create_dir_all(&asset_dir).expect("should create asset directory");
+        let staged_path = asset_dir.join("sorted-source.gff3.bgz");
+        let materialized_contents =
+            b"##gff-version 3\nchr1\tsource\tgene\t1\t5\t.\t+\t.\tID=gene1\n";
+        let mut bgzf_writer = noodles::bgzf::io::Writer::new(Vec::new());
+        bgzf_writer
+            .write_all(materialized_contents)
+            .expect("should write finalized BGZF source");
+        let bgzf_contents = bgzf_writer.finish().expect("should finish BGZF source");
+        fs::write(&staged_path, &bgzf_contents).expect("should write ordinary staged file");
+        let archive_checksum = calculate_reader_checksum(bgzf_contents.as_slice())
+            .expect("should checksum compressed BGZF bytes");
+        let materialized_checksum =
+            calculate_reader_checksum(noodles::bgzf::io::Reader::new(Cursor::new(&bgzf_contents)))
+                .expect("should checksum decoded BGZF contents");
+
+        let addition = FileAddition::prepare_from_source(
+            context.workspace(),
+            "sorted-source.gff3",
+            FileTypes::Gff3,
+            FileSource::StagedBgzf {
+                path: staged_path.clone(),
+                archive_checksum,
+                materialized_checksum,
+            },
+        )
+        .expect("should retain a regular staged BGZF path");
+        let asset_path = asset_dir.join(
+            addition
+                .hashed_filename()
+                .expect("should derive content-addressed BGZF filename"),
+        );
+
+        assert_eq!(addition.checksum, Some(archive_checksum));
+        assert_eq!(addition.materialized_checksum, Some(materialized_checksum));
+        assert_eq!(fs::read(&asset_path).unwrap(), bgzf_contents);
+        assert_eq!(fs::read(&staged_path).unwrap(), bgzf_contents);
     }
 
     #[test]
