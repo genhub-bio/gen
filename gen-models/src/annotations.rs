@@ -776,23 +776,16 @@ pub fn annotation_index_file_path(
     let mut candidates = vec![format!("{path}.csi"), format!("{path}.tbi")];
     let path_buf = PathBuf::from(path);
     if let Some(extension) = path_buf.extension().and_then(|ext| ext.to_str()) {
-        let mut extension_candidate = path_buf.clone();
-        extension_candidate.set_extension(format!("{extension}.csi"));
-        let extension_candidate = extension_candidate.to_string_lossy().to_string();
-        if !candidates
-            .iter()
-            .any(|candidate| candidate == &extension_candidate)
-        {
-            candidates.push(extension_candidate);
-        }
-        let mut extension_candidate = path_buf.clone();
-        extension_candidate.set_extension(format!("{extension}.tbi"));
-        let extension_candidate = extension_candidate.to_string_lossy().to_string();
-        if !candidates
-            .iter()
-            .any(|candidate| candidate == &extension_candidate)
-        {
-            candidates.push(extension_candidate);
+        for suffix in ["csi", "tbi"] {
+            let mut extension_candidate = path_buf.clone();
+            extension_candidate.set_extension(format!("{extension}.{suffix}"));
+            let extension_candidate = extension_candidate.to_string_lossy().to_string();
+            if !candidates
+                .iter()
+                .any(|candidate| candidate == &extension_candidate)
+            {
+                candidates.push(extension_candidate);
+            }
         }
     }
 
@@ -864,25 +857,12 @@ pub struct AnnotationFileChecksumOverrides {
     pub index: Option<Sha256Hash>,
 }
 
-struct PreparedAnnotationSidecar {
-    file_addition: FileAddition,
-    role: AssetRole,
-    logical_path: String,
-    name: String,
-}
-
-struct PreparedAnnotationFile {
-    file_addition: FileAddition,
-    logical_path: String,
-    sidecars: Vec<PreparedAnnotationSidecar>,
-}
-
 fn prepare_local_sorted_annotation(
     workspace: &Workspace,
     path: &str,
     file_type: FileTypes,
     checksum_override: Option<Sha256Hash>,
-) -> Result<PreparedAnnotationFile, AnnotationFileError> {
+) -> Result<(FileAddition, FileAddition), AnnotationFileError> {
     let cache_dir = workspace
         .find_cache_dir()
         .ok_or_else(|| {
@@ -954,8 +934,6 @@ fn prepare_local_sorted_annotation(
         None,
     )?;
     file_addition.materialized_checksum = Some(materialized_checksum);
-    let logical_path =
-        OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
 
     let sidecar_temp_dir = TempDir::new_in(&cache_dir)?;
     let coordinate_index_path = sidecar_temp_dir.path().join("coordinate.csi");
@@ -964,27 +942,14 @@ fn prepare_local_sorted_annotation(
     coordinate_index_writer.write_index(&coordinate_index)?;
     coordinate_index_writer.into_inner().finish()?.flush()?;
 
-    let filename = Path::new(&logical_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("annotation");
-    let sidecars = vec![PreparedAnnotationSidecar {
-        file_addition: FileAddition::prepare(
-            workspace,
-            &coordinate_index_path.to_string_lossy(),
-            FileTypes::Tabix,
-            None,
-        )?,
-        role: AssetRole::AnnotationIndex,
-        logical_path: format!("{logical_path}.csi"),
-        name: format!("{filename}.csi"),
-    }];
+    let index_file_addition = FileAddition::prepare(
+        workspace,
+        &coordinate_index_path.to_string_lossy(),
+        FileTypes::Tabix,
+        None,
+    )?;
 
-    Ok(PreparedAnnotationFile {
-        file_addition,
-        logical_path,
-        sidecars,
-    })
+    Ok((file_addition, index_file_addition))
 }
 
 /// Adds an annotation asset and its available indexes to operation history.
@@ -1012,64 +977,75 @@ pub fn add_annotation_file(
             parse_annotation_file_type(&ext)?
         }
     };
-    let prepared_annotation = if matches!(file_type, FileTypes::Gff3 | FileTypes::Bed)
-        && LocalAssetUri::is_local_path_or_file_uri(path)
-    {
-        // Sorting changes compressed offsets, so local GFF/BED sidecars are always rebuilt against
-        // the retained BGZF bytes. A supplied coordinate index describes the original input bytes.
-        prepare_local_sorted_annotation(workspace, path, file_type, checksum_overrides.annotation)?
-    } else {
-        let file_addition =
-            FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
-        let logical_path =
-            OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
-        let mut sidecars = Vec::new();
-        if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
-            let index_file_type = FileTypes::infer_from_path(&index_path);
-            let index_file_addition = FileAddition::prepare(
-                workspace,
-                &index_path,
-                index_file_type,
-                checksum_overrides.index,
-            )?;
-            let index_logical_path = OperationFile::storage_file_path(
-                workspace,
-                &index_path,
-                index_file_addition.checksum.as_ref(),
-            )?;
-            let index_name = Path::new(&index_path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| index_path.clone());
-            sidecars.push(PreparedAnnotationSidecar {
-                file_addition: index_file_addition,
-                role: AssetRole::AnnotationIndex,
-                logical_path: index_logical_path,
-                name: index_name,
-            });
-        }
-        PreparedAnnotationFile {
-            file_addition,
-            logical_path,
-            sidecars,
-        }
-    };
-    let file_addition = &prepared_annotation.file_addition;
-    let annotation_logical_path = &prepared_annotation.logical_path;
     let name = name.or_else(|| Path::new(path).file_name().and_then(|value| value.to_str()));
     let name_value = name.unwrap_or_default();
-    let annotation_asset_ref_id = AssetRef::id_hash(
-        file_addition,
-        &AssetRole::Annotation,
-        Some(annotation_logical_path),
+    let (file_addition, logical_path, sidecars) =
+        if matches!(file_type, FileTypes::Gff3 | FileTypes::Bed)
+            && LocalAssetUri::is_local_path_or_file_uri(path)
+        {
+            // Sorting changes compressed offsets, so local GFF/BED sidecars are always rebuilt against
+            // the retained BGZF bytes. A supplied coordinate index describes the original input bytes.
+            let (file_addition, index_file_addition) = prepare_local_sorted_annotation(
+                workspace,
+                path,
+                file_type,
+                checksum_overrides.annotation,
+            )?;
+            let logical_path =
+                OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
+            let filename = Path::new(&logical_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("annotation");
+            let sidecars = vec![(
+                index_file_addition,
+                format!("{logical_path}.csi"),
+                format!("{filename}.csi"),
+            )];
+            (file_addition, logical_path, sidecars)
+        } else {
+            let file_addition =
+                FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
+            let logical_path =
+                OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
+            let mut sidecars = Vec::new();
+            if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
+                let index_file_type = FileTypes::infer_from_path(&index_path);
+                let index_file_addition = FileAddition::prepare(
+                    workspace,
+                    &index_path,
+                    index_file_type,
+                    checksum_overrides.index,
+                )?;
+                let index_logical_path = OperationFile::storage_file_path(
+                    workspace,
+                    &index_path,
+                    index_file_addition.checksum.as_ref(),
+                )?;
+                let index_name = Path::new(&index_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| index_path.clone());
+                sidecars.push((index_file_addition, index_logical_path, index_name));
+            }
+            (file_addition, logical_path, sidecars)
+        };
+    let created_on = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should create annotation asset timestamp");
+    let annotation_asset_ref = AssetRef::from_file_addition(
+        &file_addition,
+        AssetRole::Annotation,
+        Some(&logical_path),
         name,
         None,
+        created_on,
     );
-    let index_file_addition_ids = prepared_annotation
-        .sidecars
+    let annotation_asset_ref_id = annotation_asset_ref.id;
+    let index_file_addition_ids = sidecars
         .iter()
-        .map(|sidecar| sidecar.file_addition.id.to_string())
+        .map(|(file_addition, _, _)| file_addition.id.to_string())
         .collect::<Vec<_>>()
         .join(":");
     let log_id = HashId(calculate_hash(&format!(
@@ -1079,33 +1055,24 @@ pub fn add_annotation_file(
     let summary = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("Add annotation file {path}"));
-    let created_on = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .expect("should create annotation asset timestamp");
-    let mut tracked_assets = vec![AssetRef::from_file_addition(
-        file_addition,
-        AssetRole::Annotation,
-        Some(annotation_logical_path),
-        name,
-        None,
-        created_on,
-    )];
-    for sidecar in &prepared_annotation.sidecars {
-        tracked_assets.push(AssetRef::from_file_addition(
-            &sidecar.file_addition,
-            sidecar.role.clone(),
-            Some(&sidecar.logical_path),
-            Some(&sidecar.name),
+    let mut asset_refs = vec![annotation_asset_ref];
+    for (file_addition, logical_path, index_name) in &sidecars {
+        asset_refs.push(AssetRef::from_file_addition(
+            file_addition,
+            AssetRole::AnnotationIndex,
+            Some(logical_path),
+            Some(index_name),
             Some(&annotation_asset_ref_id),
             created_on,
         ));
     }
+
     track_asset_refs(
         graph_conn,
         Some(&log_id),
         &OperationKind::AnnotationFile,
         &summary,
-        &tracked_assets,
+        &asset_refs,
     )?;
     let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
     if history_store.status()?.is_empty() {
