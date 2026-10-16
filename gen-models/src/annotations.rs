@@ -21,7 +21,10 @@ use thiserror::Error;
 use crate::{
     Direction, ForeignKeyCache, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
-    assets::{AssetRef, AssetRole, AssetUri, CompressionType, LocalAssetUri, OperationKind},
+    assets::{
+        AssetRef, AssetRole, AssetUri, ChecksummedWriter, CompressionType, LocalAssetUri,
+        OperationKind,
+    },
     db::{DbContext, GraphConnection, max_rows_per_batch},
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
@@ -29,8 +32,8 @@ use crate::{
     history::{HistoryStore, dolt::DoltHistoryStore},
     interval_tree::IntervalTreeSource,
     operations::{
-        FileAddition, OperationFile, OperationInfo, OperationSummary, calculate_reader_checksum,
-        track_asset_refs,
+        FileAddition, FileSource, OperationFile, OperationInfo, OperationSummary,
+        calculate_reader_checksum, track_asset_refs,
     },
     region::GenRegionError,
     select::query_models,
@@ -894,9 +897,13 @@ fn prepare_local_sorted_annotation(
             Box::new(MultiGzDecoder::new(replayed_reader))
         }
     };
+    let asset_dir = workspace
+        .asset_dir()
+        .map_err(FileAdditionError::ConfigError)?;
+    fs::create_dir_all(&asset_dir)?;
     let mut sorted_source = TempFileBuilder::new()
         .suffix(&format!(".{}.bgz", FileTypes::suffix(file_type)))
-        .tempfile_in(&cache_dir)?;
+        .tempfile_in(&asset_dir)?;
     let format = match file_type {
         FileTypes::Gff3 => gai::SortFormat::Gff,
         FileTypes::Bed => gai::SortFormat::Bed,
@@ -906,8 +913,11 @@ fn prepare_local_sorted_annotation(
             ));
         }
     };
-    let coordinate_index = {
-        let mut bgzf_writer = noodles::bgzf::io::Writer::new(sorted_source.as_file_mut());
+
+    // GAI sorts, writes a .bgz and returns an index all in one pass.
+    let (coordinate_index, archive_checksum) = {
+        let checksummed_writer = ChecksummedWriter::new(sorted_source.as_file_mut());
+        let mut bgzf_writer = noodles::bgzf::io::Writer::new(checksummed_writer);
         let coordinate_index = match gai::sort_bgzf_with_csi(
             BufReader::new(source_reader),
             &mut bgzf_writer,
@@ -920,20 +930,22 @@ fn prepare_local_sorted_annotation(
                 return Err(error.into());
             }
         };
-        bgzf_writer.finish()?.flush()?;
-        coordinate_index
+        let mut checksummed_writer = bgzf_writer.finish()?;
+        checksummed_writer.flush()?;
+        (coordinate_index, checksummed_writer.checksum())
     };
     let materialized_checksum =
         calculate_reader_checksum(noodles::bgzf::io::Reader::new(sorted_source.reopen()?))?;
-    let mut file_addition = FileAddition::prepare_from_reader(
+    let file_addition = FileAddition::prepare_from_source(
         workspace,
         path,
         file_type,
-        sorted_source.reopen()?,
-        CompressionType::Bgzf,
-        None,
+        FileSource::StagedBgzf {
+            path: sorted_source.path().to_path_buf(),
+            archive_checksum,
+            materialized_checksum,
+        },
     )?;
-    file_addition.materialized_checksum = Some(materialized_checksum);
 
     let sidecar_temp_dir = TempDir::new_in(&cache_dir)?;
     let coordinate_index_path = sidecar_temp_dir.path().join("coordinate.csi");
@@ -1770,6 +1782,10 @@ mod tests {
         let source_path = annotation
             .versioned_store_path(context.workspace())
             .expect("should resolve retained BGZF source");
+        let retained_bgzf_bytes = fs::read(&source_path).expect("should read retained BGZF bytes");
+        let archive_checksum = calculate_reader_checksum(retained_bgzf_bytes.as_slice())
+            .expect("should checksum retained BGZF archive bytes");
+        assert_eq!(annotation.checksum, Some(archive_checksum));
         let coordinate_index_path = coordinate_index
             .versioned_store_path(context.workspace())
             .expect("should resolve retained CSI index");
