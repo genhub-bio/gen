@@ -269,10 +269,10 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Open the workspace at `path`, creating it if it does not exist. `path` may be the workspace
-    /// or its `.gen` directory; when omitted the workspace is discovered from the current
-    /// directory. `committer` and `email` become the identity recorded on operations made through
-    /// this object.
+    /// Open the project directory at `path`, creating it if needed. If it has no `.gen`
+    /// directory, a new repository is initialized there. When `path` is omitted, the current
+    /// working directory is used. `committer` and `email` become the identity recorded on
+    /// operations made through this object.
     #[new]
     #[pyo3(signature = (path = Option::<String>::None, committer = None, email = None))]
     fn new(path: Option<String>, committer: Option<&str>, email: Option<&str>) -> PyResult<Self> {

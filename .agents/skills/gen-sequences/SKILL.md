@@ -23,6 +23,13 @@ so edit through Gen and read the result back as strings. Do not export to FASTA,
 with `sed`/Biopython/string slicing and re-import: that loses history, annotations and
 alternatives. Biopython is fine for parsing records you then hand to `repo.import_sequence()`.
 
+## Workspace layout
+
+`gen.Repository(path)` treats `path` as the **project directory** and stores Gen data in
+`path/.gen/`. When omitted, it uses the current working directory. Keep ordinary project
+files beside `.gen/`; `.git/` may coexist for code. In a script, use
+`gen.Repository(str(project_dir))` where `project_dir` is the project folder.
+
 A **sequence graph can hold many sequences**: after a library import, `stack=True` edit or
 VCF, one graph has many paths. `graph.all_sequences()` returns every distinct path as a `Sequence`
 (`str(sequence)` is its bases). It builds the whole list, so avoid it on very large libraries. `locus.sequence` is the string for one region. A `Sample`
@@ -92,5 +99,8 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
   patches, `gen transform`, `gen propagate-annotations`), or when the user wants shell
   commands or Python is unavailable. `references/cli.md` maps every CLI command to its Python
   call and has the command recipes. Both work on the same `.gen` workspace.
+- Add project README and final report files as Gen assets after writing them with
+  `repo.add_file()`. Gen tracks only files explicitly added or imported; see `files.md` for
+  asset snapshots and verification.
 - Gen exposes sequence context; primer thermodynamics, specificity and functional predictions
   need domain tools.
