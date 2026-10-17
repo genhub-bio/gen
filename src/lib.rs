@@ -24,6 +24,7 @@ pub mod patch;
 #[cfg(feature = "profiling")]
 pub mod profiling;
 mod progress_bar;
+pub use progress_bar::get_time_elapsed_bar;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
 pub mod theme;
