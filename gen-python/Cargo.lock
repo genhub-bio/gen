@@ -2502,7 +2502,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libdoltlite-sys"
 version = "0.38.23"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-windows-master#2cc6ac681c3ac4b6b91472a0fe4cffa274985cd4"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-windows-master#d81e1becc7366d6e65c06326c6434004924b36e3"
 dependencies = [
  "cc",
  "curl-sys",
@@ -4489,7 +4489,7 @@ dependencies = [
 [[package]]
 name = "rusqdoltlite"
 version = "0.41.0"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-windows-master#2cc6ac681c3ac4b6b91472a0fe4cffa274985cd4"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-windows-master#d81e1becc7366d6e65c06326c6434004924b36e3"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",
