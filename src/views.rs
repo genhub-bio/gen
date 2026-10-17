@@ -1,5 +1,6 @@
 pub mod annotation_files;
 pub mod annotation_groups;
+mod annotation_loading;
 pub mod annotation_track;
 pub mod annotations;
 pub mod block_group;
