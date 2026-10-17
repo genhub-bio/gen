@@ -1,8 +1,9 @@
 """Repository properties and widget display controls without sequence editing."""
 
-from pathlib import Path
+import gzip
 import tempfile
 import unittest
+from pathlib import Path
 
 import gen
 
@@ -53,20 +54,46 @@ class GeneralApiTests(RepositoryTestCase):
         self.assertEqual(operation.committer, "gen")
         self.assertEqual(operation.email, "gen@genhub.bio")
 
-    def test_import_annotations_detects_format_and_index(self):
+    def test_import_annotations_detects_format_and_rebuilds_csi_index(self):
         self.repository.import_fasta(str(FIXTURES / "simple.fa"))
         annotation = self.root / "genes.gff"
-        annotation.write_bytes((FIXTURES / "simple.gff").read_bytes())
-        index = self.root / "genes.gff.tbi"
-        index.write_bytes(b"index fixture")
+        fixture_lines = (FIXTURES / "simple.gff").read_text().splitlines()
+        fixture_records = [line for line in fixture_lines if not line.startswith("#")]
+        expected_positions = sorted(int(line.split("\t")[3]) for line in fixture_records)
+        fixture_headers = [line for line in fixture_lines if line.startswith("#")]
+        annotation.write_text(
+            "\n".join([*fixture_headers, *reversed(fixture_records)]) + "\n"
+        )
+        stale_index = self.root / "genes.gff.tbi"
+        stale_index.write_bytes(b"stale index for the original source")
         commit_hash = self.repository.import_annotations(
             str(annotation), name="genes", message="Add genes"
         )
         self.assertEqual(self.repository.get_operations()[0].id, commit_hash)
         self.assertEqual(self.repository.get_operations()[0].message, "Add genes")
-        asset_names = {asset.name for asset in self.repository.get_assets()}
+        assets = self.repository.get_assets()
+        asset_names = {asset.name for asset in assets}
         self.assertIn("genes", asset_names)
-        self.assertIn(index.name, asset_names)
+        self.assertIn("genes.gff.csi", asset_names)
+        self.assertNotIn(stale_index.name, asset_names)
+
+        coordinate_index = next(
+            asset for asset in assets if asset.name == "genes.gff.csi"
+        )
+        saved_index = coordinate_index.save_as(self.root / "generated-index.csi")
+        self.assertTrue(
+            gzip.decompress(saved_index.read_bytes()).startswith(b"CSI\x01"),
+            "local annotation imports should retain a real CSI index",
+        )
+
+        annotation_asset = next(asset for asset in assets if asset.name == "genes")
+        saved_annotation = annotation_asset.save_as(self.root / "retained.gff")
+        indexed_positions = [
+            int(line.split("\t")[3])
+            for line in saved_annotation.read_text().splitlines()
+            if not line.startswith("#")
+        ]
+        self.assertEqual(indexed_positions, expected_positions)
 
     def test_import_annotations_accepts_explicit_format(self):
         annotation = self.root / "genes"

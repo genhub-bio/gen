@@ -92,6 +92,7 @@ mod tests {
     use gen_models::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::Assets,
+        file_types::FileTypes,
     };
 
     use super::load_annotation_file_entries;
@@ -121,7 +122,30 @@ mod tests {
             entries[0].file_addition.file_type,
             gen_models::file_types::FileTypes::Gff3
         );
-        assert!(entries[0].index_file_addition.is_none());
+
+        let annotation_files = Assets::get_annotation_files(context.graph().conn(), None)
+            .expect("should load the annotation and generated coordinate index");
+        assert_eq!(annotation_files.len(), 1);
+        let annotation_assets = &annotation_files[0];
+        let coordinate_index = annotation_assets
+            .index
+            .as_ref()
+            .expect("should generate a coordinate index for a locally imported GFF");
+        assert_eq!(coordinate_index.file_type, FileTypes::Tabix.as_str());
+        assert!(coordinate_index.uri.ends_with(".csi"));
+        assert_eq!(
+            coordinate_index.upstream_asset_ref_id,
+            Some(annotation_assets.annotation.id),
+            "generated CSI should be associated with its source annotation"
+        );
+
+        let loaded_coordinate_index = entries[0]
+            .index_file_addition
+            .as_ref()
+            .expect("should retain the generated coordinate index in the viewer entry");
+        assert_eq!(loaded_coordinate_index.id, coordinate_index.id);
+        assert_eq!(loaded_coordinate_index.asset_uri, coordinate_index.uri);
+        assert_eq!(loaded_coordinate_index.file_type, FileTypes::Tabix);
     }
 
     #[test]
