@@ -18,12 +18,13 @@
 //! A repository remote URL and an asset URI have separate meanings here. A repository
 //! `file://` remote points directly to another Dolt database (or a workspace containing
 //! `.gen/default.db`), so graph operations use that path directly and transfers happen
-//! directly between the workspaces. For an HTTP(S) repository remote, Gen requests a scoped,
-//! short-lived transfer capability, installs the returned URL as the graph database's Dolt
-//! remote, performs the operation, and restores the canonical URL. An authorization failure
-//! is retried once with a fresh capability. Failure to restore the canonical URL is reported
-//! as a warning because the graph transfer may already have succeeded and will be replaced on
-//! the next attempt.
+//! directly between the workspaces. For a GenHub remote, clone and pull use a scoped,
+//! short-lived HTTP capability as the graph database's Dolt remote. Push instead opens a
+//! direct GCS database URI behind an in-process loopback `RemoteServer`, stages the Dolt push,
+//! and asks GenHub to publish the accepted manifest. An idempotency token persisted with the
+//! push operation lets an interrupted push resume its staged session. Failure to restore a
+//! temporary clone or pull URL is reported as a warning because the graph transfer may already
+//! have succeeded and the canonical URL will be restored on the next attempt.
 //!
 //! Assets referenced by the transferred branch are handled after the graph operation.
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
@@ -43,9 +44,11 @@
 //! then the assets are transfered. Thus, an asset transfer can fail and need to be resumed. We
 //! track the state of asset transfers and checkpoint after each commit is successfully transfered.
 //! When the entire commit range has been transfered, we mark the operation as complete. For pushes,
-//! a server provides a transfer ID and expiry that serve as a lease. Gen persists both so an
-//! interrupted asset phase can reuse an active lease, while an expired lease triggers fresh graph
-//! authorization. The lease restricts uploads to a single client and is released after assets are
+//! the client idempotency token identifies a durable direct-GCS staging session. Gen persists that
+//! token and the transfer lease so an interrupted graph push can reopen the same session and resume
+//! from its accepted manifest checkpoints. An expired lease is renewed against the same session
+//! before graph or asset requests continue. Changing the push destination starts a distinct
+//! session. The lease restricts asset uploads to a single client and is released after assets are
 //! uploaded.
 //!
 //! Pull records the branch commit from before the Dolt operation so downloads can
@@ -60,9 +63,11 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    fmt,
     fs::{self, OpenOptions},
     io::{self, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use base64::{Engine as _, engine::general_purpose};
@@ -87,7 +92,7 @@ use gen_models::{
     },
     operations::{
         Defaults, Remote, RemoteBranch, RemoteOperationKind as StoredRemoteOperationKind,
-        RemoteOperationRecord, calculate_file_checksum,
+        RemoteOperationRecord, calculate_file_checksum, calculate_reader_checksum,
     },
 };
 use indexmap::IndexMap;
@@ -98,19 +103,34 @@ use reqwest::{
     blocking::{Body, Client, Response},
     header::{CONTENT_RANGE, RANGE},
 };
-use rusqlite::Error as SqlError;
+use rusqlite::{Error as SqlError, RemoteFailureKind};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 use uuid::Uuid;
+
+mod capability;
+mod direct_gcs;
+
+use capability::{
+    PushCapabilityRenewal, PushTransferLease, acquire_existing_push_renewal, transfer_authorization,
+};
+use direct_gcs::{
+    PushGraphTransferError, PushGraphTransferRequest, is_non_fast_forward_push_error,
+    run_push_graph_transfer,
+};
 
 use crate::{
     commands::remote::{
         client::{
             AssetTransferCompletionRequest, AssetTransferRequest, AssetUploadReceipt,
-            CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
-            acquire_asset_transfers, acquire_capability, complete_asset_transfers,
+            RemoteClientError, RemoteOperation, RepositoryRemote, acquire_asset_transfers,
+            complete_asset_transfers,
         },
         login_origin,
+        progress::{
+            AssetDownloadProgressReporter, AssetUploadProgressReporter,
+            GraphUploadProgressReporter, TransferProgress, UploadBodyReader, format_elapsed,
+        },
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
 };
@@ -172,46 +192,6 @@ fn file_remote_workspace(remote_url: &str) -> Result<Workspace, Box<dyn Error>> 
     Ok(workspace)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PushTransferLease {
-    transfer_id: Uuid,
-    expires_at: i64,
-}
-
-struct GraphTransferAuthorization {
-    remote_url: String,
-    push_lease: Option<PushTransferLease>,
-}
-
-fn transfer_authorization(
-    remote: &Remote,
-    operation: RemoteOperation,
-    branch: Option<&str>,
-    force: bool,
-) -> Result<GraphTransferAuthorization, Box<dyn Error>> {
-    if remote.url.starts_with("file://") {
-        return Ok(GraphTransferAuthorization {
-            remote_url: file_graph_url(&remote.url)?,
-            push_lease: None,
-        });
-    }
-    let repository = RepositoryRemote::parse(&remote.url)?;
-    let request = CapabilityRequest {
-        operation,
-        branch,
-        force,
-    };
-    let capability = acquire_capability(&repository, &request, login_origin)?;
-    let push_lease = (operation == RemoteOperation::Push).then_some(PushTransferLease {
-        transfer_id: capability.transfer_id,
-        expires_at: capability.expires_at.timestamp(),
-    });
-    Ok(GraphTransferAuthorization {
-        remote_url: capability.remote_url,
-        push_lease,
-    })
-}
-
 fn ensure_graph_remote(
     graph: &GraphConnection,
     remote_name: &str,
@@ -237,10 +217,7 @@ fn restore_canonical_url(graph: &GraphConnection, remote: &Remote) {
 }
 
 fn is_authorization_error(error: &SqlError) -> bool {
-    matches!(
-        error,
-        SqlError::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_AUTH
-    )
+    error.remote_failure_kind() == Some(RemoteFailureKind::Authorization)
 }
 
 fn resolve_remote(
@@ -280,6 +257,34 @@ fn connect_persisted_branch(
     Ok(persisted_branch)
 }
 
+fn persist_refreshed_push_lease(
+    operation: &mut RemoteOperationRecord,
+    config: &ConfigConnection,
+    destination_hash: &DoltHashId,
+    renewal: &PushCapabilityRenewal,
+) -> Result<(), Box<dyn Error>> {
+    let lease = renewal.ensure_fresh()?;
+    if operation
+        .transfer_id
+        .is_some_and(|transfer_id| transfer_id != lease.transfer_id)
+    {
+        return Err(Box::new(PushGraphTransferError::Protocol(
+            "GenHub changed the active push transfer ID".to_string(),
+        )));
+    }
+    if operation.transfer_id != Some(lease.transfer_id)
+        || operation.transfer_expires_at != Some(lease.expires_at)
+    {
+        operation.set_push_destination(
+            config,
+            destination_hash,
+            lease.transfer_id,
+            lease.expires_at,
+        )?;
+    }
+    Ok(())
+}
+
 fn run_graph_transfer(
     graph: &GraphConnection,
     remote: &Remote,
@@ -289,8 +294,13 @@ fn run_graph_transfer(
     mut transfer: impl FnMut() -> Result<(), SqlError>,
 ) -> Result<Option<PushTransferLease>, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
-        let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
-        ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
+        let authorization =
+            transfer_authorization(remote, operation, Some(branch), force, None, login_origin)?;
+        let remote_url = authorization
+            .remote_url
+            .as_deref()
+            .ok_or("file remote did not resolve to a graph database URL")?;
+        ensure_graph_remote(graph, &remote.name, remote_url)?;
         let result = transfer();
         restore_canonical_url(graph, remote);
         result?;
@@ -299,8 +309,17 @@ fn run_graph_transfer(
 
     let mut last_error = None;
     for attempt in 0..2 {
-        let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
-        ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
+        let authorization =
+            transfer_authorization(remote, operation, Some(branch), force, None, login_origin)?;
+        let Some(remote_url) = authorization.remote_url.as_deref() else {
+            restore_canonical_url(graph, remote);
+            return Err(format!(
+                "GenHub {:?} capability did not include a graph remote URL",
+                operation
+            )
+            .into());
+        };
+        ensure_graph_remote(graph, &remote.name, remote_url)?;
         match transfer() {
             Ok(()) => {
                 restore_canonical_url(graph, remote);
@@ -334,6 +353,26 @@ fn push_graph_branch(
     }
 }
 
+fn push_graph_branch_with_progress(
+    graph: &GraphConnection,
+    remote_name: &str,
+    branch: &str,
+    force: bool,
+    progress: &GraphUploadProgressReporter,
+) -> Result<(), SqlError> {
+    let progress_callback = progress.clone();
+    let push_result = {
+        let _progress_callback = graph.dolt_push_progress_callback(move |event| {
+            progress_callback.report_dolt_progress(event);
+        })?;
+        push_graph_branch(graph, remote_name, branch, force)
+    };
+    if !matches!(&push_result, Err(error) if is_non_fast_forward_push_error(error)) {
+        progress.finish_dolt_progress(push_result.is_ok());
+    }
+    push_result
+}
+
 fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
     asset
         .checksum
@@ -347,18 +386,24 @@ fn materialized_asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn E
     }
 }
 
-fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String), std::io::Error> {
+fn calculate_upload_checksums(
+    path: &Path,
+    progress: &AssetUploadProgressReporter,
+) -> Result<(Sha256Hash, String, String), std::io::Error> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut sha256 = Sha256::new();
     let mut md5 = Md5::new();
     let mut crc32c = 0;
+    let mut bytes_read = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let length = reader.read(&mut buffer)?;
         if length == 0 {
             break;
         }
+        bytes_read += length as u64;
+        progress.checksum_bytes(bytes_read);
         sha256.update(&buffer[..length]);
         md5.update(&buffer[..length]);
         crc32c = crc32c_append(crc32c, &buffer[..length]);
@@ -370,11 +415,35 @@ fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String
     ))
 }
 
+fn progress_asset_name(asset: &AssetRef, source_path: &Path) -> String {
+    let name = asset
+        .logical_path
+        .as_deref()
+        .or_else(|| source_path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or("asset");
+    sanitize_progress_label(name)
+}
+
+fn sanitize_progress_label(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn upload_asset(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
+    index: usize,
+    total: usize,
+    progress: &TransferProgress,
 ) -> Result<AssetUploadReceipt, Box<dyn Error>> {
     let relative_path = LocalAssetUri::path_from_uri(&asset.uri)
         .ok_or_else(|| format!("Invalid local asset URI: {}", asset.uri))?;
@@ -392,14 +461,49 @@ fn upload_asset(
             asset.logical_path.as_deref(),
         )?
     };
-    let (actual_checksum, md5, crc32c) =
-        calculate_upload_checksums(&source_path).map_err(|error| {
-            format!(
-                "Unable to read asset {} at {}: {error}",
-                asset.id,
-                source_path.display()
-            )
-        })?;
+    let length = fs::metadata(&source_path)?.len();
+    let progress = progress.asset_reporter(
+        index,
+        total,
+        progress_asset_name(asset, &source_path),
+        length,
+    );
+    let result = upload_asset_with_progress(
+        client,
+        asset,
+        url,
+        source_path,
+        expected_checksum,
+        length,
+        &progress,
+    );
+    if result.is_err() {
+        progress.failed();
+    }
+    result
+}
+
+fn upload_asset_with_progress(
+    client: &Client,
+    asset: &AssetRef,
+    url: &str,
+    source_path: PathBuf,
+    expected_checksum: Sha256Hash,
+    length: u64,
+    progress: &AssetUploadProgressReporter,
+) -> Result<AssetUploadReceipt, Box<dyn Error>> {
+    progress.checksum_started();
+    let (actual_checksum, md5, crc32c) = {
+        let _heartbeat = progress.heartbeat("scanning and checksumming the local asset");
+        calculate_upload_checksums(&source_path, progress)
+    }
+    .map_err(|error| {
+        format!(
+            "Unable to read asset {} at {}: {error}",
+            asset.id,
+            source_path.display()
+        )
+    })?;
     if actual_checksum != expected_checksum {
         return Err(format!(
             "Asset {} at {} does not match its recorded checksum",
@@ -409,17 +513,31 @@ fn upload_asset(
         .into());
     }
     let file = fs::File::open(&source_path)?;
-    let length = file.metadata()?.len();
-    let response = client
-        .put(url)
-        .header("content-type", "application/octet-stream")
-        // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
-        // composite objects (those > 5GB)
-        .header("content-md5", &md5)
-        .header("x-goog-if-generation-match", "0")
-        .body(Body::sized(file, length))
-        .send()
-        .map_err(|error| error.without_url())?;
+    if file.metadata()?.len() != length {
+        return Err(format!(
+            "Asset {} at {} changed size while its checksum was being verified",
+            asset.id,
+            source_path.display()
+        )
+        .into());
+    }
+    progress.checksum_verified();
+    progress.upload_started();
+    let request_body = UploadBodyReader::new(file, progress.clone());
+    let response = {
+        let _heartbeat =
+            progress.heartbeat("sending the asset request and waiting for storage acceptance");
+        client
+            .put(url)
+            .header("content-type", "application/octet-stream")
+            // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
+            // composite objects (those > 5GB)
+            .header("content-md5", &md5)
+            .header("x-goog-if-generation-match", "0")
+            .body(Body::sized(request_body, length))
+            .send()
+            .map_err(|error| error.without_url())?
+    };
     if !response.status().is_success()
         && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
     {
@@ -429,6 +547,11 @@ fn upload_asset(
             response.status()
         )
         .into());
+    }
+    if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+        progress.upload_already_present();
+    } else {
+        progress.upload_accepted();
     }
     Ok(AssetUploadReceipt {
         id: asset.id,
@@ -456,6 +579,63 @@ struct AssetTransferTarget<'transfer> {
     range: AssetTransferRange<'transfer>,
 }
 
+struct AssetTransferRun<'transfer> {
+    target: AssetTransferTarget<'transfer>,
+    progress: &'transfer TransferProgress,
+}
+
+struct AssetDownloadBatch<'progress> {
+    progress: &'progress TransferProgress,
+    total: usize,
+    next_index: usize,
+}
+
+impl<'progress> AssetDownloadBatch<'progress> {
+    fn from_commits(
+        progress: &'progress TransferProgress,
+        assets_by_commit: &IndexMap<DoltHashId, Vec<AssetRef>>,
+    ) -> Self {
+        let total = assets_by_commit.values().map(Vec::len).sum();
+        let mut known_bytes = 0_u64;
+        let mut unknown_size_assets = 0;
+        for asset in assets_by_commit.values().flatten() {
+            if let Some(size) = asset.size.and_then(|size| u64::try_from(size).ok()) {
+                known_bytes = known_bytes.saturating_add(size);
+            } else {
+                unknown_size_assets += 1;
+            }
+        }
+        progress.report_asset_download_plan(total, known_bytes, unknown_size_assets);
+        Self {
+            progress,
+            total,
+            next_index: 0,
+        }
+    }
+
+    fn start_asset(&mut self, asset: &AssetRef) -> AssetDownloadProgressReporter {
+        self.next_index += 1;
+        let name = asset
+            .name
+            .clone()
+            .or_else(|| {
+                asset
+                    .logical_path
+                    .as_deref()
+                    .and_then(|path| path.rsplit('/').next())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| asset.id.to_string());
+        let name = sanitize_progress_label(&name);
+        self.progress.asset_download_reporter(
+            self.next_index,
+            self.total,
+            name,
+            asset.size.and_then(|size| u64::try_from(size).ok()),
+        )
+    }
+}
+
 /// This is effectively a dirty file check. On clones/pulls we want to update
 /// files if they match previously known checksums. The previous asset set is cumulative
 /// so a workspace that still contains any committed version
@@ -465,6 +645,7 @@ fn destination_matches_previous_asset(
     destination_path: &Path,
     existing_checksum: &Sha256Hash,
     previous_assets: &HashMap<HashId, AssetRef>,
+    progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<bool, Box<dyn Error>> {
     let mut decoded_destination_checksum = None;
     let mut destination_decode_failed = false;
@@ -500,9 +681,16 @@ fn destination_matches_previous_asset(
             continue;
         }
         // Hash mismatch means cached bytes may be partial, corrupt, or locally modified.
-        if !calculate_file_checksum(&archived_path)
-            .is_ok_and(|checksum| checksum == archive_checksum)
-        {
+        let archived_checksum = if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                &archived_path,
+                progress,
+                "checking a previous asset archive",
+            )
+        } else {
+            calculate_file_checksum(&archived_path)
+        };
+        if !archived_checksum.is_ok_and(|checksum| checksum == archive_checksum) {
             continue;
         }
         // This means we can't hash the destination asset, so just skip everything else trying to use this checksum.
@@ -513,7 +701,16 @@ fn destination_matches_previous_asset(
         let existing_decoded_checksum = if let Some(checksum) = decoded_destination_checksum {
             checksum
         } else {
-            match decoded_compressed_checksum(destination_path) {
+            let checksum = if let Some(progress) = progress {
+                decoded_compressed_checksum_with_progress(
+                    destination_path,
+                    progress,
+                    "checking the existing workspace asset",
+                )
+            } else {
+                decoded_compressed_checksum(destination_path)
+            };
+            match checksum {
                 Ok(checksum) => {
                     decoded_destination_checksum = Some(checksum);
                     checksum
@@ -526,7 +723,16 @@ fn destination_matches_previous_asset(
             }
         };
         // Raw hash verification does not guarantee the archive stream can be decoded.
-        let Ok(archived_decoded_checksum) = decoded_compressed_checksum(&archived_path) else {
+        let archived_decoded_checksum = if let Some(progress) = progress {
+            decoded_compressed_checksum_with_progress(
+                &archived_path,
+                progress,
+                "checking a previous asset archive",
+            )
+        } else {
+            decoded_compressed_checksum(&archived_path)
+        };
+        let Ok(archived_decoded_checksum) = archived_decoded_checksum else {
             continue;
         };
         // Matching decoded bytes means different gzip/BGZF encodings represent a known workspace version.
@@ -549,6 +755,62 @@ fn decoded_compressed_checksum(path: &Path) -> Result<Sha256Hash, io::Error> {
         hasher.update(&buffer[..length]);
     }
     Ok(Sha256Hash(hasher.finalize().into()))
+}
+
+fn decoded_compressed_checksum_with_progress(
+    path: &Path,
+    reporter: &AssetDownloadProgressReporter,
+    phase: &str,
+) -> Result<Sha256Hash, io::Error> {
+    reporter.checksum_started(phase, None);
+    let decoder = MultiGzDecoder::new(fs::File::open(path)?);
+    let mut reader = CountingReader::new(decoder, |bytes| reporter.checksum_bytes(bytes));
+    calculate_reader_checksum(&mut reader)
+}
+
+struct CountingReader<R, F> {
+    reader: R,
+    bytes_read: u64,
+    report_bytes: F,
+}
+
+impl<R, F> CountingReader<R, F> {
+    fn new(reader: R, report_bytes: F) -> Self {
+        Self {
+            reader,
+            bytes_read: 0,
+            report_bytes,
+        }
+    }
+}
+
+impl<R, F> io::Read for CountingReader<R, F>
+where
+    R: io::Read,
+    F: FnMut(u64),
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.reader.read(buffer)?;
+        if read > 0 {
+            self.bytes_read = self.bytes_read.saturating_add(read as u64);
+            (self.report_bytes)(self.bytes_read);
+        }
+        Ok(read)
+    }
+}
+
+fn calculate_file_checksum_with_progress(
+    file_path: &Path,
+    reporter: &AssetDownloadProgressReporter,
+    phase: &str,
+) -> Result<Sha256Hash, io::Error> {
+    let expected_bytes = fs::metadata(file_path).ok().map(|metadata| metadata.len());
+    reporter.checksum_started(phase, expected_bytes);
+    let file = fs::File::open(file_path)?;
+    let mut reader = CountingReader::new(BufReader::new(file), |bytes| {
+        reporter.checksum_bytes(bytes);
+    });
+    calculate_reader_checksum(&mut reader)
 }
 
 /// If a conflict exists for a file we are pulling/cloning, rename it as .conflict for user resolution
@@ -611,6 +873,22 @@ fn content_range_starts_at(response: &Response, expected_start: u64) -> bool {
         == Some(expected_start)
 }
 
+fn content_range_total(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit_once('/'))
+        .and_then(|(_, total)| total.parse::<u64>().ok())
+}
+
+/// Keeps streamed response errors free of messages that may contain a signed URL.
+#[derive(Debug, thiserror::Error)]
+#[error("asset response body read failed ({kind:?})")]
+struct AssetResponseReadError {
+    kind: io::ErrorKind,
+}
+
 /// Streams a response directly to the durable staged file without buffering the asset in memory.
 ///
 /// Partial bytes are deliberately left in place when the stream fails so the next invocation can
@@ -619,6 +897,8 @@ fn stream_asset_response_to_staged_file(
     response: &mut Response,
     staged_path: &Path,
     append: bool,
+    resumed_bytes: u64,
+    progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<(), Box<dyn Error>> {
     let mut staged_file = OpenOptions::new()
         .create(true)
@@ -626,7 +906,21 @@ fn stream_asset_response_to_staged_file(
         .append(append)
         .truncate(!append)
         .open(staged_path)?;
-    io::copy(response, &mut staged_file)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_read = 0_u64;
+    loop {
+        let read = response.read(&mut buffer).map_err(|error| {
+            Box::new(AssetResponseReadError { kind: error.kind() }) as Box<dyn Error>
+        })?;
+        if read == 0 {
+            break;
+        }
+        staged_file.write_all(&buffer[..read])?;
+        bytes_read = bytes_read.saturating_add(read as u64);
+        if let Some(progress) = progress {
+            progress.download_bytes(resumed_bytes.saturating_add(bytes_read));
+        }
+    }
     staged_file.flush()?;
     staged_file.sync_all()?;
     Ok(())
@@ -634,32 +928,44 @@ fn stream_asset_response_to_staged_file(
 
 /// Completes or resumes one HTTP asset download in its durable staged file.
 ///
-/// [`download_to_versioned_store`] owns the final rename into `.gen/assets`; this function owns
+/// [`download_to_versioned_store_with_progress`] owns the final rename into `.gen/assets`; this function owns
 /// only the HTTP range protocol. It appends a valid partial response, overwrites the staged file
 /// when a server ignores `Range` and returns a complete response, and retries once from byte zero
 /// after an invalid partial response or a resumed checksum mismatch.
-fn download_to_staged_path(
+fn download_to_staged_path_with_progress(
     client: &Client,
     asset: &AssetRef,
     url: &str,
     staged_path: &Path,
     expected_checksum: &Sha256Hash,
+    progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<(), Box<dyn Error>> {
     let mut resume_offset = staged_path
         .metadata()
         .map(|metadata| metadata.len())
         .unwrap_or(0);
+    if let Some(progress) = progress {
+        progress.download_started(resume_offset);
+    }
     // Size is only a cheap hint. It avoids hashing a known-partial multi-gigabyte file before
     // resuming, while the checksum remains authoritative whenever the staged size could be final.
     let staged_size_could_be_complete = asset
         .size
         .and_then(|size| u64::try_from(size).ok())
         .is_none_or(|expected_size| expected_size == resume_offset);
-    if resume_offset > 0
-        && staged_size_could_be_complete
-        && calculate_file_checksum(staged_path).is_ok_and(|checksum| checksum == *expected_checksum)
-    {
-        return Ok(());
+    if resume_offset > 0 && staged_size_could_be_complete {
+        let checksum = if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                staged_path,
+                progress,
+                "verifying a resumed asset download",
+            )
+        } else {
+            calculate_file_checksum(staged_path)
+        };
+        if checksum.is_ok_and(|checksum| checksum == *expected_checksum) {
+            return Ok(());
+        }
     }
 
     loop {
@@ -667,7 +973,13 @@ fn download_to_staged_path(
         if resume_offset > 0 {
             request = request.header(RANGE, format!("bytes={resume_offset}-"));
         }
-        let mut response = request.send().map_err(|error| error.without_url())?;
+        let send_result = if let Some(progress) = progress {
+            let _heartbeat = progress.heartbeat("waiting for the asset download response");
+            request.send().map_err(|error| error.without_url())
+        } else {
+            request.send().map_err(|error| error.without_url())
+        };
+        let mut response = send_result?;
         let append = resume_offset > 0
             && response.status() == StatusCode::PARTIAL_CONTENT
             && content_range_starts_at(&response, resume_offset);
@@ -677,6 +989,9 @@ fn download_to_staged_path(
         if invalid_partial_response {
             fs::remove_file(staged_path)?;
             resume_offset = 0;
+            if let Some(progress) = progress {
+                progress.download_started(0);
+            }
             continue;
         }
         if !response.status().is_success() {
@@ -688,13 +1003,51 @@ fn download_to_staged_path(
             .into());
         }
 
-        stream_asset_response_to_staged_file(&mut response, staged_path, append)?;
-        if calculate_file_checksum(staged_path)? == *expected_checksum {
+        let effective_resume_offset = if append { resume_offset } else { 0 };
+        if let Some(progress) = progress {
+            let response_total = if append {
+                content_range_total(&response).or_else(|| {
+                    response
+                        .content_length()
+                        .map(|length| effective_resume_offset.saturating_add(length))
+                })
+            } else {
+                response.content_length()
+            };
+            if let Some(response_total) = response_total {
+                progress.set_expected_bytes(response_total);
+            }
+            progress.download_started(effective_resume_offset);
+        }
+
+        let body_heartbeat = progress.map(|reporter| reporter.heartbeat("downloading asset bytes"));
+        let stream_result = stream_asset_response_to_staged_file(
+            &mut response,
+            staged_path,
+            append,
+            effective_resume_offset,
+            progress,
+        );
+        drop(body_heartbeat);
+        stream_result?;
+        let checksum = if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                staged_path,
+                progress,
+                "verifying the downloaded asset checksum",
+            )?
+        } else {
+            calculate_file_checksum(staged_path)?
+        };
+        if checksum == *expected_checksum {
             return Ok(());
         }
         if append {
             fs::remove_file(staged_path)?;
             resume_offset = 0;
+            if let Some(progress) = progress {
+                progress.download_started(0);
+            }
             continue;
         }
 
@@ -703,25 +1056,37 @@ fn download_to_staged_path(
     }
 }
 
-/// Ensures that an HTTP asset exists under its checksum-derived `.gen/assets` path.
+/// Ensures an HTTP asset is available under its checksum-derived `.gen/assets` path.
 ///
-/// [`download_asset`] calls this storage phase before considering the logical workspace path. The
-/// returned boolean reports whether this call published new bytes; the returned file is always
-/// checksum-verified. No logical file is read or written here.
-fn download_to_versioned_store(
+/// [`download_asset_with_progress`] uses this storage phase before considering the logical
+/// workspace path. The returned boolean reports whether this call published new bytes; the
+/// returned file is always checksum-verified. No logical file is read or written here.
+fn download_to_versioned_store_with_progress(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
+    progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<(PathBuf, bool), Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
     let versioned_path =
         materialization_destination_path(workspace, &asset.uri, Some(&expected_checksum), None)?;
-    if versioned_path.exists()
-        && calculate_file_checksum(&versioned_path)
-            .is_ok_and(|checksum| checksum == expected_checksum)
-    {
-        return Ok((versioned_path, false));
+    if versioned_path.exists() {
+        let cached_checksum = if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                &versioned_path,
+                progress,
+                "checking the local asset cache",
+            )
+        } else {
+            calculate_file_checksum(&versioned_path)
+        };
+        if cached_checksum.is_ok_and(|checksum| checksum == expected_checksum) {
+            if let Some(progress) = progress {
+                progress.reused_cached_asset();
+            }
+            return Ok((versioned_path, false));
+        }
     }
 
     let asset_dir = versioned_path.parent().ok_or_else(|| {
@@ -732,7 +1097,14 @@ fn download_to_versioned_store(
     })?;
     fs::create_dir_all(asset_dir)?;
     let staged_path = temporary_path(&versioned_path)?;
-    download_to_staged_path(client, asset, url, &staged_path, &expected_checksum)?;
+    download_to_staged_path_with_progress(
+        client,
+        asset,
+        url,
+        &staged_path,
+        &expected_checksum,
+        progress,
+    )?;
     if versioned_path.exists() {
         fs::remove_file(&versioned_path)?;
     }
@@ -750,6 +1122,15 @@ fn copy_to_versioned_store(
     destination_workspace: &Workspace,
     asset: &AssetRef,
 ) -> Result<(PathBuf, bool), Box<dyn Error>> {
+    copy_to_versioned_store_with_progress(source_workspace, destination_workspace, asset, None)
+}
+
+fn copy_to_versioned_store_with_progress(
+    source_workspace: &Workspace,
+    destination_workspace: &Workspace,
+    asset: &AssetRef,
+    progress: Option<&AssetDownloadProgressReporter>,
+) -> Result<(PathBuf, bool), Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
     let source_path = materialization_destination_path(
         source_workspace,
@@ -757,7 +1138,16 @@ fn copy_to_versioned_store(
         Some(&expected_checksum),
         None,
     )?;
-    let source_checksum = calculate_file_checksum(&source_path).map_err(|error| {
+    let source_checksum = (if let Some(progress) = progress {
+        calculate_file_checksum_with_progress(
+            &source_path,
+            progress,
+            "verifying the source asset checksum",
+        )
+    } else {
+        calculate_file_checksum(&source_path)
+    })
+    .map_err(|error| {
         format!(
             "Unable to read versioned asset {} at {}: {error}",
             asset.id,
@@ -779,27 +1169,52 @@ fn copy_to_versioned_store(
         Some(&expected_checksum),
         None,
     )?;
-    if destination_path.exists()
-        && calculate_file_checksum(&destination_path)
-            .is_ok_and(|checksum| checksum == expected_checksum)
-    {
-        return Ok((destination_path, false));
+    if destination_path.exists() {
+        let destination_checksum = if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                &destination_path,
+                progress,
+                "checking the local asset cache",
+            )
+        } else {
+            calculate_file_checksum(&destination_path)
+        };
+        if destination_checksum.is_ok_and(|checksum| checksum == expected_checksum) {
+            if let Some(progress) = progress {
+                progress.reused_cached_asset();
+            }
+            return Ok((destination_path, false));
+        }
     }
 
-    copy_versioned_asset(&source_path, &destination_path, None, &expected_checksum)?;
+    copy_versioned_asset_with_progress(
+        &source_path,
+        &destination_path,
+        None,
+        &expected_checksum,
+        progress,
+        AssetCopyProgress::Download,
+    )?;
     Ok((destination_path, true))
 }
 
-/// Copies a versioned archive or restores it to a workspace path without premature replacement.
+#[derive(Clone, Copy)]
+enum AssetCopyProgress {
+    Download,
+    Materialize,
+}
+
+/// Copies a stored archive or restores it to a workspace path without premature replacement.
 ///
-/// Repository transfers preserve stored bytes, while workspace restoration decodes BGZF when a
-/// materialized checksum is recorded. The staged output is synced and verified before rename so
-/// incomplete or invalid data cannot replace the existing destination.
-fn copy_versioned_asset(
+/// Asset transfers use this stage to retain immutable bytes or decode BGZF for the workspace. The
+/// staged output is synced and verified before rename so incomplete data cannot replace the target.
+fn copy_versioned_asset_with_progress(
     versioned_path: &Path,
     destination_path: &Path,
     materialized_checksum: Option<&Sha256Hash>,
     expected_output_checksum: &Sha256Hash,
+    progress: Option<&AssetDownloadProgressReporter>,
+    copy_progress: AssetCopyProgress,
 ) -> Result<(), Box<dyn Error>> {
     let parent = destination_path.parent().ok_or_else(|| {
         format!(
@@ -816,16 +1231,40 @@ fn copy_versioned_asset(
             .truncate(true)
             .open(&staged_path)?;
         let versioned_file = fs::File::open(versioned_path)?;
+        if let Some(progress) = progress {
+            match copy_progress {
+                AssetCopyProgress::Download => progress.download_started(0),
+                AssetCopyProgress::Materialize => progress.materialization_started(),
+            }
+        }
         let staged_checksum = {
             let mut checksummed_writer = ChecksummedWriter::new(&mut staged_file);
             match materialized_checksum {
                 Some(_) => {
                     let mut decoded_file = bgzf::io::Reader::new(versioned_file);
-                    io::copy(&mut decoded_file, &mut checksummed_writer)?;
+                    if let Some(progress) = progress {
+                        let mut decoded_file = CountingReader::new(decoded_file, |bytes| {
+                            progress.materialized_bytes(bytes);
+                        });
+                        io::copy(&mut decoded_file, &mut checksummed_writer)?;
+                    } else {
+                        io::copy(&mut decoded_file, &mut checksummed_writer)?;
+                    }
                 }
                 None => {
                     let mut versioned_file = versioned_file;
-                    io::copy(&mut versioned_file, &mut checksummed_writer)?;
+                    if let Some(progress) = progress {
+                        let mut versioned_file =
+                            CountingReader::new(versioned_file, |bytes| match copy_progress {
+                                AssetCopyProgress::Download => progress.download_bytes(bytes),
+                                AssetCopyProgress::Materialize => {
+                                    progress.materialized_bytes(bytes)
+                                }
+                            });
+                        io::copy(&mut versioned_file, &mut checksummed_writer)?;
+                    } else {
+                        io::copy(&mut versioned_file, &mut checksummed_writer)?;
+                    }
                 }
             }
             checksummed_writer.flush()?;
@@ -861,6 +1300,26 @@ pub(crate) fn materialize_versioned_asset(
     versioned_path: &Path,
     versioned_file_created: bool,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
+    materialize_versioned_asset_with_progress(
+        workspace,
+        asset,
+        previous_assets,
+        destination_logical_path,
+        versioned_path,
+        versioned_file_created,
+        None,
+    )
+}
+
+fn materialize_versioned_asset_with_progress(
+    workspace: &Workspace,
+    asset: &AssetRef,
+    previous_assets: &HashMap<HashId, AssetRef>,
+    destination_logical_path: Option<&str>,
+    versioned_path: &Path,
+    versioned_file_created: bool,
+    progress: Option<&AssetDownloadProgressReporter>,
+) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
     let expected_materialized_checksum = materialized_asset_checksum(asset)?;
     if !versioned_path.is_file() {
@@ -871,7 +1330,16 @@ pub(crate) fn materialize_versioned_asset(
         )
         .into());
     }
-    if calculate_file_checksum(versioned_path)? != expected_checksum {
+    let versioned_checksum = if let Some(progress) = progress {
+        calculate_file_checksum_with_progress(
+            versioned_path,
+            progress,
+            "verifying the stored asset checksum",
+        )?
+    } else {
+        calculate_file_checksum(versioned_path)?
+    };
+    if versioned_checksum != expected_checksum {
         return Err(format!(
             "Versioned asset {} at {} does not match its recorded checksum",
             asset.id,
@@ -899,19 +1367,41 @@ pub(crate) fn materialize_versioned_asset(
             DownloadAssetOutcome::Unchanged
         });
     }
-    if destination_path.exists()
-        && calculate_file_checksum(&destination_path)
-            .is_ok_and(|checksum| checksum == expected_materialized_checksum)
-    {
-        return Ok(DownloadAssetOutcome::Unchanged);
+    if destination_path.exists() {
+        let destination_checksum = if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                &destination_path,
+                progress,
+                "checking the existing workspace asset",
+            )
+        } else {
+            calculate_file_checksum(&destination_path)
+        };
+        if destination_checksum.is_ok_and(|checksum| checksum == expected_materialized_checksum) {
+            return Ok(DownloadAssetOutcome::Unchanged);
+        }
     }
     let existing_checksum = if destination_path.exists() {
-        Some(calculate_file_checksum(&destination_path)?)
+        Some(if let Some(progress) = progress {
+            calculate_file_checksum_with_progress(
+                &destination_path,
+                progress,
+                "checking the existing workspace asset",
+            )?
+        } else {
+            calculate_file_checksum(&destination_path)?
+        })
     } else {
         None
     };
     let intended_change = if let Some(checksum) = existing_checksum.as_ref() {
-        destination_matches_previous_asset(workspace, &destination_path, checksum, previous_assets)?
+        destination_matches_previous_asset(
+            workspace,
+            &destination_path,
+            checksum,
+            previous_assets,
+            progress,
+        )?
     } else {
         false
     };
@@ -920,21 +1410,25 @@ pub(crate) fn materialize_versioned_asset(
         let (conflict_path, already_downloaded) =
             conflict_destination_path(&destination_path, &expected_materialized_checksum)?;
         if !already_downloaded {
-            copy_versioned_asset(
+            copy_versioned_asset_with_progress(
                 versioned_path,
                 &conflict_path,
                 asset.materialized_checksum.as_ref(),
                 &expected_materialized_checksum,
+                progress,
+                AssetCopyProgress::Materialize,
             )?;
         }
         return Ok(DownloadAssetOutcome::Conflict(conflict_path));
     }
 
-    copy_versioned_asset(
+    copy_versioned_asset_with_progress(
         versioned_path,
         &destination_path,
         asset.materialized_checksum.as_ref(),
         &expected_materialized_checksum,
+        progress,
+        AssetCopyProgress::Materialize,
     )?;
     Ok(DownloadAssetOutcome::Downloaded)
 }
@@ -943,7 +1437,7 @@ pub(crate) fn materialize_versioned_asset(
 ///
 /// [`transfer_assets`] calls this for each clone or pull URL returned by GenHub. Keeping the phases
 /// ordered here prevents an already-current logical file from bypassing `.gen/assets` population.
-fn download_asset(
+fn download_asset_with_progress(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
@@ -951,17 +1445,23 @@ fn download_asset(
     // `None` stores a historical version under `.gen/assets` instead of its recorded logical path.
     destination_logical_path: Option<&str>,
     url: &str,
+    progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let (versioned_path, versioned_file_created) =
-        download_to_versioned_store(client, workspace, asset, url)?;
-    materialize_versioned_asset(
+        download_to_versioned_store_with_progress(client, workspace, asset, url, progress)?;
+    let result = materialize_versioned_asset_with_progress(
         workspace,
         asset,
         previous_assets,
         destination_logical_path,
         &versioned_path,
         versioned_file_created,
-    )
+        progress,
+    )?;
+    if let Some(progress) = progress {
+        progress.completed();
+    }
+    Ok(result)
 }
 
 /// Reports a conflict returned by [`materialize_versioned_asset`] using workspace-relative paths.
@@ -997,38 +1497,66 @@ fn transfer_file_remote_assets(
     assets: &HashMap<HashId, AssetRef>,
     materialized_asset_ids: &HashSet<HashId>,
     previous_assets: &HashMap<HashId, AssetRef>,
+    download_batch: Option<&mut AssetDownloadBatch<'_>>,
 ) -> Result<(), Box<dyn Error>> {
     if assets.is_empty() {
         return Ok(());
     }
     let remote_workspace = file_remote_workspace(&remote.url)?;
+    let mut download_batch = download_batch;
     for asset in assets.values() {
         match operation {
             RemoteOperation::Push => {
                 copy_to_versioned_store(workspace, &remote_workspace, asset)?;
             }
             RemoteOperation::Clone | RemoteOperation::Pull => {
+                let reporter = download_batch
+                    .as_deref_mut()
+                    .map(|batch| batch.start_asset(asset));
                 let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
                     asset.logical_path.as_deref()
                 } else {
                     None
                 };
-                let (versioned_path, versioned_file_created) =
-                    copy_to_versioned_store(&remote_workspace, workspace, asset)?;
-                if let DownloadAssetOutcome::Conflict(conflict_path) = materialize_versioned_asset(
-                    workspace,
-                    asset,
-                    previous_assets,
-                    destination_logical_path,
-                    &versioned_path,
-                    versioned_file_created,
-                )? {
-                    warn_asset_conflict(
-                        workspace,
-                        asset,
-                        destination_logical_path,
-                        &conflict_path,
-                    )?;
+                let result = (|| {
+                    let (versioned_path, versioned_file_created) =
+                        copy_to_versioned_store_with_progress(
+                            &remote_workspace,
+                            workspace,
+                            asset,
+                            reporter.as_ref(),
+                        )?;
+                    if let DownloadAssetOutcome::Conflict(conflict_path) =
+                        materialize_versioned_asset_with_progress(
+                            workspace,
+                            asset,
+                            previous_assets,
+                            destination_logical_path,
+                            &versioned_path,
+                            versioned_file_created,
+                            reporter.as_ref(),
+                        )?
+                    {
+                        warn_asset_conflict(
+                            workspace,
+                            asset,
+                            destination_logical_path,
+                            &conflict_path,
+                        )?;
+                    }
+                    Ok::<(), Box<dyn Error>>(())
+                })();
+                if let Err(error) = result {
+                    if let Some(reporter) = reporter {
+                        let context = reporter.failed();
+                        return Err(
+                            format!("{context}: {}", safe_transfer_error(error.as_ref())).into(),
+                        );
+                    }
+                    return Err(error);
+                }
+                if let Some(reporter) = reporter {
+                    reporter.completed();
                 }
             }
         }
@@ -1072,9 +1600,12 @@ fn transfer_assets(
     workspace: &Workspace,
     remote: &Remote,
     operation: RemoteOperation,
-    target: AssetTransferTarget<'_>,
+    request: AssetTransferRun<'_>,
     mut complete_commit: impl FnMut(&DoltHashId) -> Result<(), Box<dyn Error>>,
+    mut before_transfer: impl FnMut() -> Result<(), Box<dyn Error>>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
+    let AssetTransferRun { target, progress } = request;
+    let asset_history_heartbeat = progress.heartbeat("planning branch asset history");
     let commit_hash = hash_of(graph, target.history_ref)?;
     let range_assets: HashMap<_, _> =
         AssetRef::get_cumulative_assets_at(graph, target.range.from_commit, Some(&commit_hash))?
@@ -1115,6 +1646,7 @@ fn transfer_assets(
         .filter(|(id, _)| !excluded_assets.contains_key(id))
         .map(|(id, asset)| (*id, asset.clone()))
         .collect();
+    drop(asset_history_heartbeat);
     if remote.url.starts_with("file://") {
         match operation {
             RemoteOperation::Push => transfer_file_remote_assets(
@@ -1124,13 +1656,15 @@ fn transfer_assets(
                 &assets,
                 &materialized_asset_ids,
                 &previous_assets,
+                None,
             )?,
             RemoteOperation::Clone | RemoteOperation::Pull => {
-                let assets_by_commit = get_remaining_assets_to_transfer(
-                    graph,
-                    target.range.from_commit,
-                    &commit_hash,
-                )?;
+                let assets_by_commit = {
+                    let _heartbeat = progress.heartbeat("planning asset download checkpoints");
+                    get_remaining_assets_to_transfer(graph, target.range.from_commit, &commit_hash)?
+                };
+                let mut download_batch =
+                    AssetDownloadBatch::from_commits(progress, &assets_by_commit);
                 for (commit_hash, assets) in assets_by_commit {
                     let assets = assets
                         .into_iter()
@@ -1143,6 +1677,7 @@ fn transfer_assets(
                         &assets,
                         &materialized_asset_ids,
                         &previous_assets,
+                        Some(&mut download_batch),
                     )?;
                     complete_commit(&commit_hash)?;
                 }
@@ -1152,16 +1687,34 @@ fn transfer_assets(
     }
 
     let repository = RepositoryRemote::parse(&remote.url)?;
-    let response = acquire_asset_transfers(
-        &repository,
-        &AssetTransferRequest {
-            operation,
-            branch: target.branch,
-            from_commit: target.range.from_commit,
-            to_commit: Some(&commit_hash),
-        },
-        login_origin,
-    )?;
+    if operation == RemoteOperation::Push {
+        let local_asset_count = assets.len();
+        let asset_label = if local_asset_count == 1 {
+            "asset"
+        } else {
+            "assets"
+        };
+        progress.println(&format!(
+            "Checking {local_asset_count} local {asset_label} for transfer..."
+        ));
+        {
+            let _heartbeat = progress.heartbeat("refreshing the push lease before asset transfer");
+            before_transfer()?;
+        }
+    }
+    let response = {
+        let _heartbeat = progress.heartbeat("requesting GenHub asset transfer URLs");
+        acquire_asset_transfers(
+            &repository,
+            &AssetTransferRequest {
+                operation,
+                branch: target.branch,
+                from_commit: target.range.from_commit,
+                to_commit: Some(&commit_hash),
+            },
+            login_origin,
+        )?
+    };
     let client = Client::new();
     for transfer in &response.assets {
         if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
@@ -1173,13 +1726,41 @@ fn transfer_assets(
         }
     }
     if operation == RemoteOperation::Push {
+        let upload_total = response
+            .assets
+            .iter()
+            .filter(|transfer| assets.contains_key(&transfer.id))
+            .count();
+        if upload_total == 0 {
+            progress.println("No new assets need uploading.");
+        } else {
+            let asset_label = if upload_total == 1 { "asset" } else { "assets" };
+            progress.println(&format!(
+                "Preparing {upload_total} {asset_label} for upload..."
+            ));
+        }
         let mut assets = assets;
         let mut upload_receipts = Vec::new();
+        let mut upload_index = 0;
         for transfer in response.assets {
             let Some(asset) = assets.remove(&transfer.id) else {
                 continue;
             };
-            upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
+            upload_index += 1;
+            {
+                let _heartbeat =
+                    progress.heartbeat("refreshing the push lease before asset upload");
+                before_transfer()?;
+            }
+            upload_receipts.push(upload_asset(
+                &client,
+                workspace,
+                &asset,
+                &transfer.url,
+                upload_index,
+                upload_total,
+                progress,
+            )?);
         }
         if !assets.is_empty() {
             return Err(format!(
@@ -1197,8 +1778,11 @@ fn transfer_assets(
         .into_iter()
         .map(|transfer| (transfer.id, transfer.url))
         .collect::<HashMap<_, _>>();
-    let assets_by_commit =
-        get_remaining_assets_to_transfer(graph, target.range.from_commit, &commit_hash)?;
+    let assets_by_commit = {
+        let _heartbeat = progress.heartbeat("planning asset download checkpoints");
+        get_remaining_assets_to_transfer(graph, target.range.from_commit, &commit_hash)?
+    };
+    let mut download_batch = AssetDownloadBatch::from_commits(progress, &assets_by_commit);
     for (commit_hash, assets) in assets_by_commit {
         for asset in assets {
             let Some(url) = transfer_urls.remove(&asset.id) else {
@@ -1213,14 +1797,28 @@ fn transfer_assets(
             } else {
                 None
             };
-            if let DownloadAssetOutcome::Conflict(conflict_path) = download_asset(
+            let reporter = download_batch.start_asset(&asset);
+            let download_result = download_asset_with_progress(
                 &client,
                 workspace,
                 &asset,
                 &previous_assets,
                 destination_logical_path,
                 &url,
-            )? {
+                Some(&reporter),
+            );
+            let outcome = match download_result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let progress_context = reporter.failed();
+                    return Err(format!(
+                        "{progress_context}: {}",
+                        safe_transfer_error(error.as_ref())
+                    )
+                    .into());
+                }
+            };
+            if let DownloadAssetOutcome::Conflict(conflict_path) = outcome {
                 warn_asset_conflict(workspace, &asset, destination_logical_path, &conflict_path)?;
             }
         }
@@ -1234,9 +1832,19 @@ pub fn clone_into_workspace(
     remote: &Remote,
     workspace: &Workspace,
 ) -> Result<String, Box<dyn Error>> {
+    let started = Instant::now();
+    let progress = TransferProgress::stderr();
+    progress.println("Preparing graph clone...");
     workspace.ensure_gen_dir();
-    let graph_path = workspace.graph_db_path()?;
-    let graph = get_raw_connection(graph_path)?;
+    let graph_path = workspace.graph_db_path().map_err(|error| {
+        clone_transfer_failure("resolving the local graph database path", started, &error)
+    })?;
+    let graph = {
+        let _heartbeat = progress.heartbeat("opening the local graph database");
+        get_raw_connection(graph_path).map_err(|error| {
+            clone_transfer_failure("opening the local graph database", started, &error)
+        })?
+    };
     let attempt_count = if remote.url.starts_with("file://") {
         1
     } else {
@@ -1244,8 +1852,61 @@ pub fn clone_into_workspace(
     };
     let mut clone_result = None;
     for attempt in 0..attempt_count {
-        let authorization = transfer_authorization(remote, RemoteOperation::Clone, None, false)?;
-        match clone_remote(&graph, &authorization.remote_url) {
+        let attempt_number = attempt + 1;
+        if attempt > 0 {
+            progress.println("Requesting fresh graph access for the clone retry...");
+        } else if remote.url.starts_with("file://") {
+            progress.println("Opening the local graph remote...");
+        } else {
+            progress.println(&format!(
+                "Requesting graph access (attempt {attempt_number}/{attempt_count})..."
+            ));
+        }
+        let authorization_phase = if remote.url.starts_with("file://") {
+            "opening the local graph remote"
+        } else {
+            "requesting GenHub graph clone capability"
+        };
+        let authorization_result = if remote.url.starts_with("file://") {
+            transfer_authorization(
+                remote,
+                RemoteOperation::Clone,
+                None,
+                false,
+                None,
+                login_origin,
+            )
+        } else {
+            let _heartbeat = progress.heartbeat(authorization_phase);
+            transfer_authorization(
+                remote,
+                RemoteOperation::Clone,
+                None,
+                false,
+                None,
+                login_origin,
+            )
+        };
+        let authorization = authorization_result.map_err(|error| {
+            clone_transfer_failure(authorization_phase, started, error.as_ref())
+        })?;
+        let remote_url = authorization.remote_url.as_deref().ok_or_else(|| {
+            clone_transfer_failure(
+                "reading the GenHub graph clone capability",
+                started,
+                &std::io::Error::other(
+                    "GenHub clone capability did not include a graph remote URL",
+                ),
+            )
+        })?;
+        progress.println(&format!(
+            "Cloning graph history (attempt {attempt_number}/{attempt_count})..."
+        ));
+        let clone_result_for_attempt = {
+            let _heartbeat = progress.heartbeat("cloning graph history from the remote");
+            clone_remote(&graph, remote_url)
+        };
+        match clone_result_for_attempt {
             Ok(()) => {
                 clone_result = Some(Ok(()));
                 break;
@@ -1262,6 +1923,9 @@ pub fn clone_into_workspace(
                     && (is_authorization_error(&error) || lost_authorization_code);
                 clone_result = Some(Err(error));
                 if should_retry {
+                    progress.println(
+                        "The graph session could not be used; retrying with freshly requested graph access...",
+                    );
                     continue;
                 }
                 break;
@@ -1269,19 +1933,45 @@ pub fn clone_into_workspace(
         }
     }
     restore_canonical_url(&graph, remote);
-    clone_result.expect("should attempt clone at least once")?;
-    let branch = active_branch(&graph)?;
+    clone_result
+        .expect("should attempt clone at least once")
+        .map_err(|error| {
+            clone_transfer_failure("cloning graph history from the remote", started, &error)
+        })?;
+    progress.println("Graph history cloned; preparing branch assets...");
+    let branch = active_branch(&graph)
+        .map_err(|error| clone_transfer_failure("reading the cloned branch", started, &error))?;
     drop(graph);
-    let graph = get_raw_connection(workspace.graph_db_path()?)?;
+    let graph_path = workspace.graph_db_path().map_err(|error| {
+        clone_transfer_failure("resolving the cloned graph database path", started, &error)
+    })?;
+    let graph = {
+        let _heartbeat = progress.heartbeat("reopening the cloned graph database");
+        get_raw_connection(graph_path).map_err(|error| {
+            clone_transfer_failure("reopening the cloned graph database", started, &error)
+        })?
+    };
     let mut operation = RemoteOperationRecord::begin_or_resume(
         config,
         &remote.name,
         &branch,
         StoredRemoteOperationKind::Clone,
         None,
-    )?;
-    let destination_hash = hash_of(&graph, &branch)?;
-    operation.set_destination(config, &destination_hash)?;
+    )
+    .map_err(|error| {
+        clone_transfer_failure("initializing the clone asset checkpoint", started, &error)
+    })?;
+    let destination_hash = {
+        let _heartbeat = progress.heartbeat("reading the cloned branch head");
+        hash_of(&graph, &branch).map_err(|error| {
+            clone_transfer_failure("reading the cloned branch head", started, &error)
+        })?
+    };
+    operation
+        .set_destination(config, &destination_hash)
+        .map_err(|error| {
+            clone_transfer_failure("recording the clone destination", started, &error)
+        })?;
     let assets_transfer_checkpoint = operation.assets_transfer_checkpoint;
     let previous_hash = operation.from_commit;
     transfer_assets(
@@ -1289,22 +1979,119 @@ pub fn clone_into_workspace(
         workspace,
         remote,
         RemoteOperation::Clone,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &branch,
-            range: AssetTransferRange {
-                from_commit: assets_transfer_checkpoint.as_ref(),
-                previous_hash: previous_hash.as_ref(),
-                materialize: true,
+        AssetTransferRun {
+            target: AssetTransferTarget {
+                branch: &branch,
+                history_ref: &branch,
+                range: AssetTransferRange {
+                    from_commit: assets_transfer_checkpoint.as_ref(),
+                    previous_hash: previous_hash.as_ref(),
+                    materialize: true,
+                },
             },
+            progress: &progress,
         },
         |commit_hash| {
             operation.advance_assets_transfer_checkpoint(config, commit_hash)?;
             Ok(())
         },
-    )?;
-    operation.complete(config)?;
+        || Ok(()),
+    )
+    .map_err(|error| {
+        clone_transfer_failure("downloading branch assets", started, error.as_ref())
+    })?;
+    operation.complete(config).map_err(|error| {
+        clone_transfer_failure("completing the clone checkpoint", started, &error)
+    })?;
+    progress.println(&format!("Clone of branch '{branch}' is complete."));
     Ok(branch)
+}
+
+#[derive(Debug)]
+struct CloneTransferFailure(String);
+
+impl fmt::Display for CloneTransferFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for CloneTransferFailure {}
+
+fn clone_transfer_failure(
+    phase: &str,
+    started: Instant,
+    error: &(dyn Error + 'static),
+) -> Box<dyn Error> {
+    let message = format!(
+        "Clone failed after {} during {phase}: {}",
+        format_elapsed(started.elapsed()),
+        safe_transfer_error(error),
+    );
+    Box::new(CloneTransferFailure(message))
+}
+
+fn safe_transfer_error(error: &(dyn Error + 'static)) -> String {
+    if let Some(client_error) = error.downcast_ref::<RemoteClientError>() {
+        return match client_error {
+            RemoteClientError::InvalidRepositoryUrl(_) => {
+                "the configured GenHub repository URL is invalid".to_string()
+            }
+            RemoteClientError::AuthenticationRequired => {
+                "authentication is required; run `gen remote login` and confirm repository read access".to_string()
+            }
+            RemoteClientError::Http { status, .. } => {
+                let guidance = match status.as_u16() {
+                    401 | 403 => "Check your GenHub login and repository read access.",
+                    404 => "Check that the repository URL is correct and your account can access it.",
+                    429 => "GenHub is rate limiting requests; retry after a short delay.",
+                    500..=599 => "GenHub reported a server error; retry after the service recovers.",
+                    _ => "Check the repository permissions and retry.",
+                };
+                format!("GenHub returned HTTP {status}. {guidance}")
+            }
+            RemoteClientError::StaleGraphSession => {
+                "GenHub rejected the graph session; retry the clone for a fresh session".to_string()
+            }
+            RemoteClientError::ResponseDecode { status, .. } => {
+                format!("GenHub returned an invalid response (HTTP {status})")
+            }
+            RemoteClientError::Request(_) => {
+                "the GenHub request failed; check network connectivity and retry".to_string()
+            }
+            RemoteClientError::TokenStorage(_) => {
+                "Gen could not read saved GenHub credentials; check credential file access".to_string()
+            }
+        };
+    }
+    if let Some(sql_error) = error.downcast_ref::<SqlError>() {
+        return match sql_error {
+            SqlError::SqliteFailure(code, _) => format!(
+                "Dolt returned SQLite error {:?} (extended code {})",
+                code.code, code.extended_code
+            ),
+            _ => "the local Dolt graph database operation failed".to_string(),
+        };
+    }
+    if error.downcast_ref::<reqwest::Error>().is_some() {
+        return "the asset HTTP request failed; check network connectivity and retry".to_string();
+    }
+    if let Some(source) = error.source()
+        && let Some(message) = safe_transfer_error_chain(source)
+    {
+        return message;
+    }
+    error.to_string()
+}
+
+fn safe_transfer_error_chain(error: &(dyn Error + 'static)) -> Option<String> {
+    if error.downcast_ref::<RemoteClientError>().is_some()
+        || error.downcast_ref::<SqlError>().is_some()
+        || error.downcast_ref::<reqwest::Error>().is_some()
+    {
+        return Some(safe_transfer_error(error));
+    }
+    error.source().and_then(safe_transfer_error_chain)
 }
 
 /// Errors that can occur while pushing a branch to a remote repository.
@@ -1331,6 +2118,9 @@ pub enum RemotePushError {
     /// Dolt could not transfer the graph branch.
     #[error("Graph transfer failed: {0}")]
     GraphTransfer(#[source] Box<dyn Error>),
+    /// The remote branch has commits that are not in the local branch.
+    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
+    NonFastForward,
     /// The branch's assets could not be transferred.
     #[error("Asset transfer failed: {0}")]
     AssetTransfer(#[source] Box<dyn Error>),
@@ -1342,12 +2132,27 @@ pub enum RemotePushError {
     IncompleteTransferLease { branch: String },
 }
 
+fn remote_push_graph_error(error: Box<dyn Error>) -> RemotePushError {
+    if error
+        .downcast_ref::<SqlError>()
+        .is_some_and(is_non_fast_forward_push_error)
+        || error
+            .downcast_ref::<PushGraphTransferError>()
+            .is_some_and(PushGraphTransferError::is_non_fast_forward)
+    {
+        RemotePushError::NonFastForward
+    } else {
+        RemotePushError::GraphTransfer(error)
+    }
+}
+
 pub fn execute_push(
     workspace: &Workspace,
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
     force: bool,
 ) -> Result<(), RemotePushError> {
+    let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let intended_branch = Defaults::get_current_branch(&config);
     let graph = get_connection_for_branch(workspace.graph_db_path()?, intended_branch.as_deref())?;
@@ -1361,6 +2166,10 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
+    progress.println(&format!(
+        "Preparing push of branch '{branch}' to '{}'...",
+        remote.name,
+    ));
     // A missing or stale tracking ref only makes the transfer conservatively include more assets.
     // Force pushes cannot use the tracking ref as a lower bound because they may replace history.
     let tracking_ref = format!("{}/{branch}", remote.name);
@@ -1376,7 +2185,7 @@ pub fn execute_push(
             force,
             || push_graph_branch(&graph, &remote.name, &branch, force),
         )
-        .map_err(RemotePushError::GraphTransfer)?;
+        .map_err(remote_push_graph_error)?;
         None
     } else {
         let mut operation = RemoteOperationRecord::begin_or_resume(
@@ -1386,8 +2195,19 @@ pub fn execute_push(
             StoredRemoteOperationKind::Push,
             previous_hash.as_ref(),
         )?;
+        if operation.push_session_id.is_none() {
+            operation.set_push_session_id(&config, Uuid::new_v4())?;
+        }
         let destination_hash = hash_of(&graph, &branch)?;
-        let transfer_lease = match (
+        let same_destination = operation
+            .to_commit
+            .as_ref()
+            .is_some_and(|recorded_destination| recorded_destination == &destination_hash);
+        let destination_changed = operation
+            .to_commit
+            .as_ref()
+            .is_some_and(|recorded_destination| recorded_destination != &destination_hash);
+        let existing_transfer_lease = match (
             operation.to_commit.as_ref(),
             operation.transfer_id,
             operation.transfer_expires_at,
@@ -1396,83 +2216,191 @@ pub fn execute_push(
                 if recorded_destination == &destination_hash
                     && expires_at > Utc::now().timestamp() =>
             {
-                PushTransferLease {
+                Some(PushTransferLease {
                     transfer_id,
                     expires_at,
-                }
+                })
             }
-            (Some(_), Some(_), Some(_)) | (None, None, None) => {
-                let graph_transfer = run_graph_transfer(
-                    &graph,
-                    &remote,
-                    RemoteOperation::Push,
-                    &branch,
-                    force,
-                    || push_graph_branch(&graph, &remote.name, &branch, force),
-                );
-                let transfer_lease = match graph_transfer {
-                    Ok(Some(transfer_lease)) => transfer_lease,
-                    Ok(None) => {
-                        return Err(RemotePushError::MissingTransferId);
-                    }
-                    Err(error) => {
-                        if operation.to_commit.is_none()
-                            && let Err(metadata_error) = operation.fail(&config)
-                        {
-                            eprintln!(
-                                "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
-                            );
-                        }
-                        return Err(RemotePushError::GraphTransfer(error));
-                    }
-                };
-                operation.set_push_destination(
-                    &config,
-                    &destination_hash,
-                    transfer_lease.transfer_id,
-                    transfer_lease.expires_at,
-                )?;
-                transfer_lease
-            }
+            (Some(_), Some(_), Some(_)) | (None, None, None) => None,
             _ => {
                 return Err(RemotePushError::IncompleteTransferLease { branch });
             }
         };
-        Some((operation, transfer_lease, destination_hash))
+        if destination_changed {
+            operation.set_push_session_id(&config, Uuid::new_v4())?;
+        }
+        let renewal = if let Some(transfer_lease) = existing_transfer_lease {
+            progress.println("Graph manifest already published; resuming asset transfer...");
+            let push_session_id = operation
+                .push_session_id
+                .expect("push session UUID should be persisted before transfer");
+            let renewal_result = {
+                let _heartbeat = progress.heartbeat("resuming the existing direct-push lease");
+                acquire_existing_push_renewal(
+                    &remote,
+                    &branch,
+                    force,
+                    push_session_id,
+                    transfer_lease.transfer_id,
+                )
+            };
+            let renewal = match renewal_result {
+                Ok(renewal) => renewal,
+                Err(error) => {
+                    if error.is_terminal()
+                        && let Err(metadata_error) = operation.fail(&config)
+                    {
+                        eprintln!(
+                            "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+                        );
+                    }
+                    return Err(RemotePushError::GraphTransfer(Box::new(error)));
+                }
+            };
+            let refreshed_lease = {
+                let _heartbeat = progress.heartbeat("refreshing the existing push lease");
+                renewal
+                    .ensure_fresh()
+                    .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?
+            };
+            operation.set_push_destination(
+                &config,
+                &destination_hash,
+                refreshed_lease.transfer_id,
+                refreshed_lease.expires_at,
+            )?;
+            renewal
+        } else {
+            let push_session_id = operation
+                .push_session_id
+                .expect("push session UUID should be persisted before transfer");
+            let expected_transfer_id = same_destination.then_some(operation.transfer_id).flatten();
+            let mut graph_transfer = run_push_graph_transfer(PushGraphTransferRequest {
+                graph: &graph,
+                remote: &remote,
+                branch: &branch,
+                force,
+                idempotency_token: push_session_id,
+                expected_transfer_id,
+                destination_hash: &destination_hash,
+                progress: &progress,
+            });
+            let confirmed_stale_session = graph_transfer.as_ref().is_err_and(|error| {
+                error
+                    .downcast_ref::<PushGraphTransferError>()
+                    .is_some_and(|error| {
+                        matches!(error, PushGraphTransferError::StaleSessionConfirmed)
+                    })
+            });
+            if confirmed_stale_session {
+                progress.println(
+                    "GenHub confirmed the accepted graph session is stale; opening a fresh session...",
+                );
+                let replacement_session_id = Uuid::new_v4();
+                operation.reset_stale_push_session(&config, replacement_session_id)?;
+                graph_transfer = run_push_graph_transfer(PushGraphTransferRequest {
+                    graph: &graph,
+                    remote: &remote,
+                    branch: &branch,
+                    force,
+                    idempotency_token: replacement_session_id,
+                    expected_transfer_id: None,
+                    destination_hash: &destination_hash,
+                    progress: &progress,
+                });
+            }
+            let renewal = match graph_transfer {
+                Ok(renewal) => renewal,
+                Err(error) => {
+                    let terminal_direct_failure = error
+                        .downcast_ref::<PushGraphTransferError>()
+                        .is_some_and(PushGraphTransferError::is_terminal);
+                    let should_fail_operation = terminal_direct_failure;
+                    if should_fail_operation && let Err(metadata_error) = operation.fail(&config) {
+                        eprintln!(
+                            "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+                        );
+                    }
+                    return Err(remote_push_graph_error(error));
+                }
+            };
+            let transfer_lease = renewal
+                .push_lease()
+                .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
+            operation.set_push_destination(
+                &config,
+                &destination_hash,
+                transfer_lease.transfer_id,
+                transfer_lease.expires_at,
+            )?;
+            renewal
+        };
+        Some((operation, renewal, destination_hash))
     };
     let assets_transfer_checkpoint = if let Some((operation, _, _)) = push_context.as_ref() {
-        operation.assets_transfer_checkpoint.as_ref()
+        operation.assets_transfer_checkpoint
     } else {
-        previous_hash.as_ref()
+        previous_hash
     };
-    let upload_receipts = transfer_assets(
-        &graph,
-        workspace,
-        &remote,
-        RemoteOperation::Push,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &branch,
-            range: AssetTransferRange {
-                from_commit: assets_transfer_checkpoint,
-                previous_hash: previous_hash.as_ref(),
-                materialize: true,
+    let upload_receipts = {
+        let mut refresh_push_lease = || {
+            if let Some((operation, renewal, destination_hash)) = push_context.as_mut() {
+                persist_refreshed_push_lease(operation, &config, destination_hash, renewal)?;
+            }
+            Ok(())
+        };
+        transfer_assets(
+            &graph,
+            workspace,
+            &remote,
+            RemoteOperation::Push,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: &branch,
+                    history_ref: &branch,
+                    range: AssetTransferRange {
+                        from_commit: assets_transfer_checkpoint.as_ref(),
+                        previous_hash: previous_hash.as_ref(),
+                        materialize: true,
+                    },
+                },
+                progress: &progress,
             },
-        },
-        |_| Ok(()),
-    )
+            |_| Ok(()),
+            &mut refresh_push_lease,
+        )
+    }
     .map_err(RemotePushError::AssetTransfer)?;
-    if let Some((operation, transfer_lease, destination_hash)) = push_context.as_mut() {
+    if let Some((operation, renewal, destination_hash)) = push_context.as_mut() {
+        persist_refreshed_push_lease(operation, &config, destination_hash, renewal)
+            .map_err(RemotePushError::AssetTransfer)?;
+        let transfer_lease = renewal
+            .push_lease()
+            .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
         let repository = RepositoryRemote::parse(&remote.url)?;
-        complete_asset_transfers(
-            &repository,
-            &AssetTransferCompletionRequest {
-                transfer_id: transfer_lease.transfer_id,
-                branch: &branch,
-                assets: &upload_receipts,
-            },
-            login_origin,
-        )?;
+        progress.println("Verifying asset uploads and finishing push...");
+        let verification_started = Instant::now();
+        let verification_result = {
+            let _heartbeat = progress
+                .heartbeat("waiting for GenHub to verify asset uploads and finish the push");
+            complete_asset_transfers(
+                &repository,
+                &AssetTransferCompletionRequest {
+                    transfer_id: transfer_lease.transfer_id,
+                    branch: &branch,
+                    assets: &upload_receipts,
+                },
+                login_origin,
+            )
+        };
+        if let Err(error) = verification_result {
+            progress.println(&format!(
+                "GenHub did not confirm asset verification after {}; per-asset request progress above reflects bytes consumed.",
+                format_elapsed(verification_started.elapsed()),
+            ));
+            return Err(RemotePushError::Client(error));
+        }
+        progress.println("GenHub verified and accepted the asset uploads.");
         operation.advance_assets_transfer_checkpoint(&config, destination_hash)?;
         operation.complete(&config)?;
     }
@@ -1499,6 +2427,7 @@ pub fn execute_pull(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let graph_path = workspace.graph_db_path()?;
     if !graph_path.exists() {
@@ -1544,19 +2473,23 @@ pub fn execute_pull(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &branch,
-            range: AssetTransferRange {
-                from_commit: assets_transfer_checkpoint.as_ref(),
-                previous_hash: previous_hash.as_ref(),
-                materialize: true,
+        AssetTransferRun {
+            target: AssetTransferTarget {
+                branch: &branch,
+                history_ref: &branch,
+                range: AssetTransferRange {
+                    from_commit: assets_transfer_checkpoint.as_ref(),
+                    previous_hash: previous_hash.as_ref(),
+                    materialize: true,
+                },
             },
+            progress: &progress,
         },
         |commit_hash| {
             operation.advance_assets_transfer_checkpoint(&config, commit_hash)?;
             Ok(())
         },
+        || Ok(()),
     )?;
     operation.complete(&config)?;
     RemoteBranch::set_remote_validated(&config, &branch, Some(&remote.name))?;
@@ -1572,6 +2505,7 @@ pub fn execute_fetch(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let graph = get_connection_for_branch(workspace.graph_db_path()?, None)?;
     let branch = explicit_branch
@@ -1594,16 +2528,20 @@ pub fn execute_fetch(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        AssetTransferTarget {
-            branch: &branch,
-            history_ref: &tracking_ref,
-            range: AssetTransferRange {
-                from_commit: None,
-                previous_hash: None,
-                materialize: false,
+        AssetTransferRun {
+            target: AssetTransferTarget {
+                branch: &branch,
+                history_ref: &tracking_ref,
+                range: AssetTransferRange {
+                    from_commit: None,
+                    previous_hash: None,
+                    materialize: false,
+                },
             },
+            progress: &progress,
         },
         |_| Ok(()),
+        || Ok(()),
     )?;
     println!("Fetched branch '{branch}' from '{}'.", remote.name);
     Ok(())
@@ -1642,27 +2580,29 @@ pub fn clone_destination_path(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::io::{BufRead as _, BufReader};
     use std::{
         collections::HashMap,
         env,
         ffi::OsString,
         fs,
-        io::{BufRead as _, BufReader, Cursor, Read as _, Write as _},
+        io::{Cursor, Read as _, Write as _},
         net::TcpListener,
         path::PathBuf,
         sync::Mutex,
         thread,
     };
 
-    use chrono::Utc;
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{DoltHashId, HashId, Sha256Hash, config::Workspace};
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
-        db::GraphConnection,
+        db::{ConfigConnection, GraphConnection},
         file_types::FileTypes,
-        history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
+        history::dolt::{clone_remote, commit_all, remote_rows, remove_remote},
         operations::{
             Defaults, FileAddition, OperationFile, Remote,
             RemoteOperationKind as StoredRemoteOperationKind, RemoteOperationRecord,
@@ -1671,23 +2611,308 @@ mod tests {
     };
     use noodles::bgzf;
     use reqwest::blocking::Client;
-    use rusqlite::{Connection, Error as SqlError};
+    use rusqlite::{Connection, Error as SqlError, blockcachevfs::AuthRefreshReason};
     use serde_json::json;
     use tempfile::tempdir;
     use uuid::Uuid;
 
     use super::{
-        AssetTransferRange, AssetTransferTarget, DownloadAssetOutcome, PushTransferLease,
-        RemoteOperation, canonical_remote_url, clone_destination_name, clone_into_workspace,
-        copy_versioned_asset, download_asset, download_to_versioned_store, execute_pull,
-        execute_push, file_graph_url, get_remaining_assets_to_transfer, resolve_remote,
-        run_graph_transfer, temporary_path, transfer_assets, upload_asset,
+        AssetDownloadBatch, AssetTransferRange, AssetTransferRun, AssetTransferTarget,
+        DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
+        download_to_staged_path_with_progress, execute_pull, execute_push, file_graph_url,
+        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
+        transfer_assets,
     };
-    use crate::{get_config_connection, get_connection, get_raw_connection};
+    #[cfg(unix)]
+    use super::{clone_into_workspace, upload_asset};
+    use crate::{
+        commands::remote::{
+            client::{
+                CapabilityResponse, DirectPushCapability, SessionScope as ClientSessionScope,
+            },
+            progress::tests::captured_transfer_progress,
+        },
+        get_config_connection, get_connection, get_raw_connection,
+    };
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
     const RETRIED_TRANSFER_ID: Uuid = Uuid::from_u128(2);
+
+    fn download_to_versioned_store(
+        client: &Client,
+        workspace: &Workspace,
+        asset: &AssetRef,
+        url: &str,
+    ) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
+        super::download_to_versioned_store_with_progress(client, workspace, asset, url, None)
+    }
+
+    fn copy_versioned_asset(
+        versioned_path: &std::path::Path,
+        destination_path: &std::path::Path,
+        materialized_checksum: Option<&Sha256Hash>,
+        expected_output_checksum: &Sha256Hash,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        super::copy_versioned_asset_with_progress(
+            versioned_path,
+            destination_path,
+            materialized_checksum,
+            expected_output_checksum,
+            None,
+            super::AssetCopyProgress::Materialize,
+        )
+    }
+
+    fn download_asset(
+        client: &Client,
+        workspace: &Workspace,
+        asset: &AssetRef,
+        previous_assets: &HashMap<HashId, AssetRef>,
+        destination_logical_path: Option<&str>,
+        url: &str,
+    ) -> Result<DownloadAssetOutcome, Box<dyn std::error::Error>> {
+        super::download_asset_with_progress(
+            client,
+            workspace,
+            asset,
+            previous_assets,
+            destination_logical_path,
+            url,
+            None,
+        )
+    }
+
+    fn push_capability_response(
+        token: &str,
+        token_expires_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        database_uri: &str,
+        publish_url: &str,
+        session_scope: ClientSessionScope,
+    ) -> CapabilityResponse {
+        CapabilityResponse {
+            remote_url: None,
+            expires_at,
+            default_branch: "main".to_string(),
+            transfer_id: TEST_TRANSFER_ID,
+            direct_push: Some(DirectPushCapability {
+                database_uri: database_uri.replace("TOKEN", token),
+                token_expires_at,
+                session_id: TEST_TRANSFER_ID,
+                session_scope,
+                publish_url: publish_url.to_string(),
+            }),
+        }
+    }
+
+    fn push_session_scope() -> ClientSessionScope {
+        ClientSessionScope {
+            principal: "repository:repo-id".to_string(),
+            target_database: "default.db".to_string(),
+            operations: r#"["write","push","main",false]"#.to_string(),
+        }
+    }
+
+    fn push_database_uri() -> &'static str {
+        "gcs://bucket/.gen/graph_db/?database=default.db&project=test-project&vfs=blockcachevfs&endpoint=https%3A%2F%2Fstorage.googleapis.com&access_token=TOKEN"
+    }
+
+    fn request_session_id(request: &str) -> Uuid {
+        request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("idempotency-token")
+                    .then(|| value.trim().parse::<Uuid>().ok())
+                    .flatten()
+            })
+            .expect("capability request should include its persisted session UUID")
+    }
+
+    fn direct_push_capability_body(request: &str, origin: &str) -> String {
+        let scope = push_session_scope();
+        json!({
+            "remote_url": null,
+            "expires_at": (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339(),
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID,
+            "direct_push": {
+                "database_uri": push_database_uri(),
+                "token_expires_at": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
+                "session_id": request_session_id(request),
+                "session_scope": {
+                    "principal": scope.principal,
+                    "target_database": scope.target_database,
+                    "operations": scope.operations,
+                },
+                "publish_url": format!("{origin}/api/publish?capability=mock-signed-value")
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_push_capability_renewal_rotates_token_and_publication_capability() {
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "renewal-test-key");
+        let now = Utc::now();
+        let scope = push_session_scope();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind renewal server");
+        let address = listener
+            .local_addr()
+            .expect("should read renewal server address");
+        let publish_origin = format!("http://{address}");
+        let refreshed_expiry = now + ChronoDuration::minutes(30);
+        let refreshed_token_expiry = now + ChronoDuration::hours(2);
+        let initial = push_capability_response(
+            "initial-token",
+            now + ChronoDuration::hours(1),
+            now + ChronoDuration::minutes(15),
+            push_database_uri(),
+            &format!("{publish_origin}/api/publish?capability=initial-signed-value"),
+            scope.clone(),
+        );
+        let body = json!({
+            "remote_url": null,
+            "expires_at": refreshed_expiry.to_rfc3339(),
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID,
+            "direct_push": {
+                "database_uri": "gcs://bucket/.gen/graph_db/?access_token=rotated-token&endpoint=https%3A%2F%2Fstorage.googleapis.com&vfs=blockcachevfs&project=test-project&database=default.db",
+                "token_expires_at": refreshed_token_expiry.to_rfc3339(),
+                "session_id": TEST_TRANSFER_ID,
+                "session_scope": {
+                    "principal": scope.principal,
+                    "target_database": scope.target_database,
+                    "operations": scope.operations,
+                },
+                "publish_url": format!("{publish_origin}/api/publish?capability=refreshed-signed-value")
+            }
+        })
+        .to_string();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for request_number in 0..2 {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("should accept capability or publication request");
+                let mut request = [0_u8; 8192];
+                let length = stream
+                    .read(&mut request)
+                    .expect("should read capability or publication request");
+                requests.push(String::from_utf8_lossy(&request[..length]).into_owned());
+                if request_number == 0 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should send renewed capability");
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .expect("should accept manifest publication");
+                }
+            }
+            requests
+        });
+
+        let remote = Remote {
+            name: "origin".to_string(),
+            url: format!("http://{address}/api/repos/alice/example"),
+        };
+        let renewal = super::capability::push_capability_renewal(
+            &remote,
+            "main",
+            false,
+            TEST_TRANSFER_ID,
+            TEST_TRANSFER_ID,
+            initial,
+        )
+        .expect("should create the direct-push renewal coordinator");
+
+        let token = renewal
+            .auth_token(AuthRefreshReason::Unauthorized)
+            .expect("should renew after an authorization rejection");
+        renewal
+            .publish()
+            .expect("should publish through the refreshed capability");
+        let requests = server
+            .join()
+            .expect("should finish capability and publication server");
+        let capability_request = &requests[0];
+        let publication_request = &requests[1];
+        let latest = renewal
+            .capability_response()
+            .expect("should read the renewed capability response");
+        let latest_lease = renewal
+            .push_lease()
+            .expect("should read the renewed push lease");
+
+        assert_eq!(token, "rotated-token");
+        assert!(
+            capability_request
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
+        );
+        assert!(
+            publication_request.starts_with("POST /api/publish?capability=refreshed-signed-value ")
+        );
+        assert!(
+            publication_request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("content-length: 0"))
+        );
+        assert!(publication_request.ends_with("\r\n\r\n"));
+        assert_eq!(latest.transfer_id, TEST_TRANSFER_ID);
+        assert_eq!(latest_lease.transfer_id, TEST_TRANSFER_ID);
+        assert_eq!(latest_lease.expires_at, refreshed_expiry.timestamp());
+        assert_eq!(
+            latest
+                .direct_push
+                .as_ref()
+                .expect("should keep a direct-push capability")
+                .publish_url,
+            format!("{publish_origin}/api/publish?capability=refreshed-signed-value")
+        );
+    }
+
+    #[test]
+    fn test_session_auth_io_error_is_retryable_authorization_failure() {
+        let error = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_AUTH),
+            Some("credential refresh failed".to_string()),
+        );
+
+        assert!(super::is_authorization_error(&error));
+    }
+
+    fn seed_push_lease(
+        config: &ConfigConnection,
+        branch: &str,
+        destination_hash: &DoltHashId,
+        transfer_id: Uuid,
+        expires_at: i64,
+    ) -> Uuid {
+        let mut operation = RemoteOperationRecord::begin_or_resume(
+            config,
+            "origin",
+            branch,
+            StoredRemoteOperationKind::Push,
+            None,
+        )
+        .expect("should create pending push operation");
+        let session_id = operation
+            .push_session_id
+            .expect("should allocate a push session UUID");
+        operation
+            .set_push_destination(config, destination_hash, transfer_id, expires_at)
+            .expect("should seed graph transfer lease");
+        session_id
+    }
 
     mod clone {
         use std::{
@@ -1889,6 +3114,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_asset_download_progress_sanitizes_terminal_control_characters() {
+        let (progress, lines) = captured_transfer_progress(std::time::Duration::ZERO);
+        let mut batch = AssetDownloadBatch {
+            progress: &progress,
+            total: 1,
+            next_index: 0,
+        };
+        let mut asset = test_asset(b"contents", "reference.fa", 1);
+        asset.name = Some("ref\u{1b}[2J.fa\n".to_string());
+
+        batch.start_asset(&asset).download_started(0);
+
+        let lines = lines
+            .lock()
+            .expect("should read captured download progress");
+        assert!(
+            lines.iter().any(|line| line.contains("ref?[2J.fa?")),
+            "control characters in remote asset names should be replaced before display"
+        );
+        assert!(
+            lines.iter().all(|line| !line.chars().any(char::is_control)),
+            "progress output should not contain terminal control characters"
+        );
+    }
+
     fn test_asset(contents: &[u8], logical_path: &str, created_on: i64) -> AssetRef {
         let checksum = calculate_reader_checksum(Cursor::new(contents)).expect("should checksum");
         let uri = LocalAssetUri::asset_uri(logical_path);
@@ -2044,6 +3295,37 @@ mod tests {
                 .write_all(body)
                 .expect("should write partial asset response body");
             String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+        (format!("http://{address}/asset"), handle)
+    }
+
+    fn serve_asset_ignoring_range(contents: &[u8]) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind asset server");
+        let address = listener
+            .local_addr()
+            .expect("should read asset server address");
+        let contents = contents.to_vec();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("should accept asset request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).expect("should read asset request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                contents.len()
+            )
+            .expect("should write full asset response headers");
+            stream
+                .write_all(&contents)
+                .expect("should write full asset response body");
+            String::from_utf8_lossy(&request).into_owned()
         });
         (format!("http://{address}/asset"), handle)
     }
@@ -2619,6 +3901,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_ignored_range_resets_progress_to_the_full_response_length() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let remote_contents = b"the complete body returned when Range is ignored";
+        let mut remote_asset = test_asset(remote_contents, "reference.fa", 1);
+        remote_asset.size = Some(1);
+        let versioned_path = versioned_asset_path(&workspace, &remote_asset);
+        fs::create_dir_all(
+            versioned_path
+                .parent()
+                .expect("should resolve versioned asset directory"),
+        )
+        .expect("should create versioned asset directory");
+        let staged_path =
+            temporary_path(&versioned_path).expect("should resolve staged asset path");
+        let stale_prefix = b"a stale prefix that is larger than the metadata size";
+        fs::write(&staged_path, stale_prefix).expect("should seed stale staged bytes");
+        let (url, server) = serve_asset_ignoring_range(remote_contents);
+        let (progress, lines) = captured_transfer_progress(std::time::Duration::ZERO);
+        let reporter = progress.asset_download_reporter(1, 1, "reference.fa".to_string(), Some(1));
+
+        download_to_staged_path_with_progress(
+            &Client::new(),
+            &remote_asset,
+            &url,
+            &staged_path,
+            remote_asset
+                .checksum
+                .as_ref()
+                .expect("test asset should have a checksum"),
+            Some(&reporter),
+        )
+        .expect("ignored Range should restart from the full response");
+        let request = server.join().expect("asset server should finish");
+
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("\r\nrange: bytes={}-\r\n", stale_prefix.len())),
+            "the downloader should preserve its range request and accept a full 200 response"
+        );
+        assert_eq!(
+            fs::read(&staged_path).expect("should read restarted staged asset"),
+            remote_contents
+        );
+        let lines = lines
+            .lock()
+            .expect("should read captured download progress");
+        assert!(
+            lines.iter().any(|line| {
+                line.contains(&format!(
+                    "{} B read this attempt; {} B of {} B staged (100%)",
+                    remote_contents.len(),
+                    remote_contents.len(),
+                    remote_contents.len(),
+                ))
+            }),
+            "the 200 response should reset the resumed prefix and replace metadata size with Content-Length: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("size pending verification")),
+            "an oversized staged prefix should not appear complete against stale metadata"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains(&format!("{} B of 1 B staged", remote_contents.len(),))),
+            "the progress denominator should come from the response length"
+        );
+    }
+
     // Conflict detection accepts any known version before the pull, so an older clean
     // checkout can still advance without a false conflict.
     #[test]
@@ -2993,16 +4350,20 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Pull,
-            AssetTransferTarget {
-                branch: "main",
-                history_ref: "main",
-                range: AssetTransferRange {
-                    from_commit: Some(&previous_hash),
-                    previous_hash: Some(&previous_hash),
-                    materialize: true,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: "main",
+                    history_ref: "main",
+                    range: AssetTransferRange {
+                        from_commit: Some(&previous_hash),
+                        previous_hash: Some(&previous_hash),
+                        materialize: true,
+                    },
                 },
+                progress: &crate::commands::remote::progress::TransferProgress::stderr(),
             },
             |_| Ok(()),
+            || Ok(()),
         )
         .expect("should transfer only the asset delta");
         let transfer_request = transfer_server
@@ -3061,16 +4422,20 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Clone,
-            AssetTransferTarget {
-                branch: "main",
-                history_ref: "main",
-                range: AssetTransferRange {
-                    from_commit: None,
-                    previous_hash: None,
-                    materialize: true,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: "main",
+                    history_ref: "main",
+                    range: AssetTransferRange {
+                        from_commit: None,
+                        previous_hash: None,
+                        materialize: true,
+                    },
                 },
+                progress: &crate::commands::remote::progress::TransferProgress::stderr(),
             },
             |_| Ok(()),
+            || Ok(()),
         )
         .expect("should transfer clone assets");
         let transfer_request = transfer_server
@@ -3409,6 +4774,9 @@ mod tests {
             &source_workspace,
             &asset,
             &format!("http://{address}/upload"),
+            1,
+            1,
+            &crate::commands::remote::progress::TransferProgress::stderr(),
         )
         .expect("should upload source symlink asset bytes");
         let download_result = download_asset(
@@ -3839,7 +5207,7 @@ mod tests {
     }
 
     #[test]
-    fn test_authorization_failure_retries_with_a_fresh_capability() {
+    fn test_pull_authorization_failure_retries_with_a_fresh_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -3885,7 +5253,7 @@ mod tests {
         let transfer_lease = run_graph_transfer(
             &graph,
             &remote,
-            RemoteOperation::Push,
+            RemoteOperation::Pull,
             "main",
             false,
             || {
@@ -3904,13 +5272,7 @@ mod tests {
         server.join().expect("capability server should finish");
 
         assert_eq!(attempts, 2);
-        assert_eq!(
-            transfer_lease,
-            Some(PushTransferLease {
-                transfer_id: RETRIED_TRANSFER_ID,
-                expires_at: 1_893_456_000,
-            })
-        );
+        assert_eq!(transfer_lease, None);
         let remotes = remote_rows(&graph).expect("should read restored canonical URL");
         assert!(
             remotes
@@ -3920,7 +5282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_uploads_assets_before_tracking_fetch() {
+    fn test_push_rejects_legacy_http_capability_without_uploading_assets() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -3930,43 +5292,26 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create push test directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for request_index in 0..4 {
-                let (mut stream, _) = listener.accept().expect("should accept capability request");
-                let mut request = [0_u8; 8192];
-                let read = stream
-                    .read(&mut request)
-                    .expect("should read capability request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                if request_index == 2 {
-                    write!(
-                        stream,
-                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
-                    )
-                    .expect("should write completion response");
-                    continue;
-                }
-                let body = if request_index == 1 {
-                    "{\"assets\":[]}".to_string()
-                } else {
-                    format!(
-                        "{{\"remote_url\":\"{transfer_url}\",\
-                         \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                         \"default_branch\":\"main\",\
-                         \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
-                    )
-                };
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .expect("should write capability response");
-            }
-            requests
+            let (mut stream, _) = listener.accept().expect("should accept capability request");
+            let mut request = [0_u8; 8192];
+            let read = stream
+                .read(&mut request)
+                .expect("should read capability request");
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = format!(
+                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                 \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                 \"default_branch\":\"main\",\
+                 \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should write legacy capability response");
+            request
         });
 
         let workspace = Workspace::new(temp.path().join("local"));
@@ -3984,25 +5329,24 @@ mod tests {
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
         drop(graph);
-        drop(config);
 
-        execute_push(&workspace, None, None, false).expect("push should succeed");
-        let requests = server.join().expect("capability server should finish");
+        let error = execute_push(&workspace, None, None, false)
+            .expect_err("push should reject a legacy HTTP-only capability");
+        let request = server.join().expect("capability server should finish");
 
-        assert_eq!(requests.len(), 4);
-        assert!(requests[0].contains("\"operation\":\"push\""));
-        assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[1].contains("\"operation\":\"push\""));
-        assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
-        assert!(requests[2].contains("\"branch\":\"main\""));
-        assert!(requests[2].contains("\"assets\":[]"));
-        assert!(requests[3].contains("\"operation\":\"pull\""));
-        let graph =
-            get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
-        let local_hash = hash_of(&graph, "main").expect("should query local branch");
-        let tracking_hash = hash_of(&graph, "origin/main").expect("should query tracking branch");
-        assert_eq!(tracking_hash, local_hash);
+        assert!(error.to_string().contains("direct GCS session"));
+        assert!(request.contains("\"operation\":\"push\""));
+        assert!(request.to_ascii_lowercase().contains("idempotency-token:"));
+        assert!(!request.contains("/asset-transfers "));
+        let failed_operations = config
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations \
+                 WHERE operation = 'push' AND failed_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("should count failed push operations");
+        assert_eq!(failed_operations, 1);
     }
 
     #[cfg(unix)]
@@ -4119,33 +5463,28 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create push retry directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for request_index in 0..6 {
+            for request_index in 0..7 {
                 let (mut stream, _) = listener.accept().expect("should accept GenHub request");
                 let mut request = [0_u8; 8192];
                 let read = stream
                     .read(&mut request)
                     .expect("should read GenHub request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                requests.push(request.clone());
                 match request_index {
-                    0 | 5 => {
-                        let body = format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
-                        );
+                    0 | 3 => {
+                        let body =
+                            direct_push_capability_body(&request, &format!("http://{address}"));
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                             body.len()
                         )
-                        .expect("should write capability response");
+                        .expect("should write refreshed direct-push capability");
                     }
-                    1 | 3 => {
+                    1 | 4 => {
                         let body = "{\"assets\":[]}";
                         write!(
                             stream,
@@ -4163,10 +5502,19 @@ mod tests {
                         )
                         .expect("should write failed completion response");
                     }
-                    4 => {
+                    5 => {
                         stream
                             .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
                             .expect("should write completion response");
+                    }
+                    6 => {
+                        let body = "tracking fetch unavailable";
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write failed tracking-fetch response");
                     }
                     _ => unreachable!("request index should be covered"),
                 }
@@ -4189,35 +5537,49 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        let session_id = seed_push_lease(
+            &config,
+            "main",
+            &destination_hash,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
         drop(graph);
 
         execute_push(&workspace, None, None, false)
             .expect_err("first push should retain its lease after completion fails");
-        let pending_transfer: (DoltHashId, Uuid) = config
+        let pending_transfer: (DoltHashId, Uuid, Uuid) = config
             .query_row(
-                "SELECT to_commit, transfer_id FROM remote_operations \
+                "SELECT to_commit, transfer_id, push_session_id FROM remote_operations \
                  WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("should retain pending push lease");
-        assert_eq!(pending_transfer, (destination_hash, TEST_TRANSFER_ID));
+        assert_eq!(
+            pending_transfer,
+            (destination_hash, TEST_TRANSFER_ID, session_id)
+        );
 
         execute_push(&workspace, None, None, false).expect("push retry should complete");
         let requests = server.join().expect("GenHub server should finish");
 
-        assert_eq!(requests.len(), 6);
+        assert_eq!(requests.len(), 7);
+        assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
         assert!(requests[0].contains("\"operation\":\"push\""));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
         assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[3].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        for request in [&requests[2], &requests[4]] {
+        assert!(requests[3].starts_with("POST /api/repos/alice/example/remote-capability "));
+        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers "));
+        assert!(requests[5].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
+        for request in [&requests[2], &requests[5]] {
             assert!(request.contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
             assert!(request.contains("\"branch\":\"main\""));
             assert!(request.contains("\"assets\":[]"));
         }
-        assert!(requests[5].contains("\"operation\":\"pull\""));
+        assert_eq!(request_session_id(&requests[0]), session_id);
+        assert_eq!(request_session_id(&requests[3]), session_id);
+        assert!(requests[6].contains("\"operation\":\"pull\""));
         let pending_operations = config
             .query_row(
                 "SELECT COUNT(*) FROM remote_operations \
@@ -4230,9 +5592,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_retry_pushes_advanced_head_with_new_transfer_lease() {
-        // This tests that if we have a resumed push, but have commited work since the last failed push, the to_commit recorded
-        // as the end state of the push is advanced to the current head commit.
+    fn test_advanced_push_retry_requires_a_direct_gcs_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -4242,38 +5602,28 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create advanced push retry directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for request_index in 0..7 {
+            for request_index in 0..4 {
                 let (mut stream, _) = listener.accept().expect("should accept GenHub request");
                 let mut request = [0_u8; 8192];
                 let read = stream
                     .read(&mut request)
                     .expect("should read GenHub request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                requests.push(request.clone());
                 match request_index {
-                    0 | 3 | 6 => {
-                        let transfer_id = if request_index == 0 {
-                            TEST_TRANSFER_ID
-                        } else {
-                            RETRIED_TRANSFER_ID
-                        };
-                        let body = format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{transfer_id}\"}}"
-                        );
+                    0 => {
+                        let body =
+                            direct_push_capability_body(&request, &format!("http://{address}"));
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                             body.len()
                         )
-                        .expect("should write capability response");
+                        .expect("should write existing direct-push capability");
                     }
-                    1 | 4 => {
+                    1 => {
                         let body = "{\"assets\":[]}";
                         write!(
                             stream,
@@ -4291,10 +5641,19 @@ mod tests {
                         )
                         .expect("should write failed completion response");
                     }
-                    5 => {
-                        stream
-                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                            .expect("should write completion response");
+                    3 => {
+                        let body = format!(
+                            "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                             \"default_branch\":\"main\",\
+                             \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
+                        );
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write capability response");
                     }
                     _ => unreachable!("request index should be covered"),
                 }
@@ -4317,19 +5676,29 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        let original_session_id = seed_push_lease(
+            &config,
+            "main",
+            &original_destination,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
         drop(graph);
 
         execute_push(&workspace, None, None, false)
             .expect_err("first push should retain its lease after completion fails");
-        let pending_transfer: (DoltHashId, Uuid) = config
+        let pending_transfer: (DoltHashId, Uuid, Uuid) = config
             .query_row(
-                "SELECT to_commit, transfer_id FROM remote_operations \
+                "SELECT to_commit, transfer_id, push_session_id FROM remote_operations \
                  WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("should retain pending push lease");
-        assert_eq!(pending_transfer, (original_destination, TEST_TRANSFER_ID));
+        assert_eq!(
+            pending_transfer,
+            (original_destination, TEST_TRANSFER_ID, original_session_id)
+        );
 
         let graph =
             get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
@@ -4337,42 +5706,39 @@ mod tests {
         let advanced_destination =
             commit_all(&graph, "advance push retry").expect("should commit advanced local head");
         drop(graph);
+        assert_ne!(advanced_destination, original_destination);
 
-        execute_push(&workspace, None, None, false).expect("advanced push retry should complete");
+        let error = execute_push(&workspace, None, None, false)
+            .expect_err("advanced push retry should reject a legacy HTTP capability");
         let requests = server.join().expect("GenHub server should finish");
 
-        assert_eq!(requests.len(), 7);
-        assert!(requests[0].contains("\"operation\":\"push\""));
-        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
+        assert!(error.to_string().contains("direct GCS session"));
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
+        assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
+        assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
         assert!(requests[3].contains("\"operation\":\"push\""));
-        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[5].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[5].contains(&format!("\"transfer_id\":\"{RETRIED_TRANSFER_ID}\"")));
-        assert!(requests[6].contains("\"operation\":\"pull\""));
-        let completed_transfer: (DoltHashId, DoltHashId, Uuid) = config
+        assert!(!requests[3].contains(&original_session_id.to_string()));
+        assert!(
+            requests[3]
+                .to_ascii_lowercase()
+                .contains("idempotency-token:")
+        );
+        let failed_transfer: (DoltHashId, Uuid, bool) = config
             .query_row(
-                "SELECT to_commit, assets_transfer_checkpoint, transfer_id \
-                 FROM remote_operations WHERE operation = 'push' AND completed_at IS NOT NULL",
+                "SELECT to_commit, push_session_id, failed_at IS NOT NULL \
+                 FROM remote_operations WHERE operation = 'push'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .expect("should complete advanced push operation");
-        assert_eq!(
-            completed_transfer,
-            (
-                advanced_destination,
-                advanced_destination,
-                RETRIED_TRANSFER_ID
-            )
-        );
-        let graph =
-            get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
-        let tracking_hash = hash_of(&graph, "origin/main").expect("should query tracking branch");
-        assert_eq!(tracking_hash, advanced_destination);
+            .expect("should mark advanced push as failed");
+        assert_eq!(failed_transfer.0, original_destination);
+        assert_ne!(failed_transfer.1, original_session_id);
+        assert!(failed_transfer.2);
     }
 
     #[test]
-    fn test_push_retry_refreshes_expired_transfer_lease() {
+    fn test_expired_push_lease_requires_a_direct_gcs_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -4383,64 +5749,26 @@ mod tests {
             .local_addr()
             .expect("should read expired lease retry server address");
         let temp = tempdir().expect("should create expired lease retry directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for request_index in 0..7 {
-                let (mut stream, _) = listener.accept().expect("should accept GenHub request");
-                let mut request = [0_u8; 8192];
-                let read = stream
-                    .read(&mut request)
-                    .expect("should read GenHub request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                match request_index {
-                    0 | 3 | 6 => {
-                        let transfer_id = if request_index == 0 {
-                            TEST_TRANSFER_ID
-                        } else {
-                            RETRIED_TRANSFER_ID
-                        };
-                        let body = format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{transfer_id}\"}}"
-                        );
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write capability response");
-                    }
-                    1 | 4 => {
-                        let body = "{\"assets\":[]}";
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write asset response");
-                    }
-                    2 => {
-                        let body = "asset verification unavailable";
-                        write!(
-                            stream,
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write failed completion response");
-                    }
-                    5 => {
-                        stream
-                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                            .expect("should write completion response");
-                    }
-                    _ => unreachable!("request index should be covered"),
-                }
-            }
-            requests
+            let (mut stream, _) = listener.accept().expect("should accept GenHub request");
+            let mut request = [0_u8; 8192];
+            let read = stream
+                .read(&mut request)
+                .expect("should read GenHub request");
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = format!(
+                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                 \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                 \"default_branch\":\"main\",\
+                 \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should write legacy capability response");
+            request
         });
 
         let workspace = Workspace::new(temp.path().join("local"));
@@ -4459,39 +5787,30 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        let original_session_id =
+            seed_push_lease(&config, "main", &destination_hash, TEST_TRANSFER_ID, 0);
         drop(graph);
 
-        execute_push(&workspace, None, None, false)
-            .expect_err("first push should retain its lease after completion fails");
-        config
-            .execute(
-                "UPDATE remote_operations SET transfer_expires_at = 0 \
-                 WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
-                [],
-            )
-            .expect("should expire the persisted transfer lease");
+        let error = execute_push(&workspace, None, None, false)
+            .expect_err("expired push lease should require a direct GCS capability");
+        let request = server.join().expect("GenHub server should finish");
 
-        execute_push(&workspace, None, None, false)
-            .expect("expired lease retry should obtain a new transfer");
-        let requests = server.join().expect("GenHub server should finish");
-
-        assert_eq!(requests.len(), 7);
-        assert!(requests[0].contains("\"operation\":\"push\""));
-        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
-        assert!(requests[3].contains("\"operation\":\"push\""));
-        assert!(requests[5].contains(&format!("\"transfer_id\":\"{RETRIED_TRANSFER_ID}\"")));
-        assert!(requests[6].contains("\"operation\":\"pull\""));
-        let completed_transfer: (DoltHashId, Uuid, i64) = config
+        assert!(error.to_string().contains("direct GCS session"));
+        assert!(request.contains("\"operation\":\"push\""));
+        assert!(request.to_ascii_lowercase().contains("idempotency-token:"));
+        assert!(request.contains(&original_session_id.to_string()));
+        assert!(!request.contains("/asset-transfers "));
+        let failed_transfer: (DoltHashId, Uuid, bool) = config
             .query_row(
-                "SELECT to_commit, transfer_id, transfer_expires_at \
-                 FROM remote_operations WHERE operation = 'push' AND completed_at IS NOT NULL",
+                "SELECT to_commit, push_session_id, failed_at IS NOT NULL \
+                 FROM remote_operations WHERE operation = 'push'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .expect("should complete refreshed transfer lease");
-        assert_eq!(completed_transfer.0, destination_hash);
-        assert_eq!(completed_transfer.1, RETRIED_TRANSFER_ID);
-        assert!(completed_transfer.2 > Utc::now().timestamp());
+            .expect("should mark expired push as failed");
+        assert_eq!(failed_transfer.0, destination_hash);
+        assert_eq!(failed_transfer.1, original_session_id);
+        assert!(failed_transfer.2);
     }
 
     #[test]
@@ -4505,8 +5824,6 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let temp = tempdir().expect("should create push test directory");
-        let remote_graph = temp.path().join("remote.db");
-        let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
             for request_index in 0..4 {
@@ -4515,40 +5832,43 @@ mod tests {
                 let read = stream
                     .read(&mut request)
                     .expect("should read capability request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                if request_index < 3 {
-                    if request_index == 2 {
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                requests.push(request.clone());
+                match request_index {
+                    0 => {
+                        let body =
+                            direct_push_capability_body(&request, &format!("http://{address}"));
                         write!(
                             stream,
-                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
                         )
-                        .expect("should write completion response");
-                        continue;
+                        .expect("should write direct-push capability");
                     }
-                    let body = if request_index == 0 {
-                        format!(
-                            "{{\"remote_url\":\"{transfer_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
+                    1 => {
+                        let body = "{\"assets\":[]}";
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
                         )
-                    } else {
-                        "{\"assets\":[]}".to_string()
-                    };
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .expect("should write successful response");
-                } else {
-                    let body = "tracking fetch unavailable";
-                    write!(
-                        stream,
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .expect("should write failed response");
+                        .expect("should write asset response");
+                    }
+                    2 => {
+                        stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                            .expect("should write completion response");
+                    }
+                    3 => {
+                        let body = "tracking fetch unavailable";
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write failed response");
+                    }
+                    _ => unreachable!("request index should be covered"),
                 }
             }
             requests
@@ -4560,7 +5880,8 @@ mod tests {
             .expect("should open push config");
         let graph = get_connection(workspace.graph_db_path().unwrap()).expect("should open graph");
         Collection::create(&graph, "push-fixture").expect("should create push fixture");
-        commit_all(&graph, "push fixture").expect("should commit push fixture");
+        let destination_hash =
+            commit_all(&graph, "push fixture").expect("should commit push fixture");
         Remote::create(
             &config,
             "origin",
@@ -4568,6 +5889,13 @@ mod tests {
         )
         .expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        seed_push_lease(
+            &config,
+            "main",
+            &destination_hash,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
         drop(graph);
         drop(config);
 
@@ -4576,13 +5904,24 @@ mod tests {
         let requests = server.join().expect("capability server should finish");
 
         assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
         assert!(requests[0].contains("\"operation\":\"push\""));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
-        assert!(requests[1].contains("\"operation\":\"push\""));
         assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
         assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
         assert!(requests[2].contains("\"branch\":\"main\""));
         assert!(requests[3].contains("\"operation\":\"pull\""));
+        let config = get_config_connection(workspace.gen_db_path().unwrap())
+            .expect("should reopen push config");
+        let completed_operations: i64 = config
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations \
+                 WHERE operation = 'push' AND completed_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should count completed push operations");
+        assert_eq!(completed_operations, 1);
     }
 
     #[test]
@@ -4642,6 +5981,48 @@ mod tests {
             remote_rows(&graph)
                 .expect("should query remotes")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_non_fast_forward_classifier_requires_exact_sqlite_constraint_error() {
+        let exact = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        let other_constraint = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("constraint failed".to_string()),
+        );
+        let other_code = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        let unique_constraint = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        assert!(!super::is_non_fast_forward_push_error(&other_constraint));
+        let wrapped_conflict =
+            super::remote_push_graph_error(Box::new(super::PushGraphTransferError::NonFastForward));
+        let wrapped_unrelated_constraint = super::remote_push_graph_error(Box::new(
+            super::PushGraphTransferError::database("running Dolt push", other_constraint),
+        ));
+
+        assert!(super::is_non_fast_forward_push_error(&exact));
+        assert!(!super::is_non_fast_forward_push_error(&other_code));
+        assert!(!super::is_non_fast_forward_push_error(&unique_constraint));
+        assert!(matches!(
+            wrapped_conflict,
+            super::RemotePushError::NonFastForward
+        ));
+        assert!(matches!(
+            wrapped_unrelated_constraint,
+            super::RemotePushError::GraphTransfer(_)
+        ));
+        assert_eq!(
+            super::remote_push_graph_error(Box::new(exact)).to_string(),
+            "The branch is not a fast-forward of the remote. Use --force to overwrite the remote."
         );
     }
 }
