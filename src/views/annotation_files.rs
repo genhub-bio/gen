@@ -37,6 +37,7 @@ impl AnnotationAssetEntry {
 pub struct AnnotationFileEntry {
     pub file_addition: AnnotationAssetEntry,
     pub index_file_addition: Option<AnnotationAssetEntry>,
+    pub attribute_index_file_addition: Option<AnnotationAssetEntry>,
     pub name: Option<String>,
     pub display_name: String,
 }
@@ -63,6 +64,10 @@ pub fn load_annotation_file_entries(
         let asset_ref = &annotation_file.annotation;
         let file_addition = asset_entry_from_ref(asset_ref);
         let index_file_addition = annotation_file.index.as_ref().map(asset_entry_from_ref);
+        let attribute_index_file_addition = annotation_file
+            .attribute_index
+            .as_ref()
+            .map(asset_entry_from_ref);
         let name = asset_ref.name.clone();
         let display_name = name.clone().unwrap_or_else(|| {
             FsPath::new(
@@ -78,6 +83,7 @@ pub fn load_annotation_file_entries(
         entries.push(AnnotationFileEntry {
             file_addition,
             index_file_addition,
+            attribute_index_file_addition,
             name,
             display_name,
         });
@@ -122,9 +128,8 @@ mod tests {
             entries[0].file_addition.file_type,
             gen_models::file_types::FileTypes::Gff3
         );
-
         let annotation_files = Assets::get_annotation_files(context.graph().conn(), None)
-            .expect("should load the annotation and generated coordinate index");
+            .expect("should load the annotation and generated indexes");
         assert_eq!(annotation_files.len(), 1);
         let annotation_assets = &annotation_files[0];
         let coordinate_index = annotation_assets
@@ -138,6 +143,17 @@ mod tests {
             Some(annotation_assets.annotation.id),
             "generated CSI should be associated with its source annotation"
         );
+        let attribute_index = annotation_assets
+            .attribute_index
+            .as_ref()
+            .expect("should generate an attribute index for a locally imported GFF");
+        assert_eq!(attribute_index.file_type, FileTypes::None.as_str());
+        assert!(attribute_index.uri.ends_with(".gai"));
+        assert_eq!(
+            attribute_index.upstream_asset_ref_id,
+            Some(annotation_assets.annotation.id),
+            "generated GAI should be associated with its source annotation"
+        );
 
         let loaded_coordinate_index = entries[0]
             .index_file_addition
@@ -146,6 +162,17 @@ mod tests {
         assert_eq!(loaded_coordinate_index.id, coordinate_index.id);
         assert_eq!(loaded_coordinate_index.asset_uri, coordinate_index.uri);
         assert_eq!(loaded_coordinate_index.file_type, FileTypes::Tabix);
+        let loaded_attribute_index = entries[0]
+            .attribute_index_file_addition
+            .as_ref()
+            .expect("local GFF should have a generated attribute index");
+        assert_eq!(
+            loaded_attribute_index.id, attribute_index.id,
+            "viewer entry should retain the generated GAI reference"
+        );
+        assert_eq!(loaded_attribute_index.asset_uri, attribute_index.uri);
+        assert_eq!(loaded_attribute_index.file_type, FileTypes::None);
+        assert!(loaded_attribute_index.asset_uri.ends_with(".gai"));
     }
 
     #[test]

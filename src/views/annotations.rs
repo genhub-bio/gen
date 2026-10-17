@@ -1401,6 +1401,7 @@ mod tests {
                 file_type: FileTypes::None,
                 checksum: Some(Sha256Hash::convert_str("index-checksum")),
             }),
+            attribute_index_file_addition: None,
             name: None,
             display_name: "annotation".to_string(),
         };
@@ -1467,6 +1468,7 @@ mod tests {
                 file_type: FileTypes::Tabix,
                 checksum: None,
             }),
+            attribute_index_file_addition: None,
             name: None,
             display_name: "annotation".to_string(),
         };
@@ -1521,6 +1523,7 @@ mod tests {
                 checksum: None,
             },
             index_file_addition: Some(index_file_addition.clone()),
+            attribute_index_file_addition: None,
             name: Some("remote-track".to_string()),
             display_name: "remote-track".to_string(),
         };
@@ -1572,6 +1575,7 @@ mod tests {
                 checksum: None,
             },
             index_file_addition: None,
+            attribute_index_file_addition: None,
             name: None,
             display_name: "remote-track".to_string(),
         };
@@ -1633,6 +1637,7 @@ mod tests {
         let entry = AnnotationFileEntry {
             file_addition: file_addition.clone(),
             index_file_addition: None,
+            attribute_index_file_addition: None,
             name: None,
             display_name: "remote-gzip-track".to_string(),
         };
