@@ -1,6 +1,6 @@
-//! Progress reporting for remote pushes that spend time inside synchronous Dolt and storage calls.
-//! The CLI needs separate signals for logical Dolt chunks, physical GCS blocks, and asset request
-//! bytes because those counters become available at different stages and do not mean publication.
+//! Progress reporting for remote transfers that spend time inside synchronous Dolt and storage calls.
+//! The CLI keeps graph transfer, uploaded assets, and downloaded assets distinct because their
+//! counters become available at different stages and do not represent the same work.
 
 use std::{
     io::{self, IsTerminal as _, Write as _},
@@ -26,7 +26,7 @@ type SharedActivity = Arc<Mutex<Instant>>;
 
 /// Shared progress output for one remote operation.
 ///
-/// Keeping one context for the full push lets graph, asset, heartbeat, and phase output use the
+/// Keeping one context for the transfer lets graph, asset, heartbeat, and phase output use the
 /// same terminal bars without process-global coordination.
 #[derive(Clone)]
 pub(crate) struct TransferProgress {
@@ -44,10 +44,10 @@ impl TransferProgress {
         self.output.println(line);
     }
 
-    /// Keeps users informed during remote push phases that block without emitting progress callbacks.
+    /// Keeps users informed during remote phases that block without emitting progress callbacks.
     ///
-    /// `push_graph_through_direct_session_inner` and asset upload phases use this around waits
-    /// that have no native progress callback.
+    /// Graph clone and asset transfer phases use this around waits that have no native progress
+    /// callback.
     pub(crate) fn heartbeat(&self, phase: &str) -> ProgressHeartbeat {
         ProgressHeartbeat::start(
             self.output.clone(),
@@ -79,6 +79,51 @@ impl TransferProgress {
             name,
             total_bytes,
         )
+    }
+
+    pub(crate) fn asset_download_reporter(
+        &self,
+        index: usize,
+        total: usize,
+        name: String,
+        total_bytes: Option<u64>,
+    ) -> AssetDownloadProgressReporter {
+        AssetDownloadProgressReporter::with_output(
+            self.output.clone(),
+            index,
+            total,
+            name,
+            total_bytes,
+        )
+    }
+
+    pub(crate) fn report_asset_download_plan(
+        &self,
+        total_assets: usize,
+        known_bytes: u64,
+        unknown_size_assets: usize,
+    ) {
+        if total_assets == 0 {
+            self.println("No assets need downloading.");
+            return;
+        }
+        let noun = if total_assets == 1 { "asset" } else { "assets" };
+        if unknown_size_assets == 0 {
+            self.println(&format!(
+                "Downloading {total_assets} {noun} ({} total known size).",
+                format_bytes(known_bytes),
+            ));
+        } else {
+            let unknown_noun = if unknown_size_assets == 1 {
+                "asset"
+            } else {
+                "assets"
+            };
+            self.println(&format!(
+                "Downloading {total_assets} {noun} ({} total known size; size unknown for {unknown_size_assets} {unknown_noun}).",
+                format_bytes(known_bytes),
+            ));
+        }
     }
 }
 
@@ -295,6 +340,13 @@ impl IndicatifOutput {
         }
     }
 
+    fn asset_download_progress(&self, total_bytes: Option<u64>, bytes: u64, message: &str) {
+        match total_bytes.filter(|total| *total > 0) {
+            Some(total) => self.set_bar(BarKind::Determinate(total), bytes, message),
+            None => self.set_bar(BarKind::Message, 0, message),
+        }
+    }
+
     fn asset_waiting(&self, message: &str) {
         self.set_bar(BarKind::Spinner, 0, message);
     }
@@ -337,7 +389,7 @@ impl IndicatifOutput {
     }
 }
 
-/// Periodically reports that a long upload phase is still waiting for real progress.
+/// Periodically reports that a long transfer phase is still working.
 ///
 /// The worker thread is always joined when this guard is dropped. If the operating system cannot
 /// create a thread, progress remains best-effort and the transfer continues without heartbeats.
@@ -363,7 +415,7 @@ impl ProgressHeartbeat {
         }
         let (stop, receiver) = mpsc::channel();
         let worker = thread::Builder::new()
-            .name("gen-upload-progress".to_string())
+            .name("gen-transfer-progress".to_string())
             .spawn(move || {
                 let started = Instant::now();
                 let mut last_heartbeat = started;
@@ -387,11 +439,9 @@ impl ProgressHeartbeat {
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner),
                             );
-                            if idle >= interval
-                                && now.duration_since(last_heartbeat) >= interval
-                            {
+                            if idle >= interval && now.duration_since(last_heartbeat) >= interval {
                                 (output.sink)(&format!(
-                                    "Still waiting during {phase}; no new transfer progress (elapsed {}).",
+                                    "Still working on {phase} (elapsed {}).",
                                     format_elapsed(now.duration_since(started)),
                                 ));
                                 last_heartbeat = now;
@@ -1077,6 +1127,341 @@ impl AssetUploadProgressReporter {
     }
 }
 
+/// Reports the real byte work that happens while a clone or pull receives and materializes assets.
+///
+/// `transfer_assets` creates one reporter per required asset so resumed bytes, cache hits, checksum
+/// reads, and decompression remain visible without treating a server-provided URL as progress.
+#[derive(Clone)]
+pub(crate) struct AssetDownloadProgressReporter {
+    output: Arc<ThrottledOutput>,
+    index: usize,
+    total: usize,
+    name: Arc<str>,
+    total_bytes: Arc<Mutex<Option<u64>>>,
+    phase_total_bytes: Arc<Mutex<Option<u64>>>,
+    started: Instant,
+    phase: Arc<Mutex<String>>,
+    activity: SharedActivity,
+    downloaded_bytes: Arc<AtomicU64>,
+    network_bytes: Arc<AtomicU64>,
+    resumed_bytes: Arc<AtomicU64>,
+    checksum_bytes: Arc<AtomicU64>,
+    materialized_bytes: Arc<AtomicU64>,
+    reused: Arc<Mutex<bool>>,
+}
+
+impl AssetDownloadProgressReporter {
+    fn with_output(
+        output: ProgressOutput,
+        index: usize,
+        total: usize,
+        name: String,
+        total_bytes: Option<u64>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            output: Arc::new(output.reporter()),
+            index,
+            total,
+            name: Arc::from(name),
+            total_bytes: Arc::new(Mutex::new(total_bytes)),
+            phase_total_bytes: Arc::new(Mutex::new(total_bytes)),
+            started: now,
+            phase: Arc::new(Mutex::new("preparing asset download".to_string())),
+            activity: Arc::new(Mutex::new(now)),
+            downloaded_bytes: Arc::new(AtomicU64::new(0)),
+            network_bytes: Arc::new(AtomicU64::new(0)),
+            resumed_bytes: Arc::new(AtomicU64::new(0)),
+            checksum_bytes: Arc::new(AtomicU64::new(0)),
+            materialized_bytes: Arc::new(AtomicU64::new(0)),
+            reused: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    pub(crate) fn download_started(&self, resumed_bytes: u64) {
+        self.set_phase("downloading asset bytes");
+        self.downloaded_bytes
+            .store(resumed_bytes, Ordering::Relaxed);
+        self.network_bytes.store(0, Ordering::Relaxed);
+        self.resumed_bytes.store(resumed_bytes, Ordering::Relaxed);
+        self.set_phase_total_bytes(self.expected_bytes());
+        let message = if resumed_bytes > 0 {
+            format!(
+                "Resuming asset download {}/{}: {} ({} staged, unverified)",
+                self.index,
+                self.total,
+                self.name,
+                format_bytes(resumed_bytes),
+            )
+        } else {
+            format!(
+                "Downloading asset {}/{}: {}",
+                self.index, self.total, self.name
+            )
+        };
+        self.report_downloaded(resumed_bytes, &message, true);
+    }
+
+    /// Counts the staged position while separately tracking new bytes consumed in this attempt.
+    pub(crate) fn download_bytes(&self, bytes: u64) {
+        let previous = self.downloaded_bytes.swap(bytes, Ordering::Relaxed);
+        self.network_bytes.store(
+            bytes.saturating_sub(self.resumed_bytes.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+        if bytes > previous {
+            self.mark_activity();
+        }
+        self.report_current_bytes(bytes, &self.download_message(bytes), false);
+    }
+
+    pub(crate) fn reused_cached_asset(&self) {
+        *self
+            .reused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        let total_bytes = self.expected_bytes();
+        let message = format!(
+            "Reusing cached asset {}/{} after checksum verification: {} ({})",
+            self.index,
+            self.total,
+            self.name,
+            total_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "size unknown".to_string()),
+        );
+        self.output.report(&message, true);
+    }
+
+    pub(crate) fn checksum_started(&self, phase: &str, total_bytes: Option<u64>) {
+        self.set_phase(phase);
+        self.set_phase_total_bytes(total_bytes);
+        self.checksum_bytes.store(0, Ordering::Relaxed);
+        let message = format!(
+            "Checking asset {}/{}: {}",
+            self.index, self.total, self.name,
+        );
+        self.report_current_bytes(0, &message, true);
+    }
+
+    pub(crate) fn checksum_bytes(&self, bytes: u64) {
+        let previous = self.checksum_bytes.swap(bytes, Ordering::Relaxed);
+        if bytes > previous {
+            self.mark_activity();
+        }
+        let message = self.checksum_message(bytes);
+        self.report_current_bytes(bytes, &message, false);
+    }
+
+    pub(crate) fn materialization_started(&self) {
+        self.set_phase("materializing asset in the workspace");
+        self.set_phase_total_bytes(None);
+        self.materialized_bytes.store(0, Ordering::Relaxed);
+        self.report_current_bytes(0, &self.materialization_message(0), true);
+    }
+
+    /// Counts decompressed or copied bytes written to the staged workspace file.
+    pub(crate) fn materialized_bytes(&self, bytes: u64) {
+        let previous = self.materialized_bytes.swap(bytes, Ordering::Relaxed);
+        if bytes > previous {
+            self.mark_activity();
+        }
+        self.report_current_bytes(bytes, &self.materialization_message(bytes), false);
+    }
+
+    pub(crate) fn heartbeat(&self, phase: &str) -> ProgressHeartbeat {
+        self.set_phase(phase);
+        *self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+        ProgressHeartbeat::start(
+            self.output.output.clone(),
+            Arc::clone(&self.activity),
+            phase.to_string(),
+            HEARTBEAT_INTERVAL,
+        )
+    }
+
+    pub(crate) fn completed(&self) {
+        let message = if *self
+            .reused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            format!(
+                "Asset {}/{} ready from cache: {}",
+                self.index, self.total, self.name
+            )
+        } else {
+            format!(
+                "Asset {}/{} ready; checksum verified: {} ({} staged, {} read this attempt)",
+                self.index,
+                self.total,
+                self.name,
+                format_bytes(self.downloaded_bytes.load(Ordering::Relaxed)),
+                format_bytes(self.network_bytes.load(Ordering::Relaxed)),
+            )
+        };
+        if let Some(indicatif) = &self.output.output.indicatif {
+            indicatif.finish_bar(&message, true);
+        } else {
+            self.output.report(&message, true);
+        }
+    }
+
+    pub(crate) fn failed(&self) -> String {
+        let phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let downloaded = self.downloaded_bytes.load(Ordering::Relaxed);
+        let network = self.network_bytes.load(Ordering::Relaxed);
+        let checksum = self.checksum_bytes.load(Ordering::Relaxed);
+        let materialized = self.materialized_bytes.load(Ordering::Relaxed);
+        let message = format!(
+            "asset download {}/{} ({}) failed after {} during {phase}; staged {}, read this attempt {}, checksum scanned {}, materialized {}",
+            self.index,
+            self.total,
+            self.name,
+            format_elapsed(self.started.elapsed()),
+            format_bytes(downloaded),
+            format_bytes(network),
+            format_bytes(checksum),
+            format_bytes(materialized),
+        );
+        if let Some(indicatif) = &self.output.output.indicatif {
+            indicatif.finish_bar(&format!("Asset download failed: {}", self.name), false);
+        }
+        self.output.println(&message);
+        message
+    }
+
+    fn set_phase(&self, phase: &str) {
+        *self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = phase.to_string();
+        *self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+
+    pub(crate) fn set_expected_bytes(&self, total_bytes: u64) {
+        *self
+            .total_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(total_bytes);
+    }
+
+    fn expected_bytes(&self) -> Option<u64> {
+        *self
+            .total_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_phase_total_bytes(&self, total_bytes: Option<u64>) {
+        *self
+            .phase_total_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = total_bytes;
+    }
+
+    fn mark_activity(&self) {
+        *self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+
+    fn report_downloaded(&self, bytes: u64, message: &str, force: bool) {
+        self.report_current_bytes(bytes, &self.with_download_count(message, bytes), force);
+    }
+
+    fn report_current_bytes(&self, bytes: u64, message: &str, force: bool) {
+        let total_bytes = *self
+            .phase_total_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(indicatif) = &self.output.output.indicatif {
+            let determinate_total = total_bytes.filter(|total| bytes <= *total);
+            indicatif.asset_download_progress(determinate_total, bytes, message);
+        } else {
+            self.output.report(message, force);
+        }
+    }
+
+    fn download_message(&self, bytes: u64) -> String {
+        let network_bytes = self.network_bytes.load(Ordering::Relaxed);
+        self.with_download_count(
+            &format!(
+                "Downloading asset {}/{}: {}; {} read this attempt",
+                self.index,
+                self.total,
+                self.name,
+                format_bytes(network_bytes),
+            ),
+            bytes,
+        )
+    }
+
+    fn with_download_count(&self, prefix: &str, bytes: u64) -> String {
+        match self.expected_bytes() {
+            Some(total) if bytes <= total => format!(
+                "{prefix}; {} of {} staged ({})",
+                format_bytes(bytes),
+                format_bytes(total),
+                completion_percentage(bytes, total),
+            ),
+            Some(_) => format!(
+                "{prefix}; {} staged (size pending verification)",
+                format_bytes(bytes),
+            ),
+            None => format!("{prefix}; {} staged", format_bytes(bytes)),
+        }
+    }
+
+    fn checksum_message(&self, bytes: u64) -> String {
+        match self.phase_total_expected_bytes() {
+            Some(total) => format!(
+                "Checking asset {}/{}: {}; {} of {} scanned",
+                self.index,
+                self.total,
+                self.name,
+                format_bytes(bytes),
+                format_bytes(total),
+            ),
+            None => format!(
+                "Checking asset {}/{}: {}; {} scanned",
+                self.index,
+                self.total,
+                self.name,
+                format_bytes(bytes),
+            ),
+        }
+    }
+
+    fn materialization_message(&self, bytes: u64) -> String {
+        format!(
+            "Materializing asset {}/{}: {}; {} written",
+            self.index,
+            self.total,
+            self.name,
+            format_bytes(bytes),
+        )
+    }
+
+    fn phase_total_expected_bytes(&self) -> Option<u64> {
+        *self
+            .phase_total_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 pub(crate) struct UploadBodyReader<R> {
     reader: R,
     progress: AssetUploadProgressReporter,
@@ -1164,7 +1549,7 @@ pub(crate) fn format_elapsed(elapsed: Duration) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         io::{Cursor, Read as _},
         sync::{Arc, Mutex},
@@ -1247,6 +1632,13 @@ mod tests {
             indicatif: None,
         };
         (output, lines)
+    }
+
+    pub(crate) fn captured_transfer_progress(
+        interval: Duration,
+    ) -> (TransferProgress, Arc<Mutex<Vec<String>>>) {
+        let (output, lines) = captured_output(interval);
+        (TransferProgress { output }, lines)
     }
 
     #[test]
@@ -1735,7 +2127,7 @@ mod tests {
                     .lock()
                     .expect("should capture heartbeat output")
                     .push(line.to_string());
-                if line.starts_with("Still waiting") {
+                if line.starts_with("Still working") {
                     let _ = heartbeat_tx.send(line.to_string());
                 }
             }),
@@ -1770,6 +2162,29 @@ mod tests {
     }
 
     #[test]
+    fn test_asset_download_progress_separates_resumed_bytes_from_new_reads() {
+        let (progress, lines) = captured_transfer_progress(Duration::ZERO);
+        let reporter = progress.asset_download_reporter(1, 1, "reference.fa".to_string(), None);
+
+        reporter.set_expected_bytes(12);
+        reporter.download_started(4);
+        reporter.download_bytes(8);
+
+        let lines = lines
+            .lock()
+            .expect("should read captured download progress");
+        let latest = lines.last().expect("should report downloaded bytes");
+        assert!(latest.contains("4 B read this attempt"));
+        assert!(latest.contains("8 B of 12 B staged (66%)"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("4 B staged, unverified")),
+            "a resumed prefix should remain labeled unverified until checksum validation"
+        );
+    }
+
+    #[test]
     fn test_injected_graph_failure_keeps_error_phase_and_last_real_counters() {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel();
@@ -1780,7 +2195,7 @@ mod tests {
                     .lock()
                     .expect("should capture failure output")
                     .push(line.to_string());
-                if line.starts_with("Still waiting") {
+                if line.starts_with("Still working") {
                     let _ = heartbeat_tx.send(line.to_string());
                 }
             }),
@@ -1829,7 +2244,7 @@ mod tests {
                 && line.contains("1 GCS blocks reused (4.0 MiB)")
         }));
         assert!(lines.iter().any(|line| {
-            line.contains("Still waiting during Dolt push through loopback RemoteServer")
+            line.contains("Still working on Dolt push through loopback RemoteServer")
         }));
         assert!(
             lines
