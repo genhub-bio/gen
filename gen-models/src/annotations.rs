@@ -1,8 +1,11 @@
 use std::{
+    fs::{self, File},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+use flate2::read::MultiGzDecoder;
 use gen_core::{
     DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
     config::Workspace,
@@ -12,19 +15,26 @@ use gen_core::{
 use intervaltree::IntervalTree;
 use rusqlite::{Result as SqlResult, Row, params, types::Type};
 use serde::{Deserialize, Serialize};
+use tempfile::{Builder as TempFileBuilder, TempDir};
 use thiserror::Error;
 
 use crate::{
     Direction, ForeignKeyCache, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
-    assets::{AssetRef, AssetRole, OperationKind},
+    assets::{
+        AssetRef, AssetRole, AssetUri, ChecksummedWriter, CompressionType, LocalAssetUri,
+        OperationKind,
+    },
     db::{DbContext, GraphConnection, max_rows_per_batch},
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     history::{HistoryStore, dolt::DoltHistoryStore},
     interval_tree::IntervalTreeSource,
-    operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
+    operations::{
+        FileAddition, FileSource, OperationFile, OperationInfo, OperationSummary,
+        calculate_reader_checksum, track_asset_refs,
+    },
     region::GenRegionError,
     select::query_models,
 };
@@ -718,6 +728,10 @@ pub enum AnnotationFileError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("File addition error: {0}")]
     FileAdditionError(#[from] FileAdditionError),
+    #[error("Annotation file I/O error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("Unable to sort or index annotation file: {0}")]
+    GaiError(#[from] gai::Error),
     #[error("Operation error: {0}")]
     OperationError(#[from] OperationError),
     #[error(
@@ -743,7 +757,7 @@ pub fn annotation_file_extension(path: &str) -> Option<String> {
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase());
-    if matches!(ext.as_deref(), Some("gz") | Some("bgz")) {
+    if matches!(ext.as_deref(), Some("gz") | Some("bgz") | Some("bgzf")) {
         ext = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -762,17 +776,19 @@ pub fn annotation_index_file_path(
         return Some(index_path.to_string());
     }
 
-    let mut candidates = vec![format!("{path}.tbi")];
+    let mut candidates = vec![format!("{path}.csi"), format!("{path}.tbi")];
     let path_buf = PathBuf::from(path);
     if let Some(extension) = path_buf.extension().and_then(|ext| ext.to_str()) {
-        let mut extension_candidate = path_buf.clone();
-        extension_candidate.set_extension(format!("{extension}.tbi"));
-        let extension_candidate = extension_candidate.to_string_lossy().to_string();
-        if !candidates
-            .iter()
-            .any(|candidate| candidate == &extension_candidate)
-        {
-            candidates.push(extension_candidate);
+        for suffix in ["csi", "tbi"] {
+            let mut extension_candidate = path_buf.clone();
+            extension_candidate.set_extension(format!("{extension}.{suffix}"));
+            let extension_candidate = extension_candidate.to_string_lossy().to_string();
+            if !candidates
+                .iter()
+                .any(|candidate| candidate == &extension_candidate)
+            {
+                candidates.push(extension_candidate);
+            }
         }
     }
 
@@ -844,11 +860,116 @@ pub struct AnnotationFileChecksumOverrides {
     pub index: Option<Sha256Hash>,
 }
 
-/// Adds an annotation asset and optional index to operation history.
+fn prepare_local_sorted_annotation(
+    workspace: &Workspace,
+    path: &str,
+    file_type: FileTypes,
+    checksum_override: Option<Sha256Hash>,
+) -> Result<(FileAddition, FileAddition), AnnotationFileError> {
+    let cache_dir = workspace
+        .find_cache_dir()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "workspace cache directory is unavailable",
+            )
+        })?
+        .join("annotation-indexes");
+    fs::create_dir_all(&cache_dir)?;
+
+    let asset_uri = <dyn AssetUri>::new(workspace, path);
+    if let Some(expected_checksum) = checksum_override {
+        let source_checksum = calculate_reader_checksum(asset_uri.reader(workspace)?)?;
+        if source_checksum != expected_checksum {
+            return Err(FileAdditionError::ChecksumError(
+                "local source checksum does not match the provided checksum".to_string(),
+            )
+            .into());
+        }
+    }
+
+    let source_reader = asset_uri.reader(workspace)?;
+    let (compression_type, replayed_reader) =
+        CompressionType::sniff(source_reader).map_err(FileAdditionError::FileReadError)?;
+    let source_reader: Box<dyn Read> = match compression_type {
+        CompressionType::Plain => Box::new(replayed_reader),
+        CompressionType::Gzip | CompressionType::Bgzf => {
+            Box::new(MultiGzDecoder::new(replayed_reader))
+        }
+    };
+    let asset_dir = workspace
+        .asset_dir()
+        .map_err(FileAdditionError::ConfigError)?;
+    fs::create_dir_all(&asset_dir)?;
+    let mut sorted_source = TempFileBuilder::new()
+        .suffix(&format!(".{}.bgz", FileTypes::suffix(file_type)))
+        .tempfile_in(&asset_dir)?;
+    let format = match file_type {
+        FileTypes::Gff3 => gai::SortFormat::Gff,
+        FileTypes::Bed => gai::SortFormat::Bed,
+        other => {
+            return Err(AnnotationFileError::UnsupportedFileType(
+                other.as_str().to_string(),
+            ));
+        }
+    };
+
+    // GAI sorts, writes a .bgz and returns an index all in one pass.
+    let (coordinate_index, archive_checksum) = {
+        let checksummed_writer = ChecksummedWriter::new(sorted_source.as_file_mut());
+        let mut bgzf_writer = noodles::bgzf::io::Writer::new(checksummed_writer);
+        let coordinate_index = match gai::sort_bgzf_with_csi(
+            BufReader::new(source_reader),
+            &mut bgzf_writer,
+            format,
+            true,
+        ) {
+            Ok(coordinate_index) => coordinate_index,
+            Err(error) => {
+                bgzf_writer.into_inner();
+                return Err(error.into());
+            }
+        };
+        let mut checksummed_writer = bgzf_writer.finish()?;
+        checksummed_writer.flush()?;
+        (coordinate_index, checksummed_writer.checksum())
+    };
+    let materialized_checksum =
+        calculate_reader_checksum(noodles::bgzf::io::Reader::new(sorted_source.reopen()?))?;
+    let file_addition = FileAddition::prepare_from_source(
+        workspace,
+        path,
+        file_type,
+        FileSource::StagedBgzf {
+            path: sorted_source.path().to_path_buf(),
+            archive_checksum,
+            materialized_checksum,
+        },
+        true,
+    )?;
+
+    let sidecar_temp_dir = TempDir::new_in(&cache_dir)?;
+    let coordinate_index_path = sidecar_temp_dir.path().join("coordinate.csi");
+    let mut coordinate_index_writer =
+        noodles::csi::io::Writer::new(File::create(&coordinate_index_path)?);
+    coordinate_index_writer.write_index(&coordinate_index)?;
+    coordinate_index_writer.into_inner().finish()?.flush()?;
+
+    let index_file_addition = FileAddition::prepare(
+        workspace,
+        &coordinate_index_path.to_string_lossy(),
+        FileTypes::Tabix,
+        None,
+    )?;
+
+    Ok((file_addition, index_file_addition))
+}
+
+/// Adds an annotation asset and its available indexes to operation history.
 ///
 /// Callers pass checksums only when the corresponding remote streams were already consumed for
 /// annotation work. This keeps operation creation independent of remote credentials while local
-/// assets are retained and hashed during preparation.
+/// annotation files are sorted, retained, and hashed during preparation.
 pub fn add_annotation_file(
     context: &DbContext,
     path: &str,
@@ -869,79 +990,102 @@ pub fn add_annotation_file(
             parse_annotation_file_type(&ext)?
         }
     };
-    let file_addition =
-        FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
-    let annotation_logical_path =
-        OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
-    let prepared_index =
-        if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
-            let index_file_type = FileTypes::infer_from_path(&index_path);
-            let file_addition = FileAddition::prepare(
-                workspace,
-                &index_path,
-                index_file_type,
-                checksum_overrides.index,
-            )?;
-            let logical_path = OperationFile::storage_file_path(
-                workspace,
-                &index_path,
-                file_addition.checksum.as_ref(),
-            )?;
-            let name = Path::new(&index_path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(str::to_string);
-            Some((file_addition, logical_path, name))
-        } else {
-            None
-        };
     let name = name.or_else(|| Path::new(path).file_name().and_then(|value| value.to_str()));
     let name_value = name.unwrap_or_default();
-    let annotation_asset_ref_id = AssetRef::id_hash(
+    let (file_addition, logical_path, sidecars) =
+        if matches!(file_type, FileTypes::Gff3 | FileTypes::Bed)
+            && LocalAssetUri::is_local_path_or_file_uri(path)
+        {
+            // Sorting changes compressed offsets, so local GFF/BED sidecars are always rebuilt against
+            // the retained BGZF bytes. A supplied coordinate index describes the original input bytes.
+            let (file_addition, index_file_addition) = prepare_local_sorted_annotation(
+                workspace,
+                path,
+                file_type,
+                checksum_overrides.annotation,
+            )?;
+            let logical_path =
+                OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
+            let filename = Path::new(&logical_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("annotation");
+            let sidecars = vec![(
+                index_file_addition,
+                format!("{logical_path}.csi"),
+                format!("{filename}.csi"),
+            )];
+            (file_addition, logical_path, sidecars)
+        } else {
+            let file_addition =
+                FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
+            let logical_path =
+                OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
+            let mut sidecars = Vec::new();
+            if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
+                let index_file_type = FileTypes::infer_from_path(&index_path);
+                let index_file_addition = FileAddition::prepare(
+                    workspace,
+                    &index_path,
+                    index_file_type,
+                    checksum_overrides.index,
+                )?;
+                let index_logical_path = OperationFile::storage_file_path(
+                    workspace,
+                    &index_path,
+                    index_file_addition.checksum.as_ref(),
+                )?;
+                let index_name = Path::new(&index_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| index_path.clone());
+                sidecars.push((index_file_addition, index_logical_path, index_name));
+            }
+            (file_addition, logical_path, sidecars)
+        };
+    let created_on = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should create annotation asset timestamp");
+    let annotation_asset_ref = AssetRef::from_file_addition(
         &file_addition,
-        &AssetRole::Annotation,
-        Some(&annotation_logical_path),
+        AssetRole::Annotation,
+        Some(&logical_path),
         name,
         None,
+        created_on,
     );
-    let index_file_addition_id = prepared_index
-        .as_ref()
-        .map(|(index_file, _, _)| index_file.id.to_string())
-        .unwrap_or_default();
+    let annotation_asset_ref_id = annotation_asset_ref.id;
+    let index_file_addition_ids = sidecars
+        .iter()
+        .map(|(file_addition, _, _)| file_addition.id.to_string())
+        .collect::<Vec<_>>()
+        .join(":");
     let log_id = HashId(calculate_hash(&format!(
-        "{file_addition_id}:{name_value}:{index_file_addition_id}",
+        "{file_addition_id}:{name_value}:{index_file_addition_ids}",
         file_addition_id = file_addition.id
     )));
     let summary = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("Add annotation file {path}"));
-    let created_on = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .expect("should create annotation asset timestamp");
-    let mut tracked_assets = vec![AssetRef::from_file_addition(
-        &file_addition,
-        AssetRole::Annotation,
-        Some(&annotation_logical_path),
-        name,
-        None,
-        created_on,
-    )];
-    if let Some((index_file_addition, index_logical_path, index_name)) = prepared_index.as_ref() {
-        tracked_assets.push(AssetRef::from_file_addition(
-            index_file_addition,
+    let mut asset_refs = vec![annotation_asset_ref];
+    for (file_addition, logical_path, index_name) in &sidecars {
+        asset_refs.push(AssetRef::from_file_addition(
+            file_addition,
             AssetRole::AnnotationIndex,
-            Some(index_logical_path),
-            index_name.as_deref(),
+            Some(logical_path),
+            Some(index_name),
             Some(&annotation_asset_ref_id),
             created_on,
         ));
     }
+
     track_asset_refs(
         graph_conn,
         Some(&log_id),
         &OperationKind::AnnotationFile,
         &summary,
-        &tracked_assets,
+        &asset_refs,
     )?;
     let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
     if history_store.status()?.is_empty() {
@@ -955,7 +1099,7 @@ pub fn add_annotation_file(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs, io::Read as _, sync::Arc};
+    use std::{collections::HashSet, fs, sync::Arc};
 
     use gen_core::{HashId, NodeIntervalBlock, Strand, region::RegionResolutionError};
 
@@ -965,9 +1109,7 @@ mod tests {
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
-        operations::{
-            calculate_file_checksum, calculate_reader_checksum, commit_operation_summary,
-        },
+        operations::{calculate_reader_checksum, commit_operation_summary},
         path::Path,
         sample::Sample,
         sample_lineage::SampleLineage,
@@ -1540,24 +1682,30 @@ mod tests {
         asset_refs.sort_by(|left, right| left.role.as_str().cmp(right.role.as_str()));
         let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
-        assert_eq!(asset_refs.len(), 1);
-        assert_eq!(asset_refs[0].role, AssetRole::Annotation);
-        assert_eq!(asset_refs[0].name.as_deref(), Some("track-1"));
+        assert_eq!(asset_refs.len(), 2);
+        let annotation_asset = asset_refs
+            .iter()
+            .find(|asset| asset.role == AssetRole::Annotation)
+            .expect("should track annotation source");
+        assert_eq!(annotation_asset.name.as_deref(), Some("track-1"));
         assert!(
-            asset_refs[0]
+            annotation_asset
                 .logical_path
                 .as_deref()
                 .unwrap_or_default()
                 .ends_with("fixtures/annotation.gff3")
         );
+        assert!(asset_refs.iter().any(|asset| {
+            asset.role == AssetRole::AnnotationIndex
+                && asset.upstream_asset_ref_id == Some(annotation_asset.id)
+        }));
         assert_eq!(operation_logs.len(), 1);
         assert_eq!(
             operation_logs[0].operation_kind,
             OperationKind::AnnotationFile
         );
         let operation_assets = OperationAsset::by_log_id(graph_conn, &operation_logs[0].id);
-        assert_eq!(operation_assets.len(), 1);
-        assert_eq!(operation_assets[0].role, AssetRole::Annotation);
+        assert_eq!(operation_assets.len(), 2);
         assert!(
             history_store
                 .log(None)
@@ -1583,28 +1731,23 @@ mod tests {
     }
 
     #[test]
-    fn test_add_annotation_file_tracks_explicit_non_tabix_index() {
+    fn test_add_annotation_file_sorts_local_gff() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
-
-        let repo_root = context
+        let annotation_path = context
             .workspace()
             .repo_root()
-            .expect("should have repo root");
-        let annotation_path = repo_root
-            .join("fixtures")
-            .join("annotation-with-index.gff3");
-        let index_path = repo_root.join("fixtures").join("annotation-with-index.csi");
-        let annotation_contents = b"##gff-version 3\n";
-        let index_contents = b"index";
-        fs::create_dir_all(
-            annotation_path
-                .parent()
-                .expect("should have annotation parent directory"),
-        )
-        .expect("should create fixture directory");
-        fs::write(&annotation_path, annotation_contents).expect("should write annotation fixture");
-        fs::write(&index_path, index_contents).expect("should write index fixture");
+            .unwrap()
+            .join("features.gff3");
+        let input = concat!(
+            "##gff-version 3\n",
+            "m123\tsource\tgene\t20\t25\t.\t+\t.\tName=Beta-feature\n",
+            "m123\tsource\tgene\t2\t4\t.\t+\t.\tName=Alpha-feature\n",
+            "m123\tsource\tgene\t10\t12\t.\t-\t.\tName=Gamma-feature\n",
+        );
+        let source_checksum = calculate_reader_checksum(input.as_bytes())
+            .expect("should checksum original unsorted GFF input");
+        fs::write(&annotation_path, input).expect("should write unsorted GFF input");
 
         add_annotation_file(
             &context,
@@ -1612,70 +1755,117 @@ mod tests {
                 .to_str()
                 .expect("should encode annotation path"),
             None,
-            Some(index_path.to_str().expect("should encode index path")),
-            Some("track-with-index"),
+            None,
+            Some("sorted-gff"),
+            None,
+            AnnotationFileChecksumOverrides {
+                annotation: Some(source_checksum),
+                index: None,
+            },
+        )
+        .expect("should sort and index local GFF input");
+
+        assert_eq!(fs::read_to_string(&annotation_path).unwrap(), input);
+        let assets = AssetRef::all(graph_conn).expect("should load generated annotation assets");
+        let annotation = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::Annotation)
+            .expect("should track GFF source");
+
+        let source_path = annotation
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained BGZF source");
+        let retained_bgzf_bytes = fs::read(&source_path).expect("should read retained BGZF bytes");
+        let archive_checksum = calculate_reader_checksum(retained_bgzf_bytes.as_slice())
+            .expect("should checksum retained BGZF archive bytes");
+        assert_eq!(annotation.checksum, Some(archive_checksum));
+        let mut bgzf_reader = noodles::bgzf::io::Reader::new(
+            fs::File::open(&source_path).expect("should open retained BGZF source"),
+        );
+        let mut sorted_text = String::new();
+        bgzf_reader
+            .read_to_string(&mut sorted_text)
+            .expect("should decode sorted GFF source");
+        let sorted_checksum = calculate_reader_checksum(sorted_text.as_bytes())
+            .expect("should checksum sorted annotation content");
+        assert_eq!(annotation.materialized_checksum, Some(sorted_checksum));
+        assert_ne!(annotation.materialized_checksum, Some(source_checksum));
+        let sorted_positions = sorted_text
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| line.split('\t').nth(3).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(sorted_positions, ["2", "10", "20"]);
+    }
+
+    #[test]
+    fn test_add_annotation_file_builds_local_gff_csi() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let annotation_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("features.gff3");
+        let input = concat!(
+            "##gff-version 3\n",
+            "m123\tsource\tgene\t600000002\t600000004\t.\t+\t.\tName=Alpha-feature\n",
+            "m123\tsource\tgene\t600000020\t600000025\t.\t+\t.\tName=Beta-feature\n",
+        );
+        fs::write(&annotation_path, input).expect("should write sorted GFF input");
+
+        add_annotation_file(
+            &context,
+            annotation_path
+                .to_str()
+                .expect("should encode annotation path"),
+            None,
+            None,
+            Some("indexed-gff"),
             None,
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should create annotation file operation");
+        .expect("should index local GFF input");
 
-        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
-        asset_refs.sort_by(|left, right| {
-            left.role
-                .as_str()
-                .cmp(right.role.as_str())
-                .then_with(|| left.logical_path.cmp(&right.logical_path))
-        });
-        assert_eq!(asset_refs.len(), 2);
-        assert_eq!(asset_refs[0].role, AssetRole::Annotation);
-        assert_eq!(asset_refs[1].role, AssetRole::AnnotationIndex);
+        let assets = AssetRef::all(graph_conn).expect("should load generated annotation assets");
+        assert_eq!(assets.len(), 2);
+        let annotation = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::Annotation)
+            .expect("should track GFF source");
+        let coordinate_index = assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::AnnotationIndex)
+            .expect("should track CSI coordinate index");
+        assert!(annotation.uri.ends_with(".gff3.bgz"));
+        assert!(coordinate_index.uri.ends_with(".csi"));
+        assert_eq!(coordinate_index.file_type, FileTypes::Tabix.as_str());
         assert_eq!(
-            asset_refs[1].upstream_asset_ref_id,
-            Some(asset_refs[0].id),
-            "annotation index should identify its immutable upstream annotation"
+            coordinate_index.upstream_asset_ref_id,
+            Some(annotation.id),
+            "CSI metadata should link to its annotation source"
         );
-        assert_eq!(
-            asset_refs[0].checksum,
-            Some(
-                calculate_file_checksum(
-                    asset_refs[0]
-                        .versioned_store_path(context.workspace())
-                        .expect("should resolve retained BGZF annotation")
-                )
-                .expect("should checksum retained BGZF annotation")
-            )
-        );
-        assert_eq!(
-            asset_refs[0].materialized_checksum,
-            Some(calculate_reader_checksum(annotation_contents.as_slice()).unwrap())
-        );
-        assert!(asset_refs[0].uri.ends_with(".gff3.bgz"));
-        let archive_path = asset_refs[0]
+
+        let source_path = annotation
             .versioned_store_path(context.workspace())
-            .expect("should resolve retained BGZF annotation");
-        let mut decoded = noodles::bgzf::io::Reader::new(
-            fs::File::open(archive_path).expect("should open retained BGZF annotation"),
+            .expect("should resolve retained BGZF source");
+        let coordinate_index_path = coordinate_index
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained CSI index");
+        let coordinate_index = noodles::csi::fs::read(&coordinate_index_path)
+            .expect("should read coordinate index generated from BGZF bytes");
+        let mut indexed_reader = noodles::csi::io::IndexedReader::new(
+            fs::File::open(source_path).unwrap(),
+            coordinate_index,
         );
-        let mut decoded_contents = Vec::new();
-        decoded
-            .read_to_end(&mut decoded_contents)
-            .expect("should decompress retained annotation bytes");
-        assert_eq!(decoded_contents, annotation_contents);
-        assert_eq!(fs::read(&annotation_path).unwrap(), annotation_contents);
-        assert_eq!(fs::read(&index_path).unwrap(), index_contents);
-        assert_eq!(
-            asset_refs[1].checksum,
-            Some(calculate_reader_checksum(index_contents.as_slice()).unwrap())
-        );
-        assert_eq!(asset_refs[1].materialized_checksum, None);
-        assert_eq!(asset_refs[1].file_type.as_str(), "none");
-        assert_eq!(
-            asset_refs[1]
-                .logical_path
-                .as_deref()
-                .expect("should store index logical path"),
-            "fixtures/annotation-with-index.csi"
-        );
+        let region: noodles::core::Region = "m123:600000002-600000002".parse().unwrap();
+        let records = indexed_reader
+            .query(&region)
+            .unwrap()
+            .map(|result| result.unwrap().as_ref().as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert!(String::from_utf8_lossy(&records[0]).contains("Alpha-feature"));
     }
 
     #[test]
@@ -1785,18 +1975,14 @@ mod tests {
         )
         .expect("should create annotation file operation");
 
-        let index_asset = AssetRef::all(graph_conn)
-            .expect("should load asset references")
-            .into_iter()
+        let assets = AssetRef::all(graph_conn).expect("should load asset references");
+        let index_asset = assets
+            .iter()
             .find(|asset| asset.role == AssetRole::AnnotationIndex)
-            .expect("should store annotation index asset");
-        let checksum = index_asset
-            .checksum
-            .expect("local index asset should have checksum");
-        let expected_logical_path = format!(".gen/assets/{checksum}.csi");
+            .expect("should store generated coordinate index asset");
         assert_eq!(
             index_asset.logical_path.as_deref(),
-            Some(expected_logical_path.as_str())
+            Some("annotation.gff3.csi")
         );
         assert_ne!(index_asset.logical_path.as_deref(), Some(index_path));
         assert!(!index_asset.uri.contains(index_path));
