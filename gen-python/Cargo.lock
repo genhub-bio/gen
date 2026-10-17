@@ -2501,8 +2501,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdoltlite-sys"
-version = "0.38.22"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#0745b5449270551d6f4abffae0092a3a37938603"
+version = "0.38.23"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-windows-master#dbf9532351db3b9ebf13df45d3e7b87c859b7ca6"
 dependencies = [
  "cc",
  "curl-sys",
@@ -4488,8 +4488,8 @@ dependencies = [
 
 [[package]]
 name = "rusqdoltlite"
-version = "0.40.22"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#0745b5449270551d6f4abffae0092a3a37938603"
+version = "0.41.0"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-windows-master#dbf9532351db3b9ebf13df45d3e7b87c859b7ca6"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",
@@ -4504,9 +4504,8 @@ dependencies = [
 
 [[package]]
 name = "rusqdoltlite_migration"
-version = "2.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41b44b6f47daa92c1b7559314fc0fbcb3c17bfe90977d03fa86636a99ac9b563"
+version = "2.7.0"
+source = "git+https://github.com/Chris7/rusqdoltlite_migration?branch=rusqdoltlite-0.41#16ca6aec4e111bff52c2e5ccefd87eec029aca39"
 dependencies = [
  "include_dir",
  "log",

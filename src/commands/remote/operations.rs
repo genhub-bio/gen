@@ -2580,12 +2580,14 @@ pub fn clone_destination_path(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::io::{BufRead as _, BufReader};
     use std::{
         collections::HashMap,
         env,
         ffi::OsString,
         fs,
-        io::{BufRead as _, BufReader, Cursor, Read as _, Write as _},
+        io::{Cursor, Read as _, Write as _},
         net::TcpListener,
         path::PathBuf,
         sync::Mutex,
@@ -2617,10 +2619,12 @@ mod tests {
     use super::{
         AssetDownloadBatch, AssetTransferRange, AssetTransferRun, AssetTransferTarget,
         DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
-        clone_into_workspace, download_to_staged_path_with_progress, execute_pull, execute_push,
-        file_graph_url, get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer,
-        temporary_path, transfer_assets, upload_asset,
+        download_to_staged_path_with_progress, execute_pull, execute_push, file_graph_url,
+        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
+        transfer_assets,
     };
+    #[cfg(unix)]
+    use super::{clone_into_workspace, upload_asset};
     use crate::{
         commands::remote::{
             client::{
@@ -2790,19 +2794,30 @@ mod tests {
         })
         .to_string();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("should accept renewal request");
-            let mut request = [0_u8; 8192];
-            let length = stream
-                .read(&mut request)
-                .expect("should read renewal request");
-            let request = String::from_utf8_lossy(&request[..length]).into_owned();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("should send renewed capability");
-            request
+            let mut requests = Vec::new();
+            for request_number in 0..2 {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("should accept capability or publication request");
+                let mut request = [0_u8; 8192];
+                let length = stream
+                    .read(&mut request)
+                    .expect("should read capability or publication request");
+                requests.push(String::from_utf8_lossy(&request[..length]).into_owned());
+                if request_number == 0 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should send renewed capability");
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .expect("should accept manifest publication");
+                }
+            }
+            requests
         });
 
         let remote = Remote {
@@ -2822,7 +2837,14 @@ mod tests {
         let token = renewal
             .auth_token(AuthRefreshReason::Unauthorized)
             .expect("should renew after an authorization rejection");
-        let request = server.join().expect("renewal server should finish");
+        renewal
+            .publish()
+            .expect("should publish through the refreshed capability");
+        let requests = server
+            .join()
+            .expect("should finish capability and publication server");
+        let capability_request = &requests[0];
+        let publication_request = &requests[1];
         let latest = renewal
             .capability_response()
             .expect("should read the renewed capability response");
@@ -2832,10 +2854,19 @@ mod tests {
 
         assert_eq!(token, "rotated-token");
         assert!(
-            request
+            capability_request
                 .to_ascii_lowercase()
                 .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
         );
+        assert!(
+            publication_request.starts_with("POST /api/publish?capability=refreshed-signed-value ")
+        );
+        assert!(
+            publication_request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("content-length: 0"))
+        );
+        assert!(publication_request.ends_with("\r\n\r\n"));
         assert_eq!(latest.transfer_id, TEST_TRANSFER_ID);
         assert_eq!(latest_lease.transfer_id, TEST_TRANSFER_ID);
         assert_eq!(latest_lease.expires_at, refreshed_expiry.timestamp());
