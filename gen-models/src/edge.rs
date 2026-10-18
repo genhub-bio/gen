@@ -772,7 +772,8 @@ impl Edge {
     /// is lost. The union edge goes from where a path leaves the first edit (`a` for a deletion,
     /// the end of its inserted node otherwise) to where it enters the second (`d` for a deletion,
     /// the start of its inserted node otherwise). The unions are derived at read time so edits
-    /// split across update chunks still combine.
+    /// split across update chunks still combine. Stored edges are never removed: phasing is not
+    /// enforced, so each edit, including one nested in another, must stay possible on its own.
     pub fn with_overlap_unions(mut edges: Vec<AugmentedEdge>) -> Vec<AugmentedEdge> {
         type Group = (HashId, i64);
         type Endpoint = (HashId, i64);
@@ -2706,9 +2707,13 @@ mod tests {
         let reference = HashId::convert_str("overlap-reference");
         let first_insert = HashId::convert_str("overlap-first-insert");
         let second_insert = HashId::convert_str("overlap-second-insert");
+        let snp = HashId::convert_str("overlap-snp");
         let unions = |edges: Vec<AugmentedEdge>| {
-            let count = edges.len();
-            Edge::with_overlap_unions(edges)[count..]
+            let with_unions = Edge::with_overlap_unions(edges.clone());
+            // Phasing is not enforced, so every stored edit must stay possible on its own: unions
+            // are only added, never substituted for an input edge.
+            assert_eq!(with_unions[..edges.len()], edges[..]);
+            with_unions[edges.len()..]
                 .iter()
                 .map(|union| {
                     (
@@ -2733,9 +2738,12 @@ mod tests {
         );
 
         // Deletions of [10, 20) and [25, 40) with a replacement of [15, 30) overlapping both: the
-        // first deletion enters the inserted node, which leaves for the end of the second.
+        // first deletion enters the inserted node, which leaves for the end of the second. An SNP
+        // nested in the first deletion overlaps nothing partially and needs no union.
         let chain = vec![
             augmented_edge("first-delete", reference, 10, reference, 20),
+            augmented_edge("nested-snp-in", reference, 12, snp, 0),
+            augmented_edge("nested-snp-out", snp, 1, reference, 13),
             augmented_edge("replace-in", reference, 15, second_insert, 0),
             augmented_edge("replace-out", second_insert, 2, reference, 30),
             augmented_edge("second-delete", reference, 25, reference, 40),

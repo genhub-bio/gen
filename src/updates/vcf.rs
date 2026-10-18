@@ -2805,4 +2805,135 @@ mod tests {
         let expected = format!("{}AAAAGAAAAG{}", &reference[..22], &reference[31..]);
         assert_eq!(sequences, HashSet::from([expected]));
     }
+
+    /// Applies `rows` for the VCF sample `sample` on top of `simple.fa` and spells its sequences.
+    fn overlap_sample_sequences(rows: &str) -> HashSet<String> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().into_owned(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let vcf_path = directory.path().join("overlap.vcf");
+        std::fs::write(&vcf_path, format!("##fileformat=VCFv4.3\n##contig=<ID=m123,length=34>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n{rows}")).unwrap();
+        update_with_vcf_options(
+            &context,
+            &vcf_path.to_string_lossy().into_owned(),
+            "test",
+            VcfUpdateOptions {
+                parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                ..VcfUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let block_group = get_sample_bg(conn, "test", "sample");
+        BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, true).unwrap()
+    }
+
+    #[test]
+    fn test_vcf_overlapping_edit_groups_spell_every_edit_together() {
+        let reference = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+        // An edit of [start, end) after its padding base, replaced by `inserted`.
+        let row = |(start, end, inserted): &(usize, usize, &str)| {
+            format!(
+                "m123\t{start}\t.\t{}\t{}{inserted}\t.\t.\t.\tGT\t1/1\n",
+                &reference[start - 1..*end],
+                &reference[start - 1..*start]
+            )
+        };
+        let cases = [
+            (
+                "three deletions",
+                [(4, 12, ""), (8, 16, ""), (10, 20, "")],
+                "ATCGGGAACACACAGAGA",
+            ),
+            (
+                "replacement between deletions",
+                [(4, 12, ""), (8, 16, "GGG"), (10, 20, "")],
+                "ATCGGGGGGAACACACAGAGA",
+            ),
+            (
+                "deletion between replacements",
+                [(4, 12, "TTT"), (8, 16, ""), (10, 20, "CCC")],
+                "ATCGTTTCCCGGAACACACAGAGA",
+            ),
+            (
+                "chain with disjoint ends",
+                [(4, 10, ""), (8, 16, "GG"), (14, 20, "")],
+                "ATCGGGGGAACACACAGAGA",
+            ),
+            (
+                "three replacements",
+                [(4, 10, "TT"), (8, 16, "GG"), (14, 20, "CC")],
+                "ATCGTTGGCCGGAACACACAGAGA",
+            ),
+            (
+                "second inside the first",
+                [(4, 20, ""), (8, 12, ""), (16, 24, "")],
+                "ATCGCACACAGAGA",
+            ),
+        ];
+        let four_edit_cases = [
+            (
+                "four deletions in a chain",
+                [(4, 10, ""), (8, 14, ""), (12, 18, ""), (16, 22, "")],
+                "ATCGAACACACAGAGA",
+            ),
+            (
+                "alternating deletions and replacements",
+                [(4, 10, ""), (8, 14, "TT"), (12, 18, ""), (16, 22, "CC")],
+                "ATCGTTCCAACACACAGAGA",
+            ),
+            (
+                "four edits that all overlap",
+                [(4, 16, "GG"), (6, 18, ""), (8, 20, "TT"), (10, 22, "")],
+                "ATCGGGTTAACACACAGAGA",
+            ),
+            (
+                "chain with a nested replacement",
+                [(4, 12, ""), (6, 8, "C"), (10, 18, "AA"), (16, 22, "")],
+                "ATCGAAAACACACAGAGA",
+            ),
+        ];
+        let cases = cases
+            .iter()
+            .map(|(name, edits, expected)| (*name, edits.to_vec(), *expected))
+            .chain(
+                four_edit_cases
+                    .iter()
+                    .map(|(name, edits, expected)| (*name, edits.to_vec(), *expected)),
+            );
+        for (name, edits, expected) in cases {
+            let rows = edits.iter().map(row).collect::<String>();
+            let sequences = overlap_sample_sequences(&rows);
+            // Every edit applies to the reference at once: the bases before the group, each
+            // inserted sequence in order, and the bases after it. Phasing is not enforced, so
+            // other combinations of the edits may be spelled too.
+            assert!(sequences.contains(expected), "{name}: {sequences:?}");
+        }
+    }
+
+    #[test]
+    fn test_vcf_snp_inside_merged_deletions_on_other_chromatid_is_kept() {
+        let sequences = overlap_sample_sequences(
+            "m123\t4\t.\tGATCGATCG\tG\t.\t.\t.\tGT\t1|0\nm123\t8\t.\tGATCGATCG\tG\t.\t.\t.\tGT\t1|0\nm123\t11\t.\tC\tA\t.\t.\t.\tGT\t0|1\n",
+        );
+
+        // The overlapping deletions join on the first chromatid; the SNP nested in them is on
+        // the second chromatid and keeps its own path.
+        let reference = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+        let merged = format!("{}{}", &reference[..4], &reference[16..]);
+        let snp = format!("{}A{}", &reference[..10], &reference[11..]);
+        assert!(
+            sequences.contains(&merged) && sequences.contains(&snp),
+            "{sequences:?}"
+        );
+    }
 }
