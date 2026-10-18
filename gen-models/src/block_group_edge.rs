@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::Utc;
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use indexmap::IndexSet;
 use rusqlite::{self, types::Value};
@@ -124,6 +125,22 @@ impl BlockGroupEdge {
         tracing::instrument(skip(conn, block_group_edges))
     )]
     pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
+        let created_on = Utc::now()
+            .timestamp_nanos_opt()
+            .expect("should represent the current time in nanoseconds");
+        Self::bulk_create_at(conn, block_group_edges, created_on);
+    }
+
+    /// Inserts block group edges that all share one `created_on`.
+    ///
+    /// Pruning keeps every edge tied for the newest `created_on` at a source, so edges of one edit
+    /// must share it however they are batched. Callers that write one edit in several calls, such
+    /// as a VCF import applied in chunks, pass the same value to each call.
+    pub fn bulk_create_at(
+        conn: &GraphConnection,
+        block_group_edges: &[BlockGroupEdgeData],
+        created_on: i64,
+    ) {
         let unique_block_group_edges = block_group_edges
             .iter()
             .collect::<IndexSet<_>>()
@@ -136,7 +153,6 @@ impl BlockGroupEdge {
         let batch_size = max_rows_per_batch(conn, 6);
 
         for chunk in unique_block_group_edges.chunks(batch_size) {
-            let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             let mut sql = String::from(
                 "INSERT OR IGNORE INTO block_group_edges
                  (id, block_group_id, edge_id, chromosome_index, phased, created_on) VALUES ",
@@ -155,7 +171,7 @@ impl BlockGroupEdge {
                 params.push(Value::from(block_group_edge.edge_id));
                 params.push(Value::from(block_group_edge.chromosome_index));
                 params.push(Value::from(block_group_edge.phased));
-                params.push(Value::from(timestamp));
+                params.push(Value::from(created_on));
             }
             let mut stmt = conn.prepare_cached(&sql).unwrap();
             stmt.execute(rusqlite::params_from_iter(params)).unwrap();
