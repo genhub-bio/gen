@@ -80,7 +80,7 @@ where
     source_context
         .graph()
         .conn()
-        .backup(MAIN_DB, &graph_path, None)?;
+        .backup(MAIN_DB, &graph_path, rusqlite::backup::NO_PROGRESS)?;
 
     let graph_conn = get_connection(&graph_path)?;
     let config_conn = get_config_connection(workspace.gen_db_path()?)?;

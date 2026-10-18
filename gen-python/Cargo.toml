@@ -50,5 +50,5 @@ pyo3-build-config = "0.29"
 members = ["."]
 
 [patch.crates-io]
-rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite", branch = "remoteserver-windows-master" }
-libdoltlite-sys = { git = "https://github.com/Chris7/rusqdoltlite", branch = "remoteserver-windows-master" }
+rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite", branch = "master" }
+libdoltlite-sys = { git = "https://github.com/Chris7/rusqdoltlite", branch = "master" }
