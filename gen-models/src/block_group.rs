@@ -503,8 +503,8 @@ impl BlockGroup {
         block_group_id: &HashId,
         edges: &[AugmentedEdge],
     ) -> Result<GenGraph, BlockGroupError> {
-        let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, edges, None)?;
-        let edges_vec = edges.to_vec();
+        let edges_vec = Edge::with_overlap_unions(edges.to_vec());
+        let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges_vec, None)?;
         let (graph, _) = Edge::build_graph(&edges_vec, &blocks);
         Ok(graph)
     }
