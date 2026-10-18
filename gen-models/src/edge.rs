@@ -761,57 +761,147 @@ impl Edge {
             && self.source_coordinate == self.target_coordinate
     }
 
-    /// Adds the union edge for each pair of partially overlapping deletions on one chromatid.
+    /// Adds the union edge for each pair of partially overlapping edits on one chromatid.
     ///
-    /// Deletions from one update all apply to the same reference at once. For deletions `[a, b)`
-    /// and `[c, d)` with `a < c < b < d`, the sequence keeps `..a` and `d..`. The stored edges only
-    /// spell `a -> b` and `c -> d`, and the reference continuation `b -> d` is retired by the
-    /// second edit's marker, so nothing connects `a` to `d` and everything downstream is lost.
-    /// The unions are derived at read time so deletions split across update chunks still combine.
+    /// Edits from one update all apply to the same reference at once. An edit spans `[start, end)`
+    /// of a node: a deletion is the skip edge `start -> end`, and a replacement enters an inserted
+    /// node from `start` and leaves it to `end`. For edits `[a, b)` and `[c, d)` with
+    /// `a < c < b < d`, the sequence keeps `..a`, the inserted sequence of each edit, and `d..`.
+    /// The stored edges leave the first edit towards `b`, and the reference continuation into the
+    /// second edit is retired by its marker, so nothing connects the two and everything downstream
+    /// is lost. The union edge goes from where a path leaves the first edit (`a` for a deletion,
+    /// the end of its inserted node otherwise) to where it enters the second (`d` for a deletion,
+    /// the start of its inserted node otherwise). The unions are derived at read time so edits
+    /// split across update chunks still combine.
     pub fn with_overlap_unions(mut edges: Vec<AugmentedEdge>) -> Vec<AugmentedEdge> {
         type Group = (HashId, i64);
-        let mut spans_by_group: HashMap<Group, Vec<(i64, i64, i64, i64)>> = HashMap::new();
-        let mut seen: HashSet<(Group, i64, i64)> = HashSet::new();
+        type Endpoint = (HashId, i64);
+        // Fields are ordered so that sorting visits spans by start.
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        struct Span {
+            start: i64,
+            end: i64,
+            // Where a path stands when it must get past `end`: a deletion's source, or the end of
+            // the inserted node.
+            leave: Endpoint,
+            // Where a path continues once it is past `start`: a deletion's target, or the start of
+            // the inserted node.
+            arrive: Endpoint,
+            is_deletion: bool,
+            phased: i64,
+            created_on: i64,
+        }
+        let mut spans_by_group: HashMap<Group, Vec<Span>> = HashMap::new();
+        let mut seen: HashSet<(i64, Endpoint, Endpoint)> = HashSet::new();
+        let mut entries_by_node: HashMap<Group, Vec<&AugmentedEdge>> = HashMap::new();
+        let mut exits_by_node: HashMap<Group, Vec<&AugmentedEdge>> = HashMap::new();
         for augmented_edge in &edges {
             let edge = &augmented_edge.edge;
-            if augmented_edge.chromosome_index < 0
-                || edge.source_node_id != edge.target_node_id
+            let chromosome_index = augmented_edge.chromosome_index;
+            if chromosome_index < 0
                 || edge.source_strand != Strand::Forward
                 || edge.target_strand != Strand::Forward
-                || edge.target_coordinate <= edge.source_coordinate
             {
                 continue;
             }
-            let group = (edge.source_node_id, augmented_edge.chromosome_index);
-            if seen.insert((group, edge.source_coordinate, edge.target_coordinate)) {
-                spans_by_group.entry(group).or_default().push((
-                    edge.source_coordinate,
-                    edge.target_coordinate,
-                    augmented_edge.phased,
-                    augmented_edge.created_on,
-                ));
+            let source = (edge.source_node_id, edge.source_coordinate);
+            let target = (edge.target_node_id, edge.target_coordinate);
+            seen.insert((chromosome_index, source, target));
+            if edge.source_node_id != edge.target_node_id {
+                entries_by_node
+                    .entry((edge.target_node_id, chromosome_index))
+                    .or_default()
+                    .push(augmented_edge);
+                exits_by_node
+                    .entry((edge.source_node_id, chromosome_index))
+                    .or_default()
+                    .push(augmented_edge);
+            } else if edge.target_coordinate > edge.source_coordinate {
+                spans_by_group
+                    .entry((edge.source_node_id, chromosome_index))
+                    .or_default()
+                    .push(Span {
+                        start: edge.source_coordinate,
+                        end: edge.target_coordinate,
+                        leave: source,
+                        arrive: target,
+                        is_deletion: true,
+                        phased: augmented_edge.phased,
+                        created_on: augmented_edge.created_on,
+                    });
             }
         }
+        // A replacement's inserted node has exactly one way in from a node and one way back to it
+        // on the chromatid. Nodes edited again later have more and are left alone.
+        for ((node_id, chromosome_index), entries) in &entries_by_node {
+            let Some(exits) = exits_by_node.get(&(*node_id, *chromosome_index)) else {
+                continue;
+            };
+            let ([entry], [exit]) = (entries.as_slice(), exits.as_slice()) else {
+                continue;
+            };
+            if entry.edge.source_node_id != exit.edge.target_node_id
+                || entry.edge.source_coordinate >= exit.edge.target_coordinate
+            {
+                continue;
+            }
+            spans_by_group
+                .entry((entry.edge.source_node_id, *chromosome_index))
+                .or_default()
+                .push(Span {
+                    start: entry.edge.source_coordinate,
+                    end: exit.edge.target_coordinate,
+                    leave: (*node_id, exit.edge.source_coordinate),
+                    arrive: (*node_id, entry.edge.target_coordinate),
+                    is_deletion: false,
+                    phased: entry.phased,
+                    created_on: entry.created_on.max(exit.created_on),
+                });
+        }
         let mut unions = vec![];
-        for ((node_id, chromosome_index), spans) in &mut spans_by_group {
+        for ((_, chromosome_index), spans) in &mut spans_by_group {
             spans.sort_unstable();
+            spans.dedup();
             let mut index = 0;
             while index < spans.len() {
-                let (start, end, phased, created_on) = spans[index];
+                let span = spans[index];
                 let mut later = index + 1;
-                while later < spans.len() && spans[later].0 < end {
-                    let (later_start, later_end, _, later_created_on) = spans[later];
-                    let group = (*node_id, *chromosome_index);
-                    if later_start > start
-                        && later_end > end
-                        && seen.insert((group, start, later_end))
+                while later < spans.len() && spans[later].start < span.end {
+                    let later_span = spans[later];
+                    if later_span.start > span.start
+                        && later_span.end > span.end
+                        && seen.insert((*chromosome_index, span.leave, later_span.arrive))
                     {
-                        let created_on = created_on.max(later_created_on);
-                        unions.push((group, start, later_end, phased, created_on));
-                        // Chains of overlaps resolve as later spans are visited in order.
-                        let position =
-                            spans.partition_point(|span| *span < (start, later_end, 0, 0));
-                        spans.insert(position, (start, later_end, phased, created_on));
+                        let created_on = span.created_on.max(later_span.created_on);
+                        unions.push((
+                            *chromosome_index,
+                            span.leave,
+                            later_span.arrive,
+                            span.phased,
+                            created_on,
+                        ));
+                        // Chains of overlaps resolve as later spans are visited in order: the
+                        // combined edit is entered like the first and left like the second, and a
+                        // deletion passes either role on to its partner.
+                        let combined = Span {
+                            start: span.start,
+                            end: later_span.end,
+                            leave: if later_span.is_deletion {
+                                span.leave
+                            } else {
+                                later_span.leave
+                            },
+                            arrive: if span.is_deletion {
+                                later_span.arrive
+                            } else {
+                                span.arrive
+                            },
+                            is_deletion: span.is_deletion && later_span.is_deletion,
+                            phased: span.phased,
+                            created_on,
+                        };
+                        let position = spans.partition_point(|existing| *existing < combined);
+                        spans.insert(position, combined);
                         if position <= index {
                             index += 1;
                         }
@@ -821,23 +911,26 @@ impl Edge {
                 index += 1;
             }
         }
-        for ((node_id, chromosome_index), start, end, phased, created_on) in unions {
+        for (chromosome_index, (source_node_id, source_coordinate), target, phased, created_on) in
+            unions
+        {
+            let (target_node_id, target_coordinate) = target;
             let data = EdgeData {
-                source_node_id: node_id,
-                source_coordinate: start,
+                source_node_id,
+                source_coordinate,
                 source_strand: Strand::Forward,
-                target_node_id: node_id,
-                target_coordinate: end,
+                target_node_id,
+                target_coordinate,
                 target_strand: Strand::Forward,
             };
             edges.push(AugmentedEdge {
                 edge: Edge {
                     id: data.id_hash(),
-                    source_node_id: node_id,
-                    source_coordinate: start,
+                    source_node_id,
+                    source_coordinate,
                     source_strand: Strand::Forward,
-                    target_node_id: node_id,
-                    target_coordinate: end,
+                    target_node_id,
+                    target_coordinate,
                     target_strand: Strand::Forward,
                 },
                 chromosome_index,
@@ -2606,5 +2699,53 @@ mod tests {
 
         let deserialized = Edge::read_capnp(root.into_reader());
         assert_eq!(edge, deserialized);
+    }
+
+    #[test]
+    fn test_overlap_unions_connect_replacements_and_deletions() {
+        let reference = HashId::convert_str("overlap-reference");
+        let first_insert = HashId::convert_str("overlap-first-insert");
+        let second_insert = HashId::convert_str("overlap-second-insert");
+        let unions = |edges: Vec<AugmentedEdge>| {
+            let count = edges.len();
+            Edge::with_overlap_unions(edges)[count..]
+                .iter()
+                .map(|union| {
+                    (
+                        union.edge.source_node_id,
+                        union.edge.source_coordinate,
+                        union.edge.target_node_id,
+                        union.edge.target_coordinate,
+                    )
+                })
+                .collect::<HashSet<_>>()
+        };
+
+        // A replacement of [10, 20) and a deletion of [15, 30): leave the inserted node for 30.
+        let replacement_then_deletion = vec![
+            augmented_edge("replace-in", reference, 10, first_insert, 0),
+            augmented_edge("replace-out", first_insert, 3, reference, 20),
+            augmented_edge("delete", reference, 15, reference, 30),
+        ];
+        assert_eq!(
+            unions(replacement_then_deletion),
+            HashSet::from([(first_insert, 3, reference, 30)])
+        );
+
+        // Deletions of [10, 20) and [25, 40) with a replacement of [15, 30) overlapping both: the
+        // first deletion enters the inserted node, which leaves for the end of the second.
+        let chain = vec![
+            augmented_edge("first-delete", reference, 10, reference, 20),
+            augmented_edge("replace-in", reference, 15, second_insert, 0),
+            augmented_edge("replace-out", second_insert, 2, reference, 30),
+            augmented_edge("second-delete", reference, 25, reference, 40),
+        ];
+        assert_eq!(
+            unions(chain),
+            HashSet::from([
+                (reference, 10, second_insert, 0),
+                (second_insert, 2, reference, 40),
+            ])
+        );
     }
 }

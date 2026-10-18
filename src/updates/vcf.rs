@@ -2764,4 +2764,45 @@ mod tests {
         let expected = format!("{}{}", &reference[..4], &reference[22..]);
         assert!(sequences.contains(&expected), "{sequences:?}");
     }
+
+    #[test]
+    fn test_vcf_deletion_overlapped_by_replacement_stays_reachable() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fixture_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixture_directory.join("homopolymer_overlap.fa");
+        let vcf_path = fixture_directory.join("homopolymer_overlap.vcf");
+        import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().into_owned(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_vcf_options(
+            &context,
+            &vcf_path.to_string_lossy().into_owned(),
+            "test",
+            VcfUpdateOptions {
+                fixed_genotype: "1/1".to_string(),
+                fixed_sample: Some("sample".to_string()),
+                parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                ..VcfUpdateOptions::default()
+            },
+        )
+        .unwrap();
+
+        // `TAAAAA>T` deletes [22, 27) and `AAAAAG>AAAAAGAAAAG` replaces [26, 31) after its padding
+        // base, so the deletion removes the replacement's first base. Applied together, the
+        // sample keeps the bases before the deletion, the replacement and the bases after it.
+        let block_group = get_sample_bg(conn, "test", "sample");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, true)
+                .unwrap();
+        let reference = "CTCCTGGCGGAAACTTCCCTTTAAAAAAAAGAAAAGAAAAGAAAAGCAACAGCACTTTTG";
+        let expected = format!("{}AAAAGAAAAG{}", &reference[..22], &reference[31..]);
+        assert_eq!(sequences, HashSet::from([expected]));
+    }
 }
