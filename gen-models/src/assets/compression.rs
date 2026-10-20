@@ -137,11 +137,8 @@ pub(crate) fn stage_bgzf_asset_copy(
 
     let archive_filename = format!("{archive_checksum}.{}.bgz", FileTypes::suffix(file_type));
     let archived_path = asset_dir.join(archive_filename);
-    match staged_file.persist_noclobber(&archived_path) {
-        Ok(_) => {}
-        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
-    }
+    super::persist_staged_asset(staged_file, &archived_path)
+        .map_err(FileAdditionError::FileReadError)?;
     Ok((archive_checksum, source_checksum))
 }
 

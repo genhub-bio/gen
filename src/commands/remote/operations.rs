@@ -6889,6 +6889,48 @@ mod tests {
     }
 
     #[test]
+    fn test_expired_push_lease_retains_session_on_capability_http_failure() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = Some((
+            500,
+            json!({"code": 500, "message": "capability service unavailable"}).to_string(),
+        ));
+        let (remote_url, server) = serve_capability_replies(vec![unavailable]);
+        let temp = tempdir().expect("should create expired lease retry directory");
+        let (workspace, config, destination_hash) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        let original_session_id =
+            seed_push_lease(&config, "main", &destination_hash, TEST_TRANSFER_ID, 0);
+
+        let result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("should finish the GenHub server");
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            result.is_err(),
+            "an unavailable capability should fail push"
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(request_session_id(&requests[0]), original_session_id);
+        let pending_transfer: (DoltHashId, Uuid, Uuid, bool) = config
+            .query_row(
+                "SELECT to_commit, transfer_id, push_session_id, failed_at IS NOT NULL \
+                 FROM remote_operations WHERE operation = 'push'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("should retain pending expired push metadata");
+        assert_eq!(pending_transfer.0, destination_hash);
+        assert_eq!(pending_transfer.1, TEST_TRANSFER_ID);
+        assert_eq!(pending_transfer.2, original_session_id);
+        assert!(!pending_transfer.3);
+    }
+
+    #[test]
     fn test_expired_push_lease_requires_a_direct_gcs_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()

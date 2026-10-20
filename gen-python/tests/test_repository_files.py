@@ -20,16 +20,16 @@ class RepositoryFileTests(unittest.TestCase):
     def _release_repository(self):
         self.repository = None
 
-    def test_add_file_tracks_notebook_asset_and_returns_head_for_repeat(self):
+    def test_add_file_tracks_notebook_asset(self):
         relative_path = "notebooks/review.ipynb"
         notebook = self.root / relative_path
         notebook.parent.mkdir(parents=True)
         contents = b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}'
         notebook.write_bytes(contents)
 
-        commit_hash = self.repository.add_file(relative_path)
+        asset = self.repository.add_file(notebook)
 
-        self.assertEqual(self.repository.current_branch.head, commit_hash)
+        self.assertEqual(asset.name, "review.ipynb")
         rows = self.repository.query(
             "SELECT file_type, logical_path, name, checksum, materialized_checksum "
             "FROM gen_asset_refs"
@@ -47,22 +47,23 @@ class RepositoryFileTests(unittest.TestCase):
         archived_contents = asset_files[0].read_bytes()
         self.assertEqual(checksum.hex(), sha256(archived_contents).hexdigest())
         self.assertEqual(gzip.decompress(archived_contents), contents)
-
         operation_count = self.repository.query(
             "SELECT COUNT(*) FROM gen_operation_log"
         )[0][0]
-        repeated_hash = self.repository.add_file(relative_path)
-
-        self.assertEqual(repeated_hash, commit_hash)
-        self.assertEqual(self.repository.current_branch.head, commit_hash)
+        with self.assertRaisesRegex(RuntimeError, "already in the repository"):
+            self.repository.add_file(notebook)
+        repeated_asset = self.repository.add_file(notebook, allow_no_changes=True)
+        self.assertEqual(repeated_asset.id, asset.id)
         self.assertEqual(
             self.repository.query("SELECT COUNT(*) FROM gen_operation_log")[0][0],
             operation_count,
         )
 
     def test_add_file_does_not_hide_file_read_errors(self):
-        with self.assertRaisesRegex(RuntimeError, "Failed to add file"):
+        with self.assertRaises(FileNotFoundError):
             self.repository.add_file("notebooks/missing.ipynb")
+        with self.assertRaises(FileNotFoundError):
+            self.repository.add_file("notebooks/missing.ipynb", allow_no_changes=True)
 
 
 if __name__ == "__main__":

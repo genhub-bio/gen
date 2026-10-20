@@ -504,16 +504,17 @@ impl PyRepository {
     /// protocol, and return its `Asset`.
     ///
     /// The content is stored once, inside `.gen`, and recorded as its own operation (with
-    /// `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-    /// stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-    /// the path of the file to store; a relative path is resolved against the current working
-    /// directory.
-    #[pyo3(signature = (filename, message=None))]
+    /// `message` when given). Adding the same file again fails unless `allow_no_changes=True`,
+    /// which returns the existing asset. Use `asset.path` to locate the stored copy or
+    /// `asset.save_as(name)` to write a copy under a name you choose. `filename` is the path of the
+    /// file to store; a relative path is resolved against the current working directory.
+    #[pyo3(signature = (filename, message=None, *, allow_no_changes=false))]
     fn add_file(
         &self,
         #[gen_stub(override_type(type_repr = "str | os.PathLike[str]", imports = ("os")))]
         filename: PathBuf,
         message: Option<&str>,
+        allow_no_changes: bool,
     ) -> PyResult<PyAsset> {
         let filename = absolute_path(&filename)?;
         let path = filename
@@ -524,15 +525,24 @@ impl PyRepository {
         }
         let file = OperationFile::new(path);
         let asset_name = file.filename.clone();
-        add_files_operation(&self.context, &[file], message).map_err(|error| match error {
-            AddFilesOperationError::OperationError(OperationError::NoChanges) => {
-                PyRuntimeError::new_err(format!("'{path}': this file is already in the repository"))
+        match add_files_operation(&self.context, &[file], message) {
+            Ok(_) => {}
+            Err(AddFilesOperationError::OperationError(OperationError::NoChanges))
+                if allow_no_changes => {}
+            Err(AddFilesOperationError::OperationError(OperationError::NoChanges)) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "'{path}': this file is already in the repository"
+                )));
             }
-            AddFilesOperationError::FileAdditionError(FileAdditionError::FileNotFound(missing)) => {
-                PyFileNotFoundError::new_err(missing)
+            Err(AddFilesOperationError::FileAdditionError(FileAdditionError::FileNotFound(
+                missing,
+            ))) => return Err(PyFileNotFoundError::new_err(missing)),
+            Err(other) => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Failed to add '{path}': {other}"
+                )));
             }
-            other => PyRuntimeError::new_err(format!("Failed to add '{path}': {other}")),
-        })?;
+        }
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let branch = history_store
             .current_branch()

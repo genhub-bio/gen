@@ -1,5 +1,6 @@
 """Exercise notebook downloads and explicit publication with a native Gen database."""
 
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -55,12 +56,13 @@ class FakeResponse:
 
 
 class NotebookServer:
-    def __init__(self, snapshot_url, database, branch, base_commit, asset):
+    def __init__(self, snapshot_url, database, branch, base_commit, assets):
         self.snapshot_url = snapshot_url
         self.database = database
         self.branch = branch
         self.base_commit = base_commit
-        self.asset = asset
+        self.assets = assets
+        self.asset = assets[0]
         self.requests = []
         self.manifest_override = None
         self.snapshot_status = 200
@@ -95,20 +97,29 @@ class NotebookServer:
                 or {
                     "assets": [
                         {
-                            "id": self.asset["id"],
-                            "filename": self.asset["filename"],
-                            "checksum": self.asset["checksum"],
+                            "id": asset["id"],
+                            "filename": asset["filename"],
+                            "checksum": asset["checksum"],
                             "url": (
                                 "/api/repos/test/repository/notebook/assets/"
-                                f"{self.asset['id']}?branch={self.branch}"
+                                f"{asset['id']}?branch={self.branch}"
                                 f"&commit={self.base_commit}"
                             ),
                         }
+                        for asset in self.assets
                     ]
                 },
             )
-        if request.path.endswith(f"/assets/{self.asset['id']}"):
-            return FakeResponse(url, data=self.asset["contents"])
+        asset = next(
+            (
+                asset
+                for asset in self.assets
+                if request.path.endswith(f"/assets/{asset['id']}")
+            ),
+            None,
+        )
+        if asset is not None:
+            return FakeResponse(url, data=asset["contents"])
         raise AssertionError(f"Unexpected notebook request: {url}")
 
 
@@ -160,34 +171,35 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         fasta = self.root / "source.fa"
         fasta.write_text(">chr1\nACGTACGTACGT\n")
         self.repository.import_fasta(str(fasta))
-        self.base_commit = self.repository.current_branch.head
+        self.base_commit = str(self.repository.current_branch.head)
         self.branch = self.repository.current_branch.name
         asset_rows = self.repository.query("SELECT id, checksum FROM gen_asset_refs")
         asset_files = list((self.repository.gen_dir / "assets").iterdir())
         files_by_checksum = {
             hashlib.sha256(path.read_bytes()).hexdigest(): path for path in asset_files
         }
-        matching_asset = next(
-            (
-                row
-                for row in asset_rows
-                if hash_text(row[1]).lower() in files_by_checksum
-            ),
-            None,
-        )
-        self.assertIsNotNone(
-            matching_asset,
+        self.assets = []
+        seen_asset_ids = set()
+        for row in asset_rows:
+            asset_id = hash_text(row[0])
+            checksum = hash_text(row[1]).lower()
+            asset_path = files_by_checksum.get(checksum)
+            if asset_path is None or asset_id in seen_asset_ids:
+                continue
+            seen_asset_ids.add(asset_id)
+            self.assets.append(
+                {
+                    "id": asset_id,
+                    "filename": asset_path.name,
+                    "checksum": checksum,
+                    "contents": asset_path.read_bytes(),
+                }
+            )
+        self.assertTrue(
+            self.assets,
             "fixture asset should be content-addressed in the native database",
         )
-        checksum = hash_text(matching_asset[1]).lower()
-        asset_path = files_by_checksum[checksum]
-        asset_contents = asset_path.read_bytes()
-        self.asset = {
-            "id": hash_text(matching_asset[0]),
-            "filename": asset_path.name,
-            "checksum": checksum,
-            "contents": asset_contents,
-        }
+        self.asset = self.assets[0]
         self.snapshot_url = (
             "https://genhub.example/api/repos/test/repository/notebook/snapshot"
             "?branch=main"
@@ -197,7 +209,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
             self.repository.snapshot_bytes(),
             self.branch,
             self.base_commit,
-            self.asset,
+            self.assets,
         )
 
     def _release_repository(self):
@@ -220,12 +232,11 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         graph = session.repository.get_sequence_graphs()[0]
-        session.repository.update_with_sequence(
+        session.repository.import_sequence(
             "TTTTACGTACGT",
-            sample=graph.sample_name,
-            new_sample="notebook-edited",
-            region_name=f"{graph.name}:0-12",
-            collection=graph.collection_name,
+            name=graph.name,
+            sample="notebook-edited",
+            collection=graph.collection,
         )
         self.assertFalse(
             any(kwargs.get("method") == "POST" for _, kwargs in self.server.requests)
@@ -278,7 +289,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.uploaded_repository = uploaded_repository
         self.assertIn(
             "notebook-edited",
-            {sample.sample_name for sample in uploaded_repository.get_samples()},
+            {sample.name for sample in uploaded_repository.samples},
         )
 
     async def test_asset_checksum_failure_prevents_repository_open(self):
@@ -357,20 +368,21 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         notebook_asset = next(
             row
             for row in uploaded_repository.query(
-                "SELECT logical_path, name, checksum FROM gen_asset_refs"
+                "SELECT logical_path, name, checksum, materialized_checksum "
+                "FROM gen_asset_refs"
             )
             if row[0] == relative_path
         )
         self.assertEqual(notebook_asset[1], "review.ipynb")
         self.assertEqual(
-            notebook_asset[2].hex(), hashlib.sha256(notebook_bytes).hexdigest()
+            notebook_asset[3].hex(), hashlib.sha256(notebook_bytes).hexdigest()
         )
         stored_notebook = next(
             path
             for path in (Path(session.repository.gen_dir) / "assets").iterdir()
             if hashlib.sha256(path.read_bytes()).hexdigest() == notebook_asset[2].hex()
         )
-        self.assertEqual(stored_notebook.read_bytes(), notebook_bytes)
+        self.assertEqual(gzip.decompress(stored_notebook.read_bytes()), notebook_bytes)
 
     async def test_invalid_notebook_inputs_do_not_change_the_local_repository(self):
         with patch("gen.browser._pyfetch", self.server):

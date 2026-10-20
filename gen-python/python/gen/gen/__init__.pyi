@@ -541,16 +541,18 @@ class Repository:
         self,
         filename: str | os.PathLike[str],
         message: typing.Optional[builtins.str] = None,
+        *,
+        allow_no_changes: builtins.bool = False,
     ) -> Asset:
         r"""
         Keep a file in the repository without importing it as sequence, for example a README or a
         protocol, and return its `Asset`.
 
         The content is stored once, inside `.gen`, and recorded as its own operation (with
-        `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-        stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-        the path of the file to store; a relative path is resolved against the current working
-        directory.
+        `message` when given). Adding the same file again fails unless `allow_no_changes=True`,
+        which returns the existing asset. Use `asset.path` to locate the stored copy or
+        `asset.save_as(name)` to write a copy under a name you choose. `filename` is the path of the
+        file to store; a relative path is resolved against the current working directory.
         """
     def merge(self, branch: str | Branch) -> Operation:
         r"""
