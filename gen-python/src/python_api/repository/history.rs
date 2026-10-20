@@ -16,7 +16,7 @@ use gen_models::{
         HistoryEntry, HistoryStore,
         dolt::{DoltBranchRow, DoltHistoryStore, branch_exists, branch_rows, get_branch},
     },
-    operations::{OperationFile, RemoteBranch, add_files_operation},
+    operations::{OperationFile, OperationInfo, RemoteBranch, add_files_operation},
 };
 use pyo3::{
     exceptions::{PyFileExistsError, PyFileNotFoundError, PyRuntimeError, PyValueError},
@@ -708,16 +708,18 @@ impl PyRepository {
 
     /// Stores a file as a repository asset and returns its `Asset`.
     ///
-    /// The content is stored once, inside `.gen`; `message` labels the addition. Adding the same
-    /// file again fails. Use `asset.path` to locate the stored copy or `asset.save_as(name)` to
-    /// write a copy under a name you choose. `filename` is the path of the file to store; a
-    /// relative path is resolved against the current working directory.
-    #[pyo3(signature = (filename, message=None))]
+    /// The content is stored once, inside `.gen`, and recorded as its own operation (with
+    /// `message` when given). Adding the same file again fails unless `allow_no_changes=True`,
+    /// which returns the existing asset. Use `asset.path` to locate the stored copy or
+    /// `asset.save_as(name)` to write a copy under a name you choose. `filename` is the path of the
+    /// file to store; a relative path is resolved against the current working directory.
+    #[pyo3(signature = (filename, message=None, *, allow_no_changes=false))]
     fn add_file(
         &self,
         #[gen_stub(override_type(type_repr = "str | os.PathLike[str]", imports = ("os")))]
         filename: PathBuf,
         message: Option<&str>,
+        allow_no_changes: bool,
     ) -> PyResult<PyAsset> {
         let filename = absolute_path(&filename)?;
         let path = filename
@@ -729,21 +731,51 @@ impl PyRepository {
         let file = OperationFile::new(path);
         let asset_name = file.filename.clone();
         let (asset_ref, _) = run_context_savepoint_write(&self.context, || {
-            let operation_summary = add_files_operation(&self.context, &[file], message)
-                .map_err(|error| add_files_err_to_pyerr(path, error))?;
-            let asset_ref = operation_summary
-                .prepared_asset_refs
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err("the added file was not recorded as an asset")
-                })?
-                .iter()
-                .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
-                .cloned()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err("the added file was not recorded as an asset")
-                })?;
-            Ok((asset_ref, operation_summary))
+            match add_files_operation(&self.context, &[file], message) {
+                Ok(operation_summary) => {
+                    let asset_ref = operation_summary
+                        .prepared_asset_refs
+                        .as_ref()
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err("the added file was not recorded as an asset")
+                        })?
+                        .iter()
+                        .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                        .cloned()
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err("the added file was not recorded as an asset")
+                        })?;
+                    Ok((asset_ref, Some(operation_summary)))
+                }
+                Err(AddFilesOperationError::OperationError(OperationError::NoChanges))
+                    if allow_no_changes =>
+                {
+                    let connection = self.context.graph().conn();
+                    let mut assets = Assets::get_added_working_assets(connection)
+                        .map_err(history_err_to_pyerr)?;
+                    let history_store = DoltHistoryStore::new(connection);
+                    let branch = history_store
+                        .current_branch()
+                        .map_err(history_err_to_pyerr)?
+                        .ok_or_else(|| PyRuntimeError::new_err("repository has no current branch"))?;
+                    assets.extend(
+                        Assets::get_branch_assets(connection, &branch.0)
+                            .map_err(history_err_to_pyerr)?
+                            .into_values(),
+                    );
+                    let asset_ref = assets
+                        .into_iter()
+                        .filter(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                        .max_by_key(|asset| asset.created_on)
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(
+                                "the existing file was not recorded as an asset",
+                            )
+                        })?;
+                    Ok((asset_ref, None))
+                }
+                Err(error) => Err(add_files_err_to_pyerr(path, error)),
+            }
         })?;
         Ok(PyAsset::new(asset_ref, &self.context))
     }

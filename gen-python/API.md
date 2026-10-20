@@ -228,10 +228,12 @@ authentication and asset-transfer behavior.
 
 ## 8. Files, assets, and exports
 
-`repo.add_file(filename, message=None)` stores a file as a repository asset without importing it
-as sequence data. `repo.get_assets(branch=None)` lists committed assets from the current branch or
-a requested branch. `repo.get_working_assets()` overlays current pending additions and replacements
-on the committed materialized view. `Asset` exposes a content `id`, original `name`, and stored
+`repo.add_file(filename, message=None, *, allow_no_changes=False)` stores a file as a repository
+asset without importing it as sequence data. By default, adding an unchanged file again is an
+error; set `allow_no_changes=True` to retrieve the existing asset instead. `repo.get_assets(branch=None)`
+lists committed assets from the current branch or a requested branch. `repo.get_working_assets()`
+overlays current pending additions and replacements on the committed materialized view. `Asset`
+exposes a content `id`, original `name`, and stored
 `path`; `asset.save_as(destination, overwrite=False)` writes a named readable copy.
 
 Export methods are called on a `SequenceGraph`, but they export the sequence graphs in that graph's

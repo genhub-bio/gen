@@ -6,14 +6,13 @@ use gen_core::{DoltHashId, HashId, config::Workspace};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
-    errors::{AddFilesOperationError, OperationError},
+    errors::OperationError,
     history::{
         HistoryStore,
         dolt::{DoltHistoryStore, set_commit_author_email, set_commit_author_name},
     },
     operations::{
-        Defaults, OperationFile, OperationSummary, add_files_operation, commit_operation_summary,
-        record_operation_summary,
+        Defaults, OperationSummary, commit_operation_summary, record_operation_summary,
     },
     sample::Sample,
 };
@@ -176,7 +175,7 @@ pub(crate) fn run_context_savepoint_write<F, T>(
     operation: F,
 ) -> PyResult<(T, Option<DoltHashId>)>
 where
-    F: FnOnce() -> PyResult<(T, OperationSummary)>,
+    F: FnOnce() -> PyResult<(T, Option<OperationSummary>)>,
 {
     let graph = context.graph().conn();
     let was_autocommit = graph.is_autocommit();
@@ -188,6 +187,12 @@ where
                 context.rollback_savepoint().map_err(sqlite_err_to_pyerr)?;
                 return Ok((value, None));
             }
+            let Some(operation_summary) = operation_summary else {
+                context.rollback_savepoint().map_err(sqlite_err_to_pyerr)?;
+                return Err(PyRuntimeError::new_err(
+                    "a changed repository write has no operation summary",
+                ));
+            };
 
             if was_autocommit {
                 match DoltHistoryStore::new_with_config(graph, context.config().conn())
@@ -411,27 +416,6 @@ impl PyRepository {
     #[gen_stub(skip)]
     fn query(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Vec<Py<PyAny>>>> {
         py_query(py, self.context.graph().conn(), query)
-    }
-
-    /// Tracks a repository-relative file as a Gen add-file operation.
-    ///
-    /// Returns the commit hash created by the operation. If the same file contents and path are
-    /// already tracked, returns the current head hash.
-    fn add_file(&self, path: &str) -> PyResult<String> {
-        match add_files_operation(&self.context, &[OperationFile::new(path)], None) {
-            Ok(commit_hash) => Ok(commit_hash.to_string()),
-            Err(AddFilesOperationError::OperationError(OperationError::NoChanges)) => {
-                let history_store = DoltHistoryStore::new(self.context.graph().conn());
-                history_store
-                    .current_head()
-                    .map_err(sqlite_err_to_pyerr)?
-                    .map(|commit_hash| commit_hash.to_string())
-                    .ok_or_else(|| PyRuntimeError::new_err("Repository has no current commit"))
-            }
-            Err(error) => Err(PyRuntimeError::new_err(format!(
-                "Failed to add file '{path}': {error}"
-            ))),
-        }
     }
 
     /// Creates a standalone SQLite backup of the current Dolt graph database.

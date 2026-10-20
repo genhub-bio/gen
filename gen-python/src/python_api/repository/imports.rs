@@ -246,7 +246,7 @@ impl PyRepository {
             .map_err(|error| {
                 PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}"))
             })?;
-            Ok(((), operation_summary))
+            Ok(((), Some(operation_summary)))
         })?;
         Ok(operation_hash.map(PyHashId::from_dolt))
     }
