@@ -4,6 +4,7 @@ use std::{
     io, str,
 };
 
+use chrono::Utc;
 use gen_core::{HashId, PathBlock, Strand, is_terminal};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange, BlockGroupData, IntervalTreeCache},
@@ -1117,6 +1118,11 @@ pub fn update_with_vcf_options(
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
     let mut tree_map = IntervalTreeCache::new();
+    // All records apply to the same reference at once. Pruning keeps every edge tied for the newest
+    // `created_on`, so the chunks below must not stamp adjacent records with different times.
+    let created_on = Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should represent the current time in nanoseconds");
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(VCF_CHANGE_APPLY_CHUNK_SIZE) {
             if in_place {
@@ -1141,11 +1147,18 @@ pub fn update_with_vcf_options(
                     context.workspace(),
                     &in_place_changes,
                     Some(&mut tree_map),
+                    created_on,
                 )
                 .unwrap();
             } else {
-                BlockGroup::insert_changes(conn, context.workspace(), chunk, Some(&mut tree_map))
-                    .unwrap();
+                BlockGroup::insert_changes(
+                    conn,
+                    context.workspace(),
+                    chunk,
+                    Some(&mut tree_map),
+                    created_on,
+                )
+                .unwrap();
             }
             bar.inc(chunk.len() as u64);
         }
@@ -1506,7 +1519,7 @@ mod tests {
         for alternate in ["C", ""] {
             let (context, path, changes) = setup_sample_path_changes(alternate);
             let conn = context.graph().conn();
-            BlockGroup::insert_changes(conn, context.workspace(), &changes, None).unwrap();
+            BlockGroup::insert_changes(conn, context.workspace(), &changes, None, 0).unwrap();
             assert_sample_path_edges_unchanged(conn, &path, &changes).unwrap();
             let blocks = path.coordinate_blocks(conn, None);
             assert!(
@@ -2763,5 +2776,74 @@ mod tests {
         let reference = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         let expected = format!("{}{}", &reference[..4], &reference[22..]);
         assert!(sequences.contains(&expected), "{sequences:?}");
+    }
+
+    #[test]
+    fn test_vcf_changes_in_separate_apply_chunks_share_created_on() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let directory = tempfile::tempdir().unwrap();
+        // Each 1/1 row is two changes, so the filler rows fill the first apply chunk up to the
+        // insertion and the adjacent SNP starts the second chunk.
+        let filler_rows = VCF_CHANGE_APPLY_CHUNK_SIZE / 2 - 1;
+        let reference = "ACG".repeat(filler_rows + 10);
+        let fasta_path = directory.path().join("chunked.fa");
+        std::fs::write(&fasta_path, format!(">chr\n{reference}\n")).unwrap();
+        import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().into_owned(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut vcf = format!(
+            "##fileformat=VCFv4.3\n##contig=<ID=chr,length={length}>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n",
+            length = reference.len()
+        );
+        let mut expected = reference.chars().map(String::from).collect::<Vec<_>>();
+        for row in 0..filler_rows {
+            vcf.push_str(&format!(
+                "chr\t{}\t.\tA\tT\t.\t.\t.\tGT\t1/1\n",
+                3 * row + 1
+            ));
+            expected[3 * row] = "T".to_string();
+        }
+        let insertion = 3 * filler_rows + 2;
+        vcf.push_str(&format!("chr\t{insertion}\t.\tC\tCT\t.\t.\t.\tGT\t1/1\n"));
+        vcf.push_str(&format!(
+            "chr\t{}\t.\tG\tA\t.\t.\t.\tGT\t1/1\n",
+            insertion + 1
+        ));
+        expected[insertion - 1] = "CT".to_string();
+        expected[insertion] = "A".to_string();
+        let vcf_path = directory.path().join("chunked.vcf");
+        std::fs::write(&vcf_path, vcf).unwrap();
+        update_with_vcf_options(
+            &context,
+            &vcf_path.to_string_lossy().into_owned(),
+            "test",
+            VcfUpdateOptions {
+                fixed_genotype: "1/1".to_string(),
+                fixed_sample: Some("sample".to_string()),
+                parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                ..VcfUpdateOptions::default()
+            },
+        )
+        .unwrap();
+
+        // The insertion and the SNP leave the same junction. They only tie for newest when the
+        // whole import shares one `created_on`; otherwise pruning drops one and strands the rest.
+        let block_group = get_sample_bg(conn, "test", "sample");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, true)
+                .unwrap();
+        let expected = expected.concat();
+        let tails = sequences
+            .iter()
+            .map(|sequence| &sequence[sequence.len() - 30..])
+            .collect::<Vec<_>>();
+        assert!(sequences.contains(&expected), "{tails:?}");
     }
 }

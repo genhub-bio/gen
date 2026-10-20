@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::Utc;
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
     PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
@@ -757,6 +758,7 @@ impl BlockGroup {
         workspace: &Workspace,
         changes: &[BlockGroupChange],
         tree_map: Option<&mut IntervalTreeCache>,
+        created_on: i64,
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
@@ -800,6 +802,7 @@ impl BlockGroup {
             conn,
             new_augmented_edges_by_block_group,
             new_accession_edges,
+            created_on,
         )
     }
 
@@ -823,6 +826,9 @@ impl BlockGroup {
             conn,
             new_augmented_edges_by_block_group,
             new_accession_edges,
+            Utc::now()
+                .timestamp_nanos_opt()
+                .expect("should represent the current time in nanoseconds"),
         )
     }
 
@@ -834,6 +840,7 @@ impl BlockGroup {
         conn: &GraphConnection,
         new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
         new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
+        created_on: i64,
     ) -> Result<(), BlockGroupError> {
         for (block_group_id, new_augmented_edges) in new_augmented_edges_by_block_group {
             let mut unique_new_edges = new_augmented_edges
@@ -862,7 +869,7 @@ impl BlockGroup {
                 .into_iter()
                 .collect::<Vec<_>>();
             new_block_group_edges.sort_unstable();
-            BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+            BlockGroupEdge::bulk_create_at(conn, &new_block_group_edges, created_on);
         }
 
         for ((block_group_id, accession_name), path_edges) in new_accession_edges {
