@@ -19,7 +19,10 @@ use rusqlite::{
 use uuid::Uuid;
 
 use super::{
-    capability::{PushCapabilityRenewal, push_capability_renewal, transfer_authorization},
+    capability::{
+        PushCapabilityRenewal, push_capability_renewal, transfer_authorization,
+        wrap_push_authorization_error,
+    },
     ensure_graph_remote, is_authorization_error, push_graph_branch_with_progress,
     restore_canonical_url,
 };
@@ -51,6 +54,10 @@ pub(super) enum PushGraphTransferError {
     Client(#[from] RemoteClientError),
     #[error("GenHub confirmed the direct GCS graph session is stale")]
     StaleSessionConfirmed,
+    #[error("GenHub reports another push is in progress; retry after it completes")]
+    CapabilityContention,
+    #[error("GenHub no longer recognizes the push transfer lease")]
+    CapabilityLeaseInactive,
     #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
     NonFastForward,
     #[error("{primary}; GenHub could not verify the stale session: {confirmation}")]
@@ -71,6 +78,12 @@ pub(super) enum PushGraphTransferError {
         #[source]
         primary: Box<PushGraphTransferError>,
         cleanup: String,
+    },
+    #[error("{primary}; GenHub could not release the rejected push lease: {abort}")]
+    Abort {
+        #[source]
+        primary: Box<PushGraphTransferError>,
+        abort: Box<PushGraphTransferError>,
     },
     #[error("{0}")]
     Protocol(String),
@@ -101,6 +114,13 @@ fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
                 safe_graph_error_context(primary)
             )
         }
+        PushGraphTransferError::Abort { primary, abort } => {
+            format!(
+                "{}; additionally GenHub could not release the rejected push lease: {}",
+                safe_graph_error_context(primary),
+                safe_graph_error_context(abort),
+            )
+        }
         PushGraphTransferError::Client(RemoteClientError::Http { status, .. }) => {
             format!("remote request HTTP {status}")
         }
@@ -108,6 +128,12 @@ fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
         PushGraphTransferError::StaleSessionConfirmed
         | PushGraphTransferError::StaleSessionCheckFailed { .. } => {
             "stale direct GCS session recovery".to_string()
+        }
+        PushGraphTransferError::CapabilityContention => {
+            "temporary direct-push lease contention".to_string()
+        }
+        PushGraphTransferError::CapabilityLeaseInactive => {
+            "inactive direct-push transfer lease".to_string()
         }
         PushGraphTransferError::NonFastForward => {
             "Dolt rejected a non-fast-forward branch update".to_string()
@@ -124,15 +150,17 @@ impl PushGraphTransferError {
     pub(super) fn is_authorization_error(&self) -> bool {
         match self {
             Self::Database { source, .. } => is_authorization_error(source),
-            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => {
-                primary.is_authorization_error()
-            }
+            Self::Storage { primary, .. }
+            | Self::Cleanup { primary, .. }
+            | Self::Abort { primary, .. } => primary.is_authorization_error(),
             Self::StorageFailure(_) => false,
             Self::Client(RemoteClientError::Http { status, .. }) => {
                 matches!(*status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
             }
             Self::Client(_)
             | Self::StaleSessionConfirmed
+            | Self::CapabilityContention
+            | Self::CapabilityLeaseInactive
             | Self::NonFastForward
             | Self::StaleSessionCheckFailed { .. }
             | Self::Protocol(_) => false,
@@ -144,24 +172,31 @@ impl PushGraphTransferError {
             Self::Client(RemoteClientError::Http { status, .. }) => *status == StatusCode::CONFLICT,
             Self::Client(RemoteClientError::StaleGraphSession)
             | Self::StaleSessionConfirmed
+            | Self::CapabilityContention
             | Self::StaleSessionCheckFailed { .. } => false,
+            Self::CapabilityLeaseInactive => true,
             Self::StorageFailure(_) => true,
-            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => primary.is_terminal(),
+            Self::Storage { primary, .. }
+            | Self::Cleanup { primary, .. }
+            | Self::Abort { primary, .. } => primary.is_terminal(),
             Self::Protocol(_) => true,
-            Self::Database { .. } | Self::Client(_) | Self::NonFastForward => false,
+            Self::Database { .. } | Self::Client(_) => false,
+            Self::NonFastForward => true,
         }
     }
 
     pub(super) fn is_stale_session(&self) -> bool {
         match self {
             Self::Database { source, .. } => is_stale_accepted_session_error(source),
-            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => {
-                primary.is_stale_session()
-            }
+            Self::Storage { primary, .. }
+            | Self::Cleanup { primary, .. }
+            | Self::Abort { primary, .. } => primary.is_stale_session(),
             Self::StorageFailure(_) => false,
             Self::Client(RemoteClientError::StaleGraphSession) => true,
             Self::Client(_)
             | Self::StaleSessionConfirmed
+            | Self::CapabilityContention
+            | Self::CapabilityLeaseInactive
             | Self::NonFastForward
             | Self::StaleSessionCheckFailed { .. }
             | Self::Protocol(_) => false,
@@ -171,12 +206,50 @@ impl PushGraphTransferError {
     pub(super) fn is_non_fast_forward(&self) -> bool {
         match self {
             Self::NonFastForward => true,
-            Self::Storage { primary, .. } | Self::Cleanup { primary, .. } => {
-                primary.is_non_fast_forward()
-            }
+            Self::Storage { primary, .. }
+            | Self::Cleanup { primary, .. }
+            | Self::Abort { primary, .. } => primary.is_non_fast_forward(),
             _ => false,
         }
     }
+
+    pub(super) fn non_fast_forward_cleanup_warning(&self) -> String {
+        match self {
+            Self::Abort { primary, abort } => {
+                let mut warnings = primary.non_fast_forward_cleanup_warning();
+                let abort_warning = format!(
+                    "GenHub could not release the rejected push lease: {}",
+                    safe_graph_error_context(abort)
+                );
+                append_cleanup_warning(&mut warnings, &abort_warning);
+                warnings
+            }
+            Self::Cleanup { primary, cleanup } if primary.is_non_fast_forward() => {
+                let mut warnings = primary.non_fast_forward_cleanup_warning();
+                append_cleanup_warning(
+                    &mut warnings,
+                    &format!("local server cleanup also failed: {cleanup}"),
+                );
+                warnings
+            }
+            Self::Storage { primary, failure } if primary.is_non_fast_forward() => {
+                let mut warnings = primary.non_fast_forward_cleanup_warning();
+                append_cleanup_warning(
+                    &mut warnings,
+                    &format!("object storage cleanup also failed: {failure}"),
+                );
+                warnings
+            }
+            _ => String::new(),
+        }
+    }
+}
+
+fn append_cleanup_warning(warnings: &mut String, warning: &str) {
+    if !warnings.is_empty() {
+        warnings.push_str("; ");
+    }
+    warnings.push_str(warning);
 }
 
 /// RemoteServer owns background block uploads, so push completion must quiesce them before reuse.
@@ -549,7 +622,7 @@ pub(super) fn run_push_graph_transfer(
         if attempt > 0 {
             progress.println("Retrying direct GCS graph transfer (attempt 2/2)...");
         }
-        let authorization = {
+        let authorization_result = {
             let _heartbeat = progress.heartbeat("requesting GenHub direct-push capability");
             if attempt == 0 {
                 transfer_authorization(
@@ -570,7 +643,8 @@ pub(super) fn run_push_graph_transfer(
                     |_| Err("interactive login is unavailable during a push retry".into()),
                 )
             }
-        }?;
+        };
+        let authorization = authorization_result.map_err(wrap_push_authorization_error)?;
         let Some(capability) = authorization.direct_push.as_ref() else {
             restore_canonical_url(graph, remote);
             return Err(Box::new(PushGraphTransferError::Protocol(
@@ -653,6 +727,18 @@ pub(super) fn run_push_graph_transfer(
             }
             Err(error) => {
                 restore_canonical_url(graph, remote);
+                if error.is_non_fast_forward()
+                    && let Err(abort_error) = {
+                        let _heartbeat =
+                            progress.heartbeat("releasing the rejected GenHub push lease");
+                        renewal.abort()
+                    }
+                {
+                    return Err(Box::new(PushGraphTransferError::Abort {
+                        primary: Box::new(error),
+                        abort: Box::new(abort_error),
+                    }));
+                }
                 return Err(Box::new(error));
             }
         }
@@ -665,12 +751,15 @@ pub(super) fn run_push_graph_transfer(
 
 #[cfg(test)]
 mod tests {
+    use reqwest::StatusCode;
     use rusqlite::{
         Error as SqlError,
         blockcachevfs::{StorageFailure, StorageFailureCause, StorageFailurePhase},
     };
 
-    use super::{preserve_graph_error_after_close, safe_graph_error_context};
+    use super::{
+        PushGraphTransferError, preserve_graph_error_after_close, safe_graph_error_context,
+    };
 
     #[test]
     fn test_direct_push_cleanup_error_does_not_replace_primary_sql_error() {
@@ -741,6 +830,28 @@ mod tests {
             error
                 .to_string()
                 .contains("staged block upload failed with HTTP 403")
+        );
+    }
+
+    #[test]
+    fn test_non_fast_forward_remains_terminal_when_lease_abort_fails() {
+        let error = PushGraphTransferError::Abort {
+            primary: Box::new(PushGraphTransferError::NonFastForward),
+            abort: Box::new(PushGraphTransferError::Client(
+                crate::commands::remote::client::RemoteClientError::Http {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    message: "direct GCS push lease abort failed".to_string(),
+                },
+            )),
+        };
+
+        assert!(error.is_non_fast_forward());
+        assert!(error.is_terminal());
+        assert!(
+            error
+                .non_fast_forward_cleanup_warning()
+                .contains("GenHub could not release the rejected push lease"),
+            "a failed abort should be shown beside the original non-fast-forward result"
         );
     }
 

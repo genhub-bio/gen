@@ -330,7 +330,8 @@ fn test_push_capability_sends_idempotency_token_and_parses_direct_gcs_grant() {
                     "target_database": session_scope.target_database.clone(),
                     "operations": session_scope.operations.clone()
                 },
-                "publish_url": "https://genhub.bio/api/publish?token=secret"
+                "publish_url": "https://genhub.bio/api/publish?token=publish-secret",
+                "abort_url": "https://genhub.bio/api/retire?token=abort-secret"
             }
         })
         .to_string();
@@ -367,13 +368,36 @@ fn test_push_capability_sends_idempotency_token_and_parses_direct_gcs_grant() {
                     .expect("should parse CAB token expiry"),
                 session_id: TEST_TRANSFER_ID,
                 session_scope,
-                publish_url: "https://genhub.bio/api/publish?token=secret".to_string(),
+                publish_url: "https://genhub.bio/api/publish?token=publish-secret".to_string(),
+                abort_url: "https://genhub.bio/api/retire?token=abort-secret".to_string(),
             })
         );
     let debug = format!("{capability:?}");
     assert!(!debug.contains("legacy-transfer"));
     assert!(!debug.contains("access_token=secret"));
-    assert!(!debug.contains("token=secret"));
+    assert!(!debug.contains("token=publish-secret"));
+    assert!(!debug.contains("token=abort-secret"));
+    assert!(debug.contains("abort_url: \"[REDACTED]\""));
+}
+
+#[test]
+fn test_direct_push_abort_url_is_required() {
+    let capability = serde_json::json!({
+        "database_uri": "gcs://bucket/prefix?access_token=secret",
+        "token_expires_at": "2050-01-01T00:15:00Z",
+        "session_id": TEST_TRANSFER_ID,
+        "session_scope": {
+            "principal": "repository:repo-uuid",
+            "target_database": "default.db",
+            "operations": "push",
+        },
+        "publish_url": "https://genhub.bio/api/publish?token=publish-secret",
+    });
+
+    assert!(
+        serde_json::from_value::<DirectPushCapability>(capability).is_err(),
+        "clients must not synthesize a missing server-supplied abort URL"
+    );
 }
 
 #[test]

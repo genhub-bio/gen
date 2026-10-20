@@ -23,7 +23,23 @@ const STALE_SESSION_CHECK_HEADER: &str = "x-gen-session-stale-check";
 ///
 /// After Dolt finishes staging, GenHub atomically publishes the manifest through the signed URL.
 pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), RemoteClientError> {
-    send_direct_push_request(capability, false)
+    send_direct_push_request(
+        &capability.publish_url,
+        false,
+        "direct GCS manifest publication failed",
+    )
+}
+
+/// Releases a push lease after Dolt rejects the staged branch as a non-fast-forward.
+///
+/// The signed capability is bound to this one session, so aborting it lets a later forced push
+/// acquire a new session without releasing another client's active lease.
+pub fn abort_direct_push(capability: &DirectPushCapability) -> Result<(), RemoteClientError> {
+    send_direct_push_request(
+        &capability.abort_url,
+        false,
+        "direct GCS push lease abort failed",
+    )
 }
 
 /// A saved push can outlive the remote head it was accepted against, so recovery asks GenHub before
@@ -34,7 +50,11 @@ pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), Remo
 pub fn confirm_direct_push_session_stale(
     capability: &DirectPushCapability,
 ) -> Result<bool, RemoteClientError> {
-    match send_direct_push_request(capability, true) {
+    match send_direct_push_request(
+        &capability.publish_url,
+        true,
+        "direct GCS manifest publication failed",
+    ) {
         Ok(()) => Ok(false),
         Err(RemoteClientError::StaleGraphSession) => Ok(true),
         Err(error) => Err(error),
@@ -44,13 +64,12 @@ pub fn confirm_direct_push_session_stale(
 /// A signed URL authorizes only one endpoint, and strict frontends require `Content-Length: 0` for
 /// the empty manifest commit POST.
 fn send_direct_push_request(
-    capability: &DirectPushCapability,
+    signed_url: &str,
     stale_check: bool,
+    failure_context: &'static str,
 ) -> Result<(), RemoteClientError> {
     let client = Client::builder().redirect(Policy::none()).build()?;
-    let mut request = client
-        .post(&capability.publish_url)
-        .header(CONTENT_LENGTH, "0");
+    let mut request = client.post(signed_url).header(CONTENT_LENGTH, "0");
     if stale_check {
         request = request.header(STALE_SESSION_CHECK_HEADER, "1");
     }
@@ -69,7 +88,7 @@ fn send_direct_push_request(
         );
         return Err(RemoteClientError::Http {
             status,
-            message: "direct GCS manifest publication failed".to_string(),
+            message: failure_context.to_string(),
         });
     }
     Ok(())
@@ -152,8 +171,8 @@ mod tests {
     };
 
     use super::{
-        MAX_DIRECT_PUSH_ERROR_BODY_BYTES, confirm_direct_push_session_stale, http_version_label,
-        publish_direct_push, response_content_type_label,
+        MAX_DIRECT_PUSH_ERROR_BODY_BYTES, abort_direct_push, confirm_direct_push_session_stale,
+        http_version_label, publish_direct_push, response_content_type_label,
     };
     use crate::commands::remote::client::{
         DirectPushCapability, RemoteClientError, SessionScope,
@@ -296,6 +315,7 @@ mod tests {
                 operations: "commit".to_string(),
             },
             publish_url: format!("{origin}/publish?signature=publish-secret"),
+            abort_url: format!("{origin}/abort?signature=abort-secret"),
         };
         let publish_result = publish_direct_push(&capability);
 
@@ -413,6 +433,7 @@ mod tests {
                 operations: "push".to_string(),
             },
             publish_url: format!("{origin}/publish?signature=publish-secret"),
+            abort_url: format!("{origin}/abort?signature=abort-secret"),
         };
 
         assert!(
@@ -458,6 +479,53 @@ mod tests {
                 .any(|line| line.eq_ignore_ascii_case("x-gen-session-stale-check: 1")),
             "normal manifest publication should not be sent as a stale probe"
         );
+    }
+
+    #[test]
+    fn test_abort_direct_push_uses_the_supplied_url_and_empty_post() {
+        let (origin, server) = strict_empty_post_server(1);
+        let capability = DirectPushCapability {
+            database_uri: "gcs://bucket/prefix?access_token=not-used".to_string(),
+            token_expires_at: "2050-01-01T00:00:00Z"
+                .parse()
+                .expect("should parse test token expiration"),
+            session_id: TEST_TRANSFER_ID,
+            session_scope: SessionScope {
+                principal: "alice".to_string(),
+                target_database: "default.db".to_string(),
+                operations: "push".to_string(),
+            },
+            publish_url: format!(
+                "{origin}/api/repos/alice/example/dolt/signed-cap/publish?sig=publish-secret"
+            ),
+            abort_url: format!("{origin}/sessions/retire/current?sig=abort-secret&mode=force"),
+        };
+        let result = abort_direct_push(&capability);
+        let requests = server.join().expect("should finish abort request server");
+
+        assert!(result.is_ok(), "abort should succeed: {result:?}");
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0].0;
+        assert!(
+            request.starts_with("POST /sessions/retire/current?sig=abort-secret&mode=force "),
+            "abort should use the exact server-supplied signed URL: {request}"
+        );
+        assert!(
+            !request.contains("publish-secret"),
+            "abort should not derive its URL from the publication endpoint"
+        );
+        let (headers, body) = request
+            .split_once("\r\n\r\n")
+            .expect("should find captured abort request headers");
+        assert!(
+            headers.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length") && value.trim() == "0"
+                })
+            }),
+            "abort should explicitly send Content-Length: 0: {headers}"
+        );
+        assert!(body.is_empty(), "abort should not send a request body");
     }
 
     #[test]

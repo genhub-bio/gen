@@ -786,8 +786,12 @@ pub struct RemoteOperationRecord {
     pub to_commit: Option<DoltHashId>,
     /// GenHub push lease retained by a pending operation.
     pub transfer_id: Option<Uuid>,
-    /// Client-owned session UUID reused until the graph manifest is published.
+    /// Client-owned session UUID for the intended graph publication scope.
     pub push_session_id: Option<Uuid>,
+    /// Target commit selected for the intended session, distinct from the last published commit.
+    pub push_session_target_commit: Option<DoltHashId>,
+    /// Whether the intended session may overwrite a divergent remote branch.
+    pub push_session_force: Option<bool>,
     /// Unix timestamp after which GenHub will reject the retained push lease.
     pub transfer_expires_at: Option<i64>,
     /// Time at which the operation began.
@@ -862,17 +866,54 @@ impl RemoteOperationRecord {
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
-    /// Replaces the client session UUID before starting a new unpublished graph transfer.
-    pub fn set_push_session_id(
+    /// Persists the graph session's intended publication scope before opening its remote server.
+    ///
+    /// Keeping the intended destination separate from the published destination lets retries reuse
+    /// one UUID while a newer graph is still uploading. Rotating that UUID clears the retired
+    /// session's lease but preserves the last published destination and asset checkpoint, so a
+    /// same-commit force change cannot mistake the prior publication for the new session.
+    pub fn prepare_push_session(
         &mut self,
         conn: &ConfigConnection,
-        push_session_id: Uuid,
+        destination: &DoltHashId,
+        force: bool,
     ) -> SQLResult<()> {
-        conn.execute(
-            "UPDATE remote_operations SET push_session_id = ?1 WHERE id = ?2",
-            params![push_session_id, self.id],
+        let replacement_session_id = Uuid::new_v4();
+        let (push_session_id, transfer_id, transfer_expires_at) = conn.query_row(
+            "UPDATE remote_operations \
+             SET push_session_id = CASE \
+                 WHEN push_session_target_commit = ?1 AND push_session_force = ?2 \
+                     THEN push_session_id \
+                 WHEN push_session_target_commit IS NULL AND push_session_force IS NULL \
+                     AND to_commit IS NULL \
+                     THEN push_session_id \
+                 ELSE ?3 \
+             END, transfer_id = CASE \
+                 WHEN push_session_target_commit = ?1 AND push_session_force = ?2 \
+                     THEN transfer_id \
+                 ELSE NULL \
+             END, transfer_expires_at = CASE \
+                 WHEN push_session_target_commit = ?1 AND push_session_force = ?2 \
+                     THEN transfer_expires_at \
+                 ELSE NULL \
+             END, push_session_target_commit = ?1, push_session_force = ?2 \
+             WHERE id = ?4 AND operation = 'push' \
+               AND completed_at IS NULL AND failed_at IS NULL \
+             RETURNING push_session_id, transfer_id, transfer_expires_at",
+            params![destination, force, replacement_session_id, self.id],
+            |row| {
+                Ok((
+                    row.get::<_, Uuid>(0)?,
+                    row.get::<_, Option<Uuid>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
         )?;
         self.push_session_id = Some(push_session_id);
+        self.push_session_target_commit = Some(*destination);
+        self.push_session_force = Some(force);
+        self.transfer_id = transfer_id;
+        self.transfer_expires_at = transfer_expires_at;
         Ok(())
     }
 
@@ -940,14 +981,27 @@ impl RemoteOperationRecord {
         transfer_id: Uuid,
         transfer_expires_at: i64,
     ) -> SQLResult<()> {
-        conn.execute(
+        let updated = conn.execute(
             "UPDATE remote_operations \
-             SET to_commit = ?1, transfer_id = ?2, transfer_expires_at = ?3 WHERE id = ?4",
+             SET to_commit = ?1, transfer_id = ?2, transfer_expires_at = ?3, \
+                 push_session_target_commit = COALESCE(push_session_target_commit, ?1), \
+                 push_session_force = COALESCE(push_session_force, 0) \
+             WHERE id = ?4 AND operation = 'push' AND push_session_id IS NOT NULL \
+               AND (push_session_target_commit IS NULL OR push_session_target_commit = ?1)",
             params![to_commit, transfer_id, transfer_expires_at, self.id],
         )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         self.to_commit = Some(*to_commit);
         self.transfer_id = Some(transfer_id);
         self.transfer_expires_at = Some(transfer_expires_at);
+        if self.push_session_target_commit.is_none() {
+            self.push_session_target_commit = Some(*to_commit);
+        }
+        if self.push_session_force.is_none() {
+            self.push_session_force = Some(false);
+        }
         Ok(())
     }
 
@@ -1435,6 +1489,8 @@ mod tests {
             assert_eq!(resumed.transfer_id, Some(transfer_id));
             assert_eq!(resumed.transfer_expires_at, Some(transfer_expires_at));
             assert_eq!(resumed.push_session_id, Some(push_session_id));
+            assert_eq!(resumed.push_session_target_commit, Some(destination_commit));
+            assert_eq!(resumed.push_session_force, Some(false));
             let replacement_session_id = Uuid::new_v4();
             resumed
                 .advance_assets_transfer_checkpoint(config, &destination_commit)
@@ -1446,6 +1502,8 @@ mod tests {
             assert_eq!(resumed.to_commit, None);
             assert_eq!(resumed.transfer_id, None);
             assert_eq!(resumed.transfer_expires_at, None);
+            assert_eq!(resumed.push_session_target_commit, Some(destination_commit));
+            assert_eq!(resumed.push_session_force, Some(false));
             assert_eq!(
                 resumed.assets_transfer_checkpoint.as_ref(),
                 Some(&destination_commit),
@@ -1462,6 +1520,163 @@ mod tests {
             resumed
                 .complete(config)
                 .expect("should complete push operation");
+        }
+
+        #[test]
+        fn test_push_intended_destination_is_stable_while_new_graph_upload_retries() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+            let published_commit = DoltHashId([3_u8; 20]);
+            let intended_commit = DoltHashId([4_u8; 20]);
+            let published_transfer_id = Uuid::from_u128(8);
+            let published_transfer_expires_at = 1_900_000_001;
+            let mut operation = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Push,
+                None,
+            )
+            .expect("should begin push operation");
+            operation
+                .prepare_push_session(config, &published_commit, true)
+                .expect("should persist the force scope used for the published graph");
+            operation
+                .set_push_destination(
+                    config,
+                    &published_commit,
+                    published_transfer_id,
+                    published_transfer_expires_at,
+                )
+                .expect("should seed the published graph and lease");
+            let initial_session_id = operation
+                .push_session_id
+                .expect("should keep the operation session ID");
+
+            operation
+                .prepare_push_session(config, &published_commit, true)
+                .expect("should preserve the lease for the unchanged published scope");
+            assert_eq!(operation.push_session_id, Some(initial_session_id));
+            assert_eq!(operation.transfer_id, Some(published_transfer_id));
+            assert_eq!(
+                operation.transfer_expires_at,
+                Some(published_transfer_expires_at)
+            );
+
+            operation
+                .prepare_push_session(config, &intended_commit, false)
+                .expect("should persist the new graph upload intent");
+            let intended_session_id = operation
+                .push_session_id
+                .expect("should select the intended session ID");
+            assert_ne!(intended_session_id, initial_session_id);
+            assert_eq!(operation.to_commit, Some(published_commit));
+            assert_eq!(operation.transfer_id, None);
+            assert_eq!(operation.transfer_expires_at, None);
+
+            let mut retry = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Push,
+                None,
+            )
+            .expect("should resume the pending push operation");
+            retry
+                .prepare_push_session(config, &intended_commit, false)
+                .expect("should resume the same intended graph session");
+
+            assert_eq!(retry.push_session_id, Some(intended_session_id));
+            assert_eq!(retry.push_session_target_commit, Some(intended_commit));
+            assert_eq!(retry.push_session_force, Some(false));
+            assert_eq!(retry.to_commit, Some(published_commit));
+            assert_eq!(retry.transfer_id, None);
+            assert_eq!(retry.transfer_expires_at, None);
+        }
+
+        #[test]
+        fn test_fresh_push_scope_keeps_its_initial_session_for_each_force_value() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+
+            for (branch, force) in [("main", false), ("forced", true)] {
+                let mut operation = RemoteOperationRecord::begin_or_resume(
+                    config,
+                    "origin",
+                    branch,
+                    RemoteOperationKind::Push,
+                    None,
+                )
+                .expect("should begin a fresh push operation");
+                let initial_session_id = operation
+                    .push_session_id
+                    .expect("should initialize a session for a fresh push");
+                assert_eq!(operation.to_commit, None);
+
+                let destination = DoltHashId([if force { 10_u8 } else { 9_u8 }; 20]);
+                operation
+                    .prepare_push_session(config, &destination, force)
+                    .expect("should prepare the requested fresh push scope");
+                assert_eq!(operation.push_session_id, Some(initial_session_id));
+                assert_eq!(operation.push_session_target_commit, Some(destination));
+                assert_eq!(operation.push_session_force, Some(force));
+
+                operation
+                    .prepare_push_session(config, &destination, force)
+                    .expect("should preserve the UUID while retrying the same fresh scope");
+                assert_eq!(operation.push_session_id, Some(initial_session_id));
+            }
+        }
+
+        #[test]
+        fn test_push_intended_scope_rotates_session_only_when_scope_changes() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+            let first_destination = DoltHashId([5_u8; 20]);
+            let second_destination = DoltHashId([6_u8; 20]);
+            let mut operation = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Push,
+                None,
+            )
+            .expect("should begin push operation");
+
+            operation
+                .prepare_push_session(config, &first_destination, false)
+                .expect("should prepare the first intended scope");
+            let initial_session_id = operation.push_session_id;
+            operation
+                .prepare_push_session(config, &first_destination, false)
+                .expect("should retain the session for an unchanged scope");
+            assert_eq!(operation.push_session_id, initial_session_id);
+
+            operation
+                .prepare_push_session(config, &first_destination, true)
+                .expect("should rotate when force authorization changes");
+            let forced_session_id = operation.push_session_id;
+            assert_ne!(forced_session_id, initial_session_id);
+            operation
+                .prepare_push_session(config, &first_destination, true)
+                .expect("should retain the session for the same forced scope");
+            assert_eq!(operation.push_session_id, forced_session_id);
+
+            operation
+                .prepare_push_session(config, &second_destination, true)
+                .expect("should rotate when the intended destination changes");
+            assert_ne!(operation.push_session_id, forced_session_id);
+            assert_eq!(
+                operation.push_session_target_commit,
+                Some(second_destination)
+            );
+            assert_eq!(operation.push_session_force, Some(true));
         }
     }
 

@@ -110,9 +110,10 @@ use uuid::Uuid;
 
 mod capability;
 mod direct_gcs;
+mod push_lock;
 
 use capability::{
-    PushCapabilityRenewal, PushTransferLease, acquire_existing_push_renewal, transfer_authorization,
+    PushCapabilityRenewal, PushTransferLease, acquire_push_session_renewal, transfer_authorization,
 };
 use direct_gcs::{
     PushGraphTransferError, PushGraphTransferRequest, is_non_fast_forward_push_error,
@@ -2109,6 +2110,23 @@ pub enum RemotePushError {
     /// The configured remote is invalid or could not be updated.
     #[error(transparent)]
     Remote(#[from] ModelRemoteError),
+    /// Another process owns the pending push session for this remote and branch.
+    #[error(
+        "Another push to remote '{remote}' branch '{branch}' is already running in this workspace"
+    )]
+    PushLockBusy { remote: String, branch: String },
+    /// The workspace push lock could not be created or acquired.
+    #[error(
+        "Could not acquire push lock for remote '{remote}' branch '{branch}' at '{}': {source}",
+        .path.display()
+    )]
+    PushLockIo {
+        remote: String,
+        branch: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// A GenHub request failed.
     #[error(transparent)]
     Client(#[from] RemoteClientError),
@@ -2119,8 +2137,10 @@ pub enum RemotePushError {
     #[error("Graph transfer failed: {0}")]
     GraphTransfer(#[source] Box<dyn Error>),
     /// The remote branch has commits that are not in the local branch.
-    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
-    NonFastForward,
+    #[error(
+        "The branch is not a fast-forward of the remote. Use --force to overwrite the remote.{cleanup_warning}"
+    )]
+    NonFastForward { cleanup_warning: String },
     /// The branch's assets could not be transferred.
     #[error("Asset transfer failed: {0}")]
     AssetTransfer(#[source] Box<dyn Error>),
@@ -2136,13 +2156,83 @@ fn remote_push_graph_error(error: Box<dyn Error>) -> RemotePushError {
     if error
         .downcast_ref::<SqlError>()
         .is_some_and(is_non_fast_forward_push_error)
-        || error
-            .downcast_ref::<PushGraphTransferError>()
-            .is_some_and(PushGraphTransferError::is_non_fast_forward)
     {
-        RemotePushError::NonFastForward
+        return RemotePushError::NonFastForward {
+            cleanup_warning: String::new(),
+        };
+    }
+    let Some(graph_error) = error.downcast_ref::<PushGraphTransferError>() else {
+        return RemotePushError::GraphTransfer(error);
+    };
+    if graph_error.is_non_fast_forward() {
+        let warning = graph_error.non_fast_forward_cleanup_warning();
+        return RemotePushError::NonFastForward {
+            cleanup_warning: if warning.is_empty() {
+                String::new()
+            } else {
+                format!(" Cleanup warning: {warning}")
+            },
+        };
+    }
+    RemotePushError::GraphTransfer(error)
+}
+
+fn remote_push_asset_error(
+    operation: Option<&mut RemoteOperationRecord>,
+    config: &ConfigConnection,
+    branch: &str,
+    error: Box<dyn Error>,
+) -> RemotePushError {
+    if let Some(graph_error) = error.downcast_ref::<PushGraphTransferError>() {
+        if graph_error.is_terminal()
+            && let Some(operation) = operation
+            && let Err(metadata_error) = operation.fail(config)
+        {
+            eprintln!(
+                "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+            );
+        }
+        remote_push_graph_error(error)
     } else {
-        RemotePushError::GraphTransfer(error)
+        RemotePushError::AssetTransfer(error)
+    }
+}
+
+fn same_push_session_scope(
+    operation: &RemoteOperationRecord,
+    destination_hash: &DoltHashId,
+    force: bool,
+) -> bool {
+    operation.push_session_target_commit.as_ref() == Some(destination_hash)
+        && operation.push_session_force == Some(force)
+}
+
+/// An incomplete push session can hold the repository claim needed by a later graph head.
+///
+/// When a pending operation moves to a new destination or force scope, retire its previous
+/// intended session before persisting the replacement. This covers interrupted staging as well as
+/// a published manifest whose asset transfer did not finish.
+fn retire_superseded_push_session(
+    operation: &RemoteOperationRecord,
+    remote: &Remote,
+    branch: &str,
+    progress: &TransferProgress,
+) -> Result<(), PushGraphTransferError> {
+    let (Some(session_id), Some(_old_destination), Some(old_force)) = (
+        operation.push_session_id,
+        operation.push_session_target_commit.as_ref(),
+        operation.push_session_force,
+    ) else {
+        return Ok(());
+    };
+
+    progress.println("Retiring the previous direct GCS push session...");
+    let _heartbeat = progress.heartbeat("retiring the previous direct GCS push session");
+    match acquire_push_session_renewal(remote, branch, old_force, session_id, None)
+        .and_then(|renewal| renewal.abort())
+    {
+        Ok(()) | Err(PushGraphTransferError::CapabilityLeaseInactive) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -2166,6 +2256,7 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
+    let _push_lock = push_lock::acquire(workspace, &remote.name, &branch)?;
     progress.println(&format!(
         "Preparing push of branch '{branch}' to '{}'...",
         remote.name,
@@ -2195,40 +2286,39 @@ pub fn execute_push(
             StoredRemoteOperationKind::Push,
             previous_hash.as_ref(),
         )?;
-        if operation.push_session_id.is_none() {
-            operation.set_push_session_id(&config, Uuid::new_v4())?;
-        }
         let destination_hash = hash_of(&graph, &branch)?;
-        let same_destination = operation
-            .to_commit
-            .as_ref()
-            .is_some_and(|recorded_destination| recorded_destination == &destination_hash);
-        let destination_changed = operation
-            .to_commit
-            .as_ref()
-            .is_some_and(|recorded_destination| recorded_destination != &destination_hash);
-        let existing_transfer_lease = match (
-            operation.to_commit.as_ref(),
-            operation.transfer_id,
-            operation.transfer_expires_at,
-        ) {
-            (Some(recorded_destination), Some(transfer_id), Some(expires_at))
-                if recorded_destination == &destination_hash
-                    && expires_at > Utc::now().timestamp() =>
+        let same_session_scope = same_push_session_scope(&operation, &destination_hash, force);
+        if !same_session_scope
+            && let Err(error) =
+                retire_superseded_push_session(&operation, &remote, &branch, &progress)
+        {
+            if error.is_terminal()
+                && let Err(metadata_error) = operation.fail(&config)
             {
-                Some(PushTransferLease {
-                    transfer_id,
-                    expires_at,
-                })
+                eprintln!(
+                    "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+                );
             }
-            (Some(_), Some(_), Some(_)) | (None, None, None) => None,
-            _ => {
-                return Err(RemotePushError::IncompleteTransferLease { branch });
-            }
-        };
-        if destination_changed {
-            operation.set_push_session_id(&config, Uuid::new_v4())?;
+            return Err(RemotePushError::GraphTransfer(Box::new(error)));
         }
+        operation.prepare_push_session(&config, &destination_hash, force)?;
+        let published_session_matches =
+            same_session_scope && operation.to_commit.as_ref() == Some(&destination_hash);
+        let existing_transfer_lease = if published_session_matches {
+            match (operation.transfer_id, operation.transfer_expires_at) {
+                (Some(transfer_id), Some(expires_at)) if expires_at > Utc::now().timestamp() => {
+                    Some(PushTransferLease {
+                        transfer_id,
+                        expires_at,
+                    })
+                }
+                (Some(_), Some(_)) => None,
+                (None, None) => None,
+                _ => return Err(RemotePushError::IncompleteTransferLease { branch }),
+            }
+        } else {
+            None
+        };
         let renewal = if let Some(transfer_lease) = existing_transfer_lease {
             progress.println("Graph manifest already published; resuming asset transfer...");
             let push_session_id = operation
@@ -2236,12 +2326,12 @@ pub fn execute_push(
                 .expect("push session UUID should be persisted before transfer");
             let renewal_result = {
                 let _heartbeat = progress.heartbeat("resuming the existing direct-push lease");
-                acquire_existing_push_renewal(
+                acquire_push_session_renewal(
                     &remote,
                     &branch,
                     force,
                     push_session_id,
-                    transfer_lease.transfer_id,
+                    Some(transfer_lease.transfer_id),
                 )
             };
             let renewal = match renewal_result {
@@ -2257,11 +2347,22 @@ pub fn execute_push(
                     return Err(RemotePushError::GraphTransfer(Box::new(error)));
                 }
             };
-            let refreshed_lease = {
+            let refreshed_lease_result = {
                 let _heartbeat = progress.heartbeat("refreshing the existing push lease");
-                renewal
-                    .ensure_fresh()
-                    .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?
+                renewal.ensure_fresh()
+            };
+            let refreshed_lease = match refreshed_lease_result {
+                Ok(lease) => lease,
+                Err(error) => {
+                    if error.is_terminal()
+                        && let Err(metadata_error) = operation.fail(&config)
+                    {
+                        eprintln!(
+                            "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
+                        );
+                    }
+                    return Err(RemotePushError::GraphTransfer(Box::new(error)));
+                }
             };
             operation.set_push_destination(
                 &config,
@@ -2274,7 +2375,9 @@ pub fn execute_push(
             let push_session_id = operation
                 .push_session_id
                 .expect("push session UUID should be persisted before transfer");
-            let expected_transfer_id = same_destination.then_some(operation.transfer_id).flatten();
+            let expected_transfer_id = published_session_matches
+                .then_some(operation.transfer_id)
+                .flatten();
             let mut graph_transfer = run_push_graph_transfer(PushGraphTransferRequest {
                 graph: &graph,
                 remote: &remote,
@@ -2342,7 +2445,7 @@ pub fn execute_push(
     } else {
         previous_hash
     };
-    let upload_receipts = {
+    let upload_receipts_result = {
         let mut refresh_push_lease = || {
             if let Some((operation, renewal, destination_hash)) = push_context.as_mut() {
                 persist_refreshed_push_lease(operation, &config, destination_hash, renewal)?;
@@ -2369,11 +2472,25 @@ pub fn execute_push(
             |_| Ok(()),
             &mut refresh_push_lease,
         )
-    }
-    .map_err(RemotePushError::AssetTransfer)?;
+    };
+    let upload_receipts = match upload_receipts_result {
+        Ok(upload_receipts) => upload_receipts,
+        Err(error) => {
+            let operation = push_context.as_mut().map(|(operation, _, _)| operation);
+            return Err(remote_push_asset_error(operation, &config, &branch, error));
+        }
+    };
     if let Some((operation, renewal, destination_hash)) = push_context.as_mut() {
-        persist_refreshed_push_lease(operation, &config, destination_hash, renewal)
-            .map_err(RemotePushError::AssetTransfer)?;
+        if let Err(error) =
+            persist_refreshed_push_lease(operation, &config, destination_hash, renewal)
+        {
+            return Err(remote_push_asset_error(
+                Some(operation),
+                &config,
+                &branch,
+                error,
+            ));
+        }
         let transfer_lease = renewal
             .push_lease()
             .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
@@ -2589,9 +2706,10 @@ mod tests {
         fs,
         io::{Cursor, Read as _, Write as _},
         net::TcpListener,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::Mutex,
         thread,
+        time::{Duration, Instant},
     };
 
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -2689,6 +2807,7 @@ mod tests {
         expires_at: DateTime<Utc>,
         database_uri: &str,
         publish_url: &str,
+        abort_url: &str,
         session_scope: ClientSessionScope,
     ) -> CapabilityResponse {
         CapabilityResponse {
@@ -2702,6 +2821,7 @@ mod tests {
                 session_id: TEST_TRANSFER_ID,
                 session_scope,
                 publish_url: publish_url.to_string(),
+                abort_url: abort_url.to_string(),
             }),
         }
     }
@@ -2730,13 +2850,13 @@ mod tests {
             .expect("capability request should include its persisted session UUID")
     }
 
-    fn direct_push_capability_body(request: &str, origin: &str) -> String {
+    fn direct_push_capability_body(request: &str, origin: &str, transfer_id: Uuid) -> String {
         let scope = push_session_scope();
         json!({
             "remote_url": null,
             "expires_at": (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339(),
             "default_branch": "main",
-            "transfer_id": TEST_TRANSFER_ID,
+            "transfer_id": transfer_id,
             "direct_push": {
                 "database_uri": push_database_uri(),
                 "token_expires_at": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
@@ -2746,7 +2866,8 @@ mod tests {
                     "target_database": scope.target_database,
                     "operations": scope.operations,
                 },
-                "publish_url": format!("{origin}/api/publish?capability=mock-signed-value")
+                "publish_url": format!("{origin}/api/publish?capability=mock-signed-value"),
+                "abort_url": format!("{origin}/api/abort?capability=mock-signed-value")
             }
         })
         .to_string()
@@ -2773,6 +2894,7 @@ mod tests {
             now + ChronoDuration::minutes(15),
             push_database_uri(),
             &format!("{publish_origin}/api/publish?capability=initial-signed-value"),
+            &format!("{publish_origin}/api/abort?capability=initial-signed-value"),
             scope.clone(),
         );
         let body = json!({
@@ -2789,7 +2911,8 @@ mod tests {
                     "target_database": scope.target_database,
                     "operations": scope.operations,
                 },
-                "publish_url": format!("{publish_origin}/api/publish?capability=refreshed-signed-value")
+                "publish_url": format!("{publish_origin}/api/publish?capability=refreshed-signed-value"),
+                "abort_url": format!("{publish_origin}/api/abort?capability=refreshed-signed-value")
             }
         })
         .to_string();
@@ -2897,6 +3020,22 @@ mod tests {
         transfer_id: Uuid,
         expires_at: i64,
     ) -> Uuid {
+        let mut operation = seed_push_session(config, branch, destination_hash, false);
+        let session_id = operation
+            .push_session_id
+            .expect("should allocate a push session UUID");
+        operation
+            .set_push_destination(config, destination_hash, transfer_id, expires_at)
+            .expect("should seed graph transfer lease");
+        session_id
+    }
+
+    fn seed_push_session(
+        config: &ConfigConnection,
+        branch: &str,
+        destination_hash: &DoltHashId,
+        force: bool,
+    ) -> RemoteOperationRecord {
         let mut operation = RemoteOperationRecord::begin_or_resume(
             config,
             "origin",
@@ -2905,13 +3044,233 @@ mod tests {
             None,
         )
         .expect("should create pending push operation");
-        let session_id = operation
-            .push_session_id
-            .expect("should allocate a push session UUID");
         operation
-            .set_push_destination(config, destination_hash, transfer_id, expires_at)
-            .expect("should seed graph transfer lease");
-        session_id
+            .prepare_push_session(config, destination_hash, force)
+            .expect("should prepare the seeded push scope");
+        operation
+    }
+
+    fn reload_push_operation(
+        config: &ConfigConnection,
+        operation_id: i64,
+    ) -> RemoteOperationRecord {
+        RemoteOperationRecord::select(config)
+            .get_by_id(operation_id)
+            .expect("should query the persisted push operation")
+            .expect("should find the persisted push operation")
+    }
+
+    enum MockGenHubReply {
+        Drop,
+        Http(u16, String),
+        DirectPushCapability(Uuid),
+        EmptySuccess,
+    }
+
+    impl From<Option<(u16, String)>> for MockGenHubReply {
+        fn from(reply: Option<(u16, String)>) -> Self {
+            match reply {
+                Some((status, body)) => Self::Http(status, body),
+                None => Self::Drop,
+            }
+        }
+    }
+
+    fn read_mock_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("should bound mock HTTP request reads");
+        let mut request = Vec::new();
+        loop {
+            let mut buffer = [0_u8; 4096];
+            let read = stream
+                .read(&mut buffer)
+                .expect("should read mock HTTP request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let content_length = String::from_utf8_lossy(&request[..header_end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn serve_capability_replies<R>(replies: Vec<R>) -> (String, thread::JoinHandle<Vec<String>>)
+    where
+        R: Into<MockGenHubReply>,
+    {
+        let replies = replies.into_iter().map(Into::into).collect::<Vec<_>>();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind capability server");
+        listener
+            .set_nonblocking(true)
+            .expect("should bound capability server waits");
+        let address = listener
+            .local_addr()
+            .expect("should read capability server address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(replies.len());
+            for reply in replies {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => {
+                            panic!("should accept capability request before timeout: {error}")
+                        }
+                    }
+                };
+                let request = read_mock_http_request(&mut stream);
+                requests.push(request.clone());
+                match reply {
+                    MockGenHubReply::Drop => {}
+                    MockGenHubReply::DirectPushCapability(transfer_id) => {
+                        let body = direct_push_capability_body(
+                            &request,
+                            &format!("http://{address}"),
+                            transfer_id,
+                        );
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write direct-push capability");
+                    }
+                    MockGenHubReply::EmptySuccess => stream
+                        .write_all(
+                            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should write empty success response"),
+                    MockGenHubReply::Http(status, body) => {
+                        let reason = match status {
+                            200 => "OK",
+                            409 => "Conflict",
+                            500 => "Internal Server Error",
+                            503 => "Service Unavailable",
+                            _ => panic!("test capability server does not support HTTP {status}"),
+                        };
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write capability response");
+                    }
+                }
+            }
+            requests
+        });
+        (format!("http://{address}/api/repos/alice/example"), server)
+    }
+
+    fn observe_push_requests() -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind push observer");
+        listener
+            .set_nonblocking(true)
+            .expect("should bound push observer waits");
+        let address = listener
+            .local_addr()
+            .expect("should read push observer address");
+        let observer = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests.push(read_mock_http_request(&mut stream));
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .expect("should reject an unexpected push request");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("should accept unexpected push requests: {error}"),
+                }
+            }
+            requests
+        });
+        (
+            format!("http://{address}/api/repos/alice/example"),
+            observer,
+        )
+    }
+
+    fn serve_published_session_retirement() -> (String, thread::JoinHandle<Vec<String>>) {
+        let unavailable = r#"{"code":503,"message":"capability service unavailable"}"#;
+        serve_capability_replies(vec![
+            MockGenHubReply::DirectPushCapability(TEST_TRANSFER_ID),
+            MockGenHubReply::EmptySuccess,
+            MockGenHubReply::Http(503, unavailable.to_string()),
+            MockGenHubReply::Http(503, unavailable.to_string()),
+        ])
+    }
+
+    fn create_http_push_fixture(
+        root: &Path,
+        remote_url: &str,
+    ) -> (Workspace, ConfigConnection, DoltHashId) {
+        let workspace = Workspace::new(root.join("local"));
+        workspace.ensure_gen_dir();
+        let config = get_config_connection(
+            workspace
+                .gen_db_path()
+                .expect("should resolve push config path"),
+        )
+        .expect("should open push config");
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve push graph path"),
+        )
+        .expect("should open push graph");
+        Collection::create(&graph, "push-session-fixture")
+            .expect("should create push session fixture");
+        let destination =
+            commit_all(&graph, "push session fixture").expect("should commit push session fixture");
+        let remote = Remote::create(&config, "origin", remote_url)
+            .expect("should configure push session remote");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set push session remote as default");
+        drop(graph);
+        (workspace, config, destination)
+    }
+
+    fn push_operation_sessions(config: &ConfigConnection) -> Vec<(Option<Uuid>, bool)> {
+        let mut statement = config
+            .prepare(
+                "SELECT push_session_id, failed_at IS NOT NULL FROM remote_operations \
+                 WHERE operation = 'push' ORDER BY id",
+            )
+            .expect("should query push operation session state");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("should read push operation session state")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("should collect push operation session state")
     }
 
     mod clone {
@@ -5453,6 +5812,841 @@ mod tests {
     }
 
     #[test]
+    fn test_permanent_initial_push_capability_conflict_retires_operation() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let (remote_url, server) = serve_capability_replies(vec![Some((
+            409,
+            json!({"code": 409, "message": "Remote transfer ID cannot be reused"}).to_string(),
+        ))]);
+        let temp = tempdir().expect("should create rejected push directory");
+        let (workspace, config, _) = create_http_push_fixture(temp.path(), &remote_url);
+
+        let result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("capability server should finish");
+        let sessions = push_operation_sessions(&config);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            result.is_err(),
+            "permanent capability conflict should fail push"
+        );
+        assert_eq!(
+            requests.len(),
+            1,
+            "push should stop at the rejected capability"
+        );
+        assert_eq!(
+            sessions.len(),
+            1,
+            "push should record one logical operation"
+        );
+        assert!(
+            sessions[0].1,
+            "permanent capability conflict should retire the rejected operation"
+        );
+    }
+
+    #[test]
+    fn test_retry_after_permanent_push_capability_conflict_uses_fresh_session() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let conflict = || {
+            Some((
+                409,
+                json!({"code": 409, "message": "Remote transfer ID cannot be reused"}).to_string(),
+            ))
+        };
+        let (remote_url, server) = serve_capability_replies(vec![conflict(), conflict()]);
+        let temp = tempdir().expect("should create rejected push retry directory");
+        let (workspace, config, _) = create_http_push_fixture(temp.path(), &remote_url);
+
+        let first_result = execute_push(&workspace, None, None, false);
+        let second_result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("capability server should finish");
+        let sessions = push_operation_sessions(&config);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            first_result.is_err(),
+            "first permanent conflict should fail push"
+        );
+        assert!(
+            second_result.is_err(),
+            "repeated permanent conflict should fail push"
+        );
+        assert_eq!(requests.len(), 2, "both push attempts should reach GenHub");
+        assert_ne!(
+            request_session_id(&requests[0]),
+            request_session_id(&requests[1]),
+            "a rejected permanent session UUID must not be reused on retry"
+        );
+        assert_eq!(sessions.len(), 2, "retry should start a new operation row");
+        assert!(
+            sessions.iter().all(|(_, failed)| *failed),
+            "each permanent capability rejection should retire its operation"
+        );
+    }
+
+    #[test]
+    fn test_force_change_after_retryable_capability_failure_uses_fresh_session() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = || {
+            MockGenHubReply::Http(
+                503,
+                json!({"code": 503, "message": "capability service unavailable"}).to_string(),
+            )
+        };
+        let (remote_url, server) = serve_capability_replies(vec![
+            unavailable(),
+            MockGenHubReply::DirectPushCapability(TEST_TRANSFER_ID),
+            MockGenHubReply::EmptySuccess,
+            unavailable(),
+        ]);
+        let temp = tempdir().expect("should create force retry directory");
+        let (workspace, config, _) = create_http_push_fixture(temp.path(), &remote_url);
+
+        let first_result = execute_push(&workspace, None, None, false);
+        let second_result = execute_push(&workspace, None, None, true);
+        let requests = server.join().expect("capability server should finish");
+        let sessions = push_operation_sessions(&config);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            first_result.is_err(),
+            "first retryable capability failure should fail push"
+        );
+        assert!(
+            second_result.is_err(),
+            "second retryable capability failure should fail push"
+        );
+        assert_eq!(
+            requests.len(),
+            4,
+            "the old session should be reacquired and aborted before the new force scope is requested"
+        );
+        let first_body = requests[0]
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("first capability request should have a body");
+        let retired_body = requests[1]
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("old session capability request should have a body");
+        let second_body = requests[3]
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("new force-scoped capability request should have a body");
+        assert!(first_body.contains("\"force\":false"));
+        assert!(retired_body.contains("\"force\":false"));
+        assert!(second_body.contains("\"force\":true"));
+        assert_ne!(
+            request_session_id(&requests[0]),
+            request_session_id(&requests[3]),
+            "changing force changes the GenHub authorization scope and needs a fresh session UUID"
+        );
+        assert_eq!(
+            request_session_id(&requests[0]),
+            request_session_id(&requests[1])
+        );
+        assert!(requests[2].starts_with("POST /api/abort?capability=mock-signed-value "));
+        assert!(
+            sessions.iter().any(|(session_id, failed)| {
+                !failed && *session_id == Some(request_session_id(&requests[3]))
+            }),
+            "the retry should leave a pending operation for its fresh force-scoped session"
+        );
+    }
+
+    #[test]
+    fn test_active_push_lock_preserves_session_when_intent_changes() {
+        let (remote_url, server) = observe_push_requests();
+        let temp = tempdir().expect("should create active push lock directory");
+        let (workspace, config, original_destination) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        let mut operation = seed_push_session(&config, "main", &original_destination, false);
+        let session_id = operation
+            .push_session_id
+            .expect("should seed the active session UUID");
+        operation
+            .set_push_destination(
+                &config,
+                &original_destination,
+                TEST_TRANSFER_ID,
+                Utc::now().timestamp() + 3600,
+            )
+            .expect("should seed the published transfer lease");
+        operation
+            .advance_assets_transfer_checkpoint(&config, &original_destination)
+            .expect("should seed the completed asset checkpoint");
+        let operation_id = operation.id;
+        let before = reload_push_operation(&config, operation_id);
+
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve changed push graph path"),
+        )
+        .expect("should reopen changed push graph");
+        Collection::create(&graph, "active-push-lock-advanced")
+            .expect("should advance branch while lock holder is active");
+        let changed_destination = commit_all(&graph, "advance active push destination")
+            .expect("should commit changed active push destination");
+        drop(graph);
+
+        let holder =
+            super::push_lock::tests::LockHolder::spawn(workspace.base_dir(), "origin", "main");
+        let result = execute_push(&workspace, None, None, true);
+        holder.release();
+        let requests = server.join().expect("should finish push request observer");
+        let after = reload_push_operation(&config, operation_id);
+
+        assert_ne!(original_destination, changed_destination);
+        assert_eq!(before.push_session_id, Some(session_id));
+        assert!(
+            matches!(result, Err(super::RemotePushError::PushLockBusy { .. })),
+            "the contender should report active ownership before retiring the session"
+        );
+        assert_eq!(
+            after, before,
+            "a contender changing destination and force must leave the full operation row intact"
+        );
+        assert!(
+            requests.is_empty(),
+            "a lock contender must not send capability, lease, or abort requests"
+        );
+    }
+
+    #[test]
+    fn test_active_push_lock_prevents_creation_of_fresh_operation() {
+        let (remote_url, server) = observe_push_requests();
+        let temp = tempdir().expect("should create fresh push lock directory");
+        let (workspace, config, _) = create_http_push_fixture(temp.path(), &remote_url);
+        let holder =
+            super::push_lock::tests::LockHolder::spawn(workspace.base_dir(), "origin", "main");
+
+        let result = execute_push(&workspace, None, None, false);
+        holder.release();
+        let requests = server.join().expect("should finish push request observer");
+
+        assert!(
+            matches!(result, Err(super::RemotePushError::PushLockBusy { .. })),
+            "a contender should be rejected before creating its operation row"
+        );
+        assert!(
+            push_operation_sessions(&config).is_empty(),
+            "a rejected push must not create a fresh resumable session"
+        );
+        assert!(
+            requests.is_empty(),
+            "a rejected fresh push must not contact the remote"
+        );
+    }
+
+    #[test]
+    fn test_network_capability_failure_then_503_preserves_push_session() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = Some((
+            503,
+            json!({"code": 503, "message": "capability service unavailable"}).to_string(),
+        ));
+        let (remote_url, server) = serve_capability_replies(vec![None, unavailable]);
+        let temp = tempdir().expect("should create network retry directory");
+        let (workspace, config, _) = create_http_push_fixture(temp.path(), &remote_url);
+
+        let first_result = execute_push(&workspace, None, None, false);
+        let second_result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("capability server should finish");
+        let sessions = push_operation_sessions(&config);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            first_result.is_err(),
+            "closed capability connection should fail push"
+        );
+        assert!(
+            second_result.is_err(),
+            "503 capability response should fail push"
+        );
+        assert_eq!(
+            requests.len(),
+            2,
+            "network retry should make a second request"
+        );
+        assert_eq!(
+            request_session_id(&requests[0]),
+            request_session_id(&requests[1]),
+            "a network or server failure should preserve the resumable session UUID"
+        );
+        assert_eq!(
+            sessions.len(),
+            1,
+            "retryable failures should share one operation"
+        );
+        assert!(
+            !sessions[0].1,
+            "retryable capability failures should remain pending"
+        );
+    }
+
+    #[test]
+    fn test_temporary_initial_push_conflict_preserves_push_session() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let contention = || {
+            Some((
+                409,
+                json!({"code": 409, "message": "Another push is in progress"}).to_string(),
+            ))
+        };
+        let (remote_url, server) = serve_capability_replies(vec![contention(), contention()]);
+        let temp = tempdir().expect("should create contention retry directory");
+        let (workspace, config, _) = create_http_push_fixture(temp.path(), &remote_url);
+
+        let first_result = execute_push(&workspace, None, None, false);
+        let second_result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("capability server should finish");
+        let sessions = push_operation_sessions(&config);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            first_result.is_err(),
+            "first temporary conflict should report contention"
+        );
+        assert!(
+            second_result.is_err(),
+            "second temporary conflict should report contention"
+        );
+        assert_eq!(
+            requests.len(),
+            2,
+            "both temporary conflicts should reach GenHub"
+        );
+        assert_eq!(
+            request_session_id(&requests[0]),
+            request_session_id(&requests[1]),
+            "temporary push contention should keep the same resumable session UUID"
+        );
+        assert_eq!(
+            sessions.len(),
+            1,
+            "temporary contention should keep one operation"
+        );
+        assert!(
+            !sessions[0].1,
+            "temporary contention should not retire the operation"
+        );
+    }
+
+    #[test]
+    fn test_temporary_existing_lease_renewal_conflict_preserves_push_operation() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let (remote_url, server) = serve_capability_replies(vec![Some((
+            409,
+            json!({"code": 409, "message": "Another push is in progress"}).to_string(),
+        ))]);
+        let temp = tempdir().expect("should create lease renewal contention directory");
+        let (workspace, config, destination) = create_http_push_fixture(temp.path(), &remote_url);
+        let session_id = seed_push_lease(
+            &config,
+            "main",
+            &destination,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
+
+        let result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("capability server should finish");
+        let sessions = push_operation_sessions(&config);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            result.is_err(),
+            "temporary lease contention should report failure"
+        );
+        assert_eq!(
+            requests.len(),
+            1,
+            "lease contention should stop before staging"
+        );
+        assert_eq!(request_session_id(&requests[0]), session_id);
+        assert_eq!(sessions.len(), 1, "lease retry should retain its operation");
+        assert_eq!(sessions[0].0, Some(session_id));
+        assert!(
+            !sessions[0].1,
+            "temporary 409 during typed lease renewal should not retire the push operation"
+        );
+    }
+
+    #[test]
+    fn test_advanced_push_retry_keeps_its_new_session_until_publication() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let (remote_url, server) = serve_published_session_retirement();
+        let temp = tempdir().expect("should create advanced branch retry directory");
+        let (workspace, config, published_destination) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        // A pending operation with a graph lease models manifest A published before its asset
+        // phase finished; advancing to B must keep A's accepted destination until B publishes.
+        let published_session = seed_push_lease(
+            &config,
+            "main",
+            &published_destination,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
+        let operation_id = RemoteOperationRecord::begin_or_resume(
+            &config,
+            "origin",
+            "main",
+            StoredRemoteOperationKind::Push,
+            None,
+        )
+        .expect("should resume the published push operation")
+        .id;
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve advanced push graph path"),
+        )
+        .expect("should reopen advanced push graph");
+        Collection::create(&graph, "advanced-push-state")
+            .expect("should advance branch after published manifest A");
+        let advanced_destination = commit_all(&graph, "advance to unpublished manifest B")
+            .expect("should commit unpublished manifest B");
+        drop(graph);
+
+        let first_result = execute_push(&workspace, None, None, false);
+        let first_state = reload_push_operation(&config, operation_id);
+        let second_result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("capability server should finish");
+        let final_state = reload_push_operation(&config, operation_id);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            first_result.is_err(),
+            "first B attempt should stop before publication"
+        );
+        assert!(
+            second_result.is_err(),
+            "second B attempt should stop before publication"
+        );
+        assert_eq!(
+            requests.len(),
+            4,
+            "retiring published A should be followed by both attempts to publish B; first={first_result:?}, second={second_result:?}, requests={requests:#?}"
+        );
+        assert_eq!(request_session_id(&requests[0]), published_session);
+        assert!(
+            requests[1].starts_with("POST /api/abort?capability=mock-signed-value "),
+            "the previously published session should be retired through its signed abort endpoint: {}",
+            requests[1]
+        );
+        let (abort_headers, abort_body) = requests[1]
+            .split_once("\r\n\r\n")
+            .expect("should find previous-session abort request headers");
+        assert!(
+            abort_headers.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length") && value.trim() == "0"
+                })
+            }),
+            "old-session abort should explicitly send Content-Length: 0: {abort_headers}"
+        );
+        assert!(
+            abort_body.is_empty(),
+            "old-session abort body should be empty"
+        );
+        let first_b_session = request_session_id(&requests[2]);
+        let retry_b_session = request_session_id(&requests[3]);
+        assert_ne!(advanced_destination, published_destination);
+        assert_ne!(
+            first_b_session, published_session,
+            "advancing from published A to B should begin a new graph session"
+        );
+        assert_eq!(
+            retry_b_session, first_b_session,
+            "retries for the same unpublished B destination should reuse B's session UUID"
+        );
+        assert_eq!(first_state.to_commit, Some(published_destination));
+        assert_eq!(
+            first_state.transfer_id, None,
+            "retired A lease must not carry into B"
+        );
+        assert_eq!(first_state.push_session_id, Some(first_b_session));
+        assert!(
+            first_state.failed_at.is_none(),
+            "retryable first B failure should remain pending"
+        );
+        assert_eq!(final_state.to_commit, Some(published_destination));
+        assert_eq!(
+            final_state.transfer_id, None,
+            "B has not published a replacement lease"
+        );
+        assert_eq!(final_state.push_session_id, Some(first_b_session));
+        assert!(
+            final_state.failed_at.is_none(),
+            "retryable B retries should remain pending"
+        );
+    }
+
+    #[test]
+    fn test_unpublished_push_session_is_retired_before_destination_changes() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = MockGenHubReply::Http(
+            503,
+            json!({"code": 503, "message": "capability service unavailable"}).to_string(),
+        );
+        let (remote_url, server) = serve_capability_replies(vec![
+            MockGenHubReply::DirectPushCapability(RETRIED_TRANSFER_ID),
+            MockGenHubReply::EmptySuccess,
+            unavailable,
+        ]);
+        let temp = tempdir().expect("should create unpublished session retry directory");
+        let (workspace, config, old_destination) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        let operation = seed_push_session(&config, "main", &old_destination, false);
+        let operation_id = operation.id;
+        let old_session_id = operation
+            .push_session_id
+            .expect("should allocate the original push session UUID");
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve unpublished session graph path"),
+        )
+        .expect("should open unpublished session graph");
+        Collection::create(&graph, "unpublished-session-advance")
+            .expect("should advance beyond the interrupted graph session");
+        let new_destination =
+            commit_all(&graph, "advance after interrupted push").expect("should commit new head");
+        drop(graph);
+
+        let result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("GenHub server should finish");
+        let state = reload_push_operation(&config, operation_id);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            result.is_err(),
+            "new session capability failure should surface"
+        );
+        assert_eq!(requests.len(), 3);
+        assert_eq!(request_session_id(&requests[0]), old_session_id);
+        assert!(requests[1].starts_with("POST /api/abort?capability=mock-signed-value "));
+        let new_session_id = request_session_id(&requests[2]);
+        assert_ne!(new_session_id, old_session_id);
+        assert_ne!(old_destination, new_destination);
+        assert_eq!(state.to_commit, None, "no manifest has been published yet");
+        assert_eq!(
+            state.transfer_id, None,
+            "unpublished sessions have no published lease"
+        );
+        assert_eq!(state.push_session_target_commit, Some(new_destination));
+        assert_eq!(state.push_session_force, Some(false));
+        assert_eq!(state.push_session_id, Some(new_session_id));
+        assert!(
+            state.failed_at.is_none(),
+            "retryable new-session failure should stay pending"
+        );
+    }
+
+    #[test]
+    fn test_unpublished_session_cleanup_failure_preserves_old_intent_for_retry() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = || {
+            MockGenHubReply::Http(
+                503,
+                json!({"code": 503, "message": "cleanup temporarily unavailable"}).to_string(),
+            )
+        };
+        let (remote_url, server) = serve_capability_replies(vec![
+            MockGenHubReply::DirectPushCapability(RETRIED_TRANSFER_ID),
+            unavailable(),
+            MockGenHubReply::DirectPushCapability(RETRIED_TRANSFER_ID),
+            MockGenHubReply::EmptySuccess,
+            unavailable(),
+        ]);
+        let temp = tempdir().expect("should create cleanup retry directory");
+        let (workspace, config, old_destination) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        let operation = seed_push_session(&config, "main", &old_destination, false);
+        let operation_id = operation.id;
+        let old_session_id = operation
+            .push_session_id
+            .expect("should allocate the original push session UUID");
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve cleanup retry graph path"),
+        )
+        .expect("should open cleanup retry graph");
+        Collection::create(&graph, "cleanup-retry-advance")
+            .expect("should advance beyond the interrupted graph session");
+        let new_destination = commit_all(&graph, "advance after cleanup interruption")
+            .expect("should commit new head");
+        drop(graph);
+
+        let first_result = execute_push(&workspace, None, None, false);
+        let first_state = reload_push_operation(&config, operation_id);
+        let second_result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("GenHub server should finish");
+        let final_state = reload_push_operation(&config, operation_id);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            first_result.is_err(),
+            "first cleanup failure should surface"
+        );
+        assert!(
+            second_result.is_err(),
+            "new capability failure should surface"
+        );
+        assert_eq!(requests.len(), 5);
+        assert_eq!(request_session_id(&requests[0]), old_session_id);
+        assert_eq!(request_session_id(&requests[2]), old_session_id);
+        assert!(requests[1].starts_with("POST /api/abort?capability=mock-signed-value "));
+        assert!(requests[3].starts_with("POST /api/abort?capability=mock-signed-value "));
+        assert_ne!(request_session_id(&requests[4]), old_session_id);
+        assert_eq!(
+            first_state.push_session_target_commit,
+            Some(old_destination)
+        );
+        assert_eq!(first_state.push_session_force, Some(false));
+        assert_eq!(first_state.push_session_id, Some(old_session_id));
+        assert_eq!(first_state.to_commit, None);
+        assert_eq!(first_state.transfer_id, None);
+        assert!(
+            first_state.failed_at.is_none(),
+            "transient cleanup failure must stay pending"
+        );
+        assert_eq!(
+            final_state.push_session_target_commit,
+            Some(new_destination)
+        );
+        assert_eq!(final_state.push_session_force, Some(false));
+        assert_eq!(
+            final_state.push_session_id,
+            Some(request_session_id(&requests[4]))
+        );
+        assert_eq!(final_state.to_commit, None);
+        assert_eq!(final_state.transfer_id, None);
+        assert!(
+            final_state.failed_at.is_none(),
+            "retryable capability failure must stay pending"
+        );
+    }
+
+    #[test]
+    fn test_unpublished_force_session_cleanup_uses_its_id_not_older_published_lease() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = MockGenHubReply::Http(
+            503,
+            json!({"code": 503, "message": "capability service unavailable"}).to_string(),
+        );
+        let (remote_url, server) = serve_capability_replies(vec![
+            MockGenHubReply::DirectPushCapability(RETRIED_TRANSFER_ID),
+            MockGenHubReply::EmptySuccess,
+            unavailable,
+        ]);
+        let temp = tempdir().expect("should create force-scoped supersession directory");
+        let (workspace, config, published_destination) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        let published_session_id = seed_push_lease(
+            &config,
+            "main",
+            &published_destination,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
+        let mut operation = RemoteOperationRecord::begin_or_resume(
+            &config,
+            "origin",
+            "main",
+            StoredRemoteOperationKind::Push,
+            None,
+        )
+        .expect("should resume the pending published push");
+        let operation_id = operation.id;
+        operation
+            .prepare_push_session(&config, &published_destination, true)
+            .expect("should persist a force-scoped session for the same commit");
+        let unpublished_force_session_id = operation
+            .push_session_id
+            .expect("should allocate a force-scoped session UUID");
+        assert_ne!(unpublished_force_session_id, published_session_id);
+        drop(operation);
+
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve force-scoped graph path"),
+        )
+        .expect("should open force-scoped graph");
+        Collection::create(&graph, "force-scoped-session-advance")
+            .expect("should advance beyond the unpublished force-scoped session");
+        let next_destination = commit_all(&graph, "advance after force-scoped session")
+            .expect("should commit new head");
+        drop(graph);
+
+        let result = execute_push(&workspace, None, None, false);
+        let requests = server.join().expect("GenHub server should finish");
+        let state = reload_push_operation(&config, operation_id);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            result.is_err(),
+            "new session capability failure should surface"
+        );
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            request_session_id(&requests[0]),
+            unpublished_force_session_id
+        );
+        let old_scope_body = requests[0]
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("old capability request should have a body");
+        assert!(old_scope_body.contains("\"force\":true"));
+        assert_ne!(RETRIED_TRANSFER_ID, TEST_TRANSFER_ID);
+        assert!(requests[1].starts_with("POST /api/abort?capability=mock-signed-value "));
+        let new_session_id = request_session_id(&requests[2]);
+        assert_ne!(new_session_id, unpublished_force_session_id);
+        assert_eq!(state.to_commit, Some(published_destination));
+        assert_eq!(
+            state.transfer_id, None,
+            "the retired published lease must be cleared"
+        );
+        assert_eq!(state.push_session_target_commit, Some(next_destination));
+        assert_eq!(state.push_session_force, Some(false));
+        assert_eq!(state.push_session_id, Some(new_session_id));
+        assert!(
+            state.failed_at.is_none(),
+            "retryable new-session failure should stay pending"
+        );
+    }
+
+    #[test]
+    fn test_force_same_head_retry_requests_current_session_after_lease_retirement() {
+        let environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let unavailable = json!({
+            "code": 503,
+            "message": "capability service unavailable",
+        })
+        .to_string();
+        let (remote_url, server) =
+            serve_capability_replies(vec![MockGenHubReply::Http(503, unavailable)]);
+        let temp = tempdir().expect("should create same-head force retry directory");
+        let (workspace, config, published_destination) =
+            create_http_push_fixture(temp.path(), &remote_url);
+        let published_session_id = seed_push_lease(
+            &config,
+            "main",
+            &published_destination,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
+        let mut operation = RemoteOperationRecord::begin_or_resume(
+            &config,
+            "origin",
+            "main",
+            StoredRemoteOperationKind::Push,
+            None,
+        )
+        .expect("should resume the published push");
+        let operation_id = operation.id;
+        operation
+            .prepare_push_session(&config, &published_destination, true)
+            .expect("should retire the old lease when force scope changes");
+        let force_session_id = operation
+            .push_session_id
+            .expect("should allocate the force-scoped session");
+        assert_ne!(force_session_id, published_session_id);
+        assert_eq!(operation.to_commit, Some(published_destination));
+        assert_eq!(operation.transfer_id, None);
+        assert_eq!(operation.transfer_expires_at, None);
+        operation
+            .prepare_push_session(&config, &published_destination, true)
+            .expect("should retain the current session on same-head retry");
+        assert_eq!(operation.push_session_id, Some(force_session_id));
+        drop(operation);
+
+        let result = execute_push(&workspace, None, None, true);
+        let requests = server.join().expect("GenHub server should finish");
+        let state = reload_push_operation(&config, operation_id);
+        drop(api_key);
+        drop(environment_lock);
+
+        assert!(
+            result.is_err(),
+            "temporary capability failure should surface"
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(request_session_id(&requests[0]), force_session_id);
+        let request_body = requests[0]
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("push capability request should have a body");
+        assert!(request_body.contains("\"force\":true"));
+        assert_eq!(state.to_commit, Some(published_destination));
+        assert_eq!(state.transfer_id, None);
+        assert_eq!(state.transfer_expires_at, None);
+        assert_eq!(
+            state.push_session_target_commit,
+            Some(published_destination)
+        );
+        assert_eq!(state.push_session_force, Some(true));
+        assert_eq!(state.push_session_id, Some(force_session_id));
+        assert!(
+            state.completed_at.is_none(),
+            "retryable capability failure should keep the operation incomplete"
+        );
+        assert!(
+            state.failed_at.is_none(),
+            "retryable capability failure should keep the operation pending"
+        );
+    }
+
+    #[test]
     fn test_push_retry_reuses_persisted_transfer_lease() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
@@ -5475,8 +6669,11 @@ mod tests {
                 requests.push(request.clone());
                 match request_index {
                     0 | 3 => {
-                        let body =
-                            direct_push_capability_body(&request, &format!("http://{address}"));
+                        let body = direct_push_capability_body(
+                            &request,
+                            &format!("http://{address}"),
+                            TEST_TRANSFER_ID,
+                        );
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -5597,70 +6794,21 @@ mod tests {
             .lock()
             .expect("should lock process environment");
         let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
-        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind capability server");
-        let address = listener
-            .local_addr()
-            .expect("should read capability server address");
         let temp = tempdir().expect("should create advanced push retry directory");
-        let server = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for request_index in 0..4 {
-                let (mut stream, _) = listener.accept().expect("should accept GenHub request");
-                let mut request = [0_u8; 8192];
-                let read = stream
-                    .read(&mut request)
-                    .expect("should read GenHub request");
-                let request = String::from_utf8_lossy(&request[..read]).into_owned();
-                requests.push(request.clone());
-                match request_index {
-                    0 => {
-                        let body =
-                            direct_push_capability_body(&request, &format!("http://{address}"));
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write existing direct-push capability");
-                    }
-                    1 => {
-                        let body = "{\"assets\":[]}";
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write asset response");
-                    }
-                    2 => {
-                        let body = "asset verification unavailable";
-                        write!(
-                            stream,
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write failed completion response");
-                    }
-                    3 => {
-                        let body = format!(
-                            "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
-                        );
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .expect("should write capability response");
-                    }
-                    _ => unreachable!("request index should be covered"),
-                }
-            }
-            requests
-        });
-
+        let legacy_capability = format!(
+            "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+             \"expires_at\":\"2030-01-01T00:00:00Z\",\
+             \"default_branch\":\"main\",\
+             \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
+        );
+        let (remote_url, server) = serve_capability_replies(vec![
+            MockGenHubReply::DirectPushCapability(TEST_TRANSFER_ID),
+            MockGenHubReply::Http(200, "{\"assets\":[]}".to_string()),
+            MockGenHubReply::Http(500, "asset verification unavailable".to_string()),
+            MockGenHubReply::DirectPushCapability(TEST_TRANSFER_ID),
+            MockGenHubReply::EmptySuccess,
+            MockGenHubReply::Http(200, legacy_capability),
+        ]);
         let workspace = Workspace::new(temp.path().join("local"));
         workspace.ensure_gen_dir();
         let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
@@ -5669,12 +6817,7 @@ mod tests {
         Collection::create(&graph, "push-retry-fixture").expect("should create push fixture");
         let original_destination =
             commit_all(&graph, "push retry fixture").expect("should commit push retry fixture");
-        Remote::create(
-            &config,
-            "origin",
-            &format!("http://{address}/api/repos/alice/example"),
-        )
-        .expect("should configure origin");
+        Remote::create(&config, "origin", &remote_url).expect("should configure origin");
         Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
         let original_session_id = seed_push_lease(
             &config,
@@ -5713,14 +6856,17 @@ mod tests {
         let requests = server.join().expect("GenHub server should finish");
 
         assert!(error.to_string().contains("direct GCS session"));
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 6);
         assert!(requests[0].starts_with("POST /api/repos/alice/example/remote-capability "));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
         assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
-        assert!(requests[3].contains("\"operation\":\"push\""));
-        assert!(!requests[3].contains(&original_session_id.to_string()));
+        assert!(requests[3].starts_with("POST /api/repos/alice/example/remote-capability "));
+        assert_eq!(request_session_id(&requests[3]), original_session_id);
+        assert!(requests[4].starts_with("POST /api/abort?capability=mock-signed-value "));
+        assert!(requests[5].contains("\"operation\":\"push\""));
+        assert!(!requests[5].contains(&original_session_id.to_string()));
         assert!(
-            requests[3]
+            requests[5]
                 .to_ascii_lowercase()
                 .contains("idempotency-token:")
         );
@@ -5734,6 +6880,7 @@ mod tests {
             .expect("should mark advanced push as failed");
         assert_eq!(failed_transfer.0, original_destination);
         assert_ne!(failed_transfer.1, original_session_id);
+        assert_eq!(failed_transfer.1, request_session_id(&requests[5]));
         assert!(failed_transfer.2);
     }
 
@@ -5836,8 +6983,11 @@ mod tests {
                 requests.push(request.clone());
                 match request_index {
                     0 => {
-                        let body =
-                            direct_push_capability_body(&request, &format!("http://{address}"));
+                        let body = direct_push_capability_body(
+                            &request,
+                            &format!("http://{address}"),
+                            TEST_TRANSFER_ID,
+                        );
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -6014,7 +7164,7 @@ mod tests {
         assert!(!super::is_non_fast_forward_push_error(&unique_constraint));
         assert!(matches!(
             wrapped_conflict,
-            super::RemotePushError::NonFastForward
+            super::RemotePushError::NonFastForward { .. }
         ));
         assert!(matches!(
             wrapped_unrelated_constraint,
@@ -6023,6 +7173,44 @@ mod tests {
         assert_eq!(
             super::remote_push_graph_error(Box::new(exact)).to_string(),
             "The branch is not a fast-forward of the remote. Use --force to overwrite the remote."
+        );
+    }
+
+    #[test]
+    fn test_terminal_asset_phase_capability_error_retires_push_operation() {
+        let temp = tempdir().expect("should create asset-phase lease failure directory");
+        let (_, config, destination_hash) =
+            create_http_push_fixture(temp.path(), "https://genhub.bio/api/repos/alice/example");
+        let mut operation = RemoteOperationRecord::begin_or_resume(
+            &config,
+            "origin",
+            "main",
+            StoredRemoteOperationKind::Push,
+            None,
+        )
+        .expect("should create pending push operation");
+        operation
+            .prepare_push_session(&config, &destination_hash, false)
+            .expect("should persist intended push session before asset phase");
+
+        let error = super::remote_push_asset_error(
+            Some(&mut operation),
+            &config,
+            "main",
+            Box::new(super::PushGraphTransferError::CapabilityLeaseInactive),
+        );
+        let failed_at: bool = config
+            .query_row(
+                "SELECT failed_at IS NOT NULL FROM remote_operations WHERE operation = 'push'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should inspect terminal push state");
+
+        assert!(matches!(error, super::RemotePushError::GraphTransfer(_)));
+        assert!(
+            failed_at,
+            "terminal asset-phase lease errors must retire the UUID"
         );
     }
 }

@@ -18,7 +18,7 @@
 
 mod authentication;
 mod direct_push;
-pub use direct_push::{confirm_direct_push_session_stale, publish_direct_push};
+pub use direct_push::{abort_direct_push, confirm_direct_push_session_stale, publish_direct_push};
 #[cfg(test)]
 mod tests;
 
@@ -178,6 +178,8 @@ pub struct DirectPushCapability {
     pub session_scope: SessionScope,
     /// Signed GenHub endpoint that publishes the accepted session manifest.
     pub publish_url: String,
+    /// Signed GenHub endpoint that retires this session’s transfer lease.
+    pub abort_url: String,
 }
 
 impl fmt::Debug for DirectPushCapability {
@@ -188,6 +190,7 @@ impl fmt::Debug for DirectPushCapability {
             .field("session_id", &self.session_id)
             .field("session_scope", &self.session_scope)
             .field("publish_url", &"[REDACTED]")
+            .field("abort_url", &"[REDACTED]")
             .finish()
     }
 }
