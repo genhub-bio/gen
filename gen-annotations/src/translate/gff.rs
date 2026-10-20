@@ -1,19 +1,17 @@
 use std::{
-    cmp::{max, min},
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     io::{BufRead, Read, Write},
 };
 
-use gen_core::{HashId, Strand, Workspace, is_terminal};
-use gen_graph::{GraphNode, project_path};
+use gen_core::Workspace;
 use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
     errors::{BlockGroupError, PathError},
     reference_alias::{ReferenceAlias, ReferenceAliasError},
+    region::{GenRegionError, ResolvedGenRegion},
     sample::Sample,
 };
-use interavl::IntervalTree;
 use noodles::{core::Position, gff};
 use thiserror::Error;
 
@@ -27,6 +25,8 @@ pub enum GffError {
     PathError(#[from] PathError),
     #[error("Error loading block group graph: {0}")]
     BlockGroupError(#[from] BlockGroupError),
+    #[error("Error resolving path region: {0}")]
+    RegionError(#[from] GenRegionError),
 }
 
 pub fn translate_gff<R, W>(
@@ -44,79 +44,58 @@ where
 {
     let mut gff_reader = gff::io::Reader::new(reader);
     let mut gff_writer = gff::io::Writer::new(writer);
-
-    let bgs = Sample::get_block_groups(conn, collection, sample, history_ref);
-    let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
-        bgs.iter()
-            .map(|bg| (bg.name.clone(), bg))
-            .collect::<Vec<(String, &BlockGroup)>>(),
-    );
-
-    // Load all reference aliases, to accommodate alternate reference names in the GFF file
-    let references = sample_bgs.keys().cloned().collect::<Vec<String>>();
+    let sample_block_groups = Sample::get_block_groups(conn, collection, sample, history_ref)
+        .into_iter()
+        .map(|block_group| (block_group.name, block_group.id))
+        .collect::<HashMap<_, _>>();
+    let references = sample_block_groups.keys().cloned().collect();
     let references_by_alias =
         ReferenceAlias::get_references_by_alias(conn, references, history_ref)?;
-
-    let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
+    let mut regions_by_reference = HashMap::<String, ResolvedGenRegion>::new();
 
     for result in gff_reader.record_bufs() {
         let record = result?;
         let ref_name = record.reference_sequence_name().to_string();
-        let ref_name = references_by_alias
-            .get(&ref_name)
-            .unwrap_or(&ref_name)
-            .to_string();
-        let start = record.start().get() as i64;
+        let start = record.start().get() as i64 - 1;
         let end = record.end().get() as i64;
-        if let Some(bg) = sample_bgs.get(&ref_name) {
-            let projection = match paths.entry(bg.id) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
-                    let graph = BlockGroup::get_graph(conn, workspace, &bg.id, history_ref)?;
-                    let mut tree = IntervalTree::default();
-                    let mut position: i64 = 0;
-                    for (node, strand) in
-                        project_path(&graph, &path.coordinate_blocks(conn, history_ref))
-                    {
-                        if !is_terminal(node.node_id) {
-                            // GFF indexing is one based, inclusive, so we add 1 to the start.
-                            // Take a sequence that is 1-4 in our coordinates, this converts to:
-                            // 0123456
-                            // ATCGATC
-                            // 1234567
-                            // 1-4 in our zero-based half open interval would be 2-4 in GFF coordinates
-                            let end_position = position + node.length();
-                            tree.insert(position + 1..end_position, (node, strand));
-                            position = end_position;
-                        }
-                    }
-                    entry.insert(tree)
-                }
-            };
-            let range = start..end;
-            for (overlap, (node, _overlap_strand)) in projection.iter_overlaps(&range) {
-                let overlap_start = max(start, overlap.start) as usize;
-                let overlap_end = min(end, overlap.end) as usize;
-
-                let mut updated_record_builder =
-                    gff::feature::RecordBuf::builder()
-                        .set_reference_sequence_name(format!("{nid}", nid = node.node_id))
-                        .set_source(record.source().to_string())
-                        .set_type(record.ty().to_string())
-                        .set_start(Position::try_from(overlap_start).expect(
-                            "Could not convert start ({overlap_start}) to usize for propagation",
-                        ))
-                        .set_end(Position::try_from(overlap_end).expect(
-                            "Could not convert end ({overlap_end}) to usize for propagation",
-                        ))
-                        .set_strand(record.strand())
-                        .set_attributes(record.attributes().clone());
-                if let Some(phase) = record.phase() {
-                    updated_record_builder = updated_record_builder.set_phase(phase);
-                }
-                gff_writer.write_record(&updated_record_builder.build())?;
+        let feature_strand = record.strand();
+        let resolved_reference = references_by_alias
+            .get(&ref_name)
+            .map_or(ref_name.as_str(), String::as_str);
+        let Some(block_group_id) = sample_block_groups.get(resolved_reference) else {
+            continue;
+        };
+        let mut region = match regions_by_reference.get(resolved_reference) {
+            Some(region) => region.clone(),
+            None => {
+                let path = BlockGroup::get_current_path(conn, block_group_id, history_ref)?;
+                let region = ResolvedGenRegion::from_path(conn, &path, 0, 0)?;
+                regions_by_reference.insert(resolved_reference.to_string(), region.clone());
+                region
             }
+        };
+        region.start = start;
+        region.end = end;
+        let slices = region.graph_locus(conn, workspace)?.slices;
+        for slice in slices {
+            let mut updated_record_builder = gff::feature::RecordBuf::builder()
+                .set_reference_sequence_name(format!("{nid}", nid = slice.block.node_id))
+                .set_source(record.source().to_string())
+                .set_type(record.ty().to_string())
+                .set_start(
+                    Position::try_from(slice.block.sequence_start as usize + slice.start + 1)
+                        .expect("should convert the stored-node start to a GFF position"),
+                )
+                .set_end(
+                    Position::try_from(slice.block.sequence_start as usize + slice.end)
+                        .expect("should convert the stored-node end to a GFF position"),
+                )
+                .set_strand(feature_strand)
+                .set_attributes(record.attributes().clone());
+            if let Some(phase) = record.phase() {
+                updated_record_builder = updated_record_builder.set_phase(phase);
+            }
+            gff_writer.write_record(&updated_record_builder.build())?;
         }
     }
     Ok(())
@@ -124,12 +103,37 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::BufReader, path::PathBuf};
+    use std::{
+        fs::File,
+        io::{BufReader, Cursor},
+        path::PathBuf,
+    };
 
-    use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
+    use gen_core::Strand;
+    use gen_models::{
+        block_group::BlockGroup, history::dolt::commit_all, reference_alias::ReferenceAlias,
+        sample::Sample,
+    };
 
     use super::translate_gff;
-    use crate::test_helpers::{get_connection, setup_test_data, test_workspace};
+    use crate::test_helpers::{
+        create_sliced_test_block_group, get_connection, setup_test_data, test_workspace,
+    };
+
+    fn translate_gff_input(conn: &gen_models::db::GraphConnection, input: &str) -> String {
+        let mut translated = Vec::new();
+        translate_gff(
+            conn,
+            test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(input.as_bytes()),
+            &mut translated,
+        )
+        .expect("should translate GFF input");
+        String::from_utf8(translated).expect("should write UTF-8 GFF output")
+    }
 
     #[test]
     fn translates_coordinates_to_nodes() {
@@ -151,27 +155,22 @@ mod tests {
         )
         .expect("should translate gff for sample foo");
         let results = String::from_utf8(buffer).expect("translated output should be valid UTF-8");
+        // This selected Path stores one interval for the first node; the feature bounds clip that
+        // interval without splitting it at graph edges.
         assert_eq!(
             results,
             concat!(
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t4\t4\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t5\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t5\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t5\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t4\t4\t.\t-\t.\tID=ENSG00000277248.1\n",
-                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t5\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
-                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
-                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t5\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
-                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t4\t4\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
-                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t5\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t1\t2\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
 
@@ -191,13 +190,13 @@ mod tests {
             results,
             concat!(
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t1\t2\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
                 "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
                 "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
@@ -243,17 +242,47 @@ mod tests {
             results,
             concat!(
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t1\t2\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
                 "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
                 "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
                 "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
+    }
+
+    #[test]
+    fn test_translates_off_center_sliced_graph_nodes_to_stored_coordinates() {
+        let conn = get_connection();
+        setup_test_data(&conn);
+
+        // Stored sequence and path slice:
+        // stored index: 0123456789
+        // stored DNA:   AACCGGTTAA
+        // stored slice:    [3,7) CGGT
+        // Edge + path:     [0,4) CGGT; query [0,2) CG maps to stored [3,5).
+        // Edge - path:     [0,4) ACCG; query [0,2) AC maps to stored [5,7).
+        // Feature strand stays + while edge direction determines the mapped stored coordinates.
+        for (name, traversal_strand, start, end) in [
+            ("sliced-forward", Strand::Forward, 4, 5),
+            ("sliced-reverse", Strand::Reverse, 6, 7),
+        ] {
+            let (block_group, node_id) =
+                create_sliced_test_block_group(&conn, name, traversal_strand);
+            let input = format!(
+                "{}\tsource\tgene\t1\t2\t.\t+\t.\tID=sliced-feature\n",
+                block_group.name
+            );
+            assert_eq!(
+                translate_gff_input(&conn, &input),
+                format!("{node_id}\tsource\tgene\t{start}\t{end}\t.\t+\t.\tID=sliced-feature\n"),
+                "GFF query [0,2) should map to the off-center stored bases on {name}"
+            );
+        }
     }
 }

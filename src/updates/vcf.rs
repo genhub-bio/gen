@@ -6,12 +6,13 @@ use std::{
 
 use gen_core::{HashId, PathBlock, Strand, is_terminal};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, IntervalTreeCache, PathCache},
+    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, IntervalTreeCache},
     block_group_edge::BlockGroupEdge,
     db::{DbContext, GraphConnection},
     edge::EdgeData,
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
+    interval_tree::IntervalTreeSource as _,
     node::Node,
     operations::{OperationFile, OperationInfo, OperationSummary},
     path::Path,
@@ -96,6 +97,30 @@ impl<'a> BlockGroupCache<'_> {
             Ok(block_group_ids)
         }
     }
+}
+
+fn path_for_update(
+    paths: &mut HashMap<(HashId, String), Path>,
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    name: &str,
+) -> Result<Path, PathError> {
+    let key = (*block_group_id, name.to_string());
+    if let Some(path) = paths.get(&key) {
+        return Ok(path.clone());
+    }
+
+    let mut path = Path::select(conn)
+        .block_group_id(*block_group_id)
+        .name(name)
+        .load()
+        .expect("should load path for VCF update cache")[0]
+        .clone();
+    // Keep the pre-edit coordinates for accessions created after this VCF update changes the graph.
+    let interval_tree = path.intervaltree(conn)?;
+    path.set_cached_interval_tree(Some(interval_tree));
+    paths.insert(key, path.clone());
+    Ok(path)
 }
 
 /// Identify incomplete, conflicting, or unsupported calls that prevent path inference.
@@ -664,8 +689,12 @@ pub fn update_with_vcf_options(
 
     // Cache a bunch of data ahead of making changes
     let mut block_group_cache = BlockGroupCache::new(conn);
-    let mut path_cache = PathCache::new(conn);
+    let mut paths_by_block_group_and_name = HashMap::<(HashId, String), Path>::new();
     let mut sequence_cache = SequenceCache::new(conn);
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "Path equality and hashing ignore runtime-only caches"
+    )]
     let mut accession_cache = HashMap::new();
     let mut path_region_cache: HashMap<(HashId, String), ResolvedGenRegion> = HashMap::new();
     let mut parent_bg_cache: HashMap<HashId, Option<HashId>> = HashMap::new();
@@ -680,6 +709,10 @@ pub fn update_with_vcf_options(
     let mut ambiguous_samples = HashSet::<(String, String)>::new();
     let mut called_regions = HashMap::<(String, String), Vec<(i64, i64, String)>>::new();
     let mut paths_to_record = Vec::new();
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "Path equality and hashing ignore runtime-only caches"
+    )]
     let mut changes: HashMap<(Path, String), Vec<BlockGroupChange>> = HashMap::new();
 
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
@@ -846,8 +879,12 @@ pub fn update_with_vcf_options(
                         }
                     } else if let Some(ref_accession) = allele_accession {
                         for sample_bg_id in &sample_bg_ids {
-                            let sample_path =
-                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
+                            let sample_path = path_for_update(
+                                &mut paths_by_block_group_and_name,
+                                conn,
+                                sample_bg_id,
+                                &seq_name,
+                            )?;
 
                             let key = (sample_path, ref_accession.clone());
 
@@ -983,10 +1020,11 @@ pub fn update_with_vcf_options(
                                     }
                                 } else if let Some(ref_accession) = allele_accession {
                                     for sample_bg_id in &sample_bg_ids {
-                                        let sample_path = PathCache::lookup(
-                                            &mut path_cache,
+                                        let sample_path = path_for_update(
+                                            &mut paths_by_block_group_and_name,
+                                            conn,
                                             sample_bg_id,
-                                            seq_name.clone(),
+                                            &seq_name,
                                         )?;
 
                                         let key = (sample_path, ref_accession.clone());
@@ -1061,10 +1099,11 @@ pub fn update_with_vcf_options(
                     "parent block group must have exactly one path".to_string(),
                 ));
             }
-            let path = PathCache::lookup(
-                &mut path_cache,
+            let path = path_for_update(
+                &mut paths_by_block_group_and_name,
+                conn,
                 &block_group_ids[0],
-                block_group.name.clone(),
+                &block_group.name,
             )?;
             changes
                 .entry((path, block_group.sample_name.to_string()))
@@ -1122,14 +1161,7 @@ pub fn update_with_vcf_options(
     }
     bar.finish();
     for ((path, accession_name), (acc_start, acc_end)) in accession_cache.iter() {
-        BlockGroup::add_accession(
-            conn,
-            path,
-            accession_name,
-            *acc_start,
-            *acc_end,
-            &mut path_cache,
-        )?;
+        BlockGroup::add_accession(conn, path, accession_name, *acc_start, *acc_end)?;
     }
     // Save metadata once per updated sample, including samples with reference-only genotypes.
     // A fixed sample receives only metadata whose header ID matches its name.
@@ -1185,7 +1217,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{TestContext, get_sample_bg, setup_gen},
+        test_helpers::{TestContext, get_sample_bg, setup_block_group, setup_gen},
     };
     #[test]
     fn test_update_vcf_stores_sample_metadata_scores() {
@@ -1364,7 +1396,7 @@ mod tests {
         )
         .unwrap();
         let change = BlockGroupChange {
-            region: ResolvedGenRegion::from_path(conn, path.block_group_id, &path, 1, 2).unwrap(),
+            region: ResolvedGenRegion::from_path(conn, &path, 1, 2).unwrap(),
             path_accession: None,
             block: PathBlock {
                 node_id,

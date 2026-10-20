@@ -427,16 +427,20 @@ fn target_from_accession(
 impl ResolvedGenRegion {
     pub fn from_path(
         conn: &GraphConnection,
-        block_group_id: HashId,
         path: &Path,
         start: i64,
         end: i64,
     ) -> Result<Self, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &block_group_id, None)?;
+        let block_group = path.get_block_group(conn)?;
+        let mut path = path.clone();
+        if path.cached_interval_tree().is_none() {
+            let interval_tree = path.intervaltree(conn)?;
+            path.set_cached_interval_tree(Some(interval_tree));
+        }
         let path_length = path.length(conn, None)?;
         Ok(ResolvedGenRegion {
-            block_group,
-            path: Some(path.clone()),
+            block_group: block_group.as_ref().clone(),
+            path: Some(path),
             accession: None,
             annotation: None,
             kind: ResolvedRegionKind::Path,
@@ -570,7 +574,7 @@ impl ResolvedGenRegion {
                     .path
                     .as_ref()
                     .ok_or_else(|| GenRegionError::NotFound("No path for region".to_string()))?;
-                Ok(Arc::new(path.intervaltree(conn)?))
+                Ok(path.intervaltree(conn)?)
             }
             ResolvedRegionKind::Annotation => {
                 let annotation = self.annotation.as_ref().ok_or_else(|| {
@@ -599,8 +603,12 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
     ) -> Result<GraphLocus, GenRegionError> {
         let interval_tree = self.intervaltree(conn, workspace)?;
+        if self.start >= self.end {
+            return Ok(GraphLocus { slices: Vec::new() });
+        }
+
         let mut slices = interval_tree
-            .iter()
+            .query(self.start..self.end)
             .filter_map(|entry| {
                 let block = entry.value;
                 if is_terminal(block.node_id) {
@@ -632,8 +640,10 @@ impl ResolvedGenRegion {
                             sequence_start: block.sequence_start,
                             sequence_end: block.sequence_end,
                         },
-                        start: (sequence_start - block.sequence_start) as usize,
-                        end: (sequence_end - block.sequence_start) as usize,
+                        start: usize::try_from(sequence_start - block.sequence_start)
+                            .expect("should convert the stored-node start to a slice offset"),
+                        end: usize::try_from(sequence_end - block.sequence_start)
+                            .expect("should convert the stored-node end to a slice offset"),
                         strand: block.strand,
                     },
                 ))
@@ -853,13 +863,16 @@ impl ResolvedGenRegion {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use gen_core::range::Range;
 
     use super::*;
     use crate::{
         accession::{AccessionSpan, NewAccession},
         annotations::Annotation,
-        block_group::{BlockGroup, PathCache},
+        block_group::BlockGroup,
+        history::dolt::commit_all,
         test_helpers::{get_connection, setup_block_group, test_workspace},
     };
 
@@ -873,12 +886,78 @@ mod tests {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
         let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "mreB", 10, 30, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "mreB", 10, 30).unwrap();
         let annotation =
             Annotation::get_or_create(&conn, "gene-mreB", "genes", &accession.id, None).unwrap();
         (conn, block_group, path, accession, annotation)
+    }
+
+    #[test]
+    fn test_path_region_uses_model_history_for_tree_and_owner() {
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (block_group_id, path) = setup_block_group(&conn);
+        let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None)
+            .expect("should load the original block group");
+        // Commit the 40-base path before deleting its current rows.
+        let history_ref = commit_all(&conn, "path before deletion")
+            .expect("should commit the original path")
+            .to_string();
+
+        conn.execute("DELETE FROM paths WHERE id = ?1", [&path.id])
+            .expect("should delete the current path");
+        conn.execute(
+            "DELETE FROM block_group_edges WHERE block_group_id = ?1",
+            [&block_group_id],
+        )
+        .expect("should delete the current graph edges");
+        BlockGroup::delete(
+            &conn,
+            &block_group.collection_name,
+            &block_group.sample_name,
+            &block_group.name,
+        )
+        .expect("should delete the current block group");
+
+        let historical_path =
+            BlockGroup::get_current_path(&conn, &block_group_id, Some(&history_ref))
+                .expect("should load the historical path");
+        assert_eq!(historical_path.history_ref(), Some(history_ref.as_str()));
+        assert!(historical_path.cached_interval_tree.is_none());
+
+        let region = ResolvedGenRegion::from_path(&conn, &historical_path, 0, 40)
+            .expect("should resolve the historical whole-path region");
+        assert_eq!(region.block_group, block_group);
+        assert_eq!(region.feature_length, 40);
+
+        let first_tree = region
+            .intervaltree(&conn, test_workspace())
+            .expect("should load the historical path tree");
+        let second_tree = region
+            .intervaltree(&conn, test_workspace())
+            .expect("should reuse the historical path tree");
+        assert!(Arc::ptr_eq(&first_tree, &second_tree));
+    }
+
+    #[test]
+    fn test_from_path_reuses_attached_interval_tree() {
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (_, path) = setup_block_group(&conn);
+        let first_region = ResolvedGenRegion::from_path(&conn, &path, 0, 40)
+            .expect("should resolve the first path region");
+        let cached_path = first_region
+            .path
+            .as_ref()
+            .expect("should retain the first path");
+        let cached_tree = cached_path
+            .cached_interval_tree()
+            .expect("should cache the first path tree");
+        let second_region = ResolvedGenRegion::from_path(&conn, cached_path, 5, 15)
+            .expect("should resolve a second region from the cached path");
+        let second_tree = second_region
+            .intervaltree(&conn, test_workspace())
+            .expect("should use the second region's path tree");
+
+        assert!(Arc::ptr_eq(cached_tree, &second_tree));
     }
 
     #[test]
@@ -919,6 +998,102 @@ mod tests {
         );
         assert_eq!((slice.start, slice.end), (1, 4));
         assert_eq!(slice.strand, Strand::Reverse);
+    }
+
+    #[test]
+    fn test_graph_locus_clips_forward_and_reverse_accession_spans() {
+        // This makes an annotation comprised of part of the stored AA...
+        // and TT... nodes for our standard test block group. Notably,
+        // we mix the accession strands.
+        // Accession offset: 01234567
+        // Span membership:  AAAATTTT (A[2-6] + T[3-7])
+        // Span strands:     ++++----
+        // Query [2,6):      ..^^^^..
+        let conn = get_connection(None).expect("should create an in-memory database");
+        let (block_group_id, _) = setup_block_group(&conn);
+        let accession = Accession::create(
+            &conn,
+            &NewAccession {
+                name: "clipped-feature".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-a-node"),
+                        range: Range { start: 2, end: 6 },
+                        strand: Strand::Forward,
+                    },
+                    AccessionSpan {
+                        node_id: HashId::convert_str("test-t-node"),
+                        range: Range { start: 3, end: 7 },
+                        strand: Strand::Reverse,
+                    },
+                ],
+            },
+        )
+        .expect("should create a two-span accession");
+        let mut region = ResolvedGenRegion::from_accession(&conn, &accession, 2, 6)
+            .expect("should resolve the accession query");
+
+        let locus = region
+            .graph_locus(&conn, test_workspace())
+            .expect("should clip each span to the selected accession range");
+        let slices = locus
+            .slices
+            .iter()
+            .map(|slice| {
+                (
+                    slice.block.node_id,
+                    slice.block.sequence_start,
+                    slice.block.sequence_end,
+                    slice.start,
+                    slice.end,
+                    slice.strand,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slices,
+            vec![
+                (
+                    HashId::convert_str("test-a-node"),
+                    2,
+                    6,
+                    2,
+                    4,
+                    Strand::Forward,
+                ),
+                // This is our reverse strand, the stored sequence + accession is like:
+                // 0123456789
+                // TTTTTTTTTT
+                //    |--|
+                // Given that this is on the negative strand, the bases
+                // to extract for the slice are actually on the end of
+                // the sequence, not the first 2 Ts of the accession, so our slice here is
+                // 3 + 2, 3+4, giving 5-7 of our initial sequence
+                (
+                    HashId::convert_str("test-t-node"),
+                    3,
+                    7,
+                    2,
+                    4,
+                    Strand::Reverse,
+                ),
+            ]
+        );
+
+        for (start, end) in [(4, 4), (6, 2)] {
+            region.start = start;
+            region.end = end;
+            assert!(
+                region
+                    .graph_locus(&conn, test_workspace())
+                    .expect("should resolve an empty or inverted range")
+                    .slices
+                    .is_empty(),
+                "should produce no slices for {start}..{end}"
+            );
+        }
     }
 
     mod region_resolver {
@@ -1164,7 +1339,7 @@ mod tests {
 
         use super::*;
         use crate::{
-            block_group::{BlockGroup, NewBlockGroup, PathCache},
+            block_group::{BlockGroup, NewBlockGroup},
             block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
             collection::Collection,
             edge::Edge,
@@ -1320,9 +1495,7 @@ mod tests {
                 }
             }
             let path = Path::create(conn, name, &block_group_id, &ordered).unwrap();
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
         }
@@ -1336,9 +1509,7 @@ mod tests {
             end: i64,
         ) -> Accession {
             let path = Path::create(conn, name, &block_group_id, edge_ids).unwrap();
-            let mut path_cache = PathCache::new(conn);
-            let accession =
-                BlockGroup::add_accession(conn, &path, name, start, end, &mut path_cache).unwrap();
+            let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
         }

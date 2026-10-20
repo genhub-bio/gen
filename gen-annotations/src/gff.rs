@@ -284,8 +284,7 @@ mod tests {
             )),
         )
         .unwrap();
-        let region =
-            ResolvedGenRegion::from_path(conn, sample_bg_id, &sample_path, 15, 25).unwrap();
+        let region = ResolvedGenRegion::from_path(conn, &sample_path, 15, 25).unwrap();
         let change = BlockGroupChange {
             region,
             path_accession: None,

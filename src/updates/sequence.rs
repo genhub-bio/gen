@@ -189,7 +189,7 @@ mod tests {
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
-        block_group::{BlockGroup, BlockGroupChange, PathCache},
+        block_group::{BlockGroup, BlockGroupChange},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
@@ -245,9 +245,7 @@ mod tests {
     fn accession_update_does_not_require_target_path() {
         let conn = crate::test_helpers::get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "target-acc", 10, 30, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "target-acc", 10, 30).unwrap();
         Path::delete(&conn, "chr1", &block_group_id);
 
         let region = ResolvedGenRegion::from_accession(&conn, &accession, 5, 15).unwrap();
@@ -281,10 +279,7 @@ mod tests {
     fn annotation_update_does_not_require_target_path() {
         let conn = crate::test_helpers::get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "target-ann-acc", 10, 30, &mut path_cache)
-                .unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "target-ann-acc", 10, 30).unwrap();
         let annotation =
             Annotation::get_or_create(&conn, "target-ann", "genes", &accession.id, None).unwrap();
         Path::delete(&conn, "chr1", &block_group_id);
