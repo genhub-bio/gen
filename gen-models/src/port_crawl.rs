@@ -10,17 +10,20 @@ use std::{
 };
 
 use gen_core::{
-    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
+    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use intervaltree::IntervalTree;
 use petgraph::Direction;
 use thiserror::Error;
 
 use crate::{
+    accession::AccessionError,
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
     edge::{Edge, EdgeError, GroupBlock},
+    errors::PathError,
     region::ResolvedGenRegion,
 };
 
@@ -29,8 +32,9 @@ pub enum CrawlStart<'a> {
     /// A coordinate in the backing node's stored sequence.
     Node { node_id: HashId, coordinate: i64 },
     /// The midpoint of a resolved region, which may name a path, block group, annotation or
-    /// accession. Coordinates count bases along the region's path, including reverse blocks.
-    /// To keep the crawl within the region, pass half its length as the radius.
+    /// accession. Coordinates count bases along the region's path, or along its accession for
+    /// annotations and accessions, including reverse blocks. To keep the crawl within the
+    /// region, pass half its length as the radius.
     Region(&'a ResolvedGenRegion),
 }
 
@@ -45,9 +49,34 @@ pub enum CrawlError {
     /// The requested region does not belong to the requested block group.
     #[error("the starting region belongs to another block group")]
     RegionBlockGroupMismatch,
-    /// Only regions anchored on a path have a position to start from.
-    #[error("the starting region has no path")]
-    RegionWithoutPath,
+    /// Path and block group regions are located through a path, annotation and accession regions
+    /// through their accession.
+    #[error("the starting region has neither a path nor an accession")]
+    RegionWithoutBlocks,
+    /// The path behind a path or block group region could not be loaded.
+    #[error(transparent)]
+    Path(#[from] PathError),
+    /// The accession behind an annotation or accession region could not be loaded.
+    #[error(transparent)]
+    Accession(#[from] AccessionError),
+}
+
+/// Blocks laid out in the coordinates of `region.start` and `region.end`: the path's for path and
+/// block group regions, the accession's for annotation and accession regions, which have no path.
+/// A block group region is read through its current path rather than the block group's own tree,
+/// which would load the whole graph.
+fn region_blocks(
+    conn: &GraphConnection,
+    region: &ResolvedGenRegion,
+) -> Result<IntervalTree<i64, NodeIntervalBlock>, CrawlError> {
+    if let Some(path) = &region.path {
+        return Ok(path.intervaltree(conn)?);
+    }
+    let accession = region
+        .accession
+        .as_ref()
+        .ok_or(CrawlError::RegionWithoutBlocks)?;
+    Ok(accession.intervaltree(conn)?)
 }
 
 /// Return at most `node_budget` graph slices around a position, with all edges between them.
@@ -82,18 +111,16 @@ pub fn crawl_graph(
             if region.block_group.id != block_group_id {
                 return Err(CrawlError::RegionBlockGroupMismatch);
             }
-            let path = region.path.as_ref().ok_or(CrawlError::RegionWithoutPath)?;
-            let path_coordinate = region.start + (region.end - region.start) / 2;
-            let Some(block) = path
-                .coordinate_blocks(conn, None)
-                .into_iter()
-                .find(|block| {
-                    block.path_start <= path_coordinate && path_coordinate < block.path_end
-                })
+            let region_coordinate = region.start + (region.end - region.start) / 2;
+            let tree = region_blocks(conn, region)?;
+            let Some(block) = tree
+                .query_point(region_coordinate)
+                .map(|element| &element.value)
+                .find(|block| !is_terminal(block.node_id))
             else {
                 return Ok(None);
             };
-            let offset = path_coordinate - block.path_start;
+            let offset = region_coordinate - block.start;
             let node_coordinate = if block.strand == Strand::Reverse {
                 block.sequence_end - offset - 1
             } else {
@@ -676,7 +703,8 @@ mod tests {
 
     use super::{CrawlError, CrawlStart, PortCrawler, crawl_graph};
     use crate::{
-        block_group::{BlockGroup, NewBlockGroup},
+        annotations::Annotation,
+        block_group::{BlockGroup, NewBlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
@@ -940,6 +968,98 @@ mod tests {
         )
         .unwrap()
         .expect("should find the region midpoint");
+
+        assert!(graph.contains_node(block("b", 0, 4)));
+        assert!(graph.contains_node(block("c", 0, 4)));
+        assert!(!graph.contains_node(block("a", 0, 4)));
+        assert!(!graph.contains_node(block("d", 0, 4)));
+    }
+
+    fn chain_with_accession_region_inputs() -> (GraphConnection, HashId, Path) {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG"), ("d", "TTTT")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("b", 4, "c", 0, 0),
+                ("c", 4, "d", 0, 0),
+                ("d", 4, "end", 0, 0),
+            ],
+        );
+        let edge_ids = [
+            (PATH_START_NODE_ID, 0),
+            (node_id_for("a"), 4),
+            (node_id_for("b"), 4),
+            (node_id_for("c"), 4),
+            (node_id_for("d"), 4),
+        ]
+        .map(|(node_id, coordinate)| {
+            Edge::edges_at_port_direction(
+                &conn,
+                &block_group_id,
+                node_id,
+                coordinate,
+                Direction::Outgoing,
+            )
+            .unwrap()[0]
+                .edge
+                .id
+        });
+        let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        (conn, block_group_id, path)
+    }
+
+    #[test]
+    fn test_crawl_graph_starts_at_an_accession_region_midpoint() {
+        let (conn, block_group_id, path) = chain_with_accession_region_inputs();
+        let mut path_cache = PathCache::new(&conn);
+        BlockGroup::add_accession(&conn, &path, "middle", 4, 12, &mut path_cache).unwrap();
+        let region = resolve(&Region::parse("middle").unwrap(), &conn, "test", "test").unwrap();
+        assert!(region.path.is_none());
+
+        let graph = crawl_graph(
+            &conn,
+            block_group_id,
+            CrawlStart::Region(&region),
+            usize::MAX,
+            Some(4),
+        )
+        .unwrap()
+        .expect("should find the accession midpoint");
+
+        assert!(graph.contains_node(block("b", 0, 4)));
+        assert!(graph.contains_node(block("c", 0, 4)));
+        assert!(!graph.contains_node(block("a", 0, 4)));
+        assert!(!graph.contains_node(block("d", 0, 4)));
+    }
+
+    #[test]
+    fn test_crawl_graph_starts_at_an_annotation_region_midpoint() {
+        let (conn, block_group_id, path) = chain_with_accession_region_inputs();
+        let mut path_cache = PathCache::new(&conn);
+        let accession =
+            BlockGroup::add_accession(&conn, &path, "middle", 4, 12, &mut path_cache).unwrap();
+        Annotation::get_or_create(&conn, "gene-middle", "genes", &accession.id, None).unwrap();
+        let region = resolve(
+            &Region::parse("gene-middle").unwrap(),
+            &conn,
+            "test",
+            "test",
+        )
+        .unwrap();
+        assert!(region.path.is_none());
+
+        let graph = crawl_graph(
+            &conn,
+            block_group_id,
+            CrawlStart::Region(&region),
+            usize::MAX,
+            Some(4),
+        )
+        .unwrap()
+        .expect("should find the annotation midpoint");
 
         assert!(graph.contains_node(block("b", 0, 4)));
         assert!(graph.contains_node(block("c", 0, 4)));
