@@ -10,6 +10,7 @@ use crate::commands::remote::server::AuthTokens;
 
 pub mod client;
 pub mod operations;
+mod progress;
 pub mod server;
 pub mod utils;
 

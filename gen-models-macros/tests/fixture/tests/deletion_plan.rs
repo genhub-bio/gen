@@ -32,15 +32,17 @@ fn traced_delete_statement() -> String {
 
 #[test]
 fn test_delete_by_ids_uses_the_primary_key_index() {
-    let conn = connection();
+    let mut conn = connection();
     insert_sample(&conn, "alpha", false);
 
     TRACED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
-    conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_statement));
+    conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_statement))
+        .expect("should enable statement tracing");
     FixtureSample::select(&conn)
         .delete_by_ids(["alpha"])
         .expect("should delete the fixture sample");
-    conn.trace_v2(TraceEventCodes::empty(), None);
+    conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+        .expect("should disable statement tracing");
 
     let query = traced_delete_statement();
     let explain = format!("EXPLAIN QUERY PLAN {query}");
@@ -70,18 +72,20 @@ fn test_delete_by_ids_uses_the_primary_key_index() {
 
 #[test]
 fn test_composite_delete_by_ids_uses_the_primary_key_index() {
-    let conn = connection();
+    let mut conn = connection();
     insert_composite_key(&conn, "alpha", "one", 1);
     insert_composite_key(&conn, "alpha", "two", 2);
     insert_composite_key(&conn, "beta", "one", 3);
     insert_composite_key(&conn, "beta", "two", 4);
 
     TRACED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
-    conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_statement));
+    conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(capture_statement))
+        .expect("should enable statement tracing");
     let deleted = FixtureCompositeKey::select(&conn)
         .delete_by_ids([("alpha", "one"), ("beta", "two")])
         .expect("should delete the composite fixture key");
-    conn.trace_v2(TraceEventCodes::empty(), None);
+    conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+        .expect("should disable statement tracing");
 
     let explain = format!("EXPLAIN QUERY PLAN {}", traced_delete_statement());
     let mut statement = conn

@@ -21,6 +21,9 @@ CREATE TABLE remote_operations (
     assets_transfer_checkpoint TEXT,
     to_commit TEXT,
     transfer_id BLOB CHECK(transfer_id IS NULL OR length(transfer_id) = 16),
+    push_session_id BLOB CHECK(push_session_id IS NULL OR length(push_session_id) = 16),
+    push_session_target_commit TEXT,
+    push_session_force INTEGER CHECK(push_session_force IS NULL OR push_session_force IN (0, 1)),
     transfer_expires_at INTEGER,
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,
@@ -32,6 +35,14 @@ CREATE TABLE remote_operations (
         AND assets_transfer_checkpoint = to_commit
     )),
     CHECK(operation = 'push' OR transfer_id IS NULL),
+    -- Ensure that every push has a session UUID, even before selecting its target commit.
+    CHECK(operation != 'push' OR push_session_id IS NOT NULL),
+    -- Ensure that clones and pulls cannot have a push target commit.
+    CHECK(operation = 'push' OR push_session_target_commit IS NULL),
+    -- Target commit and force must be supplied together or both omitted.
+    -- force = false counts as supplied; a fresh push may initially have both fields NULL.
+    -- This is so a resume cannot become force if it was not initially a force push.
+    CHECK((push_session_target_commit IS NULL) = (push_session_force IS NULL)),
     CHECK((transfer_id IS NULL) = (transfer_expires_at IS NULL)),
     CHECK(operation != 'push' OR completed_at IS NULL OR transfer_id IS NOT NULL),
     FOREIGN KEY(remote_name) REFERENCES remotes(name) ON DELETE CASCADE

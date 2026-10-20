@@ -210,13 +210,11 @@ repository default, in that order. A missing remote branch is created and
 tracked. Non-fast-forward updates are rejected unless `--force` is supplied.
 Uncommitted working-tree changes are not transferred.
 
-After the push finishes, Gen uploads local assets referenced by the selected branch.
-Files are validated against their recorded checksums before upload.
+Push uploads the committed files referenced by the selected branch.
 
 # Fetch
 
-Fetch one branch without merging it into a local branch or changing the working
-checkout:
+Fetch a remote branch with:
 
 ```sh
 gen fetch [--remote <name>] [--branch <name>]
@@ -224,13 +222,9 @@ gen fetch [--remote <name>] [--branch <name>]
 
 The remote is selected from `--remote`, the branch's tracked remote, the
 repository default, or the only configured remote, in that order. The branch
-defaults to the current branch. Fetch runs Dolt's native fetch operation to
-update the remote-tracking ref and download its graph history.
-
-Gen also downloads every versioned asset reachable from the fetched branch into
-the checksum-addressed `.gen/assets` store. It does not copy any fetched version
-to its logical working-tree path; checkout and pull remain responsible for
-materializing the selected branch state.
+defaults to the current branch. Fetch downloads the branch history and files
+without changing your current branch or working files. Use `gen pull` to apply
+remote changes to a local branch.
 
 # Pull
 
@@ -240,18 +234,16 @@ Pull one branch with:
 gen pull [--remote <name>] [--branch <name>]
 ```
 
-Pull follows Dolt's merge behavior: it fast-forwards when possible and
-automatically merges divergent history on the current branch. A missing local
-branch is created and associated with the selected remote. Pulling the current
-branch updates its working tree and rejects uncommitted changes; pulling a
-non-current branch leaves the checkout unchanged and requires a fast-forward.
+Pull applies remote changes to the selected local branch. It fast-forwards
+when possible and merges divergent history when updating the current branch. A
+missing local branch is created and associated with the selected remote.
+Pulling the current branch updates its files and rejects uncommitted changes;
+pulling a non-current branch leaves the current checkout unchanged and requires
+a fast-forward.
 Pull uses the only configured remote when no explicit, tracked, or default
 remote selects one.
 Pull requires an existing repository and remote; use `gen clone` to initialize a
 workspace from a remote repository.
-
-After the pull finishes, Gen downloads missing local assets for the selected
-branch. Downloads are accepted only after their recorded checksums validate.
 
 # Remote authentication
 

@@ -34,6 +34,55 @@ jobs:
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         run: choco install capnproto
+      - name: Select native Perl for OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # maturin builds openssl-src; Git Bash's Perl lacks modules required by OpenSSL.
+          $perlCandidates = @(
+            Get-Command perl.exe -All -ErrorAction SilentlyContinue |
+              Where-Object { $_.CommandType -eq 'Application' -and $_.Source } |
+              Select-Object -ExpandProperty Source -Unique
+          )
+
+          if ($perlCandidates.Count -eq 0) {
+            throw "No perl.exe executable was found on the Windows runner PATH."
+          }
+
+          $selectedPerl = $null
+          $moduleFailures = @()
+
+          foreach ($candidate in $perlCandidates) {
+            $platform = (& $candidate -MConfig -e 'print $^O' 2>&1 | Out-String).Trim()
+            $platformExitCode = $LASTEXITCODE
+            if ($platformExitCode -ne 0 -or $platform -ne 'MSWin32') {
+              continue
+            }
+
+            $moduleOutput = (& $candidate -MLocale::Maketext::Simple -MIPC::Cmd -e '1' 2>&1 | Out-String).Trim()
+            $moduleExitCode = $LASTEXITCODE
+            if ($moduleExitCode -eq 0) {
+              $selectedPerl = $candidate
+              break
+            }
+
+            $moduleFailures += "$candidate`: $moduleOutput"
+          }
+
+          if (-not $selectedPerl) {
+            if ($moduleFailures.Count -gt 0) {
+              throw "Native Windows Perl was found, but OpenSSL requires Locale::Maketext::Simple and IPC::Cmd. $($moduleFailures -join '; ')"
+            }
+
+            throw "No native Windows Perl executable was found among perl.exe candidates."
+          }
+
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_ENV,
+            "OPENSSL_SRC_PERL=$selectedPerl`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          Write-Host "Using native Windows Perl: $selectedPerl"
       - name: Set venv bin dir
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
