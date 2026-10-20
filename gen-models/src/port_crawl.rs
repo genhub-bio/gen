@@ -696,13 +696,14 @@ mod tests {
 
     use gen_core::{
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
-        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
+        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal, range::Range,
     };
     use gen_graph::{GenGraph, GraphNode};
     use petgraph::Direction;
 
     use super::{CrawlError, CrawlStart, PortCrawler, crawl_graph};
     use crate::{
+        accession::{Accession, AccessionSpan, NewAccession},
         annotations::Annotation,
         block_group::{BlockGroup, NewBlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -1065,6 +1066,51 @@ mod tests {
         assert!(graph.contains_node(block("c", 0, 4)));
         assert!(!graph.contains_node(block("a", 0, 4)));
         assert!(!graph.contains_node(block("d", 0, 4)));
+    }
+
+    #[test]
+    fn test_crawl_graph_region_start_flips_offsets_in_reverse_blocks() {
+        let conn = get_connection(None).unwrap();
+        // Edges at coordinate four carve the node into two slices.
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("x", "AAAACCCC"), ("y", "GGGG")],
+            &[
+                ("start", 0, "x", 0, 0),
+                ("x", 4, "y", 0, 0),
+                ("y", 4, "x", 4, 0),
+                ("x", 8, "end", 0, 0),
+            ],
+        );
+        Accession::create(
+            &conn,
+            &NewAccession {
+                name: "reverse".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![AccessionSpan {
+                    node_id: node_id_for("x"),
+                    range: Range { start: 0, end: 8 },
+                    strand: Strand::Reverse,
+                }],
+            },
+        )
+        .unwrap();
+        // Accession offset one on a reversed node is node coordinate six, in the second slice.
+        let region = resolve(
+            &Region::parse("reverse:0-2").unwrap(),
+            &conn,
+            "test",
+            "test",
+        )
+        .unwrap();
+
+        let graph = crawl_graph(&conn, block_group_id, CrawlStart::Region(&region), 1, None)
+            .unwrap()
+            .expect("should find the reversed block");
+
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.contains_node(block("x", 4, 8)));
     }
 
     #[test]
