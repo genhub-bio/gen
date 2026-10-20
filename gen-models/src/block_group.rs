@@ -485,7 +485,11 @@ impl BlockGroup {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<GenGraph, BlockGroupError> {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
+        let edges = Edge::with_overlap_unions(BlockGroupEdge::edges_for_block_group(
+            conn,
+            block_group_id,
+            history_ref,
+        ));
         let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges, history_ref)?;
         let (graph, _) = Edge::build_graph(&edges, &blocks);
         Ok(graph)
@@ -499,8 +503,8 @@ impl BlockGroup {
         block_group_id: &HashId,
         edges: &[AugmentedEdge],
     ) -> Result<GenGraph, BlockGroupError> {
-        let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, edges, None)?;
-        let edges_vec = edges.to_vec();
+        let edges_vec = Edge::with_overlap_unions(edges.to_vec());
+        let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges_vec, None)?;
         let (graph, _) = Edge::build_graph(&edges_vec, &blocks);
         Ok(graph)
     }
@@ -641,10 +645,12 @@ impl BlockGroup {
         block_group_id: &HashId,
         _prune: bool,
     ) -> Result<HashSet<String>, BlockGroupError> {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
-            .into_iter()
-            .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
-            .collect::<Vec<_>>();
+        let edges = Edge::with_overlap_unions(
+            BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+                .into_iter()
+                .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+                .collect::<Vec<_>>(),
+        );
         let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges, None)?;
 
         let (mut graph, _) = Edge::build_graph(&edges, &blocks);

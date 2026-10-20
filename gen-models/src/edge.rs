@@ -761,6 +761,93 @@ impl Edge {
             && self.source_coordinate == self.target_coordinate
     }
 
+    /// Adds the union edge for each pair of partially overlapping deletions on one chromatid.
+    ///
+    /// Deletions from one update all apply to the same reference at once. For deletions `[a, b)`
+    /// and `[c, d)` with `a < c < b < d`, the sequence keeps `..a` and `d..`. The stored edges only
+    /// spell `a -> b` and `c -> d`, and the reference continuation `b -> d` is retired by the
+    /// second edit's marker, so nothing connects `a` to `d` and everything downstream is lost.
+    /// The unions are derived at read time so deletions split across update chunks still combine.
+    pub fn with_overlap_unions(mut edges: Vec<AugmentedEdge>) -> Vec<AugmentedEdge> {
+        type Group = (HashId, i64);
+        let mut spans_by_group: HashMap<Group, Vec<(i64, i64, i64, i64)>> = HashMap::new();
+        let mut seen: HashSet<(Group, i64, i64)> = HashSet::new();
+        for augmented_edge in &edges {
+            let edge = &augmented_edge.edge;
+            if augmented_edge.chromosome_index < 0
+                || edge.source_node_id != edge.target_node_id
+                || edge.source_strand != Strand::Forward
+                || edge.target_strand != Strand::Forward
+                || edge.target_coordinate <= edge.source_coordinate
+            {
+                continue;
+            }
+            let group = (edge.source_node_id, augmented_edge.chromosome_index);
+            if seen.insert((group, edge.source_coordinate, edge.target_coordinate)) {
+                spans_by_group.entry(group).or_default().push((
+                    edge.source_coordinate,
+                    edge.target_coordinate,
+                    augmented_edge.phased,
+                    augmented_edge.created_on,
+                ));
+            }
+        }
+        let mut unions = vec![];
+        for ((node_id, chromosome_index), spans) in &mut spans_by_group {
+            spans.sort_unstable();
+            let mut index = 0;
+            while index < spans.len() {
+                let (start, end, phased, created_on) = spans[index];
+                let mut later = index + 1;
+                while later < spans.len() && spans[later].0 < end {
+                    let (later_start, later_end, _, later_created_on) = spans[later];
+                    let group = (*node_id, *chromosome_index);
+                    if later_start > start
+                        && later_end > end
+                        && seen.insert((group, start, later_end))
+                    {
+                        let created_on = created_on.max(later_created_on);
+                        unions.push((group, start, later_end, phased, created_on));
+                        // Chains of overlaps resolve as later spans are visited in order.
+                        let position =
+                            spans.partition_point(|span| *span < (start, later_end, 0, 0));
+                        spans.insert(position, (start, later_end, phased, created_on));
+                        if position <= index {
+                            index += 1;
+                        }
+                    }
+                    later += 1;
+                }
+                index += 1;
+            }
+        }
+        for ((node_id, chromosome_index), start, end, phased, created_on) in unions {
+            let data = EdgeData {
+                source_node_id: node_id,
+                source_coordinate: start,
+                source_strand: Strand::Forward,
+                target_node_id: node_id,
+                target_coordinate: end,
+                target_strand: Strand::Forward,
+            };
+            edges.push(AugmentedEdge {
+                edge: Edge {
+                    id: data.id_hash(),
+                    source_node_id: node_id,
+                    source_coordinate: start,
+                    source_strand: Strand::Forward,
+                    target_node_id: node_id,
+                    target_coordinate: end,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index,
+                phased,
+                created_on,
+            });
+        }
+        edges
+    }
+
     /// Selects the blocks that an edge endpoint should connect to.
     ///
     /// `block_connections` calls this when an input edge enters or leaves a coordinate. If a
