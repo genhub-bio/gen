@@ -32,7 +32,7 @@ log = "0.4.26"
 petgraph = "0.6.5"
 pyo3-stub-gen = "0.23"
 ratatui = { version = "0.30.0", default-features = false }
-rusqlite = { package = "rusqdoltlite", version = "0.41.0", features = ["bundled", "array", "limits", "fallible_uint"] }
+rusqlite = { package = "rusqdoltlite", version = "0.41.1", features = ["bundled", "array", "limits", "fallible_uint"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 
@@ -48,7 +48,3 @@ pyo3-build-config = "0.29"
 
 [workspace]
 members = ["."]
-
-[patch.crates-io]
-rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite", branch = "master" }
-libdoltlite-sys = { git = "https://github.com/Chris7/rusqdoltlite", branch = "master" }
