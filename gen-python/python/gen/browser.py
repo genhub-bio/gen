@@ -493,7 +493,7 @@ class NotebookSession:
                 raise NotebookSessionError(
                     "Gen could not check out the requested source branch"
                 )
-            if current_branch.head.lower() != base_commit.lower():
+            if str(current_branch.head).lower() != base_commit.lower():
                 raise NotebookSessionError(
                     "The repository snapshot does not match its base commit"
                 )
@@ -539,7 +539,7 @@ class NotebookSession:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(notebook_contents)
             try:
-                self.repository.add_file(notebook_path)
+                self.repository.add_file(destination, allow_no_changes=True)
             except Exception as error:
                 raise NotebookSessionError(
                     f"Could not add notebook {notebook_path} to the local repository: {error}"
