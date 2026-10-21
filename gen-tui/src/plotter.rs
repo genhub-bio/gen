@@ -210,6 +210,26 @@ where
         let visual_width = self.get_node_size(node, detail_level).0 as i64;
         raw_col * visual_width / full_width
     }
+
+    /// Report the current proportional zoom density, in source units per visual cell.
+    fn zoom_scale(&self) -> u64 {
+        1
+    }
+
+    /// Increase the number of source units represented by each Full-detail cell.
+    fn zoom_out_scale(&mut self) -> bool {
+        false
+    }
+
+    /// Decrease the number of source units represented by each Full-detail cell.
+    fn zoom_in_scale(&mut self) -> bool {
+        false
+    }
+
+    /// Reset proportional zoom to one source unit per cell.
+    fn reset_zoom_scale(&mut self) -> bool {
+        false
+    }
 }
 
 /// Blanket implementation for Box<T> where T implements NodeSizer
@@ -233,12 +253,31 @@ where
     fn map_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
         (**self).map_column(node, raw_col, detail_level)
     }
+
+    fn zoom_scale(&self) -> u64 {
+        (**self).zoom_scale()
+    }
+
+    fn zoom_out_scale(&mut self) -> bool {
+        (**self).zoom_out_scale()
+    }
+
+    fn zoom_in_scale(&mut self) -> bool {
+        (**self).zoom_in_scale()
+    }
+
+    fn reset_zoom_scale(&mut self) -> bool {
+        (**self).reset_zoom_scale()
+    }
 }
 
 pub trait NodeRenderer<G>
 where
     G: GraphBase,
 {
+    /// Synchronize the renderer with any proportional scale maintained by its node sizer.
+    fn set_zoom_scale(&mut self, _zoom_scale: u64) {}
+
     /// Render a single node's visual representation.
     ///
     /// # Parameters

@@ -1436,6 +1436,13 @@ pub fn view_block_group(
                             "*drag* pan | *click* select | *↑↓←→* show cursor | *g* search".to_string()
                         } else if graph_controller.cursor.is_coarse_mode() {
                             "*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *g* search".to_string()
+                        } else if graph_controller.get_detail_level() == VisualDetail::Full
+                            && graph_controller.zoom_scale() > 1
+                        {
+                            format!(
+                                "*←→↑↓* navigate by cell ({} bp/cell) | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search",
+                                graph_controller.zoom_scale()
+                            )
                         } else {
                             "*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search".to_string()
                         }

@@ -47,8 +47,16 @@ fn is_zero_width_junction(node: &GraphNode) -> bool {
 
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.
-#[derive(Clone)]
-pub struct GenGraphNodeSizer;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenGraphNodeSizer {
+    bases_per_cell: u64,
+}
+
+impl Default for GenGraphNodeSizer {
+    fn default() -> Self {
+        Self { bases_per_cell: 1 }
+    }
+}
 
 impl NodeSizer<GenGraph> for GenGraphNodeSizer {
     /// Calculate how much screen space a GenGraph node needs based on sequence length and level of detail
@@ -68,7 +76,10 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
         match detail_level {
             VisualDetail::Minimal => (1u64, 1u64), // Just a glyph
             VisualDetail::Truncated => (sequence_length.min(13), 1u64), // 13 = 5 border + 3 mid + 5 border
-            VisualDetail::Full => (sequence_length, 1u64),              // Full sequence length
+            VisualDetail::Full => {
+                let scaled_width = sequence_length.div_ceil(self.bases_per_cell.max(1));
+                (scaled_width.max(sequence_length.min(13)), 1u64)
+            }
         }
     }
 
@@ -87,9 +98,61 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
             VisualDetail::Truncated if node.length() > 13 => {
                 map_truncated_col(raw_col, node.length())
             }
+            VisualDetail::Full if self.bases_per_cell > 1 && node.length() > 13 => map_scaled_col(
+                raw_col,
+                node.length(),
+                self.get_node_size(node, detail_level).0,
+            ),
             _ => raw_col,
         }
     }
+
+    fn zoom_scale(&self) -> u64 {
+        self.bases_per_cell
+    }
+
+    fn zoom_out_scale(&mut self) -> bool {
+        let Some(next_scale) = self.bases_per_cell.checked_mul(2) else {
+            return false;
+        };
+        self.bases_per_cell = next_scale;
+        true
+    }
+
+    fn zoom_in_scale(&mut self) -> bool {
+        if self.bases_per_cell <= 1 {
+            return false;
+        }
+        self.bases_per_cell /= 2;
+        true
+    }
+
+    fn reset_zoom_scale(&mut self) -> bool {
+        if self.bases_per_cell == 1 {
+            return false;
+        }
+        self.bases_per_cell = 1;
+        true
+    }
+}
+
+fn map_scaled_col(raw_col: i64, sequence_length: i64, visual_width: u64) -> i64 {
+    if sequence_length <= 1 || visual_width <= 1 {
+        return 0;
+    }
+    if raw_col < 0 {
+        return raw_col;
+    }
+    if raw_col >= sequence_length {
+        return i64::try_from(visual_width).unwrap_or(i64::MAX)
+            + raw_col.saturating_sub(sequence_length);
+    }
+
+    let source_offset = i128::from(raw_col);
+    let source_span = i128::from(sequence_length - 1);
+    let visual_span = i128::from(visual_width - 1);
+    let rounded = (source_offset * visual_span * 2 + source_span) / (source_span * 2);
+    i64::try_from(rounded).unwrap_or(i64::MAX)
 }
 
 /// Domain-specific node renderer for GenGraph that handles database sequence fetching
@@ -98,6 +161,7 @@ pub struct GenGraphNodeRenderer<'a> {
     conn: &'a GraphConnection,
     workspace: &'a Workspace,
     cache: HashMap<GraphNode, String>,
+    zoom_scale: u64,
 }
 
 impl<'a> GenGraphNodeRenderer<'a> {
@@ -107,6 +171,7 @@ impl<'a> GenGraphNodeRenderer<'a> {
             conn,
             workspace,
             cache: HashMap::new(),
+            zoom_scale: 1,
         }
     }
 
@@ -141,6 +206,10 @@ impl<'a> GenGraphNodeRenderer<'a> {
 }
 
 impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
+    fn set_zoom_scale(&mut self, zoom_scale: u64) {
+        self.zoom_scale = zoom_scale.max(1);
+    }
+
     /// Render a GenGraph node with genomic sequence data and theme styling
     /// The rendering changes based on level of detail:
     /// - Minimal: Simple glyph representation
@@ -206,6 +275,11 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
                 buffer.set_string_styled(area.left_center(), &truncated, text_style);
             }
             VisualDetail::Full => {
+                if self.zoom_scale > 1 && node_id.length().max(0) as u64 > area.width() as u64 + 1 {
+                    let aggregate_glyphs = "·".repeat(area.width().max(0) as usize + 1);
+                    buffer.set_string_styled(area.left_center(), &aggregate_glyphs, text_style);
+                    return;
+                }
                 // Full scale: Show complete sequence (truncated only by area width)
                 let sequence = self
                     .get_sequence(node_id)
@@ -409,7 +483,7 @@ fn create_gen_graph_controller_with_lowlights(
     dimmed_edges: HashSet<(GraphNode, GraphNode)>,
     dimmed_nodes: HashSet<GraphNode>,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    let node_sizer = GenGraphNodeSizer;
+    let node_sizer = GenGraphNodeSizer::default();
     let mut controller = GraphController::new(graph, node_sizer);
     for edge in dimmed_edges {
         controller.dim_edge(edge);
@@ -454,16 +528,17 @@ pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
 ///
 /// Returns `None` if no block in the locus is present in `pos_map` (all off-screen),
 /// or if the annotation's x span is entirely outside the camera rect.
-pub fn locus_label_bounds(
+pub fn locus_label_bounds<S: NodeSizer<GenGraph>>(
     locus: &GraphLocus,
     pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
+    node_sizer: &S,
     detail_level: VisualDetail,
     viewport_state: &ViewportState,
 ) -> Option<(WorldPos, WorldPos)> {
     let block_world_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
         let &(center, size) = pos_map.get(&block)?;
         let rect = WorldRect::from_center_and_size(center, size);
-        let col = GenGraphNodeSizer.map_column(&block, col_raw, detail_level);
+        let col = node_sizer.map_column(&block, col_raw, detail_level);
         Some(WorldPos::new(rect.min.x + col, center.y))
     };
 
@@ -839,9 +914,13 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
             any_hidden = true;
             continue;
         }
-        let Some(bounds) =
-            locus_label_bounds(&locus, &pos_map, detail_level, &controller.viewport_state)
-        else {
+        let Some(bounds) = locus_label_bounds(
+            &locus,
+            &pos_map,
+            &controller.partition_controller.node_sizer,
+            detail_level,
+            &controller.viewport_state,
+        ) else {
             continue;
         };
         let color = match style.color {
@@ -1121,12 +1200,133 @@ mod tests {
             VisualDetail::Full,
         ] {
             assert_eq!(
-                GenGraphNodeSizer.get_node_size(&junction, detail_level),
+                GenGraphNodeSizer::default().get_node_size(&junction, detail_level),
                 (1, 1)
             );
         }
-        assert!(!GenGraphNodeSizer.is_selectable(&junction));
-        assert!(GenGraphNodeSizer.is_selectable(&start));
+        assert!(!GenGraphNodeSizer::default().is_selectable(&junction));
+        assert!(GenGraphNodeSizer::default().is_selectable(&start));
+    }
+
+    #[test]
+    fn test_proportional_zoom_uses_partial_terminal_cell_and_maps_endpoints() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("scaled-node"),
+            sequence_start: 0,
+            sequence_end: 27,
+        };
+        let mut node_sizer = GenGraphNodeSizer::default();
+
+        assert_eq!(node_sizer.get_node_size(&node, VisualDetail::Full), (27, 1));
+        assert!(node_sizer.zoom_out_scale());
+        assert_eq!(node_sizer.zoom_scale(), 2);
+        assert_eq!(node_sizer.get_node_size(&node, VisualDetail::Full), (14, 1));
+        assert_eq!(node_sizer.map_column(&node, 0, VisualDetail::Full), 0);
+        assert_eq!(node_sizer.map_column(&node, 26, VisualDetail::Full), 13);
+        assert_eq!(node_sizer.map_column(&node, 27, VisualDetail::Full), 14);
+        assert_eq!(
+            node_sizer.get_node_size(&node, VisualDetail::Truncated),
+            (13, 1)
+        );
+        assert!(node_sizer.zoom_in_scale());
+        assert_eq!(node_sizer.zoom_scale(), 1);
+        assert_eq!(node_sizer.get_node_size(&node, VisualDetail::Full), (27, 1));
+    }
+
+    #[test]
+    fn test_full_detail_zoom_scales_proportionally_and_round_trips_cursor_anchor() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("proportional-zoom-node"),
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut controller = create_gen_graph_controller(graph);
+        controller.set_detail_level(VisualDetail::Full);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 40, 12);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+        let node_index = petgraph::graph::NodeIndex::new(<GenGraph as NodeIndexable>::to_index(
+            controller.graph(),
+            node,
+        ));
+        controller.go_to_node(node_index, (0.63, 0.5));
+        controller.rebuild_viewport_graph().unwrap();
+        let cursor_viewport = controller.cursor.viewport_pos();
+        let cursor_fraction = controller.cursor.fractional_pos();
+
+        controller.zoom_out();
+        controller.rebuild_viewport_graph().unwrap();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
+        assert_eq!(controller.zoom_scale(), 2);
+        assert_eq!(
+            controller
+                .partition_controller
+                .node_sizer
+                .get_node_size(&node, VisualDetail::Full)
+                .0,
+            50
+        );
+        assert_eq!(controller.cursor.viewport_pos(), cursor_viewport);
+        assert_eq!(controller.cursor.fractional_pos(), cursor_fraction);
+
+        for (expected_scale, expected_width) in [(4, 25), (8, 13)] {
+            controller.zoom_out();
+            controller.rebuild_viewport_graph().unwrap();
+            assert_eq!(controller.zoom_scale(), expected_scale);
+            assert_eq!(
+                controller
+                    .partition_controller
+                    .node_sizer
+                    .get_node_size(&node, VisualDetail::Full)
+                    .0,
+                expected_width
+            );
+            assert_eq!(controller.cursor.viewport_pos(), cursor_viewport);
+            assert_eq!(controller.cursor.fractional_pos(), cursor_fraction);
+        }
+
+        controller.zoom_out();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Truncated);
+        assert_eq!(controller.zoom_scale(), 8);
+        assert_eq!(
+            controller
+                .partition_controller
+                .node_sizer
+                .get_node_size(&node, VisualDetail::Truncated)
+                .0,
+            13
+        );
+
+        controller.zoom_in();
+        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
+        assert_eq!(controller.zoom_scale(), 8);
+        controller.zoom_in();
+        controller.rebuild_viewport_graph().unwrap();
+        assert_eq!(controller.zoom_scale(), 4);
+        assert_eq!(
+            controller
+                .partition_controller
+                .node_sizer
+                .get_node_size(&node, VisualDetail::Full)
+                .0,
+            25
+        );
+        controller.zoom_in();
+        controller.zoom_in();
+        controller.rebuild_viewport_graph().unwrap();
+        assert_eq!(controller.zoom_scale(), 1);
+        assert_eq!(
+            controller
+                .partition_controller
+                .node_sizer
+                .get_node_size(&node, VisualDetail::Full)
+                .0,
+            100
+        );
+        assert_eq!(controller.cursor.viewport_pos(), cursor_viewport);
+        assert_eq!(controller.cursor.fractional_pos(), cursor_fraction);
     }
 
     #[test]
@@ -1154,6 +1354,36 @@ mod tests {
             world_buffer.get_char(WorldPos::ZERO),
             Some(ZERO_WIDTH_GLYPH)
         );
+    }
+
+    #[test]
+    fn test_scaled_full_renderer_draws_aggregate_cells_without_sequence_lookup() {
+        let context = setup_gen_on_disk();
+        let node = GraphNode {
+            node_id: HashId::convert_str("aggregate-renderer-node"),
+            sequence_start: 0,
+            sequence_end: 27,
+        };
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = Rect::new(0, 0, 3, 1);
+        viewport_state.camera_current = WorldPos::new(1, 0);
+        viewport_state.camera_target = viewport_state.camera_current;
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
+        renderer.set_zoom_scale(2);
+
+        renderer.render_node(
+            &mut world_buffer,
+            WorldRect::from_corners(WorldPos::new(0, 0), WorldPos::new(13, 0)),
+            &node,
+            VisualDetail::Full,
+        );
+
+        assert_eq!(world_buffer.get_char(WorldPos::new(0, 0)), Some('·'));
+        assert_eq!(world_buffer.get_char(WorldPos::new(1, 0)), Some('·'));
+        assert_eq!(world_buffer.get_char(WorldPos::new(2, 0)), Some('·'));
+        assert!(renderer.cache.is_empty(), "should not fetch sequence bases");
     }
 
     #[test]

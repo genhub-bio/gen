@@ -269,6 +269,7 @@ where
         // Render the graph using the renderer
         let theme = current_theme();
         let mut world_buffer = WorldBuffer::new(buf, &controller.viewport_state);
+        self.renderer.set_zoom_scale(controller.zoom_scale());
 
         // Extract data from controller and render directly via ViewportGraph
         let viewport_graph = controller.get_viewport_graph();
