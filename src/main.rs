@@ -1,5 +1,12 @@
 #![allow(warnings)]
-use std::{fmt::Debug, fs::File, io, io::BufReader, ops::Deref, path::PathBuf, str};
+use std::{
+    fmt::Debug,
+    fs::File,
+    io::{self, BufReader, IsTerminal},
+    ops::Deref,
+    path::PathBuf,
+    str,
+};
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
@@ -14,7 +21,7 @@ use r#gen::{
         remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
-    get_config_connection, get_connection_for_branch, get_raw_connection,
+    get_config_connection, get_connection_for_branch, get_raw_connection, get_time_elapsed_bar,
     graphs::graph_search::{GenGraphMatcher, SeedIndex},
     history::{ensure_clean_working_set, history_action_error, operations_history_entries},
     patch,
@@ -33,7 +40,10 @@ use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
 use gen_diff::{operations::collect_operation_diff, sample::build_sample_diff};
 use gen_models::{
-    annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+    annotations::{
+        AnnotationFileAddOptions, AnnotationFileChecksumOverrides, AnnotationFileProgressStage,
+        add_annotation, add_annotation_file_with_progress,
+    },
     block_group::BlockGroup,
     collection::Collection,
     db::{ConfigConnection, DbContext, GraphConnection},
@@ -717,15 +727,43 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             name,
             message,
         }) => {
-            let commit_hash = add_annotation_file(
-                &db_context,
-                &path,
-                format.as_deref(),
-                index.as_deref(),
-                name.as_deref(),
-                message.as_deref(),
-                AnnotationFileChecksumOverrides::default(),
-            )?;
+            let stderr_is_terminal = io::stderr().is_terminal();
+            let mut progress_bar = None;
+            let add_result = {
+                let mut on_progress = |stage: AnnotationFileProgressStage| {
+                    let message = match stage {
+                        AnnotationFileProgressStage::Sorting => "Sorting the annotation file",
+                        AnnotationFileProgressStage::Compressing => "Compressing the file",
+                        AnnotationFileProgressStage::BuildingIndex => "Building the index",
+                    };
+                    if stderr_is_terminal {
+                        let progress_bar = progress_bar.get_or_insert_with(get_time_elapsed_bar);
+                        if progress_bar.is_hidden() {
+                            eprintln!("{message}");
+                        } else {
+                            progress_bar.set_message(message);
+                        }
+                    } else {
+                        eprintln!("{message}");
+                    }
+                };
+                add_annotation_file_with_progress(
+                    &db_context,
+                    &path,
+                    format.as_deref(),
+                    index.as_deref(),
+                    name.as_deref(),
+                    message.as_deref(),
+                    AnnotationFileAddOptions {
+                        checksum_overrides: AnnotationFileChecksumOverrides::default(),
+                        progress: Some(&mut on_progress),
+                    },
+                )
+            };
+            if let Some(progress_bar) = progress_bar {
+                progress_bar.finish_and_clear();
+            }
+            let commit_hash = add_result?;
             println!("Annotation file added in operation {commit_hash}");
             Ok(())
         }

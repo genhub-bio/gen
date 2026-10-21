@@ -107,6 +107,25 @@ being downloaded in full when the server supports range requests. Otherwise,
 the file is streamed into the cache and reused locally. Run `gen cache-clear` to
 remove the cache. Local repository files and `.gen/assets` are not affected.
 
+# Annotation file import
+
+Adding a local GFF3 or BED file with `gen add-annotation-file` sorts it, builds its CSI coordinate
+index as the source is compressed, and records the attribute index used by viewer search. CSI
+supports large contigs beyond the TBI coordinate limit. The command reports sorting, compression,
+and attribute-index building while it works.
+
+# TUI annotation search
+
+In the full-screen graph viewer, press `g` and type part of an annotation name. Search includes
+file-based annotations that are active in the collection explorer. GFF3 files are searchable by
+`Name`, `name`, `gene`, `gene_name`, and `db_xref`; BED files are searchable by their name field.
+Matching ignores case and finds the typed text anywhere in those values. Use the arrow keys and Enter
+to select a result. Suggestions wait briefly after typing stops. Press Enter to reveal the selected
+region at base detail; regions wider than the viewer start at their leading bound so you can pan
+across them. Closing and reopening search retains the query, results, and selected result; editing
+or clearing the query updates the suggestions. Append a range such as `gene-a0001:3-5` to search
+within a file annotation's relative coordinates.
+
 # FASTA import
 
 Use `gen import fasta <path-or-uri>` to import a FASTA. BGZF-compressed inputs

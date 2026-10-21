@@ -115,6 +115,8 @@ pub enum AssetRole {
     Other(String),
 }
 
+pub(crate) const ANNOTATION_ATTRIBUTE_INDEX_ROLE: &str = "annotation-attribute-index";
+
 impl AssetRole {
     pub fn as_str(&self) -> &str {
         match self {
@@ -222,6 +224,7 @@ pub struct AnnotationFileAssets {
     pub log_id: HashId,
     pub annotation: AssetRef,
     pub index: Option<AssetRef>,
+    pub attribute_index: Option<AssetRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
@@ -692,7 +695,18 @@ impl Assets {
                     index_assets.name AS index_name, \
                     index_assets.created_on AS index_created_on, \
                     index_assets.upstream_asset_ref_id AS index_upstream_asset_ref_id, \
-                    index_assets.materialized_checksum AS index_materialized_checksum \
+                    index_assets.materialized_checksum AS index_materialized_checksum, \
+                    attribute_index_assets.id AS attribute_index_id, \
+                    attribute_index_assets.uri AS attribute_index_uri, \
+                    attribute_index_assets.file_type AS attribute_index_file_type, \
+                    attribute_index_assets.checksum AS attribute_index_checksum, \
+                    attribute_index_assets.size AS attribute_index_size, \
+                    attribute_index_assets.role AS attribute_index_role, \
+                    attribute_index_assets.logical_path AS attribute_index_logical_path, \
+                    attribute_index_assets.name AS attribute_index_name, \
+                    attribute_index_assets.created_on AS attribute_index_created_on, \
+                    attribute_index_assets.upstream_asset_ref_id AS attribute_index_upstream_asset_ref_id, \
+                    attribute_index_assets.materialized_checksum AS attribute_index_materialized_checksum \
              FROM {operation_logs_table} operation_logs \
              JOIN {operation_assets_table} annotation_operation_assets \
                ON annotation_operation_assets.log_id = operation_logs.id \
@@ -705,6 +719,12 @@ impl Assets {
              LEFT JOIN {asset_refs_table} index_assets \
                ON index_assets.id = index_operation_assets.asset_ref_id \
               AND index_assets.upstream_asset_ref_id = annotation_assets.id \
+             LEFT JOIN {operation_assets_table} attribute_index_operation_assets \
+               ON attribute_index_operation_assets.log_id = operation_logs.id \
+              AND attribute_index_operation_assets.role = :attribute_index_role \
+             LEFT JOIN {asset_refs_table} attribute_index_assets \
+               ON attribute_index_assets.id = attribute_index_operation_assets.asset_ref_id \
+              AND attribute_index_assets.upstream_asset_ref_id = annotation_assets.id \
              WHERE operation_logs.operation_kind = :operation_kind \
              ORDER BY operation_logs.created_on, annotation_assets.created_on, \
                       annotation_assets.name"
@@ -712,10 +732,12 @@ impl Assets {
         let operation_kind = OperationKind::AnnotationFile;
         let annotation_role = AssetRole::Annotation;
         let index_role = AssetRole::AnnotationIndex;
+        let attribute_index_role = AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string());
         let mut query_params: Vec<(&str, &dyn ToSql)> = vec![
             (":operation_kind", &operation_kind),
             (":annotation_role", &annotation_role),
             (":index_role", &index_role),
+            (":attribute_index_role", &attribute_index_role),
         ];
         if let Some(history_ref) = history_ref.as_ref() {
             query_params.push((":history_ref", history_ref));
@@ -738,6 +760,22 @@ impl Assets {
                 }),
                 None => None,
             };
+            let attribute_index = match row.get::<_, Option<HashId>>("attribute_index_id")? {
+                Some(id) => Some(AssetRef {
+                    id,
+                    uri: row.get("attribute_index_uri")?,
+                    file_type: row.get("attribute_index_file_type")?,
+                    checksum: row.get("attribute_index_checksum")?,
+                    size: row.get("attribute_index_size")?,
+                    role: row.get("attribute_index_role")?,
+                    logical_path: row.get("attribute_index_logical_path")?,
+                    name: row.get("attribute_index_name")?,
+                    created_on: row.get("attribute_index_created_on")?,
+                    upstream_asset_ref_id: row.get("attribute_index_upstream_asset_ref_id")?,
+                    materialized_checksum: row.get("attribute_index_materialized_checksum")?,
+                }),
+                None => None,
+            };
             Ok(AnnotationFileAssets {
                 log_id: row.get("log_id")?,
                 annotation: AssetRef {
@@ -754,6 +792,7 @@ impl Assets {
                     materialized_checksum: row.get("annotation_materialized_checksum")?,
                 },
                 index,
+                attribute_index,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1299,7 +1338,7 @@ impl LocalAssetUri {
             .is_some_and(|extension| {
                 matches!(
                     extension.to_ascii_lowercase().as_str(),
-                    "fai" | "gzi" | "tbi" | "csi" | "bai"
+                    "fai" | "gzi" | "tbi" | "csi" | "bai" | "gai"
                 )
             })
     }
@@ -2071,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_annotation_files_pairs_annotation_and_index_in_one_query() {
+    fn test_get_annotation_files_pairs_all_annotation_indexes_in_one_query() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let log = OperationLog {
@@ -2106,9 +2145,26 @@ mod tests {
             upstream_asset_ref_id: Some(annotation.id),
             materialized_checksum: None,
         };
+        let attribute_index = AssetRef {
+            id: HashId::convert_str("annotation-attribute-index-asset"),
+            uri: "file://annotation.gff.gai".to_string(),
+            file_type: "none".to_string(),
+            checksum: Some(Sha256Hash::convert_str(
+                "annotation-attribute-index-checksum",
+            )),
+            size: None,
+            role: AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string()),
+            logical_path: Some("annotation.gff.gai".to_string()),
+            name: Some("genes".to_string()),
+            created_on: 1,
+            upstream_asset_ref_id: Some(annotation.id),
+            materialized_checksum: None,
+        };
         OperationLog::create(conn, &log).expect("should insert annotation log");
         AssetRef::create(conn, &annotation).expect("should insert annotation asset");
         AssetRef::create(conn, &index).expect("should insert annotation index asset");
+        AssetRef::create(conn, &attribute_index)
+            .expect("should insert annotation attribute index asset");
         OperationAsset::create(
             conn,
             &OperationAsset {
@@ -2127,12 +2183,22 @@ mod tests {
             },
         )
         .expect("should associate annotation index asset");
+        OperationAsset::create(
+            conn,
+            &OperationAsset {
+                log_id: log.id,
+                asset_ref_id: attribute_index.id,
+                role: AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string()),
+            },
+        )
+        .expect("should associate annotation attribute index asset");
         let commit = commit_all(conn, "add annotation assets").expect("should commit assets");
 
         let expected = vec![AnnotationFileAssets {
             log_id: log.id,
             annotation,
             index: Some(index),
+            attribute_index: Some(attribute_index),
         }];
         assert_eq!(
             Assets::get_annotation_files(conn, None).expect("should query current annotations"),

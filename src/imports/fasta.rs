@@ -18,7 +18,7 @@ use gen_models::{
     errors::{CollectionError, SampleError},
     file_types::FileTypes,
     node::Node,
-    operations::{FileAddition, OperationFile, OperationInfo, OperationSummary},
+    operations::{FileAddition, FileSource, OperationFile, OperationInfo, OperationSummary},
     path::Path,
     sample::Sample,
     sequence::Sequence,
@@ -97,13 +97,16 @@ pub fn import_fasta(
     let sequence_asset = if indexed_remote_parent {
         parent_operation_file.prepare_asset_ref(workspace, created_on)?
     } else {
-        let file_addition = FileAddition::prepare_from_reader(
+        let file_addition = FileAddition::prepare_from_source(
             workspace,
             fasta,
             FileTypes::Fasta,
-            replayed_reader,
-            compression_type,
-            None,
+            FileSource::Reader {
+                reader: Box::new(replayed_reader),
+                compression: compression_type,
+                checksum_override: None,
+            },
+            false,
         )?;
         let logical_path = if is_local {
             Some(OperationFile::storage_file_path(
