@@ -33,8 +33,8 @@ use crate::{
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
-            GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
-            draw_annotation_labels, reapply_overlays,
+            GenGraphNodeSizer, OverlayRenderCache, create_gen_graph_controller,
+            create_gen_graph_widget, draw_annotation_labels_cached, reapply_overlays_cached,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
@@ -500,6 +500,7 @@ pub fn view_block_group(
     // loaded groups, keyed by track (see `graph_overlay::file_track_key`/`group_track_key`).
     let mut overlays: Vec<GraphOverlay> = Vec::new();
     let mut annotation_colors = AnnotationColorCache::new();
+    let mut overlay_render_cache = OverlayRenderCache::default();
     let mut annotation_file_index_available: std::collections::HashMap<HashId, bool> =
         std::collections::HashMap::new();
     let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
@@ -1083,6 +1084,7 @@ pub fn view_block_group(
             current_block_group = None;
             block_graph = get_empty_graph();
             graph_controller = create_gen_graph_controller(block_graph.clone());
+            overlay_render_cache.invalidate();
             explorer.refresh(
                 conn,
                 config_conn,
@@ -1525,10 +1527,13 @@ pub fn view_block_group(
             } else {
                 graph_controller.viewport_state.focus();
 
-                // Re-register overlay highlights before rendering. This reruns every frame
-                // because `overlays` can change between frames (file/group toggles,
-                // scroll-triggered reloads).
-                reapply_overlays(&mut graph_controller, &mut overlays, &mut annotation_colors);
+                // Refresh highlights and prepared labels when annotations or detail change.
+                reapply_overlays_cached(
+                    &mut graph_controller,
+                    &mut overlays,
+                    &mut annotation_colors,
+                    &mut overlay_render_cache,
+                );
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn, workspace)
@@ -1539,11 +1544,12 @@ pub fn view_block_group(
 
                 // Draw floating labels after the graph, then a single hint if any were hidden.
                 let detail_level = graph_controller.get_detail_level();
-                let any_hidden = draw_annotation_labels(
+                let any_hidden = draw_annotation_labels_cached(
                     frame.buffer_mut(),
                     canvas_area,
                     &graph_controller,
                     &overlays,
+                    &mut overlay_render_cache,
                 );
                 if any_hidden {
                     let note = if detail_level == VisualDetail::Full {
@@ -1740,6 +1746,7 @@ pub fn view_block_group(
             block_graph = BlockGroup::get_graph(conn, workspace, new_block_group_id, history_ref)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
+            overlay_render_cache.invalidate();
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
