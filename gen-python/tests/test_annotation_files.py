@@ -12,7 +12,7 @@ try:
 except ImportError:
     GraphWidget = None
 
-LABELLED_FEATURE = "gene-a0001"
+LABELLED_FEATURE = "foobar"
 # Fills its whole node, so the widget labels it at the default detail level.
 DRAWN_FEATURE = "m123_region"
 
