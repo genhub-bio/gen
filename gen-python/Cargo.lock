@@ -761,6 +761,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1203,6 +1222,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ext-sort"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05e74d1b500434b40de2a046ab65f27528040d272241da81ba9c5bf143d703fb"
+dependencies = [
+ "log",
+ "rayon",
+ "rmp-serde",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1261,9 +1293,9 @@ checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -1313,6 +1345,12 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
+name = "fst"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
 
 [[package]]
 name = "ftree"
@@ -1432,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "gen"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1455,6 +1493,7 @@ dependencies = [
  "gen-graph",
  "gen-models",
  "gen-tui",
+ "genomic-attribute-index",
  "getrandom 0.3.4",
  "html-escape",
  "httparse",
@@ -1493,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "gen-annotations"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1506,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "gen-capnp-schemas"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "capnp",
  "capnpc",
@@ -1514,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "gen-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "capnp",
  "gen-capnp-schemas",
@@ -1534,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "gen-diff"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1548,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "gen-graph"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "gen-core",
  "interavl",
@@ -1560,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "cached",
@@ -1572,6 +1611,7 @@ dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models-macros",
+ "genomic-attribute-index",
  "include_dir",
  "indexmap",
  "intervaltree",
@@ -1594,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models-macros"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1603,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "gen-python"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "gen",
@@ -1627,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "gen-sugiyama"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "log",
  "petgraph",
@@ -1635,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "gen-tui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "crossterm",
  "ftree",
@@ -1660,6 +1700,29 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "genomic-attribute-index"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2b93ce7c2436982f02d37955f3b8ad7a0f3c11d14982c65b2fde272b9195f44"
+dependencies = [
+ "clap",
+ "crc32fast",
+ "ext-sort",
+ "flate2",
+ "fst",
+ "memmap2",
+ "natord",
+ "noodles",
+ "rayon",
+ "regex",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "zstd",
 ]
 
 [[package]]
@@ -2674,6 +2737,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memmem"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2718,9 +2790,9 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
-version = "0.8.9"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
@@ -2737,6 +2809,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "natord"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "308d96db8debc727c3fd9744aac51751243420e46edf401010908da7f8d5e57c"
 
 [[package]]
 name = "ndarray"
@@ -4163,6 +4241,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4429,6 +4527,25 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+dependencies = [
+ "rmp",
+ "serde",
 ]
 
 [[package]]
