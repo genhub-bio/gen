@@ -724,10 +724,10 @@ class Repository:
         email: typing.Optional[builtins.str] = None,
     ) -> Repository:
         r"""
-        Open the workspace at `path`, creating it if it does not exist. `path` may be the workspace
-        or its `.gen` directory; when omitted the workspace is discovered from the current
-        directory. `committer` and `email` become the identity recorded on operations made through
-        this object.
+        Open the project directory at `path`, creating it if needed. If it has no `.gen`
+        directory, a new repository is initialized there. When `path` is omitted, the current
+        working directory is used. `committer` and `email` become the identity recorded on
+        operations made through this object.
         """
     def get_sequence_graph(self, id: HashId | str) -> SequenceGraph:
         r"""
