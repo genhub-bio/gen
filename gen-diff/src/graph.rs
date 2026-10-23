@@ -1019,6 +1019,16 @@ pub(crate) fn build_diff_input_graph(
         .iter()
         .map(|node| ((node.node_id, node.sequence_end), *node))
         .collect::<HashMap<_, _>>();
+    let spans_by_start = continuation_spans
+        .iter()
+        .map(|span| ((span.node_id, span.sequence_start), *span))
+        .collect::<HashMap<_, _>>();
+    let spans_by_end = continuation_spans
+        .iter()
+        .map(|span| ((span.node_id, span.sequence_end), *span))
+        .collect::<HashMap<_, _>>();
+    let mut forward_spans = HashSet::new();
+    let mut reverse_spans = HashSet::new();
 
     for augmented_edge in input_edges {
         // Edit-site marker edges preserve coordinates for later graph
@@ -1027,18 +1037,40 @@ pub(crate) fn build_diff_input_graph(
         if augmented_edge.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
             continue;
         }
-        let source_node = blocks_by_end
-            .get(&(
-                augmented_edge.edge.source_node_id,
-                augmented_edge.edge.source_coordinate,
-            ))
-            .copied();
-        let target_node = blocks_by_start
-            .get(&(
-                augmented_edge.edge.target_node_id,
-                augmented_edge.edge.target_coordinate,
-            ))
-            .copied();
+        let edge = &augmented_edge.edge;
+        let source_key = (edge.source_node_id, edge.source_coordinate);
+        let target_key = (edge.target_node_id, edge.target_coordinate);
+        let source_span = spans_by_end.get(&source_key);
+        let target_span = spans_by_start.get(&target_key);
+        for (span, strand) in [
+            (source_span, edge.source_strand),
+            (target_span, edge.target_strand),
+        ] {
+            if let Some(span) = span {
+                if strand == Strand::Reverse {
+                    reverse_spans.insert(*span);
+                } else {
+                    forward_spans.insert(*span);
+                }
+            }
+        }
+        // Stored path coordinates bound the forward sequence slice even when
+        // it is traversed in reverse. After splitting, attach reverse entry
+        // and exit edges to the opposite ends of that original slice:
+        //   start -> A[0..8]- -> end
+        //   start -> A[3..8]- -> A[0..3]- -> end
+        let source_node = match (edge.source_strand, source_span) {
+            (Strand::Reverse, Some(span)) => {
+                blocks_by_start.get(&(span.node_id, span.sequence_start))
+            }
+            _ => blocks_by_end.get(&source_key),
+        }
+        .copied();
+        let target_node = match (edge.target_strand, target_span) {
+            (Strand::Reverse, Some(span)) => blocks_by_end.get(&(span.node_id, span.sequence_end)),
+            _ => blocks_by_start.get(&target_key),
+        }
+        .copied();
         if let (Some(source_node), Some(target_node)) = (source_node, target_node) {
             let graph_edge = GraphEdge {
                 edge_id: augmented_edge.edge.id,
@@ -1070,6 +1102,8 @@ pub(crate) fn build_diff_input_graph(
     add_continuation_edges(
         &input_nodes,
         continuation_spans,
+        &forward_spans,
+        &reverse_spans,
         &mut graph,
         &mut edge_metadata,
     );
@@ -1115,6 +1149,8 @@ pub(crate) fn path_end_graph_node() -> GraphNode {
 fn add_continuation_edges(
     input_nodes: &HashSet<GraphNode>,
     continuation_spans: &HashSet<GraphNode>,
+    forward_spans: &HashSet<GraphNode>,
+    reverse_spans: &HashSet<GraphNode>,
     graph: &mut GenGraph,
     edge_metadata: &mut HashMap<GraphEdgeKey, DiffInputEdgeMetadata>,
 ) {
@@ -1146,42 +1182,59 @@ fn add_continuation_edges(
             })
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| (node.sequence_start, node.sequence_end));
-        for window in nodes.windows(2) {
-            let source_node = window[0];
-            let target_node = window[1];
-            if source_node.sequence_end != target_node.sequence_start {
+        // A span used in both orientations needs both connections. Spans with
+        // no strand-bearing boundary retain the ordinary forward continuation.
+        let directions = [
+            (
+                Strand::Forward,
+                forward_spans.contains(span) || !reverse_spans.contains(span),
+            ),
+            (Strand::Reverse, reverse_spans.contains(span)),
+        ];
+        for (strand, enabled) in directions {
+            if !enabled {
                 continue;
             }
-            let synthetic_edge = GraphEdge {
-                edge_id: HashId::convert_str(&format!(
-                    "diff-continuation:{}:{}:{}:{}:{}",
-                    span.node_id,
-                    source_node.sequence_start,
-                    source_node.sequence_end,
-                    target_node.sequence_start,
-                    target_node.sequence_end
-                )),
-                source_strand: Strand::Forward,
-                target_strand: Strand::Forward,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                created_on: 0,
-            };
-            if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
-                if existing_edges.contains(&synthetic_edge) {
+            for window in nodes.windows(2) {
+                if window[0].sequence_end != window[1].sequence_start {
                     continue;
                 }
-                existing_edges.push(synthetic_edge);
-            } else {
-                graph.add_edge(source_node, target_node, vec![synthetic_edge]);
+                let (source_node, target_node) = if strand == Strand::Reverse {
+                    (window[1], window[0])
+                } else {
+                    (window[0], window[1])
+                };
+                let synthetic_edge = GraphEdge {
+                    edge_id: HashId::convert_str(&format!(
+                        "diff-continuation:{}:{}:{}:{}:{}",
+                        span.node_id,
+                        source_node.sequence_start,
+                        source_node.sequence_end,
+                        target_node.sequence_start,
+                        target_node.sequence_end
+                    )),
+                    source_strand: strand,
+                    target_strand: strand,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    created_on: 0,
+                };
+                if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
+                    if existing_edges.contains(&synthetic_edge) {
+                        continue;
+                    }
+                    existing_edges.push(synthetic_edge);
+                } else {
+                    graph.add_edge(source_node, target_node, vec![synthetic_edge]);
+                }
+                edge_metadata.insert(
+                    GraphEdgeKey::new(source_node, target_node, synthetic_edge),
+                    DiffInputEdgeMetadata {
+                        change: DiffChange::unchanged(),
+                        origin: EdgeOrigin::Continuation,
+                    },
+                );
             }
-            edge_metadata.insert(
-                GraphEdgeKey::new(source_node, target_node, synthetic_edge),
-                DiffInputEdgeMetadata {
-                    change: DiffChange::unchanged(),
-                    origin: EdgeOrigin::Continuation,
-                },
-            );
         }
     }
 }
@@ -1346,6 +1399,95 @@ mod tests {
             phased: 0,
             created_on: 0,
         }
+    }
+
+    #[test]
+    fn test_reverse_span_reconnects_shared_slices_in_traversal_order() {
+        // Base traverses A in reverse. A boundary from the other input splits it:
+        //   before: start -> A[0..8]- -> end
+        //   after:  start -> A[3..8]- -> A[0..3]- -> end
+        // The new connection is neutral; splitting must not reverse the sequence.
+        let node_id = HashId::convert_str("reverse-span");
+        let low = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let high = GraphNode {
+            node_id,
+            sequence_start: 3,
+            sequence_end: 8,
+        };
+        let span = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 8,
+        };
+        let mut entry = topology_test_edge(PATH_START_NODE_ID, node_id, 0);
+        entry.edge.target_strand = Strand::Reverse;
+        let mut exit = topology_test_edge(node_id, PATH_END_NODE_ID, 8);
+        exit.edge.source_strand = Strand::Reverse;
+        let input = build_diff_input_graph(
+            HashSet::from([low, high]),
+            &HashSet::from([span]),
+            &[entry.clone(), exit.clone()],
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            input
+                .graph
+                .edge_weight(path_start_graph_node(), high)
+                .is_some()
+        );
+        assert!(
+            input
+                .graph
+                .edge_weight(low, path_end_graph_node())
+                .is_some()
+        );
+        assert!(input.graph.edge_weight(low, high).is_none());
+        let continuation = input
+            .graph
+            .edge_weight(high, low)
+            .expect("should reconnect reverse slices");
+        assert_eq!(continuation.len(), 1);
+        assert_eq!(continuation[0].source_strand, Strand::Reverse);
+        assert_eq!(continuation[0].target_strand, Strand::Reverse);
+        let metadata = &input.edge_metadata[&GraphEdgeKey::new(high, low, continuation[0])];
+        assert_eq!(metadata.origin, EdgeOrigin::Continuation);
+        assert_eq!(metadata.change, DiffChange::unchanged());
+        assert_eq!(input.graph.edge_count(), 3);
+
+        // If this input also traverses A forward, retain both walks:
+        //   start -> A[0..3]+ -> A[3..8]+ -> end
+        //   start -> A[3..8]- -> A[0..3]- -> end
+        let input = build_diff_input_graph(
+            HashSet::from([low, high]),
+            &HashSet::from([span]),
+            &[
+                entry,
+                exit,
+                topology_test_edge(PATH_START_NODE_ID, node_id, 0),
+                topology_test_edge(node_id, PATH_END_NODE_ID, 8),
+            ],
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        for (source, target, strand) in [(low, high, Strand::Forward), (high, low, Strand::Reverse)]
+        {
+            let edges = input
+                .graph
+                .edge_weight(source, target)
+                .expect("should retain both traversals");
+            assert_eq!(edges[0].source_strand, strand);
+            assert_eq!(edges[0].target_strand, strand);
+            assert_eq!(
+                input.edge_metadata[&GraphEdgeKey::new(source, target, edges[0])].origin,
+                EdgeOrigin::Continuation
+            );
+        }
+        assert_eq!(input.graph.edge_count(), 6);
     }
 
     #[test]

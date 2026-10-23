@@ -42,13 +42,11 @@ pub fn build_sample_diff(
         BlockGroup::get_by_name(conn, collection_name, query_name, graph_name, history_ref)?;
     let base_block_group =
         BlockGroup::get_by_name(conn, collection_name, base_name, graph_name, history_ref)?;
-    let query_edges =
-        BlockGroupEdge::edges_for_block_group(conn, &query_block_group.id, history_ref);
-    let base_edges = BlockGroupEdge::edges_for_block_group(conn, &base_block_group.id, history_ref);
-    let graph = build_diff_graph_from_edges(
-        EdgeDiffInput::unattributed(&base_edges),
-        EdgeDiffInput::unattributed(&query_edges),
-        None,
+    let graph = build_sample_block_group_diff(
+        conn,
+        Some(&base_block_group),
+        Some(&query_block_group),
+        history_ref,
     );
 
     Ok(SampleDiff {
@@ -56,4 +54,29 @@ pub fn build_sample_diff(
         base_block_group,
         graph,
     })
+}
+
+/// Builds the normalized graph diff for optionally matching sample block groups.
+///
+/// GFA export uses this lower-level boundary while iterating the union of a
+/// pair of samples' block-group names. A missing block group is deliberately
+/// represented by an empty edge set, so its counterpart's real graph elements
+/// remain visible as additions or removals instead of being omitted.
+pub fn build_sample_block_group_diff(
+    conn: &GraphConnection,
+    base_block_group: Option<&BlockGroup>,
+    query_block_group: Option<&BlockGroup>,
+    history_ref: Option<&str>,
+) -> DiffGenGraph {
+    let base_edges = base_block_group.map_or_else(Vec::new, |block_group| {
+        BlockGroupEdge::edges_for_block_group(conn, &block_group.id, history_ref)
+    });
+    let query_edges = query_block_group.map_or_else(Vec::new, |block_group| {
+        BlockGroupEdge::edges_for_block_group(conn, &block_group.id, history_ref)
+    });
+    build_diff_graph_from_edges(
+        EdgeDiffInput::unattributed(&base_edges),
+        EdgeDiffInput::unattributed(&query_edges),
+        None,
+    )
 }
