@@ -167,10 +167,11 @@ preserve the original sample before making ordinary in-place edits to the copy.
 
 ## 5. Annotations and translation
 
-`repo.import_annotations(filename, format=None, index=None, name=None, message=None)` records an
-annotation file. The format can be inferred from the filename; supported sources include GFF,
-BED, and GenBank, with a neighboring tabix index detected when available. Imported features appear
-in `graph.annotations` and widget tracks. `repo.import_genbank()` also brings in GenBank features.
+`repo.import_annotations(filename, format=None, index=None, name=None, message=None, sample=None)`
+imports GFF features into database annotations on the explicitly supplied `sample` (a sample name
+or `Sample`). Descendant samples inherit these annotations through lineage. BED and GenBank sources
+continue to be recorded as annotation assets. `repo.import_genbank()` also brings in GenBank
+features.
 
 `graph.add_annotation(target, name, track="default")` persists an annotation over a region string,
 locus, or existing annotation. `Annotation` exposes `id`, `name`, `track`, `locus`, and optional

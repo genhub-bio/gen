@@ -15,7 +15,7 @@ use gen_models::{
     block_group::BlockGroup, db::GraphConnection, reference_alias::ReferenceAlias,
     region::ResolvedGenRegion, sample::Sample,
 };
-pub use gff::translate_gff_annotation;
+pub use gff::{import_gff_annotations, translate_gff_annotation};
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
@@ -50,6 +50,8 @@ pub enum FileAnnotationError {
     Translation(String),
     #[error("annotation has no translated records")]
     Empty,
+    #[error("failed to persist translated annotation: {0}")]
+    Persistence(String),
 }
 
 impl<'a> AnnotationTranslationContext<'a> {

@@ -34,6 +34,7 @@ use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
+    file_types::FileTypes,
     history::dolt::active_branch,
 };
 use gen_tui::{
@@ -920,6 +921,9 @@ impl GraphPage {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let mut names = annotation_group_names(&conn, &block_group, None);
         for entry in load_annotation_file_entries(&conn, None) {
+            if entry.file_addition.file_type == FileTypes::Gff3 {
+                continue;
+            }
             if !names.contains(&entry.display_name) {
                 names.push(entry.display_name);
             }
@@ -960,7 +964,10 @@ impl GraphPage {
 impl GraphPage {
     /// Read the repository's annotation files, keeping the display state of ones already known.
     fn sync_annotation_files(&mut self, conn: &GraphConnection) {
-        let entries = load_annotation_file_entries(conn, None);
+        let entries = load_annotation_file_entries(conn, None)
+            .into_iter()
+            .filter(|entry| entry.file_addition.file_type != FileTypes::Gff3)
+            .collect::<Vec<_>>();
         let mut previous = std::mem::take(&mut self.annotation_files);
         self.annotation_files = entries
             .into_iter()

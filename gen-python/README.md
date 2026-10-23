@@ -240,30 +240,25 @@ sequence.add_annotation(inserted, "mutation")
 
 ## Annotation files
 
-Add a GFF3, BED, or GenBank file to repository history with
-`Repository.import_annotations()`. The file is
-available on branches containing that operation; views match its sequence names
-to block groups when loading it. An optional tabix index, display name, and
-operation message can be supplied:
+Import GFF3 features into database annotation groups, or record BED and GenBank
+files as repository assets, with `Repository.import_annotations()`:
 
 ```python
 commit_hash = repo.import_annotations(
-    "features.gff3", name="genes", message="Add genes"
+    "features.gff3", sample=sample, name="genes", message="Add genes"
 )
 ```
 
-The format is inferred from the extension, including `.gz` and `.bgz` paths;
-use `format="gff3"`, `format="bed"`, or `format="genbank"` to override it.
-A neighboring `.tbi` index is discovered automatically, or `index=` can specify
-another path. This records the file as an asset; it does not create database
-annotation rows.
+GFF3 imports require `sample=` (a sample name or `Sample`). Records are translated
+against that sample's sequence graphs and persisted as database annotations in
+the requested track. Descendant samples inherit them through sample lineage.
+GFF3 `.gz` and `.bgz` inputs are supported. BED and GenBank continue to be
+recorded as assets; their format is inferred from the extension or can be set
+with `format=`.
 
-Imported files behave like database annotation groups once recorded. A plotted
-widget draws every file's features and lists the file under `widget.tracks`, so
-`show_track(name)` and `hide_track(name)` work with the file's `name`. Indexed
-files are read for the part of the graph in view and reloaded as you scroll.
-`SequenceGraph.annotations` includes the features of every imported file, read in
-full, with the file's name as their `group`.
+Persisted GFF3 annotations are available through `SequenceGraph.annotations` and
+load as database tracks in plots. BED and GenBank assets remain available through
+the existing file-backed annotation behavior.
 
 ## Enumerating sequences
 

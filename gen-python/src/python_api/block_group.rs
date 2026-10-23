@@ -30,6 +30,7 @@ use gen_models::{
     annotations::{Annotation, AnnotationGroupSample},
     block_group::BlockGroup,
     db::DbContext,
+    file_types::FileTypes,
     locus::GraphLocus,
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
     sample::Sample,
@@ -177,6 +178,9 @@ impl PySequenceGraph {
             .unwrap_or(start);
         let mut annotations = Vec::new();
         for entry in load_annotation_file_entries(conn, None) {
+            if entry.file_addition.file_type == FileTypes::Gff3 {
+                continue;
+            }
             let Ok(loaded) = load_annotation_file_track(&AnnotationFileTrackRequest {
                 conn,
                 history_ref: None,
@@ -738,9 +742,7 @@ impl PySequenceGraph {
 
     /// All annotations associated with this sequence graph.
     ///
-    /// Annotations imported from files (``Repository.import_annotations()``) are read in full
-    /// and listed after the database ones, so they can be searched by name alike. Their
-    /// ``track`` is the file's display name.
+    /// Database annotations are listed before features loaded from non-GFF annotation assets.
     ///
     /// Returns
     /// list[Annotation]

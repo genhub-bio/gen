@@ -571,16 +571,15 @@ class Repository:
         index: typing.Optional[builtins.str] = None,
         name: typing.Optional[builtins.str] = None,
         message: typing.Optional[builtins.str] = None,
+        sample: str | Sample | None = None,
     ) -> HashId:
         r"""
-        Record an annotation file in the repository and return the `HashId` of the operation that
-        recorded it.
+        Import annotation features and return the `HashId` of the operation that recorded them.
 
-        The format is inferred from the filename unless provided. A neighboring tabix index is
-        discovered unless an index path is provided. The file's features then appear in
-        `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-        display and track name; `message` is the operation's commit message. `filename` and `index`
-        are path strings; a relative path is resolved against the current working directory.
+        GFF features are translated into database annotations on `sample`, which must be a sample
+        name or `Sample`, and descendants inherit them through sample lineage. Other supported
+        formats are recorded as repository annotation assets. `name` sets the annotation group or
+        asset display name; `message` is the operation message.
         """
     def import_fasta(
         self,
@@ -1128,9 +1127,7 @@ class SequenceGraph:
         r"""
         All annotations associated with this sequence graph.
 
-        Annotations imported from files (``Repository.import_annotations()``) are read in full
-        and listed after the database ones, so they can be searched by name alike. Their
-        ``track`` is the file's display name.
+        Database annotations are listed before features loaded from non-GFF annotation assets.
 
         Returns
         list[Annotation]

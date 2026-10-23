@@ -12,13 +12,74 @@ use std::{
 use gen_core::{HashId, Strand};
 use gen_models::{
     ForeignKeyCache,
-    accession::Accession,
-    annotations::{Annotation, AnnotationExtra, GffAttribute, GffExtra},
+    accession::{Accession, AccessionSpan, NewAccession},
+    annotations::{
+        Annotation, AnnotationExtra, AnnotationGroupSample, GffAttribute, GffExtra, NewAnnotation,
+    },
     interval_tree::IntervalTreeSource as _,
 };
 use noodles::gff;
 
 use super::{AnnotationTranslationContext, FileAnnotationError};
+
+/// Imports translated GFF features as database annotations for a selected sample.
+pub fn import_gff_annotations<R: Read>(
+    context: &mut AnnotationTranslationContext<'_>,
+    reader: R,
+    group: &str,
+    sample_name: &str,
+) -> Result<(), FileAnnotationError> {
+    let translated = translate_gff_annotation(context, reader)
+        .filter_map(|result| match result {
+            Ok(annotation) => Some(Ok(annotation)),
+            Err(FileAnnotationError::Empty) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut persisted_annotations = Vec::new();
+    for annotation in translated {
+        let interval_tree = annotation
+            .intervaltree(context.conn)
+            .map_err(|error| FileAnnotationError::Persistence(error.to_string()))?;
+        let spans = interval_tree
+            .iter()
+            .map(|entry| AccessionSpan {
+                node_id: entry.value.node_id,
+                range: gen_core::range::Range {
+                    start: entry.value.sequence_start,
+                    end: entry.value.sequence_end,
+                },
+                strand: entry.value.strand,
+            })
+            .collect();
+        let accession = Accession::get_or_create(
+            context.conn,
+            &NewAccession {
+                name: annotation.id.to_string(),
+                block_group_id: annotation
+                    .get_accession(context.conn)
+                    .map_err(|error| FileAnnotationError::Persistence(error.to_string()))?
+                    .block_group_id,
+                parent_accession_id: None,
+                spans,
+            },
+        )
+        .map_err(|error| FileAnnotationError::Persistence(error.to_string()))?;
+        persisted_annotations.push((annotation.name, accession.id, annotation.extra));
+    }
+    let new_annotations = persisted_annotations
+        .iter()
+        .map(|(name, accession_id, extra)| NewAnnotation {
+            name,
+            accession_id: *accession_id,
+            extra: extra.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    Annotation::bulk_create(context.conn, group, &new_annotations)
+        .map_err(|error| FileAnnotationError::Persistence(error.to_string()))?;
+    AnnotationGroupSample::create(context.conn, group, sample_name)
+        .map_err(|error| FileAnnotationError::Persistence(error.to_string()))
+}
 
 /// Lazily translates each GFF record into a graph-resolved annotation.
 ///

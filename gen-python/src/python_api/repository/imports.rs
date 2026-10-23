@@ -1,5 +1,11 @@
-use std::{path::PathBuf, slice::from_ref};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::PathBuf,
+    slice::from_ref,
+};
 
+use flate2::read::GzDecoder;
 use r#gen::{
     fasta::FastaError,
     graphs::combinatorial_library::parse_library,
@@ -11,6 +17,7 @@ use r#gen::{
         sequences::import_sequences,
     },
 };
+use gen_annotations::{AnnotationTranslationContext, import_gff_annotations};
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
@@ -19,6 +26,8 @@ use gen_models::{
     db::GraphConnection,
     edge::Edge,
     errors::OperationError,
+    file_types::FileTypes,
+    operations::{OperationInfo, OperationSummary, commit_operation_summary},
     path::Path,
     sample::{NewSample, Sample},
 };
@@ -215,15 +224,13 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Record an annotation file in the repository and return the `HashId` of the operation that
-    /// recorded it.
+    /// Import annotation features and return the `HashId` of the operation that recorded them.
     ///
-    /// The format is inferred from the filename unless provided. A neighboring tabix index is
-    /// discovered unless an index path is provided. The file's features then appear in
-    /// `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-    /// display and track name; `message` is the operation's commit message. `filename` and `index`
-    /// are path strings; a relative path is resolved against the current working directory.
-    #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
+    /// GFF features are translated into database annotations on `sample`, which must be a sample
+    /// name or `Sample`, and descendants inherit them through sample lineage. Other supported
+    /// formats are recorded as repository annotation assets. `name` sets the annotation group or
+    /// asset display name; `message` is the operation message.
+    #[pyo3(signature = (filename, format=None, index=None, name=None, message=None, sample=None))]
     fn import_annotations(
         &self,
         filename: &str,
@@ -231,9 +238,76 @@ impl PyRepository {
         index: Option<&str>,
         name: Option<&str>,
         message: Option<&str>,
+        #[gen_stub(override_type(type_repr = "str | Sample | None", imports = ()))] sample: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<PyHashId> {
         let filename = absolute_path_string(filename)?;
         let index = index.map(absolute_path_string).transpose()?;
+        if format
+            .map(FileTypes::infer_from_extension)
+            .unwrap_or_else(|| FileTypes::infer_from_path(&filename))
+            == FileTypes::Gff3
+        {
+            let sample = sample.ok_or_else(|| PyValueError::new_err(
+                "sample is required when importing GFF annotations; pass a sample name or Sample",
+            ))?;
+            let (sample_name, sample_collection) = sample_reference(sample)?;
+            let collection_name =
+                sample_collection.unwrap_or_else(|| self.get_default_collection());
+            let group = name.map(str::to_string).unwrap_or_else(|| {
+                PathBuf::from(&filename)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "gff".to_string())
+            });
+            let _transaction = self
+                .context
+                .graph()
+                .conn()
+                .unchecked_transaction()
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let conn = self.context.graph().conn();
+            let mut translation_context = AnnotationTranslationContext::new(
+                conn,
+                self.context.workspace(),
+                &collection_name,
+                &sample_name,
+                None,
+            )
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            if Sample::get_block_groups(conn, &collection_name, &sample_name, None).is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "sample '{sample_name}' in collection '{collection_name}' has no sequence graphs for GFF annotation import"
+                )));
+            }
+            let file = File::open(&filename)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let reader: Box<dyn Read> = if filename.ends_with(".gz") || filename.ends_with(".bgz") {
+                Box::new(GzDecoder::new(file))
+            } else {
+                Box::new(BufReader::new(file))
+            };
+            import_gff_annotations(&mut translation_context, reader, &group, &sample_name)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let summary = OperationSummary::new(
+                OperationInfo {
+                    files: vec![],
+                    description: "import GFF annotations".to_string(),
+                },
+                message
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Import annotations from {filename}")),
+            );
+            let hash = commit_operation_summary(&self.context, &summary)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            return Ok(PyHashId::from_dolt(hash));
+        }
+        if sample.is_some() {
+            return Err(PyValueError::new_err(
+                "sample is only used when importing GFF annotations",
+            ));
+        }
         add_annotation_file(
             &self.context,
             &filename,
