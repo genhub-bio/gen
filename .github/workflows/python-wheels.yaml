@@ -109,8 +109,9 @@ jobs:
           before-script-linux: |
             uv tool install "sccache>=0.10.0"
             yum install -y epel-release
-            # Vendored OpenSSL's configuration requires Perl's IPC::Cmd module.
-            yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig mold perl-IPC-Cmd
+            # Install the full core Perl module set required by vendored OpenSSL.
+            yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig mold perl-core
+            perl -MIPC::Cmd -MTime::Piece -e 1
             cargo install capnpc --version ^0.24 --locked
             export PATH="/root/.cargo/bin:${PATH}"
             export CAPNPC_RUST="/root/.cargo/bin/capnpc-rust"
