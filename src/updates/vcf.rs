@@ -668,7 +668,10 @@ pub fn update_with_vcf_options(
     let fixed_sample = fixed_sample.as_deref();
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
+    // Copy-number gains only say how many copies a haplotype carries, not where the extra copies
+    // sit, so only `<CN0>` (the span is gone) is applied; other `<CN>` alleles are skipped like
+    // any other unsupported symbolic allele.
+    let cnv_re = Regex::new(r"(?x)<CN(?P<count>0)>").unwrap();
 
     let mut reader = vcf::io::reader::Builder::default()
         .build_from_path(vcf_path)
@@ -2000,6 +2003,7 @@ mod tests {
         );
     }
 
+    /// The `1/3` call applies `<CN0>` as a deletion of REF on one chromatid and skips `<CN3>`.
     #[test]
     fn test_parses_cnvs() {
         let context = setup_gen();
@@ -2038,10 +2042,52 @@ mod tests {
                 true
             )
             .unwrap(),
-            HashSet::from_iter(vec![
-                "ATCGATCGATCGGATCGGGAACACACAGAGA".to_string(),
-                "ATCGATCGATCGATCATCATCGATCGGGAACACACAGAGA".to_string()
-            ])
+            HashSet::from(["ATCGATCGATCGGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    /// A `<CN2>` with an END span only says the haplotype carries two copies of POS+1..END, not
+    /// where the second copy sits. REF is the single padding base, so repeating REF would replace
+    /// the span with `AA` and delete it instead. The record is skipped like other symbolic alleles.
+    #[test]
+    fn test_skips_copy_number_gain_with_symbolic_span() {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        import_fasta(
+            &context,
+            &fixtures.join("simple.fa").to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures
+                .join("simple_cn2_span.vcf")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(
+                conn,
+                context.workspace(),
+                &get_sample_bg(conn, &collection, "dup").id,
+                true
+            )
+            .unwrap(),
+            HashSet::from(["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
     }
 
