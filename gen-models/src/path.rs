@@ -16,6 +16,7 @@ use intervaltree::IntervalTree;
 use itertools::Itertools;
 use rusqlite::{ToSql, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -216,6 +217,20 @@ impl Path {
             encoded.extend_from_slice(&edge_id.0);
         }
         encoded
+    }
+
+    /// Generates a deterministic path name from its parent and ordered edges.
+    ///
+    /// The parent name distinguishes identical routes reached from differently named parent
+    /// paths. Repeating the same parent and route reuses the name, without copying the recursively
+    /// generated parent name into the new row.
+    pub fn generate_path_name(parent_path_name: &str, edge_ids: &[HashId]) -> String {
+        let mut path_name_digest = Sha256::new();
+        path_name_digest.update(parent_path_name.as_bytes());
+        for edge_id in edge_ids {
+            path_name_digest.update(edge_id.0);
+        }
+        format!("{:x}", path_name_digest.finalize())
     }
 
     fn decode_edge_ids(encoded: &[u8]) -> Vec<HashId> {
@@ -996,10 +1011,7 @@ impl Path {
             }
         }
 
-        let new_name = format!(
-            "{}-start-{}-end-{}-node-{}",
-            self.name, path_start, path_end, edge_to_new_node.target_node_id
-        );
+        let new_name = Self::generate_path_name(&self.name, &new_edge_ids);
         Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
     }
 
@@ -1076,13 +1088,7 @@ impl Path {
             }
         }
 
-        let new_name = format!(
-            "{}-start-{}-end-{}-node-{}",
-            self.name,
-            deletion_start,
-            deletion_end,
-            HashId::convert_str("")
-        );
+        let new_name = Self::generate_path_name(&self.name, &new_edge_ids);
 
         Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
     }
@@ -4403,6 +4409,7 @@ mod tests {
             path1.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAAA"
         );
+        let base_commit_hash = commit_all(conn, "base path").unwrap().to_string();
 
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -4448,7 +4455,21 @@ mod tests {
             path2.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGCCCCCCCCAAAAA"
         );
+        assert_ne!(path2.id, path1.id);
+        assert_ne!(path2.name, path1.name);
+        let path2_commit_hash = commit_all(conn, "first replacement path")
+            .unwrap()
+            .to_string();
+        let stored_path2_created_on = Path::get_by_id(conn, &path2.id).created_on;
+        let repeated_path2 = path1.new_path_with(conn, 4, 11, &edge4, &edge5).unwrap();
+        assert_eq!(path2.id, repeated_path2.id);
+        assert_eq!(path2.name, repeated_path2.name);
+        assert_eq!(
+            Path::get_by_id(conn, &path2.id).created_on,
+            stored_path2_created_on
+        );
 
+        // A different edit should become current, while both earlier commits retain their paths.
         let edge6 = Edge::create(
             conn,
             node1_id,
@@ -4486,6 +4507,32 @@ mod tests {
         assert_eq!(
             path3.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGCCCCCCCCGAAAAAAAA"
+        );
+        assert_ne!(path3.id, path2.id);
+        commit_all(conn, "second replacement path").unwrap();
+        assert_eq!(
+            BlockGroup::get_current_path(conn, &block_group.id, None)
+                .unwrap()
+                .id,
+            path3.id
+        );
+        let historical_base =
+            BlockGroup::get_current_path(conn, &block_group.id, Some(&base_commit_hash)).unwrap();
+        assert_eq!(historical_base.id, path1.id);
+        assert_eq!(
+            historical_base
+                .sequence(conn, test_workspace(), Some(&base_commit_hash))
+                .unwrap(),
+            "ATCGATCGAAAAAAAA"
+        );
+        let historical_path2 =
+            BlockGroup::get_current_path(conn, &block_group.id, Some(&path2_commit_hash)).unwrap();
+        assert_eq!(historical_path2.id, path2.id);
+        assert_eq!(
+            historical_path2
+                .sequence(conn, test_workspace(), Some(&path2_commit_hash))
+                .unwrap(),
+            "ATCGCCCCCCCCAAAAA"
         );
     }
 
@@ -4554,6 +4601,9 @@ mod tests {
             path1.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAAA"
         );
+        let base_commit_hash = commit_all(conn, "base path before deletion")
+            .unwrap()
+            .to_string();
 
         let deletion_edge = Edge::create(
             conn,
@@ -4578,6 +4628,68 @@ mod tests {
         let path2 = path1.new_path_with_deletion(conn, 4, 11).unwrap();
         assert_eq!(
             path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGAAAAA"
+        );
+        assert_ne!(path2.id, path1.id);
+        assert_ne!(path2.name, path1.name);
+        let path2_commit_hash = commit_all(conn, "first deleted path").unwrap().to_string();
+        let stored_path2_created_on = Path::get_by_id(conn, &path2.id).created_on;
+        let repeated_path2 = path1.new_path_with_deletion(conn, 4, 11).unwrap();
+        assert_eq!(path2.id, repeated_path2.id);
+        assert_eq!(path2.name, repeated_path2.name);
+        assert_eq!(
+            Path::get_by_id(conn, &path2.id).created_on,
+            stored_path2_created_on
+        );
+
+        // A different deletion should become current, while both earlier commits retain their paths.
+        let second_deletion_edge = Edge::create(
+            conn,
+            node1_id,
+            4,
+            Strand::Forward,
+            node2_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let second_block_group_edge = BlockGroupEdgeData {
+            block_group_id: block_group.id,
+            edge_id: second_deletion_edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        };
+        BlockGroupEdge::bulk_create(conn, &[second_block_group_edge]);
+
+        let path3 = path1.new_path_with_deletion(conn, 4, 8).unwrap();
+        assert_eq!(
+            path3.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGAAAAAAAA"
+        );
+        assert_ne!(path3.id, path2.id);
+        commit_all(conn, "second deleted path").unwrap();
+        assert_eq!(
+            BlockGroup::get_current_path(conn, &block_group.id, None)
+                .unwrap()
+                .id,
+            path3.id
+        );
+        let historical_base =
+            BlockGroup::get_current_path(conn, &block_group.id, Some(&base_commit_hash)).unwrap();
+        assert_eq!(historical_base.id, path1.id);
+        assert_eq!(
+            historical_base
+                .sequence(conn, test_workspace(), Some(&base_commit_hash))
+                .unwrap(),
+            "ATCGATCGAAAAAAAA"
+        );
+        let historical_path2 =
+            BlockGroup::get_current_path(conn, &block_group.id, Some(&path2_commit_hash)).unwrap();
+        assert_eq!(historical_path2.id, path2.id);
+        assert_eq!(
+            historical_path2
+                .sequence(conn, test_workspace(), Some(&path2_commit_hash))
+                .unwrap(),
             "ATCGAAAAA"
         );
     }
@@ -5119,5 +5231,28 @@ mod tests {
             },
         ];
         assert_eq!(node_blocks3, expected_node_blocks3);
+    }
+
+    #[test]
+    fn test_generated_path_names_are_deterministic_for_parent_and_edges() {
+        let edge_ids = [
+            HashId::convert_str("first edge"),
+            HashId::convert_str("second edge"),
+        ];
+        let name = Path::generate_path_name("parent-path", &edge_ids);
+
+        assert_eq!(name, Path::generate_path_name("parent-path", &edge_ids));
+        assert_ne!(
+            name,
+            Path::generate_path_name("different-parent", &edge_ids)
+        );
+        assert_ne!(
+            name,
+            Path::generate_path_name("parent-path", &[edge_ids[1], edge_ids[0]])
+        );
+        assert_ne!(
+            name,
+            Path::generate_path_name("parent-path", &[edge_ids[0]])
+        );
     }
 }

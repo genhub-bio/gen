@@ -341,7 +341,12 @@ impl BlockGroup {
         conn: &GraphConnection,
         target_block_group_id: &HashId,
     ) -> Result<(), BlockGroupError> {
-        let existing_paths = Path::select(conn).block_group_id(self.id).load()?;
+        // Copies receive fresh timestamps, so preserve source order to retain the current path.
+        let existing_paths = Path::select(conn)
+            .block_group_id(self.id)
+            .order_by(PathSelect::CreatedOn, Direction::Asc)
+            .order_by(PathSelect::Id, Direction::Asc)
+            .load()?;
 
         for path in &existing_paths {
             let edge_ids = Path::edges_for_path(conn, &path.id, None)
@@ -2257,6 +2262,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             Vec::<&str>::new()
         );
+    }
+
+    #[test]
+    fn test_blockgroup_clone_preserves_path_creation_order() {
+        let conn = &get_connection(None).unwrap();
+        let (source_block_group_id, original_path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &original_path.id, None);
+        Path::create(conn, "z-added-first", &source_block_group_id, &edge_ids)
+            .expect("should create the first additional source path");
+        Path::create(conn, "a-added-last", &source_block_group_id, &edge_ids)
+            .expect("should create the last additional source path");
+        let source_path_names = Path::select(conn)
+            .block_group_id(source_block_group_id)
+            .order_by(crate::path::PathSelect::CreatedOn, Direction::Asc)
+            .order_by(crate::path::PathSelect::Id, Direction::Asc)
+            .load()
+            .expect("should load source paths in creation order")
+            .into_iter()
+            .map(|path| path.name)
+            .collect::<Vec<_>>();
+
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "child",
+                ..Default::default()
+            },
+        )
+        .expect("should create the child sample");
+        let child_block_group_id =
+            get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
+
+        let child_path_names = Path::select(conn)
+            .block_group_id(child_block_group_id)
+            .order_by(crate::path::PathSelect::CreatedOn, Direction::Asc)
+            .order_by(crate::path::PathSelect::Id, Direction::Asc)
+            .load()
+            .expect("should load child paths in creation order")
+            .into_iter()
+            .map(|path| path.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(child_path_names, source_path_names);
     }
 
     #[test]
