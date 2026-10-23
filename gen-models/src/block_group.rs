@@ -520,6 +520,10 @@ impl BlockGroup {
         // Both projections share the same stored edge ID and `created_on`. At each source,
         // `created_on` selects the newest stored edge origin per chromatid; its `edge_id` keeps
         // every projection of that origin.
+        // Adjacent variants from one update leave the same source with the same `created_on`,
+        // such as an insertion and an SNP right after it. They are distinct origins that apply
+        // together, so every `edge_id` tied for the newest `created_on` is kept; keeping only
+        // one would strand everything downstream of the other.
         // Walk node indices directly and defer graph-link removal; reuse `outgoing_targets` so
         // the chromatid records on each connection can be filtered after outgoing-edge iteration
         // without snapshotting all nodes.
@@ -532,7 +536,7 @@ impl BlockGroup {
                 root_nodes.insert(source_node);
             }
             outgoing_targets.clear();
-            let mut latest_edges_by_chromosome_index = HashMap::<i64, (i64, HashId)>::new();
+            let mut latest_edges_by_chromosome_index = HashMap::<i64, (i64, Vec<HashId>)>::new();
             for (_, target_node, edge_weights) in graph.edges(source_node) {
                 outgoing_targets.push(target_node);
                 // Reserved `chromosome_index` annotations do not compete for the newest ordinary
@@ -549,13 +553,18 @@ impl BlockGroup {
                     }
                     latest_edges_by_chromosome_index
                         .entry(edge_weight.chromosome_index)
-                        .and_modify(|(created_on, edge_id)| {
+                        .and_modify(|(created_on, edge_ids)| {
                             if edge_weight.created_on > *created_on {
                                 *created_on = edge_weight.created_on;
-                                *edge_id = edge_weight.edge_id;
+                                edge_ids.clear();
+                                edge_ids.push(edge_weight.edge_id);
+                            } else if edge_weight.created_on == *created_on
+                                && !edge_ids.contains(&edge_weight.edge_id)
+                            {
+                                edge_ids.push(edge_weight.edge_id);
                             }
                         })
-                        .or_insert((edge_weight.created_on, edge_weight.edge_id));
+                        .or_insert((edge_weight.created_on, vec![edge_weight.edge_id]));
                 }
             }
             // A graph connection can carry `GraphEdge` annotations for multiple chromatids.
@@ -596,7 +605,9 @@ impl BlockGroup {
                             } else {
                                 latest_edges_by_chromosome_index
                                     .get(&chromosome_index)
-                                    .is_some_and(|(_, edge_id)| edge_weight.edge_id == *edge_id)
+                                    .is_some_and(|(_, edge_ids)| {
+                                        edge_ids.contains(&edge_weight.edge_id)
+                                    })
                             }
                         });
                         edge_weights.is_empty()
@@ -5017,6 +5028,50 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_prune_graph_keeps_distinct_edges_tied_for_newest_created_on() {
+        let graph_node = |node_id, sequence_start, sequence_end| GraphNode {
+            node_id,
+            sequence_start,
+            sequence_end,
+        };
+        let start = graph_node(PATH_START_NODE_ID, 0, 0);
+        let insertion = graph_node(HashId::convert_str("prune-tie-insertion"), 0, 1);
+        let substitution = graph_node(HashId::convert_str("prune-tie-substitution"), 0, 1);
+        let graph_edge = |name, chromosome_index| GraphEdge {
+            edge_id: HashId::convert_str(name),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index,
+            phased: 0,
+            created_on: 5,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            start,
+            insertion,
+            vec![
+                graph_edge("prune-tie-insertion-edge", 0),
+                graph_edge("prune-tie-insertion-edge", 1),
+            ],
+        );
+        graph.add_edge(
+            start,
+            substitution,
+            vec![
+                graph_edge("prune-tie-substitution-edge", 0),
+                graph_edge("prune-tie-substitution-edge", 1),
+            ],
+        );
+
+        // Records of one VCF all apply to the same reference, so an insertion and an adjacent SNP
+        // leave the same source on the same chromatids with equal `created_on`. Neither may win,
+        // or the other's downstream is lost.
+        BlockGroup::prune_graph(&mut graph);
+        assert_eq!(graph.edge_weight(start, insertion).unwrap().len(), 2);
+        assert_eq!(graph.edge_weight(start, substitution).unwrap().len(), 2);
     }
 
     #[test]

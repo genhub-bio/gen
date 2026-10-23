@@ -2681,4 +2681,46 @@ mod tests {
             HashSet::from(["ATCGATCGAGCGATCGGGAACACACAGAGA".to_string()])
         );
     }
+
+    #[test]
+    fn test_vcf_insertion_and_adjacent_snp_stay_reachable_after_pruning() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().into_owned(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let vcf_path = directory.path().join("adjacent.vcf");
+        std::fs::write(&vcf_path, "##fileformat=VCFv4.3\n##contig=<ID=m123,length=34>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\nm123\t10\t.\tT\tTG\t.\t.\t.\tGT\t1/1\nm123\t11\t.\tC\tA\t.\t.\t.\tGT\t1/1\n").unwrap();
+        update_with_vcf_options(
+            &context,
+            &vcf_path.to_string_lossy().into_owned(),
+            "test",
+            VcfUpdateOptions {
+                fixed_genotype: "1/1".to_string(),
+                fixed_sample: Some("sample".to_string()),
+                parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                ..VcfUpdateOptions::default()
+            },
+        )
+        .unwrap();
+
+        // Both variants leave the same junction with the same `created_on`; pruning must not drop
+        // the SNP's edge, or the sequence after it becomes unreachable.
+        let block_group = get_sample_bg(conn, "test", "sample");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, true)
+                .unwrap();
+        assert!(
+            sequences.contains("ATCGATCGATGAGATCGATCGGGAACACACAGAGA"),
+            "{sequences:?}"
+        );
+    }
 }
