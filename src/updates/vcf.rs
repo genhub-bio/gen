@@ -25,12 +25,12 @@ use gen_models::{
 use noodles::{
     vcf,
     vcf::{
-        header::record::value::Collection as HeaderCollection,
+        header::{FileFormat, record::value::Collection as HeaderCollection},
         variant::{
             Record,
             record::{
                 AlternateBases,
-                info::field::Value as InfoValue,
+                info::field::{Value as InfoValue, value::Array as InfoArray},
                 samples::{
                     Sample as NoodlesSample,
                     series::{Value, value::genotype::Phasing},
@@ -124,7 +124,46 @@ fn path_for_update(
 }
 
 /// Identify incomplete, conflicting, or unsupported calls that prevent path inference.
-fn ambiguous_call(alleles: &[Option<usize>], alternates: &[&str], cnv: &Regex) -> bool {
+/// Whether an ALT allele is `<DUP:TANDEM>`. VCF 4.1 through 4.5 reserve this ID for a duplication
+/// whose extra copy sits next to the original, which a bare copy number never says.
+fn is_tandem_duplication(alt: &str) -> bool {
+    alt.strip_prefix('<')
+        .and_then(|id| id.strip_suffix('>'))
+        .is_some_and(|id| id == "DUP:TANDEM" || id.starts_with("DUP:TANDEM:"))
+}
+
+/// The zero-based, end-exclusive interval a symbolic SV record covers. It starts after the padding
+/// base at POS and runs to `END` before VCF 4.5 or for `SVLEN` bases from VCF 4.5. noodles'
+/// `variant_end` is not used because it ignores `END` from 4.5 on and counts the padding base.
+fn symbolic_span(record: &vcf::Record, header: &vcf::Header) -> Option<(i64, i64)> {
+    let start = i64::try_from(record.variant_start()?.ok()?.get()).ok()?;
+    let end = if header.file_format() < FileFormat::new(4, 5) {
+        match record.info().get(header, "END")?.ok()?? {
+            InfoValue::Integer(end) => i64::from(end),
+            _ => return None,
+        }
+    } else {
+        match record.info().get(header, "SVLEN")?.ok()?? {
+            InfoValue::Array(InfoArray::Integer(lengths)) => {
+                start
+                    + lengths
+                        .iter()
+                        .filter_map(|length| length.ok()?)
+                        .max()
+                        .map(i64::from)?
+            }
+            _ => return None,
+        }
+    };
+    (end > start).then_some((start, end))
+}
+
+fn ambiguous_call(
+    alleles: &[Option<usize>],
+    alternates: &[&str],
+    cnv: &Regex,
+    has_tandem_span: bool,
+) -> bool {
     let Some(Some(allele)) = alleles.first() else {
         return true;
     };
@@ -133,7 +172,9 @@ fn ambiguous_call(alleles: &[Option<usize>], alternates: &[&str], cnv: &Regex) -
             && alternates.get(*allele - 1).is_none_or(|sequence| {
                 *sequence == "*"
                     || sequence.contains(['[', ']'])
-                    || (sequence.starts_with('<') && !cnv.is_match(sequence))
+                    || (sequence.starts_with('<')
+                        && !cnv.is_match(sequence)
+                        && !(has_tandem_span && is_tandem_duplication(sequence)))
             }))
 }
 
@@ -476,6 +517,61 @@ fn prepare_vcf_entry(
     })
 }
 
+/// Where a tandem duplication's copied bases live: the sample's path and the span on it.
+struct ReferenceSpan<'a> {
+    collection_name: &'a str,
+    sample_name: &'a str,
+    sample_bg_id: &'a HashId,
+    seq_name: &'a str,
+    span: (i64, i64),
+}
+
+/// The reference bases a tandem duplication copies. `<DUP:TANDEM>` carries no sequence, so it is
+/// read from the path the coordinates refer to, which is the parent's path for a child sample.
+fn reference_span_sequence(
+    path_region_cache: &mut HashMap<(HashId, String), ResolvedGenRegion>,
+    parent_bg_cache: &mut HashMap<HashId, Option<HashId>>,
+    path_sequences: &mut HashMap<HashId, String>,
+    context: &DbContext,
+    reference_span: &ReferenceSpan<'_>,
+) -> Result<String, VcfError> {
+    let ReferenceSpan {
+        collection_name,
+        sample_name,
+        sample_bg_id,
+        seq_name,
+        span,
+    } = *reference_span;
+    let conn = context.graph().conn();
+    let source_bg_id = lookup_parent_bg_id(parent_bg_cache, conn, sample_bg_id)?;
+    let source_region = lookup_path_region(
+        path_region_cache,
+        conn,
+        collection_name,
+        sample_name,
+        source_bg_id.as_ref().unwrap_or(sample_bg_id),
+        seq_name,
+    )?;
+    let source_path = source_region.path.as_ref().unwrap();
+    let path_sequence = match path_sequences.entry(source_path.id) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            entry.insert(source_path.sequence(conn, context.workspace(), None)?)
+        }
+    };
+    usize::try_from(span.0)
+        .ok()
+        .zip(usize::try_from(span.1).ok())
+        .and_then(|(start, end)| path_sequence.get(start..end))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            VcfError::InvalidRecord(format!(
+                "tandem duplication {}:{}-{} lies outside the reference path",
+                seq_name, span.0, span.1
+            ))
+        })
+}
+
 fn lookup_parent_bg_id(
     parent_bg_cache: &mut HashMap<HashId, Option<HashId>>,
     conn: &GraphConnection,
@@ -669,8 +765,8 @@ pub fn update_with_vcf_options(
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     // Copy-number gains only say how many copies a haplotype carries, not where the extra copies
-    // sit, so only `<CN0>` (the span is gone) is applied; other `<CN>` alleles are skipped like
-    // any other unsupported symbolic allele.
+    // sit, so only `<CN0>` (the span is gone) is applied; other `<CN>` alleles are skipped like any
+    // other unsupported symbolic allele. Tandem duplications are read from `<DUP:TANDEM>` instead.
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>0)>").unwrap();
 
     let mut reader = vcf::io::reader::Builder::default()
@@ -701,6 +797,7 @@ pub fn update_with_vcf_options(
     let mut accession_cache = HashMap::new();
     let mut path_region_cache: HashMap<(HashId, String), ResolvedGenRegion> = HashMap::new();
     let mut parent_bg_cache: HashMap<HashId, Option<HashId>> = HashMap::new();
+    let mut path_sequences: HashMap<HashId, String> = HashMap::new();
 
     let existing_block_groups = BlockGroup::select(conn)
         .collection_name(collection_name)
@@ -746,6 +843,11 @@ pub fn update_with_vcf_options(
         let ref_end = record.variant_end(&header).unwrap().get() as i64;
         let alt_bases = record.alternate_bases();
         let alt_alleles: Vec<_> = alt_bases.iter().collect::<io::Result<_>>().unwrap();
+        let tandem_span = alt_alleles
+            .iter()
+            .any(|alt| is_tandem_duplication(alt))
+            .then(|| symbolic_span(&record, &header))
+            .flatten();
         let mut vcf_entries = vec![];
         let accession_name: Option<String> = match record.info().get(&header, "GAN") {
             Some(v) => match v.unwrap().unwrap() {
@@ -794,7 +896,7 @@ pub fn update_with_vcf_options(
                             .and_then(|call| usize::try_from(call.allele).ok())
                     })
                     .collect::<Vec<_>>();
-                if ambiguous_call(&alleles, &alt_alleles, &cnv_re) {
+                if ambiguous_call(&alleles, &alt_alleles, &cnv_re, tandem_span.is_some()) {
                     ambiguous_samples.insert((fixed_sample.to_string(), seq_name.clone()));
                 } else {
                     let allele = alleles[0].expect("should have a called allele");
@@ -803,14 +905,17 @@ pub fn update_with_vcf_options(
                     } else {
                         alt_alleles[allele - 1]
                     };
+                    // A tandem duplication only touches its copied span, not the padding base.
+                    let (region_start, region_end) = tandem_span
+                        .filter(|_| is_tandem_duplication(sequence))
+                        .unwrap_or((
+                            (record.variant_start().unwrap().unwrap().get() - 1) as i64,
+                            ref_end,
+                        ));
                     called_regions
                         .entry((fixed_sample.to_string(), seq_name.clone()))
                         .or_default()
-                        .push((
-                            (record.variant_start().unwrap().unwrap().get() - 1) as i64,
-                            ref_end,
-                            sequence.to_string(),
-                        ));
+                        .push((region_start, region_end, sequence.to_string()));
                 }
             }
             let has_ref = genotype.iter().any(|gt| {
@@ -831,19 +936,29 @@ pub fn update_with_vcf_options(
                             .expect("alternate genotype allele should be positive");
                         let mut alt_seq = alt_alleles[allele_index].to_string();
                         let mut is_cnv = false;
+                        let mut tandem_span = None;
                         if alt_seq.starts_with("<") {
                             if let Some(cap) = cnv_re.captures(&alt_seq) {
                                 let count: usize =
                                     cap["count"].parse().expect("Invalid CN specification");
                                 alt_seq = ref_seq.to_string().repeat(count);
                                 is_cnv = true;
+                            } else if is_tandem_duplication(&alt_seq) {
+                                tandem_span = symbolic_span(&record, &header);
+                                if tandem_span.is_none() {
+                                    continue;
+                                }
                             } else {
                                 continue;
                             };
                         }
                         // If the alt sequence is a deletion or insertion, we want to remove the base in common in the VCF spec.
                         // So if VCF says ATC -> A or A -> ATTC, we don't want to include the `A` in the alt_seq.
-                        if !alt_seq.is_empty() && alt_seq != "*" && alt_seq.len() != ref_seq.len() {
+                        if tandem_span.is_none()
+                            && !alt_seq.is_empty()
+                            && alt_seq != "*"
+                            && alt_seq.len() != ref_seq.len()
+                        {
                             if is_cnv {
                                 // move past the common regions
                                 // ref_start += ref_seq.len() as i64;
@@ -861,6 +976,27 @@ pub fn update_with_vcf_options(
                             continue;
                         }
                         for sample_bg_id in &sample_bg_ids {
+                            let (entry_start, entry_end, entry_seq) = match tandem_span {
+                                Some(span) => (
+                                    span.0,
+                                    span.1,
+                                    reference_span_sequence(
+                                        &mut path_region_cache,
+                                        &mut parent_bg_cache,
+                                        &mut path_sequences,
+                                        context,
+                                        &ReferenceSpan {
+                                            collection_name,
+                                            sample_name: fixed_sample,
+                                            sample_bg_id,
+                                            seq_name: &seq_name,
+                                            span,
+                                        },
+                                    )?
+                                    .repeat(2),
+                                ),
+                                None => (ref_start, ref_end, alt_seq.clone()),
+                            };
                             let entry = prepare_vcf_entry(
                                 &mut path_region_cache,
                                 &mut parent_bg_cache,
@@ -871,11 +1007,11 @@ pub fn update_with_vcf_options(
                                 sample_bg_id,
                                 &seq_name,
                                 allele_accession.clone(),
-                                ref_start,
-                                ref_end,
+                                entry_start,
+                                entry_end,
                                 chromosome_index as i64,
                                 phased,
-                                alt_seq.clone(),
+                                entry_seq,
                                 has_ref,
                             )?;
                             vcf_entries.push(entry);
@@ -933,7 +1069,7 @@ pub fn update_with_vcf_options(
                             .collect::<Vec<_>>(),
                         _ => Vec::new(),
                     };
-                    if ambiguous_call(&alleles, &alt_alleles, &cnv_re) {
+                    if ambiguous_call(&alleles, &alt_alleles, &cnv_re, tandem_span.is_some()) {
                         ambiguous_samples.insert((sample_name.to_string(), seq_name.clone()));
                     } else {
                         let allele = alleles[0].expect("should have a called allele");
@@ -942,14 +1078,17 @@ pub fn update_with_vcf_options(
                         } else {
                             alt_alleles[allele - 1]
                         };
+                        // A tandem duplication only touches its copied span, not the padding base.
+                        let (region_start, region_end) = tandem_span
+                            .filter(|_| is_tandem_duplication(sequence))
+                            .unwrap_or((
+                                (record.variant_start().unwrap().unwrap().get() - 1) as i64,
+                                ref_end,
+                            ));
                         called_regions
                             .entry((sample_name.to_string(), seq_name.clone()))
                             .or_default()
-                            .push((
-                                (record.variant_start().unwrap().unwrap().get() - 1) as i64,
-                                ref_end,
-                                sequence.to_string(),
-                            ));
+                            .push((region_start, region_end, sequence.to_string()));
                     }
                 }
                 if let Some(Ok(Some(Value::Genotype(genotypes)))) = genotype {
@@ -972,6 +1111,7 @@ pub fn update_with_vcf_options(
                                 if allele != 0 {
                                     let mut alt_seq = alt_alleles[allele - 1].to_string();
                                     let mut is_cnv = false;
+                                    let mut tandem_span = None;
                                     if alt_seq.starts_with("<") {
                                         if let Some(cap) = cnv_re.captures(&alt_seq) {
                                             let count: usize = cap["count"]
@@ -982,11 +1122,17 @@ pub fn update_with_vcf_options(
                                             // sequence will be (ATC)*count. The position provided will be
                                             // the left most base, so the A here.
                                             alt_seq = ref_seq.to_string().repeat(count);
+                                        } else if is_tandem_duplication(&alt_seq) {
+                                            tandem_span = symbolic_span(&record, &header);
+                                            if tandem_span.is_none() {
+                                                continue;
+                                            }
                                         } else {
                                             continue;
                                         }
                                     }
-                                    if !alt_seq.is_empty()
+                                    if tandem_span.is_none()
+                                        && !alt_seq.is_empty()
                                         && alt_seq != "*"
                                         && alt_seq.len() != ref_seq.len()
                                     {
@@ -1002,6 +1148,28 @@ pub fn update_with_vcf_options(
                                         continue;
                                     }
                                     for sample_bg_id in &sample_bg_ids {
+                                        let (entry_start, entry_end, entry_seq) = match tandem_span
+                                        {
+                                            Some(span) => (
+                                                span.0,
+                                                span.1,
+                                                reference_span_sequence(
+                                                    &mut path_region_cache,
+                                                    &mut parent_bg_cache,
+                                                    &mut path_sequences,
+                                                    context,
+                                                    &ReferenceSpan {
+                                                        collection_name,
+                                                        sample_name,
+                                                        sample_bg_id,
+                                                        seq_name: &seq_name,
+                                                        span,
+                                                    },
+                                                )?
+                                                .repeat(2),
+                                            ),
+                                            None => (ref_start, ref_end, alt_seq.clone()),
+                                        };
                                         let entry = prepare_vcf_entry(
                                             &mut path_region_cache,
                                             &mut parent_bg_cache,
@@ -1012,11 +1180,11 @@ pub fn update_with_vcf_options(
                                             sample_bg_id,
                                             &seq_name,
                                             allele_accession.clone(),
-                                            ref_start,
-                                            ref_end,
+                                            entry_start,
+                                            entry_end,
                                             chromosome_index as i64,
                                             phased,
-                                            alt_seq.clone(),
+                                            entry_seq,
                                             has_ref,
                                         )?;
                                         vcf_entries.push(entry);
@@ -1642,6 +1810,24 @@ mod tests {
     }
 
     #[test]
+    fn test_vcf_path_tandem_duplication() {
+        let tandem = "m123\t12\t.\tG\t<DUP:TANDEM>\t.\t.\tEND=15\tGT\t1/1\n";
+        assert_sample_path(tandem, "", "ATCGATCGATCGATCATCGATCGGGAACACACAGAGA");
+        // The padding base is outside the copied span, so a call on it does not conflict.
+        let with_padding_call = format!("m123\t12\t.\tG\tC\t.\t.\t.\tGT\t1/1\n{tandem}");
+        assert_sample_path(
+            &with_padding_call,
+            "",
+            "ATCGATCGATCCATCATCGATCGGGAACACACAGAGA",
+        );
+        // A call inside the copied span conflicts with the duplication.
+        let with_inside_call = format!("{tandem}m123\t14\t.\tC\tG\t.\t.\t.\tGT\t1/1\n");
+        assert_sample_path(&with_inside_call, "", "");
+        // Without END or SVLEN the span is unknown, so the path cannot be inferred.
+        assert_sample_path("m123\t12\t.\tG\t<DUP:TANDEM>\t.\t.\t.\tGT\t1/1\n", "", "");
+    }
+
+    #[test]
     fn test_update_fasta_with_vcf() -> Result<(), VcfError> {
         let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -2043,6 +2229,67 @@ mod tests {
             )
             .unwrap(),
             HashSet::from(["ATCGATCGATCGGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    fn sequences_after_dup_vcf(fixture: &str) -> HashSet<String> {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        import_fasta(
+            &context,
+            &fixtures.join("simple.fa").to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures.join(fixture).to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+        BlockGroup::get_all_sequences(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, &collection, "dup").id,
+            true,
+        )
+        .unwrap()
+    }
+
+    /// `<DUP:TANDEM>` is the one duplication that says the extra copy sits next to the original.
+    /// Before VCF 4.5 the copied span is POS+1 through END, after the padding base.
+    #[test]
+    fn test_applies_tandem_duplication_with_end() {
+        assert_eq!(
+            sequences_after_dup_vcf("simple_dup_tandem_end.vcf"),
+            HashSet::from(["ATCGATCGATCGATCATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    /// From VCF 4.5 the copied span is the `SVLEN` bases after the padding base, with no `END`.
+    #[test]
+    fn test_applies_tandem_duplication_with_svlen() {
+        assert_eq!(
+            sequences_after_dup_vcf("simple_dup_tandem_svlen.vcf"),
+            HashSet::from(["ATCGATCGATCGATCATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    /// A `<CN2>` only gives a copy count, so it is skipped even when REF could be repeated.
+    #[test]
+    fn test_skips_copy_number_gain_without_location() {
+        assert_eq!(
+            sequences_after_dup_vcf("simple_cn2_untagged.vcf"),
+            HashSet::from(["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
     }
 
