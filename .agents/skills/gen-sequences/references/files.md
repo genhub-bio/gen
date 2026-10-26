@@ -153,12 +153,15 @@ asset.save_as("copy.md", overwrite=False)
 ```
 
 Assets are files kept in the repository: imported files, annotation files, and anything added
-with `repo.add_file()`, which stores a file (a README, a protocol, a plate map) without
-importing it as sequence and returns its `Asset`. `Asset` has `id` (`HashId`), `name`
-(original file name), `path` (the stored copy under `.gen`, which has a hashed filename;
-raises `FileNotFoundError` if not downloaded yet) and `save_as(destination, overwrite=False)`,
-which copies it to a path of your choice (or into a directory under `name`). Pull transfers
-assets; see `version-control.md`.
+with `repo.add_file()`, which stores a file without importing it as sequence and returns its
+`Asset`. Keep readable originals beside the project's `.gen/` directory. Add a project README
+and final report when they are ready; do not add every neighboring file automatically. Treat
+assets as explicit snapshots: after changing one on disk, add it again and check
+`repo.get_assets()` for the expected name. `Asset` has `id` (`HashId`), `name` (original file
+name), `path` (the stored copy under `.gen`, which has a hashed filename; raises
+`FileNotFoundError` if not downloaded yet) and `save_as(destination, overwrite=False)`, which
+copies it to a path of your choice (or into a directory under `name`). Pull transfers assets;
+see `version-control.md`.
 
 ## Exports
 
