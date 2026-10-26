@@ -1809,6 +1809,76 @@ mod tests {
         }
     }
 
+    /// The VCF 4.5 spec's worked examples: a symbolic record covers the bases after POS, so
+    /// POS=100 with SVLEN=30 is positions 101-130, and `TGC -> T` is the same deletion as
+    /// `<DEL>` with SVLEN=2. Spans are zero-based and end-exclusive, like the edits they become.
+    #[test]
+    fn test_symbolic_span_follows_vcf_4_5_examples() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/spans_v45.vcf");
+        let mut reader = vcf::io::reader::Builder::default()
+            .build_from_path(path)
+            .unwrap();
+        let header = reader.read_header().unwrap();
+        let spans = reader
+            .records()
+            .map(|record| {
+                let record = record.unwrap();
+                let alternate_bases = record.alternate_bases();
+                let alternate = alternate_bases.iter().next().unwrap().unwrap();
+                let span = if alternate.starts_with('<') {
+                    symbolic_span(&record, &header).unwrap()
+                } else {
+                    // Sequence records keep the padding base in REF, so the span starts after it.
+                    (
+                        record.variant_start().unwrap().unwrap().get() as i64,
+                        record.variant_end(&header).unwrap().get() as i64,
+                    )
+                };
+                (record.ids().as_ref().to_string(), span)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spans,
+            vec![
+                ("cnv".to_string(), (100, 130)),
+                ("tandem".to_string(), (100, 103)),
+                ("del_sequence".to_string(), (2, 4)),
+                ("del_symbolic".to_string(), (2, 4)),
+            ]
+        );
+    }
+
+    /// noodles' `variant_end` counts SVLEN from POS, so for VCF 4.5 symbolic records it is one
+    /// short of the spec's interval (129 vs 130, 102 vs 103, 3 vs 4). This pins that behavior so
+    /// a noodles fix fails here, which is the cue to drop `symbolic_span` for `variant_end`.
+    #[test]
+    fn test_noodles_variant_end_is_one_short_for_vcf_4_5_symbolic_records() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/spans_v45.vcf");
+        let mut reader = vcf::io::reader::Builder::default()
+            .build_from_path(path)
+            .unwrap();
+        let header = reader.read_header().unwrap();
+        let ends = reader
+            .records()
+            .map(|record| {
+                let record = record.unwrap();
+                (
+                    record.ids().as_ref().to_string(),
+                    record.variant_end(&header).unwrap().get(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ends,
+            vec![
+                ("cnv".to_string(), 129),
+                ("tandem".to_string(), 102),
+                ("del_sequence".to_string(), 4),
+                ("del_symbolic".to_string(), 3),
+            ]
+        );
+    }
+
     #[test]
     fn test_vcf_path_tandem_duplication() {
         let tandem = "m123\t12\t.\tG\t<DUP:TANDEM>\t.\t.\tEND=15\tGT\t1/1\n";
