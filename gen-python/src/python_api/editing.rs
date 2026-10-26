@@ -1451,14 +1451,9 @@ fn new_allele_edges(left: &Port, right: &Port, allele: Option<(HashId, i64)>) ->
     }
 }
 
-/// Writes `edge_ids` as a path next to `path`, named for the edges so each edit's path is its own.
+/// Writes `edge_ids` as an immutable path derived from its parent.
 fn create_path(conn: &GraphConnection, path: &Path, edge_ids: Vec<HashId>) -> PyResult<()> {
-    let edge_list = edge_ids
-        .iter()
-        .map(HashId::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let name = format!("{}-edit-{}", path.name, HashId::convert_str(&edge_list));
+    let name = Path::generate_path_name(&path.name, &edge_ids);
     Path::create(conn, &name, &path.block_group_id, &edge_ids)
         .map_err(|error| block_group_err_to_pyerr(error.into()))?;
     Ok(())
@@ -2917,10 +2912,12 @@ assert len(repo.get_operations()) == count
     /// How edits treat the sequence graph's current path: they write a new one only when the edit
     /// lies on it and is not stacked, and the graph reads the same whichever route the path takes.
     mod current_path {
-        use gen_models::path::Path;
+        use gen_core::Strand;
+        use gen_graph::{GraphNode, GraphNodeSlice};
+        use gen_models::{block_group::BlockGroup, locus::GraphLocus, path::Path};
 
         use super::{Fixture, bubble, error_message, strings};
-        use crate::python_api::editing::{EditKind, InsertSite};
+        use crate::python_api::editing::{EditKind, InsertSite, create_path};
 
         fn path_count(fixture: &Fixture) -> usize {
             Path::query_for_collection_and_sample(
@@ -2972,6 +2969,90 @@ assert len(repo.get_operations()) == count
                 .unwrap_or_else(|error| panic!("{}", error_message(error)));
             assert_eq!(path_count(&fixture), before + 2);
             assert_eq!(fixture.path_sequence(), "ABCDEFGHMNOP");
+        }
+
+        #[test]
+        fn test_repeated_python_path_creation_reuses_the_same_name() {
+            let fixture = bubble();
+            let conn = fixture.context.graph().conn();
+            let parent_path = BlockGroup::get_current_path(conn, &fixture.graph.id, None)
+                .expect("should load the imported path");
+            let edge_ids = Path::edge_ids_for_path(conn, &parent_path.id, None);
+            let generated_name = Path::generate_path_name(&parent_path.name, &edge_ids);
+            let before = path_count(&fixture);
+
+            create_path(conn, &parent_path, edge_ids.clone())
+                .unwrap_or_else(|error| panic!("{}", error));
+            let generated_path = Path::select(conn)
+                .block_group_id(parent_path.block_group_id)
+                .name(generated_name.clone())
+                .load()
+                .expect("should load the first generated path")
+                .into_iter()
+                .next()
+                .expect("should find the first generated path");
+            let stored_created_on = generated_path.created_on;
+            assert_eq!(path_count(&fixture), before + 1);
+
+            create_path(conn, &parent_path, edge_ids).unwrap_or_else(|error| panic!("{}", error));
+            let generated_paths = Path::select(conn)
+                .block_group_id(parent_path.block_group_id)
+                .name(generated_name)
+                .load()
+                .expect("should load the repeated generated path");
+
+            assert_eq!(generated_paths.len(), 1);
+            assert_eq!(generated_paths[0].id, generated_path.id);
+            assert_eq!(generated_paths[0].created_on, stored_created_on);
+            assert_eq!(path_count(&fixture), before + 1);
+        }
+
+        #[test]
+        fn test_replacing_with_a_previous_sequence_updates_the_current_path() {
+            let fixture = bubble();
+            let conn = fixture.context.graph().conn();
+            let target = GraphLocus {
+                slices: vec![GraphNodeSlice {
+                    block: GraphNode {
+                        node_id: fixture.nodes["EFGH"],
+                        sequence_start: 0,
+                        sequence_end: 4,
+                    },
+                    start: 0,
+                    end: 4,
+                    strand: Strand::Forward,
+                }],
+            };
+            let first_replacement = fixture
+                .edit(target, EditKind::Replace, "WXYZ")
+                .unwrap_or_else(|error| panic!("{}", error_message(error)))
+                .expect("should return the first replacement locus");
+            let first_path = BlockGroup::get_current_path(conn, &fixture.graph.id, None)
+                .expect("should select the first WXYZ path");
+            let first_edge_ids = Path::edge_ids_for_path(conn, &first_path.id, None);
+
+            let intermediate_replacement = fixture
+                .edit(first_replacement, EditKind::Replace, "EFGH")
+                .unwrap_or_else(|error| panic!("{}", error_message(error)))
+                .expect("should return the intermediate replacement locus");
+            let intermediate_path = BlockGroup::get_current_path(conn, &fixture.graph.id, None)
+                .expect("should select the intermediate EFGH path");
+            assert_eq!(fixture.path_sequence(), "ABCDEFGHMNOP");
+
+            // Exercise A -> B -> A (WXYZ -> EFGH -> WXYZ). Reusing the first A path would keep its
+            // old created_on and leave B current; hashing the parent distinguishes the final A path.
+            let _final_replacement = fixture
+                .edit(intermediate_replacement, EditKind::Replace, "WXYZ")
+                .unwrap_or_else(|error| panic!("{}", error_message(error)))
+                .expect("should return the final replacement locus");
+            let final_path = BlockGroup::get_current_path(conn, &fixture.graph.id, None)
+                .expect("should select the final WXYZ path");
+            let final_edge_ids = Path::edge_ids_for_path(conn, &final_path.id, None);
+
+            assert_eq!(first_edge_ids, final_edge_ids);
+            assert_ne!(first_path.id, final_path.id);
+            assert_ne!(intermediate_path.id, final_path.id);
+            assert_eq!(fixture.path_sequence(), "ABCDWXYZMNOP");
         }
 
         #[test]
