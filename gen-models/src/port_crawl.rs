@@ -68,7 +68,7 @@ pub enum CrawlError {
 fn region_blocks(
     conn: &GraphConnection,
     region: &ResolvedGenRegion,
-) -> Result<IntervalTree<i64, NodeIntervalBlock>, CrawlError> {
+) -> Result<Arc<IntervalTree<i64, NodeIntervalBlock>>, CrawlError> {
     if let Some(path) = &region.path {
         return Ok(path.intervaltree(conn)?);
     }
@@ -705,7 +705,7 @@ mod tests {
     use crate::{
         accession::{Accession, AccessionSpan, NewAccession},
         annotations::Annotation,
-        block_group::{BlockGroup, NewBlockGroup, PathCache},
+        block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db::GraphConnection,
@@ -1015,8 +1015,7 @@ mod tests {
     #[test]
     fn test_crawl_graph_starts_at_an_accession_region_midpoint() {
         let (conn, block_group_id, path) = chain_with_accession_region_inputs();
-        let mut path_cache = PathCache::new(&conn);
-        BlockGroup::add_accession(&conn, &path, "middle", 4, 12, &mut path_cache).unwrap();
+        BlockGroup::add_accession(&conn, &path, "middle", 4, 12).unwrap();
         let region = resolve(&Region::parse("middle").unwrap(), &conn, "test", "test").unwrap();
         assert!(region.path.is_none());
 
@@ -1039,9 +1038,7 @@ mod tests {
     #[test]
     fn test_crawl_graph_starts_at_an_annotation_region_midpoint() {
         let (conn, block_group_id, path) = chain_with_accession_region_inputs();
-        let mut path_cache = PathCache::new(&conn);
-        let accession =
-            BlockGroup::add_accession(&conn, &path, "middle", 4, 12, &mut path_cache).unwrap();
+        let accession = BlockGroup::add_accession(&conn, &path, "middle", 4, 12).unwrap();
         Annotation::get_or_create(&conn, "gene-middle", "genes", &accession.id, None).unwrap();
         let region = resolve(
             &Region::parse("gene-middle").unwrap(),

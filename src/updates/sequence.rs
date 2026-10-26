@@ -189,7 +189,7 @@ mod tests {
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
-        block_group::{BlockGroup, BlockGroupChange, PathCache},
+        block_group::{BlockGroup, BlockGroupChange},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
