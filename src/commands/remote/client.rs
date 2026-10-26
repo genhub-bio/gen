@@ -4,8 +4,9 @@
 //! accepts either the repository page or API URL and derives the control-plane endpoints from
 //! that identity. Local `file://` remotes bypass this client and are handled by remote operations.
 //!
-//! Remote operations request a capability before contacting the graph store. Clone and pull use
-//! the short-lived Dolt URL returned by GenHub. Push uses a direct-GCS session instead: the VFS
+//! Remote operations request a capability before contacting the graph store. Clone, pull, and
+//! fetch use the short-lived GCS URI returned by GenHub through BlockCacheVFS. Push uses a
+//! direct-GCS session: the VFS
 //! writes blocks under a scoped token, then the operations layer asks GenHub to publish the
 //! staged manifest. Asset transfer endpoints handle files referenced by the selected branch, and
 //! push completion lets GenHub verify the object-store receipts before releasing its lease.

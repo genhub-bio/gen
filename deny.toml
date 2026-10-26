@@ -70,6 +70,9 @@ ignore = [
   { id = "RUSTSEC-2023-0071", reason = "opendal for azure/gcs uses this. No upgrade yet for RSA" },
   { id = "RUSTSEC-2026-0194", reason = "opendal and cargo-llvm-cov still depend on quick-xml before the fixed range; no upstream fix released yet" },
   { id = "RUSTSEC-2026-0195", reason = "opendal and cargo-llvm-cov still depend on quick-xml before the fixed range; no upstream fix released yet" },
+  { id = "RUSTSEC-2026-0391", reason = "Locked zstd 0.13.3 consumers are GAI 0.2.5 (bulk compress/decompress only) and cargo-deny's spdx 0.13.6 cache (fresh Encoder::new/Decoder::new contexts); neither reuses raw with_context contexts. Remove when both allow zstd >=0.14.3." },
+  { id = "RUSTSEC-2026-0398", reason = "Locked zstd-safe 7.3.0 has no seekable feature in the all-features graph; neither GAI bulk APIs nor spdx cache uses Seekable::decompress. Remove when GAI/spdx allow zstd-safe >=8.2.0." },
+  { id = "RUSTSEC-2026-0403", reason = "Locked consumers use GAI bulk APIs and spdx's stream::read::Decoder; the advisory affects stream::write::Decoder, which neither consumer uses. Remove when GAI/spdx allow zstd-safe >=8.2.0." },
   #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
   #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
 ]

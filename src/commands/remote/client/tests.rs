@@ -310,6 +310,30 @@ fn test_public_read_uses_anonymous_capability_and_parses_response() {
 }
 
 #[test]
+fn test_read_capability_parses_gcs_uri_and_redacts_bearer_token() {
+    let remote_url = "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&project=project&access_token=private-read-token&database=default.db";
+    let (origin, server) = mock_server(vec![(200, capability_body(remote_url))]);
+    let repository = repository(&origin);
+    let capability = acquire_capability_with_store(
+        &Client::new(),
+        &repository,
+        &CapabilityRequest {
+            operation: RemoteOperation::Clone,
+            branch: None,
+            force: false,
+        },
+        None,
+        &MemoryTokenStore::empty(),
+        no_interactive_login,
+    )
+    .expect("should receive a direct GCS read capability for a cloud clone");
+    server.join().expect("mock GenHub should finish");
+
+    assert_eq!(capability.remote_url.as_deref(), Some(remote_url));
+    assert!(!format!("{capability:?}").contains("private-read-token"));
+}
+
+#[test]
 fn test_push_capability_sends_idempotency_token_and_parses_direct_gcs_grant() {
     let session_scope = SessionScope {
         principal: "repository:repo-uuid".to_string(),
