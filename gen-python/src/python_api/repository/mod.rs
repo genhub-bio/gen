@@ -1,4 +1,4 @@
-#[cfg(not(target_os = "emscripten"))]
+#[cfg(feature = "remote")]
 use std::{fs, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
@@ -20,7 +20,9 @@ use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
 };
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+#[cfg(feature = "remote")]
+use pyo3_stub_gen::derive::gen_stub_pyfunction;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{
     block_group::PySequenceGraph,
@@ -33,7 +35,6 @@ pub mod exports;
 pub mod graph_ops;
 pub mod history;
 pub mod imports;
-#[cfg(not(target_os = "emscripten"))]
 pub mod remote;
 pub mod search;
 pub mod stitch;
@@ -47,10 +48,10 @@ pub mod updates;
 /// `committer` and `email`, when given, become the committer identity recorded on operations
 /// made in this repository from now on. A destination that only holds a freshly initialized,
 /// still-empty `.gen` workspace (for example from an earlier `Repository(path)`) is reused.
+#[cfg(feature = "remote")]
 #[gen_stub_pyfunction]
 #[pyfunction(name = "clone")]
 #[pyo3(signature = (url, path=None, committer=None, email=None))]
-#[cfg(not(target_os = "emscripten"))]
 pub fn clone_repository(
     python: Python<'_>,
     url: &str,
@@ -78,13 +79,13 @@ pub fn clone_repository(
     Ok(repository)
 }
 
-#[cfg(not(target_os = "emscripten"))]
+#[cfg(feature = "remote")]
 const INITIALIZATION_OPERATION_COUNT: usize = 2;
 
 /// Removes a destination's `.gen` directory when it is the only entry and holds no graph data or
 /// operations, so agents that opened `Repository(path)` before cloning do not hit a spurious
 /// "not an empty directory" error. Anything with content is left for the clone to reject.
-#[cfg(not(target_os = "emscripten"))]
+#[cfg(feature = "remote")]
 fn discard_untouched_workspace(workspace: &Workspace) -> PyResult<()> {
     let destination = workspace.base_dir();
     let Ok(mut entries) = fs::read_dir(destination) else {
@@ -261,6 +262,7 @@ impl PyRepository {
     }
 
     /// Reopens the graph connection after orchestration performed work through another connection.
+    #[cfg(feature = "remote")]
     pub(crate) fn refresh_graph_connection(&mut self) -> PyResult<()> {
         let graph_path = self
             .context
@@ -418,28 +420,6 @@ impl PyRepository {
         py_query(py, self.context.graph().conn(), query)
     }
 
-    /// Creates a standalone SQLite backup of the current Dolt graph database.
-    fn snapshot_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-        let snapshot = tempfile::NamedTempFile::new()
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        let mut destination =
-            rusqlite::Connection::open(snapshot.path()).map_err(sqlite_err_to_pyerr)?;
-        {
-            let backup =
-                rusqlite::backup::Backup::new(self.context.graph().conn(), &mut destination)
-                    .map_err(sqlite_err_to_pyerr)?;
-            backup
-                .run_to_completion(256, std::time::Duration::ZERO, None)
-                .map_err(sqlite_err_to_pyerr)?;
-        }
-        destination
-            .close()
-            .map_err(|(_, error)| sqlite_err_to_pyerr(error))?;
-        let bytes = std::fs::read(snapshot.path())
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        Ok(pyo3::types::PyBytes::new(py, &bytes))
-    }
-
     // SequenceGraph queries
 
     /// Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use
@@ -578,7 +558,7 @@ mod python_tests {
     use pyo3::{PyTypeInfo, exceptions::PyRuntimeError, prelude::*, py_run};
     use tempfile::tempdir;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "remote"))]
     use crate::python_api::repository::clone_repository;
     use crate::python_api::repository::{PyRepository, run_context_operation_write};
 
@@ -747,7 +727,7 @@ mod python_tests {
         });
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "remote"))]
     #[test]
     fn test_clone_returns_open_repository() {
         Python::initialize();

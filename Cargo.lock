@@ -1689,6 +1689,7 @@ dependencies = [
  "gen-core",
  "gen-diff",
  "gen-graph",
+ "gen-http",
  "gen-models",
  "gen-tui",
  "genomic-attribute-index",
@@ -1800,6 +1801,17 @@ dependencies = [
  "intervaltree",
  "petgraph",
  "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "gen-http"
+version = "0.5.1"
+dependencies = [
+ "cc",
+ "http",
+ "reqwest 0.12.28",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -2732,15 +2744,16 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libdoltlite-sys"
-version = "0.38.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa48e9a99d2f88be2459ac2271d9a09c71a6520b52ff8685c7418145d8139ba2"
+version = "0.38.23"
+source = "git+https://github.com/Chris7/rusqdoltlite.git?rev=9c388d4ad69722792f659ebe764d631e602b74e3#9c388d4ad69722792f659ebe764d631e602b74e3"
 dependencies = [
  "cc",
  "curl-sys",
  "libz-sys",
+ "md-5 0.10.6",
  "openssl-sys",
  "pkg-config",
+ "sha2 0.10.9",
  "vcpkg",
 ]
 
@@ -4863,9 +4876,8 @@ dependencies = [
 
 [[package]]
 name = "rusqdoltlite"
-version = "0.41.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "322e06a68fd35fd88ca331d5c0719cb3baaca5df4fc2debb3e498eb60a225256"
+version = "0.41.2"
+source = "git+https://github.com/Chris7/rusqdoltlite.git?rev=9c388d4ad69722792f659ebe764d631e602b74e3#9c388d4ad69722792f659ebe764d631e602b74e3"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -5565,7 +5577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

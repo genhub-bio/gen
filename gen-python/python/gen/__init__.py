@@ -1,6 +1,5 @@
 """Python bindings to the Gen version control system."""
 
-import sys
 from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _version
 
@@ -29,9 +28,14 @@ from .gen import (
     SequenceGraph,
     SuperPosition,
 )
+from .gen import Remote as Remote
 
-if sys.platform != "emscripten":
-    from .gen import Remote as Remote, clone as clone
+try:
+    from .gen import clone as clone
+except ImportError:
+    _has_clone = False
+else:
+    _has_clone = True
 
 from .browser import NotebookSession, NotebookSessionError
 
@@ -58,11 +62,12 @@ __all__ = [
     "Transaction",
     "HashId",
     "Locus",
+    "Node",
     "NotebookSession",
     "NotebookSessionError",
-    "Node",
     "Operation",
     "Position",
+    "Remote",
     "Repository",
     "Sample",
     "Sequence",
@@ -71,8 +76,8 @@ __all__ = [
     "freeze_all_widgets",
 ]
 
-if sys.platform != "emscripten":
-    __all__.extend(["Remote", "clone"])
+if _has_clone:
+    __all__.append("clone")
 
 
 def __dir__() -> list[str]:

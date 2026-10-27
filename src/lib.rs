@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
     str,
 };
+pub(crate) mod asset_materialization;
 pub mod commands;
 pub mod diffs;
 pub mod errors;

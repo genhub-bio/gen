@@ -84,4 +84,4 @@ mkdir -p "${wheel_dir}" "${UV_CACHE_DIR}"
 
 "${pyodide_cli}" build "${repo_root}" --outdir "${wheel_dir}" \
     --no-isolation --skip-dependency-check \
-    --config-setting 'build-args=--no-default-features --features extension-module'
+    --config-setting 'build-args=--no-default-features --features extension-module,browser-cloud'

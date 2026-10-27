@@ -55,7 +55,6 @@ export function render({ model, el }) {
   model.on("change:branch", announce);
   model.on("change:commit_hash", announce);
   model.on("change:capture_request_id", captureNotebook);
-  announce();
   captureNotebook();
   return () => {
     model.off("change:branch", announce);
