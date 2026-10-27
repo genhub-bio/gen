@@ -42,7 +42,7 @@ gen-models = { path = "gen-models", version = "0.5.1" }
 gen-graph = { path = "gen-graph", version = "0.5.1" }
 gen-tui = { path = "gen-tui", version = "0.5.1" }
 gen-annotations = { path = "gen-annotations", version = "0.5.1" }
-gai = { package = "genomic-attribute-index", version = "0.2.5" }
+gai = { package = "genomic-attribute-index", version = "0.2.6" }
 gen-capnp-schemas = { path = "gen-capnp-schemas", version = "0.5.1" }
 clap = { version = "4.5.32", features = ["derive"] }
 chrono = { version = "0.4.40", features = ["serde"] }
@@ -98,7 +98,6 @@ pprof = { version = "0.15.0", optional = true }
 
 [dev-dependencies]
 cargo-llvm-cov = "0.9.0"
-cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 insta = "1.43.1"
 rusqlite = { package = "rusqdoltlite", version = "0.41.1", features = ["remote"] }
