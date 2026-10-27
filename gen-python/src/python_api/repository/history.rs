@@ -6,8 +6,6 @@ use std::{
 
 use flate2::read::MultiGzDecoder;
 use gen_core::{BranchName, CommitRef, DoltHashId};
-#[cfg(target_os = "emscripten")]
-use gen_models::operations::Defaults;
 use gen_models::{
     assets::{AssetRef, Assets},
     db::DbContext,
@@ -429,7 +427,6 @@ impl PyRepository {
                 .map_err(history_err_to_pyerr)?;
             self.create_branch(&name, None)?;
         }
-        #[cfg(not(target_os = "emscripten"))]
         r#gen::commands::checkout::execute(
             self.context.graph().conn(),
             self.context.config().conn(),
@@ -438,16 +435,6 @@ impl PyRepository {
             Some(&name),
         )
         .map_err(history_err_to_pyerr)?;
-        #[cfg(target_os = "emscripten")]
-        {
-            let graph = self.context.graph().conn();
-            let history_store = DoltHistoryStore::new(graph);
-            r#gen::history::ensure_clean_working_set(&history_store, "checkout")
-                .map_err(history_err_to_pyerr)?;
-            gen_models::history::dolt::checkout(graph, &name).map_err(history_err_to_pyerr)?;
-            Defaults::set_current_branch(self.context.config().conn(), Some(&name))
-                .map_err(history_err_to_pyerr)?;
-        }
         self.find_branch(&name)
     }
 

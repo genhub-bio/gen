@@ -7,13 +7,17 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Sender},
     },
-    thread::{self, JoinHandle},
     time::{Duration, Instant},
+};
+#[cfg(not(target_os = "emscripten"))]
+use std::{
+    sync::mpsc::{self, Sender},
+    thread::{self, JoinHandle},
 };
 
 use indicatif::{MultiProgress, ProgressBar};
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 use rusqlite::{DoltPushProgressEvent, blockcachevfs::UploadProgress};
 
 use crate::progress_bar::{get_handler, get_message_bar, get_progress_bar, get_time_elapsed_bar};
@@ -57,6 +61,7 @@ impl TransferProgress {
         )
     }
 
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
     pub(crate) fn graph_reporter(
         &self,
         attempt: usize,
@@ -249,6 +254,7 @@ impl IndicatifOutput {
         bar.set_message(message.to_string());
     }
 
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
     fn graph_progress(&self, logical: Option<LogicalChunkProgress>, gcs: Option<UploadProgress>) {
         let mut details = Vec::new();
         if let Some(progress) = logical {
@@ -314,6 +320,7 @@ impl IndicatifOutput {
         }
     }
 
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
     fn set_details(&self, messages: &[String]) {
         let mut bars = self
             .details
@@ -374,6 +381,7 @@ impl IndicatifOutput {
         }
     }
 
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
     fn clear_graph_progress(&self) {
         let mut state = self
             .bar
@@ -394,7 +402,9 @@ impl IndicatifOutput {
 /// The worker thread is always joined when this guard is dropped. If the operating system cannot
 /// create a thread, progress remains best-effort and the transfer continues without heartbeats.
 pub(crate) struct ProgressHeartbeat {
+    #[cfg(not(target_os = "emscripten"))]
     stop: Option<Sender<()>>,
+    #[cfg(not(target_os = "emscripten"))]
     worker: Option<JoinHandle<()>>,
     bar: Option<ProgressBar>,
 }
@@ -408,12 +418,18 @@ impl ProgressHeartbeat {
     ) -> Self {
         if let Some(bar) = output.start_phase(&phase) {
             return Self {
+                #[cfg(not(target_os = "emscripten"))]
                 stop: None,
+                #[cfg(not(target_os = "emscripten"))]
                 worker: None,
                 bar: Some(bar),
             };
         }
+        #[cfg(target_os = "emscripten")]
+        let _ = (activity, phase, interval);
+        #[cfg(not(target_os = "emscripten"))]
         let (stop, receiver) = mpsc::channel();
+        #[cfg(not(target_os = "emscripten"))]
         let worker = thread::Builder::new()
             .name("gen-transfer-progress".to_string())
             .spawn(move || {
@@ -452,7 +468,9 @@ impl ProgressHeartbeat {
             })
             .ok();
         Self {
+            #[cfg(not(target_os = "emscripten"))]
             stop: Some(stop),
+            #[cfg(not(target_os = "emscripten"))]
             worker,
             bar: None,
         }
@@ -461,15 +479,46 @@ impl ProgressHeartbeat {
 
 impl Drop for ProgressHeartbeat {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
         }
         if let Some(bar) = self.bar.take() {
             bar.finish_and_clear();
         }
+    }
+}
+
+#[cfg(all(test, not(target_os = "emscripten")))]
+pub(crate) mod test_support {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use super::{ProgressOutput, TransferProgress};
+
+    pub(crate) fn captured_transfer_progress(
+        interval: Duration,
+    ) -> (TransferProgress, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let captured_lines = Arc::clone(&lines);
+        let output = ProgressOutput {
+            sink: Arc::new(move |line| {
+                captured_lines
+                    .lock()
+                    .expect("should capture progress output")
+                    .push(line.to_string());
+            }),
+            interval,
+            indicatif: None,
+        };
+        (TransferProgress { output }, lines)
     }
 }
 
@@ -478,6 +527,7 @@ struct ThrottleState {
     last_message: Option<String>,
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 #[derive(Clone, Copy)]
 struct LogicalChunkProgress {
     plan_number: u64,
@@ -515,6 +565,7 @@ impl ThrottledOutput {
     }
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 #[derive(Clone)]
 pub(crate) struct GraphUploadProgressReporter {
     output: Arc<ThrottledOutput>,
@@ -527,6 +578,7 @@ pub(crate) struct GraphUploadProgressReporter {
     logical_chunks: Arc<Mutex<Option<LogicalChunkProgress>>>,
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 impl GraphUploadProgressReporter {
     fn with_output(output: ProgressOutput, attempt: usize, attempts: usize) -> Self {
         let now = Instant::now();
@@ -576,8 +628,8 @@ impl GraphUploadProgressReporter {
     /// Dolt's missing-chunk plan provides a usable total before BlockCacheVFS has reported its
     /// aggregate physical GCS block plan.
     ///
-    /// `push_graph_branch_with_progress` forwards the callback events so the CLI can show that
-    /// early logical progress during a loopback push.
+    /// `push_graph_branch_with_progress` forwards callback events so the CLI can show early
+    /// logical progress during a direct cloud push.
     pub(crate) fn report_dolt_progress(&self, event: DoltPushProgressEvent) {
         let is_plan = matches!(&event, DoltPushProgressEvent::Plan { .. });
         let now = Instant::now();
@@ -691,7 +743,7 @@ impl GraphUploadProgressReporter {
         }
     }
 
-    /// Loopback push completion is a different boundary from later branch validation, checkpointing,
+    /// Dolt push completion is a different boundary from later branch validation, checkpointing,
     /// and manifest publication, which can fail after Dolt has finished its transfer.
     ///
     /// `push_graph_branch_with_progress` records the logical outcome when the callback scope ends.
@@ -728,10 +780,6 @@ impl GraphUploadProgressReporter {
         self.heartbeat_with_interval(phase, HEARTBEAT_INTERVAL)
     }
 
-    pub(crate) fn heartbeat_preserving_phase(&self, phase: &str) -> ProgressHeartbeat {
-        self.begin_activity_window(phase, HEARTBEAT_INTERVAL)
-    }
-
     fn heartbeat_with_interval(&self, phase: &str, interval: Duration) -> ProgressHeartbeat {
         *self
             .phase
@@ -751,10 +799,6 @@ impl GraphUploadProgressReporter {
             phase.to_string(),
             interval,
         )
-    }
-
-    pub(crate) fn waiting_for_local_server_cleanup(&self) {
-        self.output.println("Waiting for local server cleanup...");
     }
 
     pub(crate) fn failed_silently(&self) {
@@ -1504,6 +1548,7 @@ fn completion_percentage(completed: u64, expected: u64) -> String {
     }
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 fn format_logical_chunk_progress(progress: LogicalChunkProgress) -> String {
     format!(
         "{} of {} destination-missing chunks acknowledged ({}); {} of {} logical payload bytes acknowledged ({})",
@@ -1516,6 +1561,7 @@ fn format_logical_chunk_progress(progress: LogicalChunkProgress) -> String {
     )
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 fn logical_percentage(completed: u64, expected: u64) -> String {
     if expected == 0 {
         "not applicable (no logical chunk work planned)".to_string()
@@ -1548,7 +1594,7 @@ pub(crate) fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote-native", not(target_os = "emscripten")))]
 pub(crate) mod tests {
     use std::{
         io::{Cursor, Read as _},
@@ -2215,7 +2261,7 @@ pub(crate) mod tests {
         });
         let result = (|| -> Result<(), &str> {
             let _heartbeat = progress.heartbeat_with_interval(
-                "Dolt push through loopback RemoteServer",
+                "Dolt push to the direct GCS remote",
                 Duration::from_millis(200),
             );
             heartbeat_rx
@@ -2223,9 +2269,6 @@ pub(crate) mod tests {
                 .map_err(|_| "heartbeat did not fire")?;
             Err("injected disk I/O error")
         })();
-        let cleanup_heartbeat =
-            progress.heartbeat_preserving_phase("closing the direct GCS graph session");
-        drop(cleanup_heartbeat);
         progress.failed();
 
         assert_eq!(result, Err("injected disk I/O error"));
@@ -2237,15 +2280,17 @@ pub(crate) mod tests {
         let lines = lines.lock().expect("should read failure output");
         assert!(lines.iter().any(|line| {
             line.contains("Graph upload attempt 1/2 failed")
-                && line.contains("during Dolt push through loopback RemoteServer")
+                && line.contains("during Dolt push to the direct GCS remote")
                 && line.contains("GCS blocks handled: 3 of 4 (75%)")
                 && line.contains("12.0 MiB of 24.0 MiB GCS block-data bytes handled (50%)")
                 && line.contains("2 GCS blocks uploaded (8.0 MiB)")
                 && line.contains("1 GCS blocks reused (4.0 MiB)")
         }));
-        assert!(lines.iter().any(|line| {
-            line.contains("Still working on Dolt push through loopback RemoteServer")
-        }));
+        assert!(
+            lines.iter().any(|line| {
+                line.contains("Still working on Dolt push to the direct GCS remote")
+            })
+        );
         assert!(
             lines
                 .iter()
@@ -2265,19 +2310,6 @@ pub(crate) mod tests {
         assert!(lines[0].contains("No completed GCS block counters were reported"));
         assert!(!lines[0].contains("0 GCS blocks uploaded"));
         assert!(!lines[0].contains("0 GCS blocks reused"));
-    }
-
-    #[test]
-    fn test_expected_branch_conflict_reports_cleanup_without_transfer_failure_summary() {
-        let (output, lines) = captured_output(Duration::ZERO);
-        let progress = GraphUploadProgressReporter::with_output(output, 1, 2);
-        progress.waiting_for_local_server_cleanup();
-        progress.failed_silently();
-
-        assert_eq!(
-            *lines.lock().expect("should read branch conflict progress"),
-            ["Waiting for local server cleanup..."]
-        );
     }
 
     #[test]

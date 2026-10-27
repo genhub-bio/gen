@@ -11,6 +11,9 @@
 //! Graph history is transferred by Dolt rather than reconstructed by Gen. Clone asks
 //! Dolt to clone the remote database; push sends the selected local branch, optionally
 //! with force; and pull integrates the selected remote branch into its local branch.
+//! Browser and native clients use the same clone, pull, and push operations. Native and
+//! browser-cloud builds stage GenHub graph pushes through BlockCacheVFS; builds without either
+//! cloud backend reject GenHub graph pushes.
 //! After a successful push, Gen fetches the branch to refresh Dolt's remote-tracking ref.
 //! After a successful push or pull, the config database records that the local branch
 //! tracks the selected remote.
@@ -19,12 +22,12 @@
 //! `file://` remote points directly to another Dolt database (or a workspace containing
 //! `.gen/default.db`), so graph operations use that path directly and transfers happen
 //! directly between the workspaces. For a GenHub remote, clone, pull, and fetch use a scoped,
-//! short-lived GCS capability through BlockCacheVFS. Push opens a direct GCS
-//! database URI behind an in-process loopback `RemoteServer`, stages the Dolt push, and asks
-//! GenHub to publish the accepted manifest. An idempotency token persisted with the push operation
-//! lets an interrupted push resume its staged session. Failure to restore a temporary clone or
-//! pull URL is reported as a warning because the graph transfer may already have succeeded and the
-//! canonical URL will be restored on the next attempt.
+//! short-lived GCS capability through BlockCacheVFS. Native and browser-cloud clients stage pushes
+//! through a direct GCS database URI, then ask GenHub to publish the accepted manifest. An
+//! idempotency token persisted with the push operation lets an interrupted push resume its staged
+//! session. Failure to restore a temporary clone or pull URL is reported as a warning because the
+//! graph transfer may already have succeeded and the canonical URL will be restored on the next
+//! attempt.
 //!
 //! Assets referenced by the transferred branch are handled after the graph operation.
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
@@ -73,22 +76,22 @@ use std::{
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use crc32c::crc32c_append;
-use flate2::read::MultiGzDecoder;
 use gen_core::{
     DoltHashId, HashId, Sha256Hash,
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
     errors::{ConfigError, ConnectionError},
 };
+use gen_http::{
+    Client, Error as HttpError, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
+    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+};
 use gen_models::{
-    assets::{
-        AssetRef, AssetView, ChecksummedWriter, CompressionType, LocalAssetUri,
-        materialization_destination_path,
-    },
+    assets::{AssetRef, AssetView, LocalAssetUri, materialization_destination_path},
     db::{ConfigConnection, GraphConnection},
     errors::{QueryError, RemoteError as ModelRemoteError},
     history::dolt::{
-        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
-        push_force, remote_rows, set_remote_url,
+        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull,
+        remote_rows, set_remote_url,
     },
     operations::{
         Defaults, Remote, RemoteBranch, RemoteOperationKind as StoredRemoteOperationKind,
@@ -97,33 +100,53 @@ use gen_models::{
 };
 use indexmap::IndexMap;
 use md5::Md5;
-use noodles::bgzf;
-use reqwest::{
-    StatusCode,
-    blocking::{Body, Client, Response},
-    header::{CONTENT_RANGE, RANGE},
-};
+#[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+use rusqlite::Connection;
+use rusqlite::{Error as SqlError, RemoteFailureKind};
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    all(feature = "browser-cloud", target_os = "emscripten")
+))]
 use rusqlite::{
-    Error as SqlError, OpenFlags, RemoteFailureKind, RemoteServer, RemoteServerOptions,
+    OpenFlags,
     blockcachevfs::{CloudConnectionIdentity, CloudConnectionUri},
 };
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+use rusqlite::{RemoteServer, RemoteServerOptions};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 use uuid::Uuid;
 
 mod capability;
+mod push_session;
+use push_session::PushGraphTransferError;
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    feature = "browser-cloud"
+))]
 mod direct_gcs;
+#[cfg(not(target_os = "emscripten"))]
 mod push_lock;
 
 use capability::{
     PushCapabilityRenewal, PushTransferLease, acquire_push_session_renewal, transfer_authorization,
 };
-use direct_gcs::{
-    PushGraphTransferError, PushGraphTransferRequest, is_non_fast_forward_push_error,
-    run_push_graph_transfer,
-};
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    feature = "browser-cloud"
+))]
+use direct_gcs::run_push_graph_transfer as run_direct_gcs_graph_transfer;
+use gen_models::history::dolt::{push, push_force};
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+use crate::commands::remote::progress::GraphUploadProgressReporter;
 use crate::{
+    asset_materialization::{
+        AssetCopyStage, AssetMaterializationProgress, DownloadAssetOutcome,
+        copy_versioned_asset as copy_local_asset,
+        materialize_versioned_asset_with_progress as materialize_local_asset_with_progress,
+        warn_asset_conflict as warn_local_asset_conflict,
+    },
     commands::remote::{
         client::{
             AssetTransferCompletionRequest, AssetTransferRequest, AssetUploadReceipt,
@@ -132,12 +155,194 @@ use crate::{
         },
         login_origin,
         progress::{
-            AssetDownloadProgressReporter, AssetUploadProgressReporter,
-            GraphUploadProgressReporter, TransferProgress, UploadBodyReader, format_elapsed,
+            AssetDownloadProgressReporter, AssetUploadProgressReporter, TransferProgress,
+            UploadBodyReader, format_elapsed,
         },
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
 };
+
+const BROWSER_ASSET_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+
+struct CapabilityGraphRemote {
+    url: String,
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+    _cloud_server: RemoteServer,
+    #[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+    _cloud_anchor: Connection,
+}
+
+#[derive(Default)]
+struct CapabilityTransportIdentity {
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        all(feature = "browser-cloud", target_os = "emscripten")
+    ))]
+    cloud: Option<CloudConnectionIdentity>,
+}
+
+/// Opens a read CAB through BlockCacheVFS and returns a credential-free Dolt remote.
+///
+/// Native builds keep a loopback server alive during transfer. Browser builds keep the VFS anchor
+/// connection alive for the same duration.
+fn capability_graph_remote(
+    remote_url: &str,
+    identity: &mut CapabilityTransportIdentity,
+) -> Result<CapabilityGraphRemote, SqlError> {
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        all(feature = "browser-cloud", target_os = "emscripten")
+    ))]
+    {
+        let cloud_uri = validate_capability_transport_identity(remote_url, identity)?;
+
+        #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+        {
+            let read_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let cloud_server = RemoteServer::start_with_options(
+                Path::new(cloud_uri.as_str()),
+                &RemoteServerOptions::new().database_open_flags(read_flags),
+            )
+            .map_err(normalize_cloud_open_authorization_error)?;
+            Ok(CapabilityGraphRemote {
+                url: cloud_server.database_url(DEFAULT_GRAPH_DB_NAME),
+                _cloud_server: cloud_server,
+            })
+        }
+
+        #[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+        {
+            let anchor = Connection::open_with_flags(
+                cloud_uri.as_str(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(normalize_cloud_open_authorization_error)?;
+            let database_path = anchor.blockcachevfs_path().ok_or_else(|| {
+                SqlError::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some("read CAB did not open with BlockCacheVFS".to_string()),
+                )
+            })?;
+            let vfs_name = anchor.blockcachevfs_name().ok_or_else(|| {
+                SqlError::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                    Some("read CAB did not register a BlockCacheVFS".to_string()),
+                )
+            })?;
+            Ok(CapabilityGraphRemote {
+                url: format!("file://{database_path}?vfs={vfs_name}"),
+                _cloud_anchor: anchor,
+            })
+        }
+    }
+
+    #[cfg(not(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        all(feature = "browser-cloud", target_os = "emscripten")
+    )))]
+    {
+        let _ = (remote_url, identity);
+        Err(unsupported_cloud_graph_error())
+    }
+}
+
+/// CBS can return raw HTTP authorization statuses during VFS attachment.
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    all(feature = "browser-cloud", target_os = "emscripten")
+))]
+fn normalize_cloud_open_authorization_error(error: SqlError) -> SqlError {
+    let is_http_authorization_error = error
+        .sqlite_error()
+        .is_some_and(|sqlite_error| matches!(sqlite_error.extended_code, 401 | 403));
+    if is_http_authorization_error {
+        SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_AUTH),
+            Some("cloud graph capability was rejected".to_string()),
+        )
+    } else {
+        error
+    }
+}
+
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    all(feature = "browser-cloud", target_os = "emscripten")
+))]
+fn validate_capability_transport_identity(
+    remote_url: &str,
+    identity: &mut CapabilityTransportIdentity,
+) -> Result<CloudConnectionUri, SqlError> {
+    let cloud_uri = CloudConnectionUri::parse(remote_url)?;
+    let cloud_identity = cloud_uri.identity();
+    if identity
+        .cloud
+        .as_ref()
+        .is_some_and(|expected| expected != &cloud_identity)
+    {
+        return Err(changed_capability_scope_error());
+    }
+    identity.cloud = Some(cloud_identity);
+    Ok(cloud_uri)
+}
+
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    all(feature = "browser-cloud", target_os = "emscripten")
+))]
+fn changed_capability_scope_error() -> SqlError {
+    SqlError::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+        Some("GenHub changed the graph capability scope during renewal".to_string()),
+    )
+}
+
+#[cfg(not(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    all(feature = "browser-cloud", target_os = "emscripten")
+)))]
+fn unsupported_cloud_graph_error() -> SqlError {
+    SqlError::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+        Some("GenHub graph capabilities require a BlockCacheVFS cloud backend".to_string()),
+    )
+}
+
+impl AssetMaterializationProgress for AssetDownloadProgressReporter {
+    fn checksum_started(&self, phase: &str, total_bytes: Option<u64>) {
+        AssetDownloadProgressReporter::checksum_started(self, phase, total_bytes);
+    }
+
+    fn checksum_bytes(&self, bytes: u64) {
+        AssetDownloadProgressReporter::checksum_bytes(self, bytes);
+    }
+
+    fn copy_started(&self, stage: AssetCopyStage) {
+        match stage {
+            AssetCopyStage::VersionedStore => {
+                AssetDownloadProgressReporter::download_started(self, 0);
+            }
+            AssetCopyStage::Workspace => {
+                AssetDownloadProgressReporter::materialization_started(self);
+            }
+        }
+    }
+
+    fn copy_bytes(&self, stage: AssetCopyStage, bytes: u64) {
+        match stage {
+            AssetCopyStage::VersionedStore => {
+                AssetDownloadProgressReporter::download_bytes(self, bytes);
+            }
+            AssetCopyStage::Workspace => {
+                AssetDownloadProgressReporter::materialized_bytes(self, bytes);
+            }
+        }
+    }
+}
 
 fn file_graph_url(remote_url: &str) -> Result<String, Box<dyn Error>> {
     let parsed = Url::parse(remote_url)?;
@@ -240,79 +445,6 @@ fn is_authorization_error(error: &SqlError) -> bool {
     error.remote_failure_kind() == Some(RemoteFailureKind::Authorization)
 }
 
-struct CapabilityGraphRemote {
-    url: String,
-    _cloud_server: RemoteServer,
-}
-
-#[derive(Default)]
-struct CapabilityTransportIdentity {
-    cloud: Option<CloudConnectionIdentity>,
-}
-
-/// Serves a read CAB through a temporary loopback remote backed by BlockCacheVFS.
-///
-/// The server owns the read-only cloud connection during clone, fetch, or pull. Its local URL
-/// contains no credentials.
-fn capability_graph_remote(
-    remote_url: &str,
-    identity: &mut CapabilityTransportIdentity,
-) -> Result<CapabilityGraphRemote, SqlError> {
-    let cloud_uri = validate_capability_transport_identity(remote_url, identity)?;
-    let read_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_URI
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let cloud_server = RemoteServer::start_with_options(
-        Path::new(cloud_uri.as_str()),
-        &RemoteServerOptions::new().database_open_flags(read_flags),
-    )
-    .map_err(normalize_cloud_open_authorization_error)?;
-    Ok(CapabilityGraphRemote {
-        url: cloud_server.database_url(DEFAULT_GRAPH_DB_NAME),
-        _cloud_server: cloud_server,
-    })
-}
-
-/// Raw GCS HTTP authorization statuses become typed failures so callers can request a fresh CAB.
-fn normalize_cloud_open_authorization_error(error: SqlError) -> SqlError {
-    let is_http_authorization_error = error
-        .sqlite_error()
-        .is_some_and(|sqlite_error| matches!(sqlite_error.extended_code, 401 | 403));
-    if is_http_authorization_error {
-        SqlError::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_AUTH),
-            Some("cloud graph capability was rejected".to_string()),
-        )
-    } else {
-        error
-    }
-}
-
-/// A renewed read CAB may rotate credentials but cannot change its cloud object scope.
-fn validate_capability_transport_identity(
-    remote_url: &str,
-    identity: &mut CapabilityTransportIdentity,
-) -> Result<CloudConnectionUri, SqlError> {
-    let cloud_uri = CloudConnectionUri::parse(remote_url)?;
-    let cloud_identity = cloud_uri.identity();
-    if identity
-        .cloud
-        .as_ref()
-        .is_some_and(|expected| expected != &cloud_identity)
-    {
-        return Err(changed_capability_scope_error());
-    }
-    identity.cloud = Some(cloud_identity);
-    Ok(cloud_uri)
-}
-
-fn changed_capability_scope_error() -> SqlError {
-    SqlError::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
-        Some("GenHub changed the graph capability scope during renewal".to_string()),
-    )
-}
-
 fn resolve_remote(
     config: &ConfigConnection,
     explicit_remote: Option<&str>,
@@ -387,13 +519,28 @@ fn run_graph_transfer(
     mut transfer: impl FnMut() -> Result<(), SqlError>,
 ) -> Result<Option<PushTransferLease>, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
-        let authorization =
-            transfer_authorization(remote, operation, Some(branch), force, None, login_origin)?;
-        let remote_url = authorization
-            .remote_url
-            .as_deref()
-            .ok_or("file remote did not resolve to a graph database URL")?;
-        ensure_graph_remote(graph, &remote.name, remote_url)?;
+        let authorization = match transfer_authorization(
+            remote,
+            operation,
+            Some(branch),
+            force,
+            None,
+            login_origin,
+        ) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                restore_canonical_url(graph, remote);
+                return Err(error);
+            }
+        };
+        let Some(remote_url) = authorization.remote_url.as_deref() else {
+            restore_canonical_url(graph, remote);
+            return Err("file remote did not resolve to a graph database URL".into());
+        };
+        if let Err(error) = ensure_graph_remote(graph, &remote.name, remote_url) {
+            restore_canonical_url(graph, remote);
+            return Err(error.into());
+        }
         let result = transfer();
         restore_canonical_url(graph, remote);
         result?;
@@ -453,6 +600,14 @@ fn run_graph_transfer(
         .into())
 }
 
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    feature = "browser-cloud"
+))]
+fn is_non_fast_forward_push_error(error: &SqlError) -> bool {
+    error.remote_failure_kind() == Some(RemoteFailureKind::NonFastForward)
+}
+
 fn push_graph_branch(
     graph: &GraphConnection,
     remote_name: &str,
@@ -466,6 +621,7 @@ fn push_graph_branch(
     }
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 fn push_graph_branch_with_progress(
     graph: &GraphConnection,
     remote_name: &str,
@@ -490,13 +646,6 @@ fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
     asset
         .checksum
         .ok_or_else(|| format!("Local asset {} has no checksum", asset.id).into())
-}
-
-fn materialized_asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
-    match asset.materialized_checksum {
-        Some(checksum) => Ok(checksum),
-        None => asset_checksum(asset),
-    }
 }
 
 fn calculate_upload_checksums(
@@ -637,23 +786,33 @@ fn upload_asset_with_progress(
     progress.checksum_verified();
     progress.upload_started();
     let request_body = UploadBodyReader::new(file, progress.clone());
+    let mut request = Request::new(Method::PUT, url.to_string());
+    request.headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    request.headers.insert(
+        HeaderName::from_static("content-md5"),
+        HeaderValue::from_str(&md5)
+            .map_err(|error| HttpError::InvalidRequestHeader(error.to_string()))?,
+    );
+    request.headers.insert(
+        HeaderName::from_static("x-goog-if-generation-match"),
+        HeaderValue::from_static("0"),
+    );
+    #[cfg(not(target_os = "emscripten"))]
+    request.headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string())
+            .map_err(|error| HttpError::InvalidRequestHeader(error.to_string()))?,
+    );
+    request = request.body_reader(request_body);
     let response = {
         let _heartbeat =
             progress.heartbeat("sending the asset request and waiting for storage acceptance");
-        client
-            .put(url)
-            .header("content-type", "application/octet-stream")
-            // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
-            // composite objects (those > 5GB)
-            .header("content-md5", &md5)
-            .header("x-goog-if-generation-match", "0")
-            .body(Body::sized(request_body, length))
-            .send()
-            .map_err(|error| error.without_url())?
+        client.execute(request)?
     };
-    if !response.status().is_success()
-        && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
-    {
+    if !response.status().is_success() && response.status() != StatusCode::PRECONDITION_FAILED {
         return Err(format!(
             "Asset {} upload failed with HTTP {}",
             asset.id,
@@ -661,7 +820,7 @@ fn upload_asset_with_progress(
         )
         .into());
     }
-    if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+    if response.status() == StatusCode::PRECONDITION_FAILED {
         progress.upload_already_present();
     } else {
         progress.upload_accepted();
@@ -670,13 +829,6 @@ fn upload_asset_with_progress(
         id: asset.id,
         crc32c,
     })
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum DownloadAssetOutcome {
-    Unchanged,
-    Downloaded,
-    Conflict(PathBuf),
 }
 
 #[derive(Clone, Copy)]
@@ -749,138 +901,6 @@ impl<'progress> AssetDownloadBatch<'progress> {
     }
 }
 
-/// This is effectively a dirty file check. On clones/pulls we want to update
-/// files if they match previously known checksums. The previous asset set is cumulative
-/// so a workspace that still contains any committed version
-/// is safe to advance. Unknown contents remain a conflict and are never overwritten.
-fn destination_matches_previous_asset(
-    workspace: &Workspace,
-    destination_path: &Path,
-    existing_checksum: &Sha256Hash,
-    previous_assets: &HashMap<HashId, AssetRef>,
-    progress: Option<&AssetDownloadProgressReporter>,
-) -> Result<bool, Box<dyn Error>> {
-    let mut decoded_destination_checksum = None;
-    let mut destination_decode_failed = false;
-    for asset in previous_assets.values() {
-        let archive_checksum = asset_checksum(asset)?;
-        let logical_path = materialization_destination_path(
-            workspace,
-            &asset.uri,
-            Some(&archive_checksum),
-            asset.logical_path.as_deref(),
-        )?;
-        // Cumulative history includes unrelated logical paths, so ignore entries targeting elsewhere.
-        if logical_path != destination_path {
-            continue;
-        }
-        // This exact checksum identifies a workspace version already known to history.
-        if materialized_asset_checksum(asset)? == *existing_checksum {
-            return Ok(true);
-        }
-        // Skip plain representations because the checksum check above is sufficient; compressed
-        // encodings can differ while preserving known payloads, so compare their decoded contents.
-        if !matches!(
-            asset.materialized_compression_type(),
-            CompressionType::Gzip | CompressionType::Bgzf
-        ) {
-            continue;
-        }
-        let archived_path =
-            materialization_destination_path(workspace, &asset.uri, Some(&archive_checksum), None)?;
-        // This is the checksum-addressed archive under .gen/assets; without local bytes, this
-        // version cannot be decoded for comparison, so try others and conflict if none match.
-        if !archived_path.is_file() {
-            continue;
-        }
-        // Hash mismatch means cached bytes may be partial, corrupt, or locally modified.
-        let archived_checksum = if let Some(progress) = progress {
-            calculate_file_checksum_with_progress(
-                &archived_path,
-                progress,
-                "checking a previous asset archive",
-            )
-        } else {
-            calculate_file_checksum(&archived_path)
-        };
-        if !archived_checksum.is_ok_and(|checksum| checksum == archive_checksum) {
-            continue;
-        }
-        // This means we can't hash the destination asset, so just skip everything else trying to use this checksum.
-        if destination_decode_failed {
-            continue;
-        }
-        // Reuse this decoded checksum across the cumulative versions of this destination.
-        let existing_decoded_checksum = if let Some(checksum) = decoded_destination_checksum {
-            checksum
-        } else {
-            let checksum = if let Some(progress) = progress {
-                decoded_compressed_checksum_with_progress(
-                    destination_path,
-                    progress,
-                    "checking the existing workspace asset",
-                )
-            } else {
-                decoded_compressed_checksum(destination_path)
-            };
-            match checksum {
-                Ok(checksum) => {
-                    decoded_destination_checksum = Some(checksum);
-                    checksum
-                }
-                Err(_) => {
-                    // A local edit or damaged compressed stream may make the destination undecodable.
-                    destination_decode_failed = true;
-                    continue;
-                }
-            }
-        };
-        // Raw hash verification does not guarantee the archive stream can be decoded.
-        let archived_decoded_checksum = if let Some(progress) = progress {
-            decoded_compressed_checksum_with_progress(
-                &archived_path,
-                progress,
-                "checking a previous asset archive",
-            )
-        } else {
-            decoded_compressed_checksum(&archived_path)
-        };
-        let Ok(archived_decoded_checksum) = archived_decoded_checksum else {
-            continue;
-        };
-        // Matching decoded bytes means different gzip/BGZF encodings represent a known workspace version.
-        if existing_decoded_checksum == archived_decoded_checksum {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn decoded_compressed_checksum(path: &Path) -> Result<Sha256Hash, io::Error> {
-    let mut reader = MultiGzDecoder::new(fs::File::open(path)?);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let length = reader.read(&mut buffer)?;
-        if length == 0 {
-            break;
-        }
-        hasher.update(&buffer[..length]);
-    }
-    Ok(Sha256Hash(hasher.finalize().into()))
-}
-
-fn decoded_compressed_checksum_with_progress(
-    path: &Path,
-    reporter: &AssetDownloadProgressReporter,
-    phase: &str,
-) -> Result<Sha256Hash, io::Error> {
-    reporter.checksum_started(phase, None);
-    let decoder = MultiGzDecoder::new(fs::File::open(path)?);
-    let mut reader = CountingReader::new(decoder, |bytes| reporter.checksum_bytes(bytes));
-    calculate_reader_checksum(&mut reader)
-}
-
 struct CountingReader<R, F> {
     reader: R,
     bytes_read: u64,
@@ -926,33 +946,6 @@ fn calculate_file_checksum_with_progress(
     calculate_reader_checksum(&mut reader)
 }
 
-/// If a conflict exists for a file we are pulling/cloning, rename it as .conflict for user resolution
-fn conflict_destination_path(
-    destination_path: &Path,
-    expected_checksum: &Sha256Hash,
-) -> Result<(PathBuf, bool), Box<dyn Error>> {
-    let file_name = destination_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("asset");
-    for index in 0_usize.. {
-        let suffix = if index == 0 {
-            ".conflict".to_string()
-        } else {
-            format!(".conflict.{index}")
-        };
-        let candidate = destination_path.with_file_name(format!("{file_name}{suffix}"));
-        if !candidate.exists() {
-            return Ok((candidate, false));
-        }
-        if calculate_file_checksum(&candidate).is_ok_and(|checksum| checksum == *expected_checksum)
-        {
-            return Ok((candidate, true));
-        }
-    }
-    unreachable!("conflict suffix space should not be exhausted")
-}
-
 /// Returns the stable sibling path used while an asset is being written.
 ///
 /// HTTP downloads intentionally reuse this path across invocations so interrupted transfers can
@@ -995,6 +988,25 @@ fn content_range_total(response: &Response) -> Option<u64> {
         .and_then(|(_, total)| total.parse::<u64>().ok())
 }
 
+fn content_range_end(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes "))
+        .and_then(|value| value.split_once('-'))
+        .and_then(|(_, range)| range.split_once('/'))
+        .and_then(|(end, _)| end.parse::<u64>().ok())
+}
+
+fn response_content_length(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+
 /// Keeps streamed response errors free of messages that may contain a signed URL.
 #[derive(Debug, thiserror::Error)]
 #[error("asset response body read failed ({kind:?})")]
@@ -1022,7 +1034,7 @@ fn stream_asset_response_to_staged_file(
     let mut buffer = [0_u8; 64 * 1024];
     let mut bytes_read = 0_u64;
     loop {
-        let read = response.read(&mut buffer).map_err(|error| {
+        let read = response.body_mut().read(&mut buffer).map_err(|error| {
             Box::new(AssetResponseReadError { kind: error.kind() }) as Box<dyn Error>
         })?;
         if read == 0 {
@@ -1053,6 +1065,9 @@ fn download_to_staged_path_with_progress(
     expected_checksum: &Sha256Hash,
     progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<(), Box<dyn Error>> {
+    let browser_chunked = cfg!(target_os = "emscripten");
+    let mut range_disabled = false;
+    let mut checksum_retry_used = false;
     let mut resume_offset = staged_path
         .metadata()
         .map(|metadata| metadata.len())
@@ -1082,25 +1097,68 @@ fn download_to_staged_path_with_progress(
     }
 
     loop {
-        let mut request = client.get(url);
-        if resume_offset > 0 {
-            request = request.header(RANGE, format!("bytes={resume_offset}-"));
+        let requested_range_end = resume_offset.saturating_add(BROWSER_ASSET_RANGE_BYTES - 1);
+        let mut request = Request::new(Method::GET, url.to_string());
+        if resume_offset > 0 || (browser_chunked && !range_disabled) {
+            let range = if browser_chunked {
+                format!("bytes={resume_offset}-{requested_range_end}")
+            } else {
+                format!("bytes={resume_offset}-")
+            };
+            request.headers.insert(
+                RANGE,
+                HeaderValue::from_str(&range)
+                    .map_err(|error| HttpError::InvalidRequestHeader(error.to_string()))?,
+            );
+        }
+        if browser_chunked {
+            request = request.max_response_bytes(BROWSER_ASSET_RANGE_BYTES as usize);
         }
         let send_result = if let Some(progress) = progress {
             let _heartbeat = progress.heartbeat("waiting for the asset download response");
-            request.send().map_err(|error| error.without_url())
+            client.execute(request)
         } else {
-            request.send().map_err(|error| error.without_url())
+            client.execute(request)
         };
         let mut response = send_result?;
-        let append = resume_offset > 0
-            && response.status() == StatusCode::PARTIAL_CONTENT
-            && content_range_starts_at(&response, resume_offset);
-        let invalid_partial_response = resume_offset > 0
-            && (response.status() == StatusCode::RANGE_NOT_SATISFIABLE
-                || (response.status() == StatusCode::PARTIAL_CONTENT && !append));
-        if invalid_partial_response {
+        let partial_response = response.status() == StatusCode::PARTIAL_CONTENT;
+        let valid_partial_response =
+            partial_response && content_range_starts_at(&response, resume_offset);
+        if resume_offset > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            if browser_chunked {
+                let checksum = if let Some(progress) = progress {
+                    calculate_file_checksum_with_progress(
+                        staged_path,
+                        progress,
+                        "verifying the completed ranged asset download",
+                    )?
+                } else {
+                    calculate_file_checksum(staged_path)?
+                };
+                if checksum == *expected_checksum {
+                    return Ok(());
+                }
+            }
             fs::remove_file(staged_path)?;
+            resume_offset = 0;
+            if let Some(progress) = progress {
+                progress.download_started(0);
+            }
+            continue;
+        }
+        if partial_response && !valid_partial_response && (resume_offset > 0 || browser_chunked) {
+            if partial_response && resume_offset == 0 && browser_chunked && !range_disabled {
+                range_disabled = true;
+            } else if partial_response && resume_offset == 0 && browser_chunked {
+                return Err(format!(
+                    "Asset {} server returned an invalid HTTP range response",
+                    asset.id
+                )
+                .into());
+            }
+            if staged_path.exists() {
+                fs::remove_file(staged_path)?;
+            }
             resume_offset = 0;
             if let Some(progress) = progress {
                 progress.download_started(0);
@@ -1116,17 +1174,16 @@ fn download_to_staged_path_with_progress(
             .into());
         }
 
+        let append = resume_offset > 0 && valid_partial_response;
         let effective_resume_offset = if append { resume_offset } else { 0 };
+        let response_total = if valid_partial_response {
+            content_range_total(&response)
+                .or_else(|| asset.size.and_then(|size| u64::try_from(size).ok()))
+        } else {
+            response_content_length(&response)
+                .or_else(|| asset.size.and_then(|size| u64::try_from(size).ok()))
+        };
         if let Some(progress) = progress {
-            let response_total = if append {
-                content_range_total(&response).or_else(|| {
-                    response
-                        .content_length()
-                        .map(|length| effective_resume_offset.saturating_add(length))
-                })
-            } else {
-                response.content_length()
-            };
             if let Some(response_total) = response_total {
                 progress.set_expected_bytes(response_total);
             }
@@ -1143,6 +1200,21 @@ fn download_to_staged_path_with_progress(
         );
         drop(body_heartbeat);
         stream_result?;
+        let staged_bytes = staged_path.metadata()?.len();
+        if browser_chunked && valid_partial_response {
+            let response_end = content_range_end(&response);
+            let needs_another_range = response_total.is_some_and(|total| staged_bytes < total)
+                || (response_total.is_none() && response_end == Some(requested_range_end));
+            if needs_another_range {
+                if staged_bytes <= effective_resume_offset {
+                    return Err(
+                        format!("Asset {} range download made no progress", asset.id).into(),
+                    );
+                }
+                resume_offset = staged_bytes;
+                continue;
+            }
+        }
         let checksum = if let Some(progress) = progress {
             calculate_file_checksum_with_progress(
                 staged_path,
@@ -1155,9 +1227,12 @@ fn download_to_staged_path_with_progress(
         if checksum == *expected_checksum {
             return Ok(());
         }
-        if append {
+        if (append || (browser_chunked && valid_partial_response && effective_resume_offset > 0))
+            && !checksum_retry_used
+        {
             fs::remove_file(staged_path)?;
             resume_offset = 0;
+            checksum_retry_used = true;
             if let Some(progress) = progress {
                 progress.download_started(0);
             }
@@ -1306,15 +1381,8 @@ fn copy_to_versioned_store_with_progress(
         None,
         &expected_checksum,
         progress,
-        AssetCopyProgress::Download,
     )?;
     Ok((destination_path, true))
-}
-
-#[derive(Clone, Copy)]
-enum AssetCopyProgress {
-    Download,
-    Materialize,
 }
 
 /// Copies a stored archive or restores it to a workspace path without premature replacement.
@@ -1327,100 +1395,14 @@ fn copy_versioned_asset_with_progress(
     materialized_checksum: Option<&Sha256Hash>,
     expected_output_checksum: &Sha256Hash,
     progress: Option<&AssetDownloadProgressReporter>,
-    copy_progress: AssetCopyProgress,
 ) -> Result<(), Box<dyn Error>> {
-    let parent = destination_path.parent().ok_or_else(|| {
-        format!(
-            "Asset destination has no parent: {}",
-            destination_path.display()
-        )
-    })?;
-    fs::create_dir_all(parent)?;
-    let staged_path = temporary_path(destination_path)?;
-    let result = (|| {
-        let mut staged_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&staged_path)?;
-        let versioned_file = fs::File::open(versioned_path)?;
-        if let Some(progress) = progress {
-            match copy_progress {
-                AssetCopyProgress::Download => progress.download_started(0),
-                AssetCopyProgress::Materialize => progress.materialization_started(),
-            }
-        }
-        let staged_checksum = {
-            let mut checksummed_writer = ChecksummedWriter::new(&mut staged_file);
-            match materialized_checksum {
-                Some(_) => {
-                    let mut decoded_file = bgzf::io::Reader::new(versioned_file);
-                    if let Some(progress) = progress {
-                        let mut decoded_file = CountingReader::new(decoded_file, |bytes| {
-                            progress.materialized_bytes(bytes);
-                        });
-                        io::copy(&mut decoded_file, &mut checksummed_writer)?;
-                    } else {
-                        io::copy(&mut decoded_file, &mut checksummed_writer)?;
-                    }
-                }
-                None => {
-                    let mut versioned_file = versioned_file;
-                    if let Some(progress) = progress {
-                        let mut versioned_file =
-                            CountingReader::new(versioned_file, |bytes| match copy_progress {
-                                AssetCopyProgress::Download => progress.download_bytes(bytes),
-                                AssetCopyProgress::Materialize => {
-                                    progress.materialized_bytes(bytes)
-                                }
-                            });
-                        io::copy(&mut versioned_file, &mut checksummed_writer)?;
-                    } else {
-                        io::copy(&mut versioned_file, &mut checksummed_writer)?;
-                    }
-                }
-            }
-            checksummed_writer.flush()?;
-            checksummed_writer.checksum()
-        };
-        staged_file.sync_all()?;
-        drop(staged_file);
-        if staged_checksum != *expected_output_checksum {
-            return Err(format!(
-                "Copied asset at {} failed checksum validation",
-                destination_path.display()
-            )
-            .into());
-        }
-        fs::rename(&staged_path, destination_path)?;
-        Ok::<(), Box<dyn Error>>(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&staged_path);
-    }
-    result
-}
-
-/// Copies a versioned asset to the workspace without overwriting unknown local content.
-///
-/// Versioned assets replace a known prior version or are copied beside unknown local
-/// content as a conflict, preventing unintentional overwrites of data.
-pub(crate) fn materialize_versioned_asset(
-    workspace: &Workspace,
-    asset: &AssetRef,
-    previous_assets: &HashMap<HashId, AssetRef>,
-    destination_logical_path: Option<&str>,
-    versioned_path: &Path,
-    versioned_file_created: bool,
-) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
-    materialize_versioned_asset_with_progress(
-        workspace,
-        asset,
-        previous_assets,
-        destination_logical_path,
+    copy_local_asset(
         versioned_path,
-        versioned_file_created,
-        None,
+        destination_path,
+        materialized_checksum,
+        expected_output_checksum,
+        progress.map(|progress| progress as &dyn AssetMaterializationProgress),
+        AssetCopyStage::VersionedStore,
     )
 }
 
@@ -1433,117 +1415,15 @@ fn materialize_versioned_asset_with_progress(
     versioned_file_created: bool,
     progress: Option<&AssetDownloadProgressReporter>,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
-    let expected_checksum = asset_checksum(asset)?;
-    let expected_materialized_checksum = materialized_asset_checksum(asset)?;
-    if !versioned_path.is_file() {
-        return Err(format!(
-            "Cannot materialize asset {} because its versioned file is missing: {}",
-            asset.id,
-            versioned_path.display()
-        )
-        .into());
-    }
-    let versioned_checksum = if let Some(progress) = progress {
-        calculate_file_checksum_with_progress(
-            versioned_path,
-            progress,
-            "verifying the stored asset checksum",
-        )?
-    } else {
-        calculate_file_checksum(versioned_path)?
-    };
-    if versioned_checksum != expected_checksum {
-        return Err(format!(
-            "Versioned asset {} at {} does not match its recorded checksum",
-            asset.id,
-            versioned_path.display()
-        )
-        .into());
-    }
-    let Some(destination_logical_path) = destination_logical_path else {
-        return Ok(if versioned_file_created {
-            DownloadAssetOutcome::Downloaded
-        } else {
-            DownloadAssetOutcome::Unchanged
-        });
-    };
-    let destination_path = materialization_destination_path(
+    materialize_local_asset_with_progress(
         workspace,
-        &asset.uri,
-        Some(&expected_checksum),
-        Some(destination_logical_path),
-    )?;
-    if destination_path == versioned_path {
-        return Ok(if versioned_file_created {
-            DownloadAssetOutcome::Downloaded
-        } else {
-            DownloadAssetOutcome::Unchanged
-        });
-    }
-    if destination_path.exists() {
-        let destination_checksum = if let Some(progress) = progress {
-            calculate_file_checksum_with_progress(
-                &destination_path,
-                progress,
-                "checking the existing workspace asset",
-            )
-        } else {
-            calculate_file_checksum(&destination_path)
-        };
-        if destination_checksum.is_ok_and(|checksum| checksum == expected_materialized_checksum) {
-            return Ok(DownloadAssetOutcome::Unchanged);
-        }
-    }
-    let existing_checksum = if destination_path.exists() {
-        Some(if let Some(progress) = progress {
-            calculate_file_checksum_with_progress(
-                &destination_path,
-                progress,
-                "checking the existing workspace asset",
-            )?
-        } else {
-            calculate_file_checksum(&destination_path)?
-        })
-    } else {
-        None
-    };
-    let intended_change = if let Some(checksum) = existing_checksum.as_ref() {
-        destination_matches_previous_asset(
-            workspace,
-            &destination_path,
-            checksum,
-            previous_assets,
-            progress,
-        )?
-    } else {
-        false
-    };
-    let has_conflict = existing_checksum.is_some() && !intended_change;
-    if has_conflict {
-        let (conflict_path, already_downloaded) =
-            conflict_destination_path(&destination_path, &expected_materialized_checksum)?;
-        if !already_downloaded {
-            copy_versioned_asset_with_progress(
-                versioned_path,
-                &conflict_path,
-                asset.materialized_checksum.as_ref(),
-                &expected_materialized_checksum,
-                progress,
-                AssetCopyProgress::Materialize,
-            )?;
-        }
-        return Ok(DownloadAssetOutcome::Conflict(conflict_path));
-    }
-
-    copy_versioned_asset_with_progress(
+        asset,
+        previous_assets,
+        destination_logical_path,
         versioned_path,
-        &destination_path,
-        asset.materialized_checksum.as_ref(),
-        &expected_materialized_checksum,
-        progress,
-        AssetCopyProgress::Materialize,
-    )?;
-    Ok(DownloadAssetOutcome::Downloaded)
+        versioned_file_created,
+        progress.map(|progress| progress as &dyn AssetMaterializationProgress),
+    )
 }
 
 /// Runs the HTTP asset pipeline: versioned storage first, optional materialization second.
@@ -1584,18 +1464,7 @@ pub(crate) fn warn_asset_conflict(
     destination_logical_path: Option<&str>,
     conflict_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let destination_path = materialization_destination_path(
-        workspace,
-        &asset.uri,
-        asset.checksum.as_ref(),
-        destination_logical_path,
-    )?;
-    eprintln!(
-        "Warning: the requested asset version conflicts with the local file at {}. The local file was preserved and the requested version was written to {}. Choose the correct version before continuing.",
-        destination_path.display(),
-        conflict_path.display()
-    );
-    Ok(())
+    warn_local_asset_conflict(workspace, asset, destination_logical_path, conflict_path)
 }
 
 /// Executes the asset portion of a `file://` clone, pull, or push.
@@ -2053,6 +1922,7 @@ pub fn clone_into_workspace(
                     && (is_authorization_error(&error) || lost_authorization_code);
                 clone_result = Some(Err(error));
                 if should_retry {
+                    restore_canonical_url(&graph, remote);
                     progress.println(
                         "The graph session could not be used; retrying with freshly requested graph access...",
                     );
@@ -2189,6 +2059,13 @@ fn safe_transfer_error(error: &(dyn Error + 'static)) -> String {
             RemoteClientError::Request(_) => {
                 "the GenHub request failed; check network connectivity and retry".to_string()
             }
+            RemoteClientError::RequestEncode(_) => {
+                "Gen could not encode the GenHub request".to_string()
+            }
+            #[cfg(not(target_os = "emscripten"))]
+            RemoteClientError::NativeRequest(_) => {
+                "the native GenHub request failed; check network connectivity and retry".to_string()
+            }
             RemoteClientError::TokenStorage(_) => {
                 "Gen could not read saved GenHub credentials; check credential file access".to_string()
             }
@@ -2203,7 +2080,7 @@ fn safe_transfer_error(error: &(dyn Error + 'static)) -> String {
             _ => "the local Dolt graph database operation failed".to_string(),
         };
     }
-    if error.downcast_ref::<reqwest::Error>().is_some() {
+    if error.downcast_ref::<HttpError>().is_some() {
         return "the asset HTTP request failed; check network connectivity and retry".to_string();
     }
     if let Some(source) = error.source()
@@ -2217,11 +2094,54 @@ fn safe_transfer_error(error: &(dyn Error + 'static)) -> String {
 fn safe_transfer_error_chain(error: &(dyn Error + 'static)) -> Option<String> {
     if error.downcast_ref::<RemoteClientError>().is_some()
         || error.downcast_ref::<SqlError>().is_some()
-        || error.downcast_ref::<reqwest::Error>().is_some()
+        || error.downcast_ref::<HttpError>().is_some()
     {
         return Some(safe_transfer_error(error));
     }
     error.source().and_then(safe_transfer_error_chain)
+}
+
+pub(super) struct PushGraphTransferRequest<'a> {
+    pub(super) graph: &'a GraphConnection,
+    pub(super) remote: &'a Remote,
+    pub(super) branch: &'a str,
+    pub(super) force: bool,
+    pub(super) idempotency_token: Uuid,
+    pub(super) expected_transfer_id: Option<Uuid>,
+    pub(super) destination_hash: &'a DoltHashId,
+    pub(super) progress: &'a TransferProgress,
+}
+
+/// Describes why GenHub graph pushes are unavailable without a direct cloud backend.
+#[cfg(not(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    feature = "browser-cloud"
+)))]
+fn unsupported_graph_push_error() -> PushGraphTransferError {
+    PushGraphTransferError::Protocol(
+        "GenHub graph pushes require `remote-native` on native targets or `browser-cloud`"
+            .to_string(),
+    )
+}
+
+fn run_push_graph_transfer(
+    request: PushGraphTransferRequest<'_>,
+) -> Result<PushCapabilityRenewal, Box<dyn Error>> {
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        feature = "browser-cloud"
+    ))]
+    {
+        run_direct_gcs_graph_transfer(request)
+    }
+    #[cfg(not(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        feature = "browser-cloud"
+    )))]
+    {
+        let _ = request;
+        Err(Box::new(unsupported_graph_push_error()))
+    }
 }
 
 /// Errors that can occur while pushing a branch to a remote repository.
@@ -2284,7 +2204,7 @@ pub enum RemotePushError {
 fn remote_push_graph_error(error: Box<dyn Error>) -> RemotePushError {
     if error
         .downcast_ref::<SqlError>()
-        .is_some_and(is_non_fast_forward_push_error)
+        .is_some_and(|error| error.remote_failure_kind() == Some(RemoteFailureKind::NonFastForward))
     {
         return RemotePushError::NonFastForward {
             cleanup_warning: String::new(),
@@ -2355,8 +2275,8 @@ fn retire_superseded_push_session(
         return Ok(());
     };
 
-    progress.println("Retiring the previous direct GCS push session...");
-    let _heartbeat = progress.heartbeat("retiring the previous direct GCS push session");
+    progress.println("Retiring the previous push session...");
+    let _heartbeat = progress.heartbeat("retiring the previous push session");
     match acquire_push_session_renewal(remote, branch, old_force, session_id, None)
         .and_then(|renewal| renewal.abort())
     {
@@ -2385,6 +2305,17 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
+    #[cfg(not(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        feature = "browser-cloud"
+    )))]
+    if !remote.url.starts_with("file://") {
+        // Reject before persisting a pending push operation or requesting a transfer lease.
+        return Err(RemotePushError::GraphTransfer(Box::new(
+            unsupported_graph_push_error(),
+        )));
+    }
+    #[cfg(not(target_os = "emscripten"))]
     let _push_lock = push_lock::acquire(workspace, &remote.name, &branch)?;
     progress.println(&format!(
         "Preparing push of branch '{branch}' to '{}'...",
@@ -2824,7 +2755,7 @@ pub fn clone_destination_path(
     Ok(parent.base_dir().join(clone_destination_name(remote_url)?))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
     mod fake_gcs {
         include!(concat!(
@@ -2845,15 +2776,22 @@ mod tests {
         io::{BufRead as _, BufReader, Cursor, Read as _, Write as _},
         net::TcpListener,
         path::{Path, PathBuf},
-        sync::Mutex,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::{Duration, Instant},
     };
 
-    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+    #[cfg(feature = "remote-native")]
+    use chrono::DateTime;
+    use chrono::{Duration as ChronoDuration, Utc};
+    #[cfg(feature = "remote-native")]
     use fake_gcs::FakeGcsServer;
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{DoltHashId, HashId, Sha256Hash, config::Workspace};
+    use gen_http::Client;
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
@@ -2867,8 +2805,9 @@ mod tests {
         },
     };
     use noodles::bgzf;
-    use reqwest::blocking::Client;
-    use rusqlite::{Connection, Error as SqlError, blockcachevfs::AuthRefreshReason};
+    #[cfg(feature = "remote-native")]
+    use rusqlite::blockcachevfs::AuthRefreshReason;
+    use rusqlite::{Connection, Error as SqlError};
     use serde_json::json;
     use tempfile::tempdir;
     use url::Url;
@@ -2881,12 +2820,16 @@ mod tests {
         execute_pull, execute_push, file_graph_url, get_remaining_assets_to_transfer,
         resolve_remote, run_graph_transfer, temporary_path, transfer_assets, upload_asset,
     };
+    #[cfg(feature = "remote-native")]
+    use crate::commands::remote::client::{CapabilityResponse, DirectPushCapability};
     use crate::{
+        asset_materialization::{
+            AssetCopyStage, copy_versioned_asset as copy_local_asset,
+            materialize_versioned_asset as materialize_local_asset,
+        },
         commands::remote::{
-            client::{
-                CapabilityResponse, DirectPushCapability, SessionScope as ClientSessionScope,
-            },
-            progress::tests::captured_transfer_progress,
+            client::SessionScope as ClientSessionScope,
+            progress::test_support::captured_transfer_progress,
         },
         get_config_connection, get_connection, get_raw_connection,
     };
@@ -2916,22 +2859,6 @@ mod tests {
         super::download_to_versioned_store_with_progress(client, workspace, asset, url, None)
     }
 
-    fn copy_versioned_asset(
-        versioned_path: &std::path::Path,
-        destination_path: &std::path::Path,
-        materialized_checksum: Option<&Sha256Hash>,
-        expected_output_checksum: &Sha256Hash,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        super::copy_versioned_asset_with_progress(
-            versioned_path,
-            destination_path,
-            materialized_checksum,
-            expected_output_checksum,
-            None,
-            super::AssetCopyProgress::Materialize,
-        )
-    }
-
     fn download_asset(
         client: &Client,
         workspace: &Workspace,
@@ -2951,6 +2878,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "remote-native")]
     fn push_capability_response(
         token: &str,
         token_expires_at: DateTime<Utc>,
@@ -3023,6 +2951,7 @@ mod tests {
         .to_string()
     }
 
+    #[cfg(feature = "remote-native")]
     #[test]
     fn test_push_capability_renewal_rotates_token_and_publication_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
@@ -4579,7 +4508,7 @@ mod tests {
             .expect("should create versioned asset directory");
             fs::write(&versioned_path, &archived_contents).expect("should write versioned archive");
 
-            let error = super::materialize_versioned_asset(
+            let error = materialize_local_asset(
                 &workspace,
                 &asset,
                 &previous_assets,
@@ -4663,11 +4592,13 @@ mod tests {
             .expect("should write previous logical asset");
         let expected_checksum = Sha256Hash::convert_str("missing-versioned-asset");
 
-        copy_versioned_asset(
+        copy_local_asset(
             &missing_versioned_path,
             &destination_path,
             None,
             &expected_checksum,
+            None,
+            AssetCopyStage::Workspace,
         )
         .expect_err("should reject a missing versioned asset");
 
@@ -5610,7 +5541,7 @@ mod tests {
                 .read(&mut request)
                 .expect("should read capability request");
             let body = format!(
-                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                "{{\"remote_url\":\"http://127.0.0.1:1/http-transfer\",\
                  \"expires_at\":\"2030-01-01T00:00:00Z\",\
                  \"default_branch\":\"main\",\
                  \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
@@ -5639,10 +5570,10 @@ mod tests {
             false,
             || panic!("Dolt should not run after rejecting a non-cloud capability"),
         )
-        .expect_err("should reject the signed HTTP network capability");
+        .expect_err("should reject an HTTP graph capability");
         server.join().expect("capability server should finish");
 
-        assert!(!error.to_string().contains("legacy-transfer"));
+        assert!(!error.to_string().contains("http-transfer"));
         let remotes = remote_rows(&graph).expect("should read restored canonical URL");
         assert!(
             remotes
@@ -5651,8 +5582,144 @@ mod tests {
         );
     }
 
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        all(feature = "browser-cloud", target_os = "emscripten")
+    ))]
     #[test]
-    fn test_push_rejects_legacy_http_capability_without_uploading_assets() {
+    fn test_read_capability_renewal_rejects_a_changed_cloud_scope() {
+        let first = rusqlite::blockcachevfs::CloudConnectionUri::gcs(
+            "first-bucket",
+            "repos/alice/example/.gen/graph_db/",
+            "test-project",
+            "first-secret-token",
+            "default.db",
+            None,
+        )
+        .expect("should build first read capability URI");
+        let renewed = rusqlite::blockcachevfs::CloudConnectionUri::gcs(
+            "other-bucket",
+            "repos/alice/example/.gen/graph_db/",
+            "test-project",
+            "renewed-secret-token",
+            "default.db",
+            None,
+        )
+        .expect("should build renewed read capability URI");
+        let mut identity = super::CapabilityTransportIdentity::default();
+
+        super::validate_capability_transport_identity(first.as_str(), &mut identity)
+            .expect("should accept the original read capability scope");
+        let rotated = rusqlite::blockcachevfs::CloudConnectionUri::gcs(
+            "first-bucket",
+            "repos/alice/example/.gen/graph_db/",
+            "test-project",
+            "renewed-secret-token",
+            "default.db",
+            None,
+        )
+        .expect("should build rotated read capability URI");
+        super::validate_capability_transport_identity(rotated.as_str(), &mut identity)
+            .expect("should accept a rotated credential for the same graph scope");
+        let error = super::validate_capability_transport_identity(renewed.as_str(), &mut identity)
+            .expect_err("should reject a renewed capability for another bucket");
+
+        assert!(
+            error
+                .to_string()
+                .contains("changed the graph capability scope")
+        );
+        assert!(!error.to_string().contains("secret-token"));
+    }
+
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        all(feature = "browser-cloud", target_os = "emscripten")
+    ))]
+    #[test]
+    fn test_read_cab_unauthorized_response_is_a_retryable_authorization_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind GCS test endpoint");
+        listener
+            .set_nonblocking(true)
+            .expect("should allow checking for GCS retries");
+        let address = listener
+            .local_addr()
+            .expect("should read GCS test endpoint address");
+        let finished = Arc::new(AtomicBool::new(false));
+        let server_finished = Arc::clone(&finished);
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut last_request = Instant::now();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_mock_http_request(&mut stream);
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 47\r\nConnection: close\r\n\r\n{\"error\":{\"code\":401,\"message\":\"Unauthorized\"}}",
+                            )
+                            .expect("should reject the read CAB request");
+                        requests.push(request);
+                        last_request = Instant::now();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if server_finished.load(Ordering::Acquire)
+                            && last_request.elapsed() > Duration::from_millis(100)
+                        {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("should accept GCS test request: {error}"),
+                }
+            }
+            requests
+        });
+        let endpoint = format!("http://{address}/");
+        let uri = rusqlite::blockcachevfs::CloudConnectionUri::gcs(
+            "read-only-bucket",
+            "repos/alice/example/.gen/graph_db/",
+            "test-project",
+            "read-only-secret-token",
+            "default.db",
+            Some(&endpoint),
+        )
+        .expect("should build read-only GCS capability URI");
+        let mut identity = super::CapabilityTransportIdentity::default();
+        let result = super::capability_graph_remote(uri.as_str(), &mut identity);
+        finished.store(true, Ordering::Release);
+        let error = result
+            .err()
+            .expect("should reject an unauthorized read CAB request");
+        let requests = server.join().expect("GCS test server should finish");
+        let error_message = error.to_string();
+
+        assert!(!error_message.contains("read-only-secret-token"));
+        assert_eq!(
+            error.remote_failure_kind(),
+            Some(rusqlite::RemoteFailureKind::Authorization),
+            "unexpected SQLite error code {:?}: {error_message}",
+            error
+                .sqlite_error()
+                .map(|sqlite_error| sqlite_error.extended_code)
+        );
+        assert!(super::is_authorization_error(&error));
+        assert!(!requests.is_empty(), "should issue a cloud read request");
+        assert!(requests.iter().all(|request| {
+            !request.starts_with("POST ")
+                && !request.starts_with("PUT ")
+                && !request.starts_with("DELETE ")
+        }));
+        assert!(requests.iter().all(|request| {
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer read-only-secret-token")
+        }));
+    }
+
+    #[test]
+    fn test_push_rejects_http_graph_capability_without_uploading_assets() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -5670,7 +5737,7 @@ mod tests {
                 .expect("should read capability request");
             let request = String::from_utf8_lossy(&request[..read]).into_owned();
             let body = format!(
-                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                "{{\"remote_url\":\"http://127.0.0.1:1/http-transfer\",\
                  \"expires_at\":\"2030-01-01T00:00:00Z\",\
                  \"default_branch\":\"main\",\
                  \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
@@ -5680,7 +5747,7 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
-            .expect("should write legacy capability response");
+            .expect("should write HTTP graph capability response");
             request
         });
 
@@ -5701,7 +5768,7 @@ mod tests {
         drop(graph);
 
         let error = execute_push(&workspace, None, None, false)
-            .expect_err("push should reject a legacy HTTP-only capability");
+            .expect_err("push should reject an HTTP graph capability without a GCS session");
         let request = server.join().expect("capability server should finish");
 
         assert!(error.to_string().contains("direct GCS session"));
@@ -6799,8 +6866,8 @@ mod tests {
             .expect("should lock process environment");
         let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
         let temp = tempdir().expect("should create advanced push retry directory");
-        let legacy_capability = format!(
-            "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+        let http_capability = format!(
+            "{{\"remote_url\":\"http://127.0.0.1:1/http-transfer\",\
              \"expires_at\":\"2030-01-01T00:00:00Z\",\
              \"default_branch\":\"main\",\
              \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
@@ -6811,7 +6878,7 @@ mod tests {
             MockGenHubReply::Http(500, "asset verification unavailable".to_string()),
             MockGenHubReply::DirectPushCapability(TEST_TRANSFER_ID),
             MockGenHubReply::EmptySuccess,
-            MockGenHubReply::Http(200, legacy_capability),
+            MockGenHubReply::Http(200, http_capability),
         ]);
         let workspace = Workspace::new(temp.path().join("local"));
         workspace.ensure_gen_dir();
@@ -6855,8 +6922,9 @@ mod tests {
         drop(graph);
         assert_ne!(advanced_destination, original_destination);
 
-        let error = execute_push(&workspace, None, None, false)
-            .expect_err("advanced push retry should reject a legacy HTTP capability");
+        let error = execute_push(&workspace, None, None, false).expect_err(
+            "advanced push retry should reject an HTTP graph capability without a GCS session",
+        );
         let requests = server.join().expect("GenHub server should finish");
 
         assert!(error.to_string().contains("direct GCS session"));
@@ -6950,7 +7018,7 @@ mod tests {
                 .expect("should read GenHub request");
             let request = String::from_utf8_lossy(&request[..read]).into_owned();
             let body = format!(
-                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                "{{\"remote_url\":\"http://127.0.0.1:1/http-transfer\",\
                  \"expires_at\":\"2030-01-01T00:00:00Z\",\
                  \"default_branch\":\"main\",\
                  \"transfer_id\":\"{RETRIED_TRANSFER_ID}\"}}"
@@ -6960,7 +7028,7 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
-            .expect("should write legacy capability response");
+            .expect("should write HTTP graph capability response");
             request
         });
 
@@ -7181,6 +7249,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "remote-native")]
     fn test_non_fast_forward_classifier_requires_exact_sqlite_constraint_error() {
         let exact = SqlError::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),

@@ -10,6 +10,7 @@
 //! writes blocks under a scoped token, then the operations layer asks GenHub to publish the
 //! staged manifest. Asset transfer endpoints handle files referenced by the selected branch, and
 //! push completion lets GenHub verify the object-store receipts before releasing its lease.
+//! Local development uses the configured GCS emulator for these capabilities as well.
 //!
 //! Capability and asset requests share one origin-scoped authentication flow. Public reads can
 //! start anonymously; authenticated requests use an API key, saved credentials, or interactive
@@ -23,20 +24,23 @@ pub use direct_push::{abort_direct_push, confirm_direct_push_session_stale, publ
 #[cfg(test)]
 mod tests;
 
-use std::{env, fmt};
+use std::{env, fmt, io::Read as _};
 
 use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
-use reqwest::{StatusCode, Url, blocking::Client};
+use gen_http::{
+    Client, Error as HttpError, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use self::authentication::{
     AuthenticationOptions, FileTokenStore, RequestAuthorization, TokenStore,
     acquire_request_with_store, authorize_request,
 };
-use crate::commands::remote::server::AuthTokens;
+use crate::commands::remote::AuthTokens;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryRemote {
@@ -266,13 +270,20 @@ pub enum RemoteClientError {
         status: StatusCode,
         declared_content_length: Option<u64>,
         #[source]
-        source: reqwest::Error,
+        source: serde_json::Error,
     },
     #[error("HTTP client error: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(#[from] HttpError),
+    #[error("Failed to encode GenHub request: {0}")]
+    RequestEncode(#[from] serde_json::Error),
+    #[cfg(not(target_os = "emscripten"))]
+    #[error("Native remote push request failed")]
+    NativeRequest(#[source] reqwest::Error),
     #[error("Token storage error: {0}")]
     TokenStorage(#[from] std::io::Error),
 }
+
+const MAX_REMOTE_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// Keys credentials by GenHub origin so multiple repository remotes on that host share one login.
 pub fn normalized_origin(remote_url: &str) -> Result<String, RemoteClientError> {
@@ -286,12 +297,48 @@ pub fn normalized_origin(remote_url: &str) -> Result<String, RemoteClientError> 
     Ok(parsed.origin().ascii_serialization())
 }
 
-fn response_error(response: reqwest::blocking::Response) -> RemoteClientError {
+fn response_error(mut response: Response) -> RemoteClientError {
     let status = response.status();
-    let message = response
-        .text()
-        .unwrap_or_else(|_| "Unable to read response".to_string());
+    let mut body = Vec::new();
+    if response
+        .body_mut()
+        .take((MAX_REMOTE_ERROR_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .is_err()
+    {
+        body.clear();
+    }
+    let was_truncated = body.len() > MAX_REMOTE_ERROR_BODY_BYTES;
+    body.truncate(MAX_REMOTE_ERROR_BODY_BYTES);
+    let mut message = String::from_utf8_lossy(&body).into_owned();
+    if was_truncated {
+        message.push_str(" [response body truncated]");
+    }
+    if message.is_empty() {
+        message = "Unable to read response".to_string();
+    }
     RemoteClientError::Http { status, message }
+}
+
+fn json_request<T: Serialize>(
+    method: Method,
+    url: String,
+    body: &T,
+) -> Result<Request, RemoteClientError> {
+    Ok(Request::new(method, url)
+        .header(
+            gen_http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )
+        .body_bytes(serde_json::to_vec(body)?))
+}
+
+fn declared_content_length(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(gen_http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 fn send_capability(
@@ -301,24 +348,28 @@ fn send_capability(
     idempotency_token: Option<Uuid>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let mut builder = client.post(repository.capability_url()).json(request);
+    let mut http_request = json_request(Method::POST, repository.capability_url(), request)?;
     if let Some(idempotency_token) = idempotency_token {
-        builder = builder.header("Idempotency-Token", idempotency_token.to_string());
+        http_request.headers.insert(
+            HeaderName::from_static("idempotency-token"),
+            HeaderValue::from_str(&idempotency_token.to_string())
+                .map_err(|error| HttpError::InvalidRequestHeader(error.to_string()))?,
+        );
     }
-    let response = authorize_request(builder, authorization).send()?;
+    let response = client.execute(authorize_request(http_request, authorization)?)?;
     if !response.status().is_success() {
         return Err(response_error(response));
     }
     let status = response.status();
-    let declared_content_length = response.content_length();
-    response
-        .json()
-        .map_err(|source| RemoteClientError::ResponseDecode {
+    let declared_content_length = declared_content_length(&response);
+    serde_json::from_reader(response.into_body()).map_err(|source| {
+        RemoteClientError::ResponseDecode {
             endpoint: "remote capability",
             status,
             declared_content_length,
             source,
-        })
+        }
+    })
 }
 
 fn send_asset_transfers(
@@ -327,24 +378,21 @@ fn send_asset_transfers(
     request: &AssetTransferRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<AssetTransferResponse, RemoteClientError> {
-    let response = authorize_request(
-        client.post(repository.asset_transfers_url()).json(request),
-        authorization,
-    )
-    .send()?;
+    let http_request = json_request(Method::POST, repository.asset_transfers_url(), request)?;
+    let response = client.execute(authorize_request(http_request, authorization)?)?;
     if !response.status().is_success() {
         return Err(response_error(response));
     }
     let status = response.status();
-    let declared_content_length = response.content_length();
-    response
-        .json()
-        .map_err(|source| RemoteClientError::ResponseDecode {
+    let declared_content_length = declared_content_length(&response);
+    serde_json::from_reader(response.into_body()).map_err(|source| {
+        RemoteClientError::ResponseDecode {
             endpoint: "asset transfers",
             status,
             declared_content_length,
             source,
-        })
+        }
+    })
 }
 
 fn send_asset_transfer_completion(
@@ -353,13 +401,12 @@ fn send_asset_transfer_completion(
     request: &AssetTransferCompletionRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<(), RemoteClientError> {
-    let response = authorize_request(
-        client
-            .post(repository.asset_transfer_completion_url())
-            .json(request),
-        authorization,
-    )
-    .send()?;
+    let http_request = json_request(
+        Method::POST,
+        repository.asset_transfer_completion_url(),
+        request,
+    )?;
+    let response = client.execute(authorize_request(http_request, authorization)?)?;
     if !response.status().is_success() {
         return Err(response_error(response));
     }
@@ -394,10 +441,11 @@ fn acquire_capability_with_store_and_token(
     token_store: &impl TokenStore,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let allow_anonymous = matches!(
-        request.operation,
-        RemoteOperation::Clone | RemoteOperation::Pull
-    );
+    let allow_anonymous = cfg!(target_os = "emscripten")
+        || matches!(
+            request.operation,
+            RemoteOperation::Clone | RemoteOperation::Pull
+        );
     acquire_request_with_store(
         client,
         repository,
@@ -470,10 +518,11 @@ pub fn acquire_asset_transfers(
 ) -> Result<AssetTransferResponse, RemoteClientError> {
     let client = Client::new();
     let api_key = env::var("GENHUB_API_KEY").ok();
-    let allow_anonymous = matches!(
-        request.operation,
-        RemoteOperation::Clone | RemoteOperation::Pull
-    );
+    let allow_anonymous = cfg!(target_os = "emscripten")
+        || matches!(
+            request.operation,
+            RemoteOperation::Clone | RemoteOperation::Pull
+        );
     acquire_request_with_store(
         &client,
         repository,
@@ -501,7 +550,7 @@ pub fn complete_asset_transfers(
         repository,
         AuthenticationOptions {
             api_key: api_key.as_deref(),
-            allow_anonymous: false,
+            allow_anonymous: cfg!(target_os = "emscripten"),
             token_store: &FileTokenStore,
         },
         interactive_login,

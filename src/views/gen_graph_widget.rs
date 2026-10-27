@@ -50,6 +50,33 @@ fn is_zero_width_junction(node: &GraphNode) -> bool {
 #[derive(Clone)]
 pub struct GenGraphNodeSizer;
 
+/// Compute the coordinate window of the visible genomic blocks in a graph controller.
+pub fn current_view_coordinate_window(
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+) -> Option<(i64, i64)> {
+    let viewport_graph = controller.get_viewport_graph();
+    let graph = controller.graph();
+    let mut start = i64::MAX;
+    let mut end = i64::MIN;
+
+    for (_world_pos, domain_idx, _layout_node) in viewport_graph.data_nodes() {
+        let block = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
+        if is_start_node(block.node_id) || is_end_node(block.node_id) {
+            continue;
+        }
+        start = start.min(block.sequence_start);
+        end = end.max(block.sequence_end);
+    }
+
+    (start <= end).then_some((start, end))
+}
+
+/// Expand a visible coordinate window by its width on both sides.
+pub fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+    let span = (window.1 - window.0).max(1);
+    (window.0.saturating_sub(span), window.1.saturating_add(span))
+}
+
 impl NodeSizer<GenGraph> for GenGraphNodeSizer {
     /// Calculate how much screen space a GenGraph node needs based on sequence length and level of detail
     fn get_node_size(&self, node: &GraphNode, detail_level: VisualDetail) -> (u64, u64) {

@@ -9,7 +9,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use reqwest::blocking::Client;
+use gen_http::Client;
 use uuid::Uuid;
 
 use super::{
@@ -19,7 +19,7 @@ use super::{
     authentication::{RequestAuthorization, TokenStore},
     normalized_origin, send_asset_transfers,
 };
-use crate::commands::remote::server::AuthTokens;
+use crate::commands::remote::AuthTokens;
 
 pub(super) const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
 
@@ -212,9 +212,9 @@ pub(super) fn assert_response_decode_context(
     );
     assert!(
         std::error::Error::source(error)
-            .and_then(|source| source.downcast_ref::<reqwest::Error>())
+            .and_then(|source| source.downcast_ref::<serde_json::Error>())
             .is_some(),
-        "response decoder error should retain its reqwest source"
+        "response decoder error should retain its serde_json source"
     );
 }
 
