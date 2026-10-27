@@ -16,10 +16,10 @@ use r#gen::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
             load_annotations_for_group,
         },
-        block_group::{current_view_coordinate_window, expand_query_window},
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
-            draw_annotation_labels, reapply_overlays,
+            current_view_coordinate_window, draw_annotation_labels, expand_query_window,
+            reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,

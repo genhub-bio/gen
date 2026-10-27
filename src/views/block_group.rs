@@ -22,6 +22,7 @@ use ratatui::{
     widgets::{Block, List, ListItem, Padding, Paragraph, Wrap},
 };
 
+pub use crate::views::gen_graph_widget::{current_view_coordinate_window, expand_query_window};
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
@@ -392,36 +393,6 @@ pub(crate) fn extract_viewport_node_ids(
         .map(|(_, idx, _)| <&GenGraph as NodeIndexable>::from_index(&graph, idx.index()).node_id)
         .filter(|&id| !is_start_node(id) && !is_end_node(id))
         .collect()
-}
-
-/// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
-/// in the current viewport, using the graph controller's viewport graph.
-pub fn current_view_coordinate_window(
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-) -> Option<(i64, i64)> {
-    use gen_core::{is_end_node, is_start_node};
-    use petgraph::visit::NodeIndexable;
-
-    let viewport_graph = controller.get_viewport_graph();
-    let graph = controller.graph();
-    let mut start = i64::MAX;
-    let mut end = i64::MIN;
-
-    for (_world_pos, domain_idx, _layout_node) in viewport_graph.data_nodes() {
-        let block = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
-        if is_start_node(block.node_id) || is_end_node(block.node_id) {
-            continue;
-        }
-        start = start.min(block.sequence_start);
-        end = end.max(block.sequence_end);
-    }
-
-    (start <= end).then_some((start, end))
-}
-
-pub fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
-    let span = (window.1 - window.0).max(1);
-    (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
 struct AnnotationViewportRequest<'a> {

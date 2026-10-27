@@ -1,287 +1,83 @@
 //! Session-owned direct-GCS graph staging for GenHub pushes.
 //!
-//! A push first stages Dolt blocks through a loopback RemoteServer and validates the requested
-//! branch against the local destination. GenHub publishes the manifest only after staging succeeds.
+//! A push stages Dolt blocks through an owned CloudSession and validates the requested branch
+//! against the local destination. GenHub publishes the manifest only after staging succeeds.
 //! Accepted checkpoints can be reused after interruption; a server-confirmed stale checkpoint is
-//! surfaced to the operation coordinator so it can begin a fresh session. Cleanup keeps the original
-//! Dolt/storage failure visible when closing the temporary server also fails.
+//! surfaced to the operation coordinator so it can begin a fresh session. Cleanup keeps the
+//! original Dolt/storage failure visible when closing the cloud session also fails.
 
-use std::{error::Error, path::Path};
+use std::error::Error;
 
 use gen_core::DoltHashId;
 use gen_models::{db::GraphConnection, operations::Remote};
-use reqwest::StatusCode;
 use rusqlite::{
-    BlockCacheSessionOptions, Error as SqlError, RemoteFailureKind, RemoteServer,
-    RemoteServerOptions, SessionOperationId, SessionOperationStatus, SessionScope,
-    blockcachevfs::{CloudConnectionUri, StorageFailure},
+    BlockCacheSessionOptions, CloudSession, SessionOperationId, SessionOperationStatus,
+    SessionScope, blockcachevfs::CloudConnectionUri,
 };
-use uuid::Uuid;
 
+#[cfg(not(all(feature = "remote-native", not(target_os = "emscripten"))))]
+use super::push_graph_branch;
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+use super::push_graph_branch_with_progress;
 use super::{
+    PushGraphTransferRequest,
     capability::{
         PushCapabilityRenewal, push_capability_renewal, transfer_authorization,
         wrap_push_authorization_error,
     },
-    ensure_graph_remote, is_authorization_error, push_graph_branch_with_progress,
+    ensure_graph_remote, is_non_fast_forward_push_error,
+    push_session::{PushGraphTransferError, safe_graph_error_context},
     restore_canonical_url,
 };
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+use crate::commands::remote::progress::GraphUploadProgressReporter;
 use crate::commands::remote::{
     client::{RemoteClientError, RemoteOperation},
     login_origin,
-    progress::{GraphUploadProgressReporter, TransferProgress},
+    progress::TransferProgress,
 };
 
 const DIRECT_GCS_UPLOAD_CONCURRENCY: u32 = 10;
 
-fn is_stale_accepted_session_error(error: &SqlError) -> bool {
-    error.remote_failure_kind() == Some(RemoteFailureKind::StaleSession)
+#[cfg(test)]
+fn is_stale_accepted_session_error(error: &rusqlite::Error) -> bool {
+    error.remote_failure_kind() == Some(rusqlite::RemoteFailureKind::StaleSession)
 }
 
-pub(super) fn is_non_fast_forward_push_error(error: &SqlError) -> bool {
-    error.remote_failure_kind() == Some(RemoteFailureKind::NonFastForward)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum PushGraphTransferError {
-    #[error("{phase} failed: {source}")]
-    Database {
-        phase: &'static str,
-        #[source]
-        source: SqlError,
-    },
-    #[error(transparent)]
-    Client(#[from] RemoteClientError),
-    #[error("GenHub confirmed the direct GCS graph session is stale")]
-    StaleSessionConfirmed,
-    #[error("GenHub reports another push is in progress; retry after it completes")]
-    CapabilityContention,
-    #[error("GenHub no longer recognizes the push transfer lease")]
-    CapabilityLeaseInactive,
-    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
-    NonFastForward,
-    #[error("{primary}; GenHub could not verify the stale session: {confirmation}")]
-    StaleSessionCheckFailed {
-        primary: Box<PushGraphTransferError>,
-        confirmation: Box<PushGraphTransferError>,
-    },
-    #[error("object storage reported {0}")]
-    StorageFailure(StorageFailure),
-    #[error("{primary}; object storage also reported {failure}")]
-    Storage {
-        #[source]
-        primary: Box<PushGraphTransferError>,
-        failure: StorageFailure,
-    },
-    #[error("{primary}; local server cleanup also failed: {cleanup}")]
-    Cleanup {
-        #[source]
-        primary: Box<PushGraphTransferError>,
-        cleanup: String,
-    },
-    #[error("{primary}; GenHub could not release the rejected push lease: {abort}")]
-    Abort {
-        #[source]
-        primary: Box<PushGraphTransferError>,
-        abort: Box<PushGraphTransferError>,
-    },
-    #[error("{0}")]
-    Protocol(String),
-}
-
-/// Keeps signed URLs and provider response details out of cleanup diagnostics.
-///
-/// Direct-session close paths use this when reporting a secondary failure beside the original error.
-fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
-    match error {
-        PushGraphTransferError::Database {
-            phase,
-            source: SqlError::SqliteFailure(code, _),
-        } => format!("{phase} (SQLite code {})", code.extended_code),
-        PushGraphTransferError::Database { phase, .. } => format!("{phase} (database error)"),
-        PushGraphTransferError::StorageFailure(failure) => {
-            format!("object storage: {failure}")
-        }
-        PushGraphTransferError::Storage { primary, failure } => {
-            format!(
-                "{}; object storage: {failure}",
-                safe_graph_error_context(primary)
-            )
-        }
-        PushGraphTransferError::Cleanup { primary, cleanup } => {
-            format!(
-                "{}; additionally {cleanup}",
-                safe_graph_error_context(primary)
-            )
-        }
-        PushGraphTransferError::Abort { primary, abort } => {
-            format!(
-                "{}; additionally GenHub could not release the rejected push lease: {}",
-                safe_graph_error_context(primary),
-                safe_graph_error_context(abort),
-            )
-        }
-        PushGraphTransferError::Client(RemoteClientError::Http { status, .. }) => {
-            format!("remote request HTTP {status}")
-        }
-        PushGraphTransferError::Client(_) => "remote client request".to_string(),
-        PushGraphTransferError::StaleSessionConfirmed
-        | PushGraphTransferError::StaleSessionCheckFailed { .. } => {
-            "stale direct GCS session recovery".to_string()
-        }
-        PushGraphTransferError::CapabilityContention => {
-            "temporary direct-push lease contention".to_string()
-        }
-        PushGraphTransferError::CapabilityLeaseInactive => {
-            "inactive direct-push transfer lease".to_string()
-        }
-        PushGraphTransferError::NonFastForward => {
-            "Dolt rejected a non-fast-forward branch update".to_string()
-        }
-        PushGraphTransferError::Protocol(_) => "remote protocol response".to_string(),
-    }
-}
-
-impl PushGraphTransferError {
-    pub(super) fn database(phase: &'static str, source: SqlError) -> Self {
-        Self::Database { phase, source }
-    }
-
-    pub(super) fn is_authorization_error(&self) -> bool {
-        match self {
-            Self::Database { source, .. } => is_authorization_error(source),
-            Self::Storage { primary, .. }
-            | Self::Cleanup { primary, .. }
-            | Self::Abort { primary, .. } => primary.is_authorization_error(),
-            Self::StorageFailure(_) => false,
-            Self::Client(RemoteClientError::Http { status, .. }) => {
-                matches!(*status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-            }
-            Self::Client(_)
-            | Self::StaleSessionConfirmed
-            | Self::CapabilityContention
-            | Self::CapabilityLeaseInactive
-            | Self::NonFastForward
-            | Self::StaleSessionCheckFailed { .. }
-            | Self::Protocol(_) => false,
-        }
-    }
-
-    pub(super) fn is_terminal(&self) -> bool {
-        match self {
-            Self::Client(RemoteClientError::Http { status, .. }) => *status == StatusCode::CONFLICT,
-            Self::Client(RemoteClientError::StaleGraphSession)
-            | Self::StaleSessionConfirmed
-            | Self::CapabilityContention
-            | Self::StaleSessionCheckFailed { .. } => false,
-            Self::CapabilityLeaseInactive => true,
-            Self::StorageFailure(_) => true,
-            Self::Storage { primary, .. }
-            | Self::Cleanup { primary, .. }
-            | Self::Abort { primary, .. } => primary.is_terminal(),
-            Self::Protocol(_) => true,
-            Self::Database { .. } | Self::Client(_) => false,
-            Self::NonFastForward => true,
-        }
-    }
-
-    pub(super) fn is_stale_session(&self) -> bool {
-        match self {
-            Self::Database { source, .. } => is_stale_accepted_session_error(source),
-            Self::Storage { primary, .. }
-            | Self::Cleanup { primary, .. }
-            | Self::Abort { primary, .. } => primary.is_stale_session(),
-            Self::StorageFailure(_) => false,
-            Self::Client(RemoteClientError::StaleGraphSession) => true,
-            Self::Client(_)
-            | Self::StaleSessionConfirmed
-            | Self::CapabilityContention
-            | Self::CapabilityLeaseInactive
-            | Self::NonFastForward
-            | Self::StaleSessionCheckFailed { .. }
-            | Self::Protocol(_) => false,
-        }
-    }
-
-    pub(super) fn is_non_fast_forward(&self) -> bool {
-        match self {
-            Self::NonFastForward => true,
-            Self::Storage { primary, .. }
-            | Self::Cleanup { primary, .. }
-            | Self::Abort { primary, .. } => primary.is_non_fast_forward(),
-            _ => false,
-        }
-    }
-
-    pub(super) fn non_fast_forward_cleanup_warning(&self) -> String {
-        match self {
-            Self::Abort { primary, abort } => {
-                let mut warnings = primary.non_fast_forward_cleanup_warning();
-                let abort_warning = format!(
-                    "GenHub could not release the rejected push lease: {}",
-                    safe_graph_error_context(abort)
-                );
-                append_cleanup_warning(&mut warnings, &abort_warning);
-                warnings
-            }
-            Self::Cleanup { primary, cleanup } if primary.is_non_fast_forward() => {
-                let mut warnings = primary.non_fast_forward_cleanup_warning();
-                append_cleanup_warning(
-                    &mut warnings,
-                    &format!("local server cleanup also failed: {cleanup}"),
-                );
-                warnings
-            }
-            Self::Storage { primary, failure } if primary.is_non_fast_forward() => {
-                let mut warnings = primary.non_fast_forward_cleanup_warning();
-                append_cleanup_warning(
-                    &mut warnings,
-                    &format!("object storage cleanup also failed: {failure}"),
-                );
-                warnings
-            }
-            _ => String::new(),
-        }
-    }
-}
-
-fn append_cleanup_warning(warnings: &mut String, warning: &str) {
-    if !warnings.is_empty() {
-        warnings.push_str("; ");
-    }
-    warnings.push_str(warning);
-}
-
-/// RemoteServer owns background block uploads, so push completion must quiesce them before reuse.
+/// Closes a cloud session after Dolt has finished using its ordinary file remote.
 ///
 /// `push_graph_through_direct_session_inner` calls this after staging, validation, and error paths
-/// so GenHub publishes only after uploads settle and the server has released its session resources.
-fn close_direct_push_server(
-    mut server: RemoteServer,
-    progress: &GraphUploadProgressReporter,
+/// so GenHub publishes only after the session has released its database and storage resources.
+fn close_direct_push_session(
+    mut session: CloudSession,
+    progress: &TransferProgress,
     preserve_phase: bool,
 ) -> Result<(), PushGraphTransferError> {
-    let _heartbeat = if preserve_phase {
-        progress.heartbeat_preserving_phase("closing the direct GCS graph session")
+    let _heartbeat = progress.heartbeat(if preserve_phase {
+        "closing the direct GCS graph session after failure"
     } else {
-        progress.heartbeat("closing the direct GCS graph session")
+        "closing the direct GCS graph session"
+    });
+    let close_result = match session.close() {
+        Ok(()) => Ok(()),
+        Err(first_error) => match session.close() {
+            Ok(()) => Ok(()),
+            Err(retry_error) => {
+                let primary =
+                    PushGraphTransferError::database("closing direct GCS session", first_error);
+                let retry = PushGraphTransferError::database(
+                    "retrying direct GCS session close",
+                    retry_error,
+                );
+                Err(PushGraphTransferError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: safe_graph_error_context(&retry),
+                })
+            }
+        },
     };
-    let quiesce_result = server
-        .quiesce()
-        .map_err(|error| PushGraphTransferError::database("quiescing direct GCS server", error));
-    let storage_failure = server.first_storage_error();
-    let close_result = server
-        .close()
-        .map_err(|error| PushGraphTransferError::database("closing direct GCS server", error));
-    let cleanup_result = match (quiesce_result, close_result) {
-        (Err(quiesce_error), Err(close_error)) => Err(PushGraphTransferError::Cleanup {
-            primary: Box::new(quiesce_error),
-            cleanup: safe_graph_error_context(&close_error),
-        }),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    };
-    match (cleanup_result, storage_failure) {
+    let storage_failure = session.first_storage_error();
+    match (close_result, storage_failure) {
         (Err(error), Some(failure)) => Err(PushGraphTransferError::Storage {
             primary: Box::new(error),
             failure,
@@ -292,7 +88,7 @@ fn close_direct_push_server(
     }
 }
 
-/// Keeps the push failure primary when temporary-server cleanup fails afterward.
+/// Keeps the push failure primary when cloud-session cleanup fails afterward.
 ///
 /// The push coordinator uses this on graph-operation errors because cleanup is secondary and must
 /// not erase a typed Dolt or storage cause needed for retry and user-facing error handling.
@@ -313,15 +109,14 @@ fn preserve_graph_error_after_close(
     }
 }
 
-fn close_server_after_graph_failure(
-    server: RemoteServer,
-    progress: &GraphUploadProgressReporter,
+fn close_session_after_graph_failure(
+    session: CloudSession,
+    progress: &TransferProgress,
     primary_error: PushGraphTransferError,
 ) -> PushGraphTransferError {
-    progress.waiting_for_local_server_cleanup();
     preserve_graph_error_after_close(
         primary_error,
-        close_direct_push_server(server, progress, true),
+        close_direct_push_session(session, progress, true),
     )
 }
 
@@ -336,6 +131,7 @@ struct DirectGraphPushRequest<'a> {
     progress: &'a TransferProgress,
 }
 
+#[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
 fn push_graph_through_direct_session(
     request: DirectGraphPushRequest<'_>,
 ) -> Result<(), PushGraphTransferError> {
@@ -351,12 +147,20 @@ fn push_graph_through_direct_session(
     result
 }
 
+#[cfg(not(all(feature = "remote-native", not(target_os = "emscripten"))))]
+fn push_graph_through_direct_session(
+    request: DirectGraphPushRequest<'_>,
+) -> Result<(), PushGraphTransferError> {
+    push_graph_through_direct_session_inner(request)
+}
+
 /// GenHub must keep uploaded blocks private until the requested branch is validated and staged.
 ///
 /// `push_graph_through_direct_session` calls this for each authorized attempt; its checkpoint is
 /// still unpublished until the outer coordinator receives success.
 fn push_graph_through_direct_session_inner(
     request: DirectGraphPushRequest<'_>,
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
     graph_progress: &GraphUploadProgressReporter,
 ) -> Result<(), PushGraphTransferError> {
     let DirectGraphPushRequest {
@@ -398,16 +202,18 @@ fn push_graph_through_direct_session_inner(
         "Opening direct GCS graph session (attempt {attempt}/2)..."
     ));
     let renewal_callback = renewal.clone();
-    let graph_progress_callback = graph_progress.clone();
-    let session =
+    let session_options =
         BlockCacheSessionOptions::for_uri(capability.session_id.to_string(), scope, operation_id)
             .map_err(|error| PushGraphTransferError::database("attaching GCS session", error))?
             .upload_concurrency(DIRECT_GCS_UPLOAD_CONCURRENCY)
-            .auth_callback(move |_storage, _account, _container, reason| {
+            .auth_callback(move |_storage, _project, _container, reason| {
                 renewal_callback.auth_token(reason)
-            })
-            .upload_progress_callback(move |progress| graph_progress_callback.report(progress));
-    let options = RemoteServerOptions::new().blockcache_session(session);
+            });
+    #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+    let session_options = session_options.upload_progress_callback({
+        let graph_progress_callback = graph_progress.clone();
+        move |progress| graph_progress_callback.report(progress)
+    });
     let connection_uri = CloudConnectionUri::parse(&capability.database_uri).map_err(|_| {
         PushGraphTransferError::Protocol(
             "GenHub returned an invalid direct GCS database URI".to_string(),
@@ -418,21 +224,24 @@ fn push_graph_through_direct_session_inner(
             "GenHub returned an invalid direct GCS database URI".to_string(),
         ));
     }
-    let mut local_server = {
+    let mut session = {
         let _heartbeat = progress.heartbeat("opening the direct GCS graph database");
-        RemoteServer::start_with_options(Path::new(connection_uri.as_str()), &options)
-            .map_err(|error| PushGraphTransferError::database("opening direct GCS server", error))?
+        session_options
+            .open_cloud_uri(connection_uri.as_str())
+            .map_err(|error| {
+                PushGraphTransferError::database("opening direct GCS session", error)
+            })?
     };
     let operation_status_result = {
         let _heartbeat = progress.heartbeat("checking direct-push session status");
-        local_server.operation_status()
+        session.operation_status()
     };
     let operation_status = match operation_status_result {
         Ok(operation_status) => operation_status,
         Err(error) => {
-            return Err(close_server_after_graph_failure(
-                local_server,
-                graph_progress,
+            return Err(close_session_after_graph_failure(
+                session,
+                progress,
                 PushGraphTransferError::database("reading direct-push session status", error),
             ));
         }
@@ -442,108 +251,116 @@ fn push_graph_through_direct_session_inner(
             progress.println("Reusing accepted graph checkpoint; verifying the staged branch...");
             let validation = {
                 let _heartbeat = progress.heartbeat("validating the staged graph branch");
-                validate_direct_session_branch(&local_server, branch, destination_hash)
+                validate_direct_session_branch(&session, branch, destination_hash)
             };
             if let Err(error) = validation {
+                #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
                 graph_progress.finish();
-                return Err(close_server_after_graph_failure(
-                    local_server,
-                    graph_progress,
-                    error,
-                ));
+                return Err(close_session_after_graph_failure(session, progress, error));
             }
+            #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
             graph_progress.finish();
-            close_direct_push_server(local_server, graph_progress, false)?;
+            close_direct_push_session(session, progress, false)?;
             progress.println("Accepted graph checkpoint is ready for publication.");
         }
         SessionOperationStatus::New => {
             progress.println(&format!(
                 "Staging graph database to GCS (attempt {attempt}/2)..."
             ));
-            let local_remote_url =
-                local_server.database_url(&capability.session_scope.target_database);
+            let local_remote_url = session.database_url().to_string();
             let configure_remote = {
-                let _heartbeat = progress.heartbeat("configuring the loopback Dolt remote");
+                let _heartbeat = progress.heartbeat("configuring the direct cloud Dolt remote");
                 ensure_graph_remote(graph, &remote.name, &local_remote_url)
             };
             if let Err(error) = configure_remote {
+                #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
                 graph_progress.finish();
-                return Err(close_server_after_graph_failure(
-                    local_server,
-                    graph_progress,
-                    PushGraphTransferError::database("configuring loopback Dolt remote", error),
+                return Err(close_session_after_graph_failure(
+                    session,
+                    progress,
+                    PushGraphTransferError::database("configuring direct cloud Dolt remote", error),
                 ));
             }
             log::debug!(
                 "Planning destination-missing Dolt chunks before the first logical chunk upload...",
             );
             let push_result = {
-                let _heartbeat =
-                    progress.heartbeat("running Dolt push through loopback RemoteServer");
-                push_graph_branch_with_progress(graph, &remote.name, branch, force, graph_progress)
+                #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+                {
+                    let _heartbeat = graph_progress.heartbeat("Dolt push to the direct GCS remote");
+                    push_graph_branch_with_progress(
+                        graph,
+                        &remote.name,
+                        branch,
+                        force,
+                        graph_progress,
+                    )
+                }
+                #[cfg(not(all(feature = "remote-native", not(target_os = "emscripten"))))]
+                {
+                    let _heartbeat = progress.heartbeat("Dolt push to the direct GCS remote");
+                    push_graph_branch(graph, &remote.name, branch, force)
+                }
             };
             if let Err(error) = push_result {
+                #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
                 graph_progress.finish();
                 let push_error = if is_non_fast_forward_push_error(&error) {
                     PushGraphTransferError::NonFastForward
                 } else {
                     PushGraphTransferError::database(
-                        "running Dolt push through loopback RemoteServer",
+                        "running Dolt push to direct cloud remote",
                         error,
                     )
                 };
-                return Err(close_server_after_graph_failure(
-                    local_server,
-                    graph_progress,
-                    push_error,
+                return Err(close_session_after_graph_failure(
+                    session, progress, push_error,
                 ));
             }
             let validation = {
                 let _heartbeat = progress.heartbeat("validating the staged graph branch");
-                validate_direct_session_branch(&local_server, branch, destination_hash)
+                validate_direct_session_branch(&session, branch, destination_hash)
             };
             if let Err(error) = validation {
+                #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
                 graph_progress.finish();
-                return Err(close_server_after_graph_failure(
-                    local_server,
-                    graph_progress,
-                    error,
-                ));
+                return Err(close_session_after_graph_failure(session, progress, error));
             }
             let stage_result = {
                 let _heartbeat =
-                    progress.heartbeat("staging graph blocks and checkpointing the session");
-                local_server.stage_request().map_err(|error| {
+                    progress.heartbeat("staging graph blocks and accepting the session");
+                session.stage_request().map_err(|error| {
                     PushGraphTransferError::database("staging direct-push operation", error)
                 })
             };
             if let Err(primary_error) = stage_result {
-                return Err(close_server_after_graph_failure(
-                    local_server,
-                    graph_progress,
+                #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
+                graph_progress.finish();
+                return Err(close_session_after_graph_failure(
+                    session,
+                    progress,
                     primary_error,
                 ));
             }
-            let close_result = close_direct_push_server(local_server, graph_progress, false);
+            let close_result = close_direct_push_session(session, progress, false);
+            #[cfg(all(feature = "remote-native", not(target_os = "emscripten")))]
             graph_progress.finish();
             close_result?;
             progress.println("Graph staging complete.");
         }
         SessionOperationStatus::Failed => {
-            graph_progress.finish();
-            return Err(close_server_after_graph_failure(
-                local_server,
-                graph_progress,
+            return Err(close_session_after_graph_failure(
+                session,
+                progress,
                 PushGraphTransferError::Protocol(
                     "GenHub direct-push session has already failed".to_string(),
                 ),
             ));
         }
         SessionOperationStatus::Conflict => {
-            graph_progress.finish();
-            return Err(close_server_after_graph_failure(
-                local_server,
-                graph_progress,
+            return Err(close_session_after_graph_failure(
+                session,
+                progress,
                 PushGraphTransferError::Protocol(
                     "GenHub direct-push session conflicts with another operation".to_string(),
                 ),
@@ -561,24 +378,22 @@ fn push_graph_through_direct_session_inner(
 
 /// A resumed push must not publish an accepted checkpoint for a different local branch head.
 ///
-/// `push_graph_through_direct_session_inner` calls this after reopening accepted work and after a
-/// new Dolt staging pass before GenHub is allowed to publish its manifest.
+/// `push_graph_through_direct_session_inner` calls this after reopening accepted work and after
+/// a new Dolt staging pass before GenHub is allowed to publish its manifest.
 fn validate_direct_session_branch(
-    local_server: &RemoteServer,
+    session: &CloudSession,
     branch: &str,
     destination_hash: &DoltHashId,
 ) -> Result<(), PushGraphTransferError> {
-    let Some(connection) = local_server.database_connection() else {
-        return Err(PushGraphTransferError::Protocol(
-            "GenHub direct-push server has no inspectable database connection".to_string(),
-        ));
-    };
+    let connection = session
+        .database_connection()
+        .map_err(|error| PushGraphTransferError::database("opening direct GCS database", error))?;
     let staged_hash: DoltHashId = connection
         .query_row("SELECT dolt_hashof(?1)", [branch], |row| row.get(0))
-        .map_err(|error| {
-            PushGraphTransferError::Protocol(format!(
-                "GenHub direct-push session has no valid target branch: {error:?}"
-            ))
+        .map_err(|_| {
+            PushGraphTransferError::Protocol(
+                "GenHub direct-push session has no valid target branch".to_string(),
+            )
         })?;
     if staged_hash != *destination_hash {
         return Err(PushGraphTransferError::Protocol(format!(
@@ -588,21 +403,10 @@ fn validate_direct_session_branch(
     Ok(())
 }
 
-pub(super) struct PushGraphTransferRequest<'a> {
-    pub(super) graph: &'a GraphConnection,
-    pub(super) remote: &'a Remote,
-    pub(super) branch: &'a str,
-    pub(super) force: bool,
-    pub(super) idempotency_token: Uuid,
-    pub(super) expected_transfer_id: Option<Uuid>,
-    pub(super) destination_hash: &'a DoltHashId,
-    pub(super) progress: &'a TransferProgress,
-}
-
 /// The persisted session UUID lets an interrupted push resume without changing its accepted GCS session.
 ///
 /// `execute_push` calls this after recording the operation's session token; it retries authorization
-/// and publishes only after the session server validates staging.
+/// and publishes only after the session validates staging.
 pub(super) fn run_push_graph_transfer(
     request: PushGraphTransferRequest<'_>,
 ) -> Result<PushCapabilityRenewal, Box<dyn Error>> {
@@ -751,24 +555,25 @@ pub(super) fn run_push_graph_transfer(
 
 #[cfg(test)]
 mod tests {
-    use reqwest::StatusCode;
+    use gen_http::StatusCode;
     use rusqlite::{
         Error as SqlError,
         blockcachevfs::{StorageFailure, StorageFailureCause, StorageFailurePhase},
     };
 
     use super::{
-        PushGraphTransferError, preserve_graph_error_after_close, safe_graph_error_context,
+        PushGraphTransferError, is_stale_accepted_session_error, preserve_graph_error_after_close,
+        safe_graph_error_context,
     };
 
     #[test]
     fn test_direct_push_cleanup_error_does_not_replace_primary_sql_error() {
         let primary = super::PushGraphTransferError::database(
-            "running Dolt push through loopback RemoteServer",
+            "running Dolt push to direct cloud remote",
             SqlError::InvalidQuery,
         );
         let close = Err(super::PushGraphTransferError::database(
-            "closing direct GCS server",
+            "closing direct GCS session",
             SqlError::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
                 Some("signed-url=secret access_token=secret".to_string()),
@@ -784,12 +589,12 @@ mod tests {
         assert!(matches!(
             primary.as_ref(),
             super::PushGraphTransferError::Database {
-                phase: "running Dolt push through loopback RemoteServer",
+                phase: "running Dolt push to direct cloud remote",
                 source: SqlError::InvalidQuery,
             }
         ));
         assert_eq!(cleanup, &cleanup_context);
-        assert!(cleanup.contains("closing direct GCS server"));
+        assert!(cleanup.contains("closing direct GCS session"));
         assert!(cleanup_context.contains("SQLite code"));
         assert!(!cleanup_context.contains("secret"));
         assert!(!error.to_string().contains("access_token"));
@@ -799,7 +604,7 @@ mod tests {
     #[test]
     fn test_direct_push_cleanup_preserves_typed_storage_failure_without_provider_details() {
         let primary = super::PushGraphTransferError::database(
-            "running Dolt push through loopback RemoteServer",
+            "running Dolt push to direct cloud remote",
             SqlError::InvalidQuery,
         );
         let failure = StorageFailure {
@@ -821,7 +626,7 @@ mod tests {
         assert!(matches!(
             primary.as_ref(),
             super::PushGraphTransferError::Database {
-                phase: "running Dolt push through loopback RemoteServer",
+                phase: "running Dolt push to direct cloud remote",
                 source: SqlError::InvalidQuery,
             }
         ));
@@ -870,8 +675,8 @@ mod tests {
             Some("published manifest changed since the accepted session head".to_string()),
         );
 
-        assert!(super::is_stale_accepted_session_error(&exact));
-        assert!(!super::is_stale_accepted_session_error(&other_busy));
-        assert!(!super::is_stale_accepted_session_error(&other_code));
+        assert!(is_stale_accepted_session_error(&exact));
+        assert!(!is_stale_accepted_session_error(&other_busy));
+        assert!(!is_stale_accepted_session_error(&other_code));
     }
 }

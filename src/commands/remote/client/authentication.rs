@@ -11,15 +11,12 @@ use base64::{
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
 use chrono::{DateTime, Utc};
-use reqwest::{
-    StatusCode,
-    blocking::{Client, RequestBuilder},
-};
+use gen_http::{Client, Error as HttpError, HeaderName, HeaderValue, Method, Request, StatusCode};
 use serde::Deserialize;
 
 use super::{RemoteClientError, RepositoryRemote, response_error};
 use crate::commands::remote::{
-    server::AuthTokens,
+    AuthTokens,
     utils::{load_tokens, save_tokens},
 };
 
@@ -53,14 +50,27 @@ pub(super) enum RequestAuthorization<'credential> {
 }
 
 pub(super) fn authorize_request(
-    builder: RequestBuilder,
+    mut request: Request,
     authorization: RequestAuthorization<'_>,
-) -> RequestBuilder {
+) -> Result<Request, RemoteClientError> {
     match authorization {
-        RequestAuthorization::Anonymous => builder,
-        RequestAuthorization::ApiKey(api_key) => builder.header("x-api-key", api_key),
-        RequestAuthorization::Bearer(token) => builder.bearer_auth(token),
+        RequestAuthorization::Anonymous => {}
+        RequestAuthorization::ApiKey(api_key) => {
+            request.headers.insert(
+                HeaderName::from_static("x-api-key"),
+                HeaderValue::from_str(api_key)
+                    .map_err(|error| HttpError::InvalidRequestHeader(error.to_string()))?,
+            );
+        }
+        RequestAuthorization::Bearer(token) => {
+            request.headers.insert(
+                gen_http::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|error| HttpError::InvalidRequestHeader(error.to_string()))?,
+            );
+        }
     }
+    Ok(request)
 }
 /// Request authentication calls this when the JWT expiry hint has elapsed or GenHub rejects the
 /// saved access token; the rotated credentials are then stored under the shared origin identity.
@@ -69,20 +79,24 @@ fn refresh_tokens(
     repository: &RepositoryRemote,
     tokens: &AuthTokens,
 ) -> Result<AuthTokens, RemoteClientError> {
-    let response = client
-        .post(format!(
-            "{}/api/auth/cli/token-refresh",
-            repository.origin()
-        ))
-        .json(&serde_json::json!({
-            "refresh_token": tokens.refresh_token,
-            "client_id": "cli"
-        }))
-        .send()?;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "refresh_token": tokens.refresh_token,
+        "client_id": "cli"
+    }))?;
+    let request = Request::new(
+        Method::POST,
+        format!("{}/api/auth/cli/token-refresh", repository.origin()),
+    )
+    .header(
+        gen_http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    )
+    .body_bytes(body);
+    let mut response = client.execute(request)?;
     if !response.status().is_success() {
         return Err(response_error(response));
     }
-    let refreshed: RefreshResponse = response.json()?;
+    let refreshed: RefreshResponse = serde_json::from_reader(response.body_mut())?;
     Ok(AuthTokens {
         jwt: refreshed.access_token,
         refresh_token: refreshed.refresh_token,
@@ -279,10 +293,11 @@ pub(super) fn acquire_request_with_store<T, Store: TokenStore>(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use reqwest::{StatusCode, blocking::Client};
+    use gen_http::{Client, StatusCode};
 
     use super::access_token_expired_hint;
     use crate::commands::remote::{
+        AuthTokens,
         client::{
             CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
             acquire_capability_with_store, acquire_capability_with_store_and_token,
@@ -292,7 +307,6 @@ mod tests {
                 test_jwt_with_expiration,
             },
         },
-        server::AuthTokens,
     };
 
     #[test]

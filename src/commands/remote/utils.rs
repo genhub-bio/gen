@@ -11,7 +11,7 @@ use base64::{
 use directories::ProjectDirs;
 use getrandom;
 
-use crate::commands::remote::server::AuthTokens;
+use crate::commands::remote::AuthTokens;
 
 pub fn generate_state() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];

@@ -667,6 +667,7 @@ where
     apply_patch_archive_inner(context, reader, true)
 }
 
+#[cfg(feature = "cli")]
 pub(crate) fn apply_patch_archive_to_isolated_context<R>(
     context: &mut DbContext,
     reader: R,

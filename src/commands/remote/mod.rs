@@ -3,15 +3,27 @@ use gen_models::{
     db::ConfigConnection,
     operations::{Defaults, Remote},
 };
+#[cfg(all(feature = "remote", not(target_os = "emscripten")))]
 use reqwest::{blocking::Client, redirect::Policy};
+#[cfg(all(feature = "remote", not(target_os = "emscripten")))]
 use thiserror::Error;
 
-use crate::commands::remote::server::AuthTokens;
+#[cfg(feature = "remote")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuthTokens {
+    pub jwt: String,
+    pub refresh_token: String,
+}
 
+#[cfg(feature = "remote")]
 pub mod client;
+#[cfg(feature = "remote")]
 pub mod operations;
+#[cfg(feature = "remote")]
 mod progress;
+#[cfg(all(feature = "remote", not(target_os = "emscripten")))]
 pub mod server;
+#[cfg(feature = "remote")]
 pub mod utils;
 
 #[derive(Subcommand)]
@@ -37,6 +49,7 @@ pub enum RemoteCommand {
     },
     /// Get the current default remote
     GetDefault,
+    #[cfg(feature = "remote")]
     /// Login to a remote
     Login {
         /// The remote to login. Uses default if not specified
@@ -44,12 +57,14 @@ pub enum RemoteCommand {
     },
 }
 
+#[cfg(all(feature = "remote", not(target_os = "emscripten")))]
 #[derive(Debug, Error, PartialEq)]
 pub enum RemoteError {
     #[error("No redirect url returned for url {0}")]
     NoRedirectUrl(String),
 }
 
+#[cfg(all(feature = "remote", not(target_os = "emscripten")))]
 pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
     println!("Logging in to remote: {origin}");
     let state = utils::generate_state().expect("Unable to generate random nonce.");
@@ -79,6 +94,14 @@ pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Erro
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
 }
 
+#[cfg(all(feature = "remote", target_os = "emscripten"))]
+pub fn login_origin(_origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
+    Err(
+        "interactive remote login is unavailable in the browser; sign in to GenHub and retry"
+            .into(),
+    )
+}
+
 pub fn remove_remote(
     conn: &ConfigConnection,
     name: &str,
@@ -95,6 +118,7 @@ pub fn remove_remote(
     }
 }
 
+#[cfg(feature = "remote")]
 pub fn login_remote(
     conn: &ConfigConnection,
     name: Option<&str>,
@@ -176,6 +200,7 @@ pub fn handle_remote_command(
             }
         },
 
+        #[cfg(feature = "remote")]
         RemoteCommand::Login { name } => login_remote(conn, name.as_deref()),
     }
 }

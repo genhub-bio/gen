@@ -35,26 +35,43 @@ sample.plot()  # or sg.plot()
 
 ## GenHub browser notebooks
 
-The `gen.browser` module opens an authenticated GenHub snapshot in a temporary
-browser workspace. The repository is available through the normal Gen Python
-API, and edits stay local until an explicit commit:
+The `gen.browser` module clones an authenticated GenHub repository into a
+temporary browser workspace. It uses Gen's normal clone, pull, and push APIs;
+the browser session cookie is sent by the Gen remote transport. Edits stay local
+until the commit widget pushes a branch:
+
+Browser-cloud builds use `rusqdoltlite` 0.41.2 from the pinned `browser-cloud`
+Git revision in both Cargo manifests. An isolated build may override that
+revision with a `.cargo/config.toml` path patch to a local checkout of the same
+commit; keep local checkout paths out of committed files.
 
 ```python
 from gen.browser import NotebookSession
 
-session = await NotebookSession.open(snapshot_url)
+session = await NotebookSession.open(
+    "https://genhub.bio/api/repos/namespace/repository",
+    branch="main",
+)
 repo = session.repository
 graphs = repo.get_sequence_graphs()
+
+# Pull the selected branch when you want to refresh the local workspace.
+session.refresh()
 
 # Save the active notebook into Gen history with the repository changes.
 display(session.commit_widget())
 ```
 
 The widget captures the notebook only after `Save notebook` is selected and
-`Commit` is pressed. To reopen a notebook tracked in the repository, pass its
-repository path to `NotebookSession.open(snapshot_url, notebook_path=...)`.
-Code can also add ordinary repository files with `repo.add_file(path)`; the
-operation records the file alongside other Gen assets.
+`Commit` is pressed. A successful commit adds the `.ipynb` through
+`repo.add_file()` and pushes the current branch. To open a notebook tracked in
+the repository, pass its logical path to
+`NotebookSession.open(..., notebook_path="notebooks/analysis.ipynb")`. If you select a different existing
+branch in the commit widget, open that branch before editing; the session will
+not switch branches and discard the current checkout's edits. A new branch is
+created from the current local head before it is pushed. Code can also add
+ordinary repository files with `repo.add_file(path)`; they are tracked alongside
+other Gen assets.
 
 For a remote indexed BGZF FASTA, pass its FASTA and BGZF index files explicitly:
 

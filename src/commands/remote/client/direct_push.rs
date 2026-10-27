@@ -5,18 +5,18 @@
 //! manifest. Its recovery probe asks GenHub to confirm that an accepted session is stale before
 //! the client resets that session; signed URLs and intermediary error bodies remain private.
 
-use std::io;
+use std::io::Read as _;
 
-use reqwest::{
-    StatusCode, Version,
-    blocking::Client,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
-    redirect::Policy,
+#[cfg(not(target_os = "emscripten"))]
+use gen_http::header::CONTENT_LENGTH;
+use gen_http::{
+    Client, Error as HttpError, HeaderMap, HeaderValue, Method, Request, Response, StatusCode,
+    header::CONTENT_TYPE,
 };
 
 use super::{DirectPushCapability, RemoteClientError};
 
-const MAX_DIRECT_PUSH_ERROR_BODY_BYTES: u64 = 4096;
+const MAX_DIRECT_PUSH_ERROR_BODY_BYTES: usize = 4096;
 const STALE_SESSION_CHECK_HEADER: &str = "x-gen-session-stale-check";
 
 /// Direct-GCS blocks stay unpublished until the remote operations layer calls this commit boundary.
@@ -68,23 +68,34 @@ fn send_direct_push_request(
     stale_check: bool,
     failure_context: &'static str,
 ) -> Result<(), RemoteClientError> {
-    let client = Client::builder().redirect(Policy::none()).build()?;
-    let mut request = client.post(signed_url).header(CONTENT_LENGTH, "0");
-    if stale_check {
-        request = request.header(STALE_SESSION_CHECK_HEADER, "1");
+    let mut request = Request::new(Method::POST, signed_url).body_bytes(Vec::new());
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        request
+            .headers
+            .insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
     }
-    let mut response = request
-        .send()
-        .map_err(|error| RemoteClientError::Request(error.without_url()))?;
+    if stale_check {
+        request.headers.insert(
+            gen_http::HeaderName::from_static(STALE_SESSION_CHECK_HEADER),
+            HeaderValue::from_static("1"),
+        );
+    }
+    // Signed publication URLs authorize one endpoint. Native requests must not forward the
+    // capability if the endpoint redirects; browser XHR follows browser redirect policy.
+    #[cfg(not(target_os = "emscripten"))]
+    let client = Client::without_redirects().map_err(map_http_error)?;
+    #[cfg(target_os = "emscripten")]
+    let client = Client::new();
+    let mut response = client.execute(request).map_err(map_http_error)?;
     if !response.status().is_success() {
         let status = response.status();
         if status == StatusCode::CONFLICT && is_stale_session_response(&mut response) {
             return Err(RemoteClientError::StaleGraphSession);
         }
         let content_type = response_content_type_label(response.headers());
-        let protocol = http_version_label(response.version());
         log::debug!(
-            "Direct GCS manifest publication returned HTTP {status}; response protocol {protocol}, content type {content_type}"
+            "Direct graph manifest publication returned HTTP {status}; content type {content_type}"
         );
         return Err(RemoteClientError::Http {
             status,
@@ -94,9 +105,22 @@ fn send_direct_push_request(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
+fn map_http_error(error: HttpError) -> RemoteClientError {
+    match error {
+        HttpError::NativeRequest(error) => RemoteClientError::NativeRequest(error.without_url()),
+        error => RemoteClientError::Request(error),
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+fn map_http_error(error: HttpError) -> RemoteClientError {
+    RemoteClientError::Request(error)
+}
+
 /// Recognizes only GenHub’s bounded stale-session response before recovery resets a lease.
 /// Proxy and provider error pages must not authorize that state change.
-fn is_stale_session_response(response: &mut reqwest::blocking::Response) -> bool {
+fn is_stale_session_response(response: &mut Response) -> bool {
     let is_json = response
         .headers()
         .get(CONTENT_TYPE)
@@ -109,12 +133,14 @@ fn is_stale_session_response(response: &mut reqwest::blocking::Response) -> bool
     if !is_json {
         return false;
     }
-    let mut bounded_response = io::Read::take(&mut *response, MAX_DIRECT_PUSH_ERROR_BODY_BYTES + 1);
+    let mut bounded_response = response
+        .body_mut()
+        .take((MAX_DIRECT_PUSH_ERROR_BODY_BYTES + 1) as u64);
     let mut body = Vec::new();
-    if io::Read::read_to_end(&mut bounded_response, &mut body).is_err() {
+    if bounded_response.read_to_end(&mut body).is_err() {
         return false;
     }
-    if body.len() as u64 > MAX_DIRECT_PUSH_ERROR_BODY_BYTES {
+    if body.len() > MAX_DIRECT_PUSH_ERROR_BODY_BYTES {
         return false;
     }
     serde_json::from_slice::<serde_json::Value>(&body)
@@ -126,17 +152,6 @@ fn is_stale_session_response(response: &mut reqwest::blocking::Response) -> bool
                 .map(str::to_owned)
         })
         .is_some_and(|reason| reason == "stale_graph_session")
-}
-
-fn http_version_label(version: Version) -> &'static str {
-    match version {
-        Version::HTTP_09 => "HTTP/0.9",
-        Version::HTTP_10 => "HTTP/1.0",
-        Version::HTTP_11 => "HTTP/1.1",
-        Version::HTTP_2 => "HTTP/2",
-        Version::HTTP_3 => "HTTP/3",
-        _ => "unknown HTTP version",
-    }
 }
 
 fn response_content_type_label(headers: &HeaderMap) -> &'static str {
@@ -162,17 +177,18 @@ fn response_content_type_label(headers: &HeaderMap) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
     use std::{
-        io::{Read as _, Write as _},
+        io::{ErrorKind, Read as _, Write as _},
         net::{TcpListener, TcpStream},
         thread::{self, JoinHandle},
+        time::{Duration, Instant},
     };
 
     use super::{
         MAX_DIRECT_PUSH_ERROR_BODY_BYTES, abort_direct_push, confirm_direct_push_session_stale,
-        http_version_label, publish_direct_push, response_content_type_label,
+        publish_direct_push, response_content_type_label,
     };
     use crate::commands::remote::client::{
         DirectPushCapability, RemoteClientError, SessionScope,
@@ -263,6 +279,75 @@ mod tests {
             requests
         });
         (format!("http://{address}"), handle)
+    }
+
+    fn redirect_server() -> (String, JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind redirect fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("should make redirect fixture nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("should read redirect fixture address");
+        let handle = thread::spawn(move || {
+            let mut request_count = 0;
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _request = read_request_head(&mut stream);
+                        request_count += 1;
+                        let (status, reason, location) = if request_count == 1 {
+                            (302, "Found", "Location: /redirect-target\r\n")
+                        } else {
+                            (204, "No Content", "")
+                        };
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status} {reason}\r\n{location}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .expect("should send redirect fixture response");
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("should accept redirect fixture request: {error}"),
+                }
+            }
+            request_count
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn test_signed_publication_does_not_follow_native_redirects() {
+        let (origin, server) = redirect_server();
+        let capability = DirectPushCapability {
+            database_uri: "gcs://bucket/prefix?access_token=not-used".to_string(),
+            token_expires_at: "2030-01-01T00:00:00Z"
+                .parse()
+                .expect("should parse test token expiration"),
+            session_id: TEST_TRANSFER_ID,
+            session_scope: SessionScope {
+                principal: "alice".to_string(),
+                target_database: "default.db".to_string(),
+                operations: "push".to_string(),
+            },
+            publish_url: format!("{origin}/signed-publish?signature=secret"),
+            abort_url: format!("{origin}/signed-abort?signature=secret"),
+        };
+
+        let error = publish_direct_push(&capability)
+            .expect_err("should report the signed endpoint redirect without following it");
+        assert!(matches!(
+            error,
+            RemoteClientError::Http { status, .. } if status == gen_http::StatusCode::FOUND
+        ));
+        assert_eq!(
+            server.join().expect("should finish redirect fixture"),
+            1,
+            "native requests must not forward the signed capability to a redirect target"
+        );
     }
 
     #[test]
@@ -404,7 +489,7 @@ mod tests {
     fn test_stale_session_response_requires_bounded_exact_reason() {
         let oversized_body = format!(
             "{{\"reason\":\"stale_graph_session\",\"detail\":\"{}\"}}",
-            "x".repeat(MAX_DIRECT_PUSH_ERROR_BODY_BYTES as usize + 64)
+            "x".repeat(MAX_DIRECT_PUSH_ERROR_BODY_BYTES + 64)
         );
         let (origin, server) = mock_server(vec![
             (
@@ -549,6 +634,5 @@ mod tests {
             }
             assert_eq!(response_content_type_label(&headers), expected);
         }
-        assert_eq!(http_version_label(reqwest::Version::HTTP_11), "HTTP/1.1");
     }
 }

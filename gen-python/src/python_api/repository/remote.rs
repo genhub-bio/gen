@@ -1,3 +1,4 @@
+#[cfg(feature = "remote")]
 use core::fmt::Display;
 
 use gen_models::{
@@ -7,7 +8,9 @@ use gen_models::{
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use super::{PyRepository, history::branch_name};
+use super::PyRepository;
+#[cfg(feature = "remote")]
+use super::history::branch_name;
 
 /// A configured Gen repository remote.
 #[gen_stub_pyclass]
@@ -55,12 +58,14 @@ fn optional_remote_name(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Str
     value.map(remote_name).transpose()
 }
 
+#[cfg(feature = "remote")]
 fn optional_branch_name(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
     value.map(branch_name).transpose()
 }
 
 impl PyRepository {
     /// Refreshes the live graph connection even when a partially completed remote workflow fails.
+    #[cfg(feature = "remote")]
     fn finish_remote_operation(
         &mut self,
         action: &str,
@@ -155,6 +160,7 @@ impl PyRepository {
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
+    #[cfg(feature = "remote")]
     /// Pushes a local branch using the same remote workflow as the Gen CLI.
     ///
     /// `force=True` overwrites the remote branch even when its history has diverged; it
@@ -186,6 +192,7 @@ impl PyRepository {
         self.finish_remote_operation("push", result)
     }
 
+    #[cfg(feature = "remote")]
     /// Pulls a remote branch using the same merge and asset workflow as the Gen CLI.
     #[pyo3(signature = (remote=None, branch=None))]
     fn pull(
@@ -212,6 +219,7 @@ impl PyRepository {
         self.finish_remote_operation("pull", result)
     }
 
+    #[cfg(feature = "remote")]
     /// Fetches a branch into its remote-tracking ref without changing the checkout.
     #[pyo3(signature = (remote=None, branch=None))]
     fn fetch(
@@ -239,43 +247,20 @@ impl PyRepository {
     }
 }
 
-#[cfg(all(test, unix))]
-mod tests {
+#[cfg(test)]
+mod configuration_tests {
     use std::path::Path;
 
-    use gen_core::{BranchName, DoltHashId, config::Workspace};
-    use gen_models::{
-        collection::Collection,
-        history::{
-            HistoryStore as _,
-            dolt::{DoltHistoryStore, active_branch, hash_of},
-        },
-        operations::RemoteBranch,
-    };
+    use gen_core::config::Workspace;
+    use gen_models::operations::RemoteBranch;
     use pyo3::{Py, Python};
     use tempfile::tempdir;
 
     use super::PyRepository;
-    use crate::python_api::repository::{clone_repository, history::PyBranch};
 
     fn create_repository(path: &Path) -> PyRepository {
         PyRepository::open_workspace(Workspace::new(path))
             .expect("should create and open repository")
-    }
-
-    fn commit_collection(repository: &PyRepository, name: &str) {
-        Collection::create(repository.context.graph().conn(), name)
-            .expect("should create collection");
-        DoltHistoryStore::new(repository.context.graph().conn())
-            .commit_all(&format!("add {name}"))
-            .expect("should commit collection");
-    }
-
-    fn has_collection(repository: &PyRepository, name: &str) -> bool {
-        Collection::all(repository.context.graph().conn())
-            .expect("should list collections")
-            .iter()
-            .any(|collection| collection.name == name)
     }
 
     #[test]
@@ -347,6 +332,45 @@ mod tests {
                 "removing the default remote should clear the default"
             );
         });
+    }
+}
+
+#[cfg(all(test, unix, feature = "remote"))]
+mod tests {
+    use std::path::Path;
+
+    use gen_core::{BranchName, DoltHashId, config::Workspace};
+    use gen_models::{
+        collection::Collection,
+        history::{
+            HistoryStore as _,
+            dolt::{DoltHistoryStore, active_branch, hash_of},
+        },
+    };
+    use pyo3::{Py, Python};
+    use tempfile::tempdir;
+
+    use super::PyRepository;
+    use crate::python_api::repository::{clone_repository, history::PyBranch};
+
+    fn create_repository(path: &Path) -> PyRepository {
+        PyRepository::open_workspace(Workspace::new(path))
+            .expect("should create and open repository")
+    }
+
+    fn commit_collection(repository: &PyRepository, name: &str) {
+        Collection::create(repository.context.graph().conn(), name)
+            .expect("should create collection");
+        DoltHistoryStore::new(repository.context.graph().conn())
+            .commit_all(&format!("add {name}"))
+            .expect("should commit collection");
+    }
+
+    fn has_collection(repository: &PyRepository, name: &str) -> bool {
+        Collection::all(repository.context.graph().conn())
+            .expect("should list collections")
+            .iter()
+            .any(|collection| collection.name == name)
     }
 
     #[test]

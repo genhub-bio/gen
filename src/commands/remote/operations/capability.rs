@@ -12,15 +12,21 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use gen_http::StatusCode;
 use gen_models::operations::Remote;
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    feature = "browser-cloud"
+))]
 use rusqlite::blockcachevfs::{
     AuthError, AuthRefreshReason, CloudConnectionIdentity, CloudConnectionUri,
 };
 use url::Url;
 use uuid::Uuid;
 
-use super::{direct_gcs::PushGraphTransferError, file_graph_url};
+use super::{file_graph_url, push_session::PushGraphTransferError};
 use crate::commands::remote::{
+    AuthTokens,
     client::{
         CapabilityRequest, CapabilityResponse, DirectPushCapability, RemoteClientError,
         RemoteOperation, RepositoryRemote, SessionScope as ClientSessionScope, abort_direct_push,
@@ -28,7 +34,6 @@ use crate::commands::remote::{
         publish_direct_push,
     },
     login_origin,
-    server::AuthTokens,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +71,10 @@ pub(super) struct PushCapabilityRenewal {
     expected_scope: ClientSessionScope,
     pub(super) expected_session_id: Uuid,
     expected_transfer_id: Uuid,
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        feature = "browser-cloud"
+    ))]
     expected_uri_identity: CloudConnectionIdentity,
     fetch: Arc<PushCapabilityFetcher>,
     state: Arc<Mutex<PushCapabilityState>>,
@@ -81,12 +90,12 @@ impl PushCapabilityRenewal {
     ) -> Result<Self, PushGraphTransferError> {
         if response.transfer_id != expected_transfer_id || response.remote_url.is_some() {
             return Err(PushGraphTransferError::Protocol(
-                "GenHub returned a direct-push capability for a different transfer".to_string(),
+                "GenHub returned a push capability for a different transfer".to_string(),
             ));
         }
         let direct_push = response.direct_push.as_ref().ok_or_else(|| {
             PushGraphTransferError::Protocol(
-                "GenHub push capability did not include a direct GCS session".to_string(),
+                "GenHub push capability did not include a transfer session".to_string(),
             )
         })?;
         if direct_push.session_id != expected_session_id {
@@ -95,17 +104,29 @@ impl PushCapabilityRenewal {
                     .to_string(),
             ));
         }
+        #[cfg(any(
+            all(feature = "remote-native", not(target_os = "emscripten")),
+            feature = "browser-cloud"
+        ))]
         let connection_uri =
             CloudConnectionUri::parse(&direct_push.database_uri).map_err(|_| {
                 PushGraphTransferError::Protocol(
                     "GenHub returned an invalid direct GCS database URI".to_string(),
                 )
             })?;
+        #[cfg(any(
+            all(feature = "remote-native", not(target_os = "emscripten")),
+            feature = "browser-cloud"
+        ))]
         if connection_uri.gcs_access_token().is_none() {
             return Err(PushGraphTransferError::Protocol(
                 "GenHub returned an invalid direct GCS database URI".to_string(),
             ));
         }
+        #[cfg(any(
+            all(feature = "remote-native", not(target_os = "emscripten")),
+            feature = "browser-cloud"
+        ))]
         let expected_uri_identity = connection_uri.identity();
         if !same_http_origin(repository_origin, &direct_push.publish_url) {
             return Err(PushGraphTransferError::Protocol(
@@ -124,6 +145,10 @@ impl PushCapabilityRenewal {
             expected_scope,
             expected_session_id,
             expected_transfer_id,
+            #[cfg(any(
+                all(feature = "remote-native", not(target_os = "emscripten")),
+                feature = "browser-cloud"
+            ))]
             expected_uri_identity,
             fetch,
             state: Arc::new(Mutex::new(PushCapabilityState {
@@ -132,38 +157,46 @@ impl PushCapabilityRenewal {
             })),
         };
         renewal
-            .auth_token_internal(AuthRefreshReason::Request)
+            .refresh_if_needed(false)
             .map_err(PushCapabilityRenewal::transfer_error)?;
         Ok(renewal)
     }
 
+    #[cfg(any(
+        all(feature = "remote-native", not(target_os = "emscripten")),
+        feature = "browser-cloud"
+    ))]
     pub(super) fn auth_token(&self, reason: AuthRefreshReason) -> Result<String, AuthError> {
-        self.auth_token_internal(reason)
-            .map_err(|_| AuthError("GenHub rejected direct-push credential renewal".to_string()))
+        self.refresh_if_needed(matches!(reason, AuthRefreshReason::Unauthorized))
+            .map_err(|_| AuthError("GenHub rejected direct-push credential renewal".to_string()))?;
+        direct_push_access_token(
+            &self.capability_response().map_err(|_| {
+                AuthError("GenHub rejected direct-push credential renewal".to_string())
+            })?,
+        )
     }
 
-    /// BlockCacheVFS can request a new CAB after a token expires during a long upload.
-    ///
-    /// Its storage callback uses this path to rotate credentials while keeping the push bound to
-    /// the persisted session and its already accepted checkpoints.
-    fn auth_token_internal(
-        &self,
-        reason: AuthRefreshReason,
-    ) -> Result<String, CapabilityRefreshFailure> {
+    /// Refreshes the session before long graph or asset transfers reuse its capability.
+    fn refresh_if_needed(&self, force_refresh: bool) -> Result<(), CapabilityRefreshFailure> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| CapabilityRefreshFailure::InvalidScope)?;
-        let should_refresh = matches!(reason, AuthRefreshReason::Unauthorized)
-            || capability_needs_refresh(&state.response, state.issued_at, Utc::now());
+        let should_refresh =
+            force_refresh || capability_needs_refresh(&state.response, state.issued_at, Utc::now());
         if should_refresh {
             let response = (self.fetch)().map_err(CapabilityRefreshFailure::Fetch)?;
             self.validate_renewal(&response)?;
             state.response = response;
             state.issued_at = Utc::now();
         }
+        #[cfg(any(
+            all(feature = "remote-native", not(target_os = "emscripten")),
+            feature = "browser-cloud"
+        ))]
         direct_push_access_token(&state.response)
-            .map_err(|_| CapabilityRefreshFailure::InvalidScope)
+            .map_err(|_| CapabilityRefreshFailure::InvalidScope)?;
+        Ok(())
     }
 
     fn validate_renewal(
@@ -201,17 +234,27 @@ impl PushCapabilityRenewal {
             .direct_push
             .as_ref()
             .ok_or(CapabilityRefreshFailure::InvalidScope)?;
+        #[cfg(any(
+            all(feature = "remote-native", not(target_os = "emscripten")),
+            feature = "browser-cloud"
+        ))]
         let uri_identity_matches =
             CloudConnectionUri::parse(&direct_push.database_uri).is_ok_and(|uri| {
                 uri.gcs_access_token().is_some() && uri.identity() == self.expected_uri_identity
             });
+        #[cfg(any(
+            all(feature = "remote-native", not(target_os = "emscripten")),
+            feature = "browser-cloud"
+        ))]
+        if !uri_identity_matches {
+            return Err(CapabilityRefreshFailure::InvalidScope);
+        }
         if response.remote_url.is_some()
             || response.transfer_id != self.expected_transfer_id
             || direct_push.session_id != self.expected_session_id
             || direct_push.session_scope != self.expected_scope
-            || !uri_identity_matches
-            || (!same_http_origin(&self.expected_repository_origin, &direct_push.publish_url)
-                || !same_http_origin(&self.expected_repository_origin, &direct_push.abort_url))
+            || !same_http_origin(&self.expected_repository_origin, &direct_push.publish_url)
+            || !same_http_origin(&self.expected_repository_origin, &direct_push.abort_url)
         {
             return Err(CapabilityRefreshFailure::InvalidScope);
         }
@@ -236,7 +279,7 @@ impl PushCapabilityRenewal {
     }
 
     pub(super) fn ensure_fresh(&self) -> Result<PushTransferLease, PushGraphTransferError> {
-        self.auth_token_internal(AuthRefreshReason::Request)
+        self.refresh_if_needed(false)
             .map_err(PushCapabilityRenewal::transfer_error)?;
         self.push_lease()
     }
@@ -298,7 +341,7 @@ impl PushCapabilityRenewal {
 /// transient claim collision from retiring the client's resumable session UUID.
 pub(super) fn push_capability_error(error: RemoteClientError) -> PushGraphTransferError {
     match error {
-        RemoteClientError::Http { status, message } if status == reqwest::StatusCode::CONFLICT => {
+        RemoteClientError::Http { status, message } if status == StatusCode::CONFLICT => {
             if is_push_contention_response(&message) {
                 PushGraphTransferError::CapabilityContention
             } else if is_inactive_push_response(&message) {
@@ -364,9 +407,14 @@ fn sanitize_capability_fetch_error(error: RemoteClientError) -> RemoteClientErro
             endpoint,
             status,
             declared_content_length,
-            source: source.without_url(),
+            source,
         },
-        RemoteClientError::Request(source) => RemoteClientError::Request(source.without_url()),
+        RemoteClientError::Request(source) => RemoteClientError::Request(source),
+        RemoteClientError::RequestEncode(source) => RemoteClientError::RequestEncode(source),
+        #[cfg(not(target_os = "emscripten"))]
+        RemoteClientError::NativeRequest(source) => {
+            RemoteClientError::NativeRequest(source.without_url())
+        }
         RemoteClientError::TokenStorage(_) => RemoteClientError::TokenStorage(io::Error::other(
             "direct-push credential storage failed",
         )),
@@ -398,6 +446,10 @@ fn capability_needs_refresh(
     now >= expires_at - ChronoDuration::milliseconds(margin_milliseconds)
 }
 
+#[cfg(any(
+    all(feature = "remote-native", not(target_os = "emscripten")),
+    feature = "browser-cloud"
+))]
 fn direct_push_access_token(response: &CapabilityResponse) -> Result<String, AuthError> {
     let direct_push = response
         .direct_push
@@ -473,8 +525,8 @@ pub(super) fn transfer_authorization(
 
 /// A direct-GCS push may outlive its initial CAB while its accepted session must stay unchanged.
 ///
-/// `run_push_graph_transfer` creates this coordinator before opening the loopback server so the
-/// native VFS callback can renew credentials against the persisted session UUID.
+/// `run_push_graph_transfer` creates this coordinator before opening the CloudSession database so
+/// the VFS callback can renew credentials against the persisted session UUID.
 pub(super) fn push_capability_renewal(
     remote: &Remote,
     branch: &str,
@@ -537,7 +589,7 @@ pub(super) fn acquire_push_session_renewal(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote-native", not(target_os = "emscripten")))]
 mod tests {
     use std::{
         io::{ErrorKind, Read as _, Write as _},
@@ -548,7 +600,7 @@ mod tests {
     };
 
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
-    use reqwest::StatusCode;
+    use gen_http::StatusCode;
     use rusqlite::blockcachevfs::AuthRefreshReason;
     use uuid::Uuid;
 
@@ -613,7 +665,7 @@ mod tests {
         });
         assert!(matches!(
             &contention,
-            super::super::direct_gcs::PushGraphTransferError::CapabilityContention
+            super::super::push_session::PushGraphTransferError::CapabilityContention
         ));
         assert!(
             !contention.is_terminal(),
@@ -636,7 +688,7 @@ mod tests {
         );
         assert!(matches!(
             &permanent,
-            super::super::direct_gcs::PushGraphTransferError::CapabilityLeaseInactive
+            super::super::push_session::PushGraphTransferError::CapabilityLeaseInactive
         ));
     }
 
@@ -651,7 +703,7 @@ mod tests {
                     status: StatusCode::CONFLICT,
                     message: body.to_string(),
                 }),
-                super::super::direct_gcs::PushGraphTransferError::CapabilityContention
+                super::super::push_session::PushGraphTransferError::CapabilityContention
             ));
         }
 
@@ -666,7 +718,7 @@ mod tests {
             assert!(error.is_terminal());
             assert!(!matches!(
                 error,
-                super::super::direct_gcs::PushGraphTransferError::CapabilityContention
+                super::super::push_session::PushGraphTransferError::CapabilityContention
             ));
         }
 
@@ -679,7 +731,7 @@ mod tests {
                     status: StatusCode::CONFLICT,
                     message: body.to_string(),
                 }),
-                super::super::direct_gcs::PushGraphTransferError::CapabilityLeaseInactive
+                super::super::push_session::PushGraphTransferError::CapabilityLeaseInactive
             ));
         }
 
@@ -694,7 +746,7 @@ mod tests {
             assert!(error.is_terminal());
             assert!(!matches!(
                 error,
-                super::super::direct_gcs::PushGraphTransferError::CapabilityLeaseInactive
+                super::super::push_session::PushGraphTransferError::CapabilityLeaseInactive
             ));
         }
     }

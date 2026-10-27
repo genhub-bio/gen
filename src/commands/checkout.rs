@@ -12,7 +12,7 @@ use gen_models::{
 };
 
 use crate::{
-    commands::remote::operations::{
+    asset_materialization::{
         DownloadAssetOutcome, materialize_versioned_asset, warn_asset_conflict,
     },
     history::ensure_clean_working_set,

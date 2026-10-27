@@ -6,14 +6,9 @@ use std::{
 };
 
 use rand::{rng, seq::SliceRandom};
-use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthTokens {
-    pub jwt: String,
-    pub refresh_token: String,
-}
+pub use super::AuthTokens;
 
 #[allow(clippy::type_complexity)]
 pub fn start_callback_server(
