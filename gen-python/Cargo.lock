@@ -1648,6 +1648,8 @@ dependencies = [
 name = "gen-python"
 version = "0.5.1"
 dependencies = [
+ "base64 0.22.1",
+ "crc32c",
  "flate2",
  "gen",
  "gen-annotations",

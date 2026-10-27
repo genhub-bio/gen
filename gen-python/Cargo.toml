@@ -14,6 +14,11 @@ crate-type = ["cdylib", "rlib"]
 # Docstrings hold Python examples for the generated stubs, not Rust doctests.
 doctest = false
 
+[[example]]
+name = "remote_gcs_fixture"
+path = "tests/support/remote_gcs_fixture.rs"
+required-features = ["abi3", "extension-module"]
+
 [features]
 default = []
 abi3 = ["pyo3/abi3-py311"]
@@ -41,6 +46,8 @@ version = "0.29.3"
 features = ["multiple-pymethods", "generate-import-lib"]
 
 [dev-dependencies]
+base64 = "0.22.1"
+crc32c = "0.6.8"
 tempfile = "3"
 
 [build-dependencies]
