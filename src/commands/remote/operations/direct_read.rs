@@ -4,12 +4,16 @@
 //! copying graph history into a second database. The connection is local-write-only so editing and
 //! Dolt commits stay in its private cache until the existing push workflow publishes them.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
+use gen_core::config::AssetReaderSource;
 use gen_models::{
     db::GraphConnection,
-    history::dolt::{active_branch, connect_branch},
+    history::dolt::{active_branch, connect_branch, hash_of},
 };
 use rusqlite::{
     Connection, OpenFlags,
@@ -18,8 +22,10 @@ use rusqlite::{
 use url::Url;
 
 use super::{
-    CapabilityTransportIdentity, capability::ReadCapabilityTokenCache, ensure_graph_remote,
-    normalize_cloud_open_authorization_error, safe_transfer_error,
+    CapabilityTransportIdentity,
+    browser_asset_source::{BrowserAssetSource, cloud_storage_scope},
+    capability::ReadCapabilityTokenCache,
+    ensure_graph_remote, normalize_cloud_open_authorization_error, safe_transfer_error,
     validate_capability_transport_identity,
 };
 use crate::commands::remote::{
@@ -42,6 +48,8 @@ pub struct BrowserGraphOpen {
     pub branch: String,
     /// Canonical GenHub repository URL stored as the repository remote.
     pub canonical_remote_url: String,
+    /// Workspace-scoped source for lazy asset reads at the selected published graph ref.
+    pub asset_reader_source: Arc<dyn AssetReaderSource>,
 }
 
 /// Opens a read capability as a local-write-only graph connection without running Dolt clone.
@@ -176,8 +184,22 @@ pub fn open_browser_graph(
         connect_branch(&graph, &branch)
             .map_err(|_| format!("graph branch '{branch}' is unavailable"))?;
     }
+    let published_hash = hash_of(&graph, &branch)
+        .map_err(|_| "reading the published graph ref failed".to_string())?;
     ensure_graph_remote(&graph, "origin", repository.canonical_url())
         .map_err(|_| "configuring the graph remote failed".to_string())?;
+    let (bucket, storage_origin) = cloud_storage_scope(cloud_uri.as_str())
+        .map_err(|_| "GenHub returned an invalid graph read capability".to_string())?;
+    let asset_reader_source = Arc::new(
+        BrowserAssetSource::new(
+            repository.clone(),
+            bucket,
+            &storage_origin,
+            &branch,
+            published_hash,
+        )
+        .map_err(|_| "configuring the browser asset source failed".to_string())?,
+    );
 
     Ok(BrowserGraphOpen {
         graph,
@@ -185,5 +207,6 @@ pub fn open_browser_graph(
         graph_path: PathBuf::from(graph_url.as_str()),
         branch,
         canonical_remote_url: repository.canonical_url().to_string(),
+        asset_reader_source,
     })
 }

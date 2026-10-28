@@ -409,6 +409,7 @@ class NotebookSession:
         self._file_refs_hash: str | None = None
         self._manifest_loaded_hash: str | None = None
         self._published_file_metadata: dict[str, dict[str, Any]] = {}
+        self._asset_source_ref: tuple[str, str] | None = None
         self._closed = False
 
     @property
@@ -439,6 +440,15 @@ class NotebookSession:
         self._file_refs_hash = None
         self._manifest_loaded_hash = None
         self._published_file_metadata.clear()
+        clear_asset_source = getattr(
+            self.repository, "clear_browser_asset_source", None
+        )
+        if callable(clear_asset_source):
+            try:
+                clear_asset_source()
+            except Exception:
+                pass
+        self._asset_source_ref = None
         if comm is not None:
             try:
                 comm.close()
@@ -669,6 +679,8 @@ class NotebookSession:
                 "The graph head changed while recording its published snapshot"
             )
 
+        self._configure_browser_asset_source(resolved_branch, resolved_hash)
+
         ref_changed = (
             self._published_branch != resolved_branch
             or self.base_commit != resolved_hash
@@ -694,6 +706,24 @@ class NotebookSession:
         self._synchronize_file_refs(force=True)
         if ref_changed:
             self._notify_contents_changed()
+
+    def _configure_browser_asset_source(self, branch: str, snapshot_hash: str) -> None:
+        """Let the direct graph VFS resolve referenced assets lazily at this published ref."""
+        configure_asset_source = getattr(
+            self.repository, "set_browser_asset_source", None
+        )
+        if not callable(configure_asset_source):
+            return
+        source_ref = (branch, snapshot_hash)
+        if self._asset_source_ref == source_ref:
+            return
+        try:
+            configure_asset_source(branch, snapshot_hash)
+        except Exception:
+            raise NotebookSessionError(
+                "Could not configure lazy access to published repository assets"
+            ) from None
+        self._asset_source_ref = source_ref
 
     def _current_asset_ids(self) -> dict[str, str]:
         assets: dict[str, str] = {}
