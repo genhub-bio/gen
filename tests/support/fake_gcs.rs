@@ -53,14 +53,21 @@ impl FakeGcsServer {
         let worker = thread::spawn(move || {
             while !server_stopped.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((mut stream, _)) => match read_request(&mut stream) {
-                        Ok(request) => {
-                            let response = handle_request(&server_store, &request);
-                            let _ = stream.write_all(&response);
+                    Ok((mut stream, _)) => {
+                        // Windows accepted sockets inherit listener mode.
+                        // Request parsing needs blocking reads for fragmented bodies.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("should make accepted fake GCS stream blocking");
+                        match read_request(&mut stream) {
+                            Ok(request) => {
+                                let response = handle_request(&server_store, &request);
+                                let _ = stream.write_all(&response);
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+                            Err(error) => panic!("should read fake GCS request: {error}"),
                         }
-                        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
-                        Err(error) => panic!("should read fake GCS request: {error}"),
-                    },
+                    }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                     }
@@ -357,4 +364,55 @@ fn json_response(status: &str, body: Value) -> Vec<u8> {
         body.len()
     )
     .into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpStream,
+        thread,
+        time::Duration,
+    };
+
+    use super::FakeGcsServer;
+
+    #[test]
+    fn test_fake_gcs_server_reads_body_sent_after_headers() {
+        let server = FakeGcsServer::start();
+        let address = server
+            .endpoint
+            .strip_prefix("http://")
+            .expect("should have an HTTP test endpoint");
+        let mut stream = TcpStream::connect(address).expect("should connect to fake GCS server");
+        let body = r#"{"name":"fragmented-bucket"}"#;
+        let headers = format!(
+            "POST /storage/v1/b?project=fake HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(headers.as_bytes())
+            .expect("should send request headers before its body");
+        thread::sleep(Duration::from_millis(100));
+        stream
+            .write_all(body.as_bytes())
+            .expect("should send request body after the server accepts the connection");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("should bound fake GCS response wait");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("should read the fake GCS response");
+        let response = String::from_utf8_lossy(&response);
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "should accept a request whose body arrives after its headers: {response}"
+        );
+        assert!(
+            response.contains(r#"{"name":"fragmented-bucket"}"#),
+            "should return the created bucket in the response: {response}"
+        );
+    }
 }
