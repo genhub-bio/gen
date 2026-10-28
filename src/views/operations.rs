@@ -513,19 +513,17 @@ pub fn view_operations(
                     KeyCode::Up => {
                         panel_focus.focus(OperationPanel::Operations);
                     }
-                    KeyCode::Down => {
-                        if panel_focus.current() == OperationPanel::Operations && view_graph {
-                            panel_focus.focus(OperationPanel::GraphView);
-                        }
+                    KeyCode::Down
+                        if panel_focus.current() == OperationPanel::Operations && view_graph =>
+                    {
+                        panel_focus.focus(OperationPanel::GraphView);
                     }
                     KeyCode::Enter => {
                         panel_focus.activate();
                     }
-                    KeyCode::Char('x') => {
-                        if panel_focus.current() == OperationPanel::GraphView {
-                            view_graph = false;
-                            panel_focus.remove_panel(OperationPanel::GraphView);
-                        }
+                    KeyCode::Char('x') if panel_focus.current() == OperationPanel::GraphView => {
+                        view_graph = false;
+                        panel_focus.remove_panel(OperationPanel::GraphView);
                     }
                     KeyCode::Char('q') => {
                         break;

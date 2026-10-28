@@ -9,6 +9,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(target_os = "emscripten")]
+use gen_core::{AssetReadRequest, AssetReadSeek};
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use indexmap::IndexMap;
 #[cfg(not(target_os = "emscripten"))]
@@ -47,7 +49,7 @@ static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 #[cfg(not(target_os = "emscripten"))]
 pub type AssetReader = blocking::StdReader;
 #[cfg(target_os = "emscripten")]
-pub type AssetReader = fs::File;
+pub type AssetReader = Box<dyn AssetReadSeek>;
 
 #[cfg(not(target_os = "emscripten"))]
 type AssetWriter = opendal::blocking::StdWriter;
@@ -333,10 +335,37 @@ impl AssetRef {
         workspace: &Workspace,
     ) -> Result<BufReader<AssetReader>, FileAdditionError> {
         let reader = if LocalAssetUri::is_local_path_or_file_uri(&self.uri) {
-            let asset_path = self.versioned_store_path(workspace)?;
-            OpenDalLocation::from_absolute_path(&asset_path)
-                .map_err(opendal_file_addition_error)?
-                .reader()?
+            match self.versioned_store_path(workspace) {
+                Ok(asset_path) => OpenDalLocation::from_absolute_path(&asset_path)
+                    .map_err(opendal_file_addition_error)?
+                    .reader()?,
+                Err(error @ FileAdditionError::FileNotFound(_)) => {
+                    #[cfg(target_os = "emscripten")]
+                    {
+                        // Direct graph workspaces keep asset metadata locally and fetch archived
+                        // bytes through their bounded source only when the local archive is absent.
+                        let source = workspace.asset_reader_source().ok_or(error)?;
+                        let checksum = self.checksum.ok_or_else(|| {
+                            FileAdditionError::ChecksumError(format!(
+                                "asset {} has no checksum for repository lookup",
+                                self.id
+                            ))
+                        })?;
+                        source
+                            .open(&AssetReadRequest {
+                                id: self.id,
+                                checksum,
+                                uri: &self.uri,
+                            })
+                            .map_err(FileAdditionError::FileReadError)?
+                    }
+                    #[cfg(not(target_os = "emscripten"))]
+                    {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             <dyn AssetUri>::from_uri(&self.uri).reader(workspace)?
         };
@@ -1146,7 +1175,9 @@ impl OpenDalLocation {
 
     #[cfg(target_os = "emscripten")]
     fn reader(self) -> Result<AssetReader, FileAdditionError> {
-        fs::File::open(self.path).map_err(FileAdditionError::FileReadError)
+        fs::File::open(self.path)
+            .map(|reader| Box::new(reader) as AssetReader)
+            .map_err(FileAdditionError::FileReadError)
     }
 }
 

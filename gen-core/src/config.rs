@@ -1,25 +1,106 @@
 use std::{
-    env, fs,
+    env, fmt, fs,
+    io::{self, Read, Seek},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use crate::errors::ConfigError;
+use crate::{DoltHashId, HashId, Sha256Hash, errors::ConfigError};
 
 pub const ASSETS_DIR_NAME: &str = "assets";
 pub const CACHE_DIR_NAME: &str = "cache";
 pub const DEFAULT_GRAPH_DB_NAME: &str = "default.db";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A reader whose cursor can seek within a content-addressed asset.
+pub trait AssetReadSeek: Read + Seek + Send {}
+
+impl<T> AssetReadSeek for T where T: Read + Seek + Send {}
+
+/// Identity required to open one archived repository asset from an external read source.
+pub struct AssetReadRequest<'asset> {
+    /// Stable Gen asset reference identity.
+    pub id: HashId,
+    /// SHA-256 of the exact archived bytes in object storage.
+    pub checksum: Sha256Hash,
+    /// Recorded URI, used only as metadata to derive the content-addressed archive name.
+    pub uri: &'asset str,
+}
+
+/// Opens immutable assets for a workspace whose content is not present in its local store.
+///
+/// A source is attached only to workspaces that explicitly opt into remote asset reads. The
+/// source controls which published branch snapshot its IDs and URLs may resolve against.
+pub trait AssetReaderSource: Send + Sync {
+    /// Pins future asset reads to a verified published branch and commit hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ref is invalid or the source has been closed.
+    fn set_ref(&self, branch: &str, snapshot_hash: &str) -> io::Result<()>;
+
+    /// Closes the source so later readers cannot obtain or refresh URLs.
+    fn close(&self);
+
+    /// Returns the verified source commit when it belongs to the selected repository remote.
+    ///
+    /// Push orchestration may use this as an initial asset baseline for a new branch, after
+    /// independently proving that the commit is on the branch's first-parent history.
+    fn published_base_hash_for_remote(&self, remote_url: &str) -> Option<DoltHashId> {
+        let _ = remote_url;
+        None
+    }
+
+    /// Opens the archived bytes for one asset using a seekable, bounded reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source is closed, the asset is outside the pinned ref, or its
+    /// content cannot be read.
+    fn open(&self, request: &AssetReadRequest<'_>) -> io::Result<Box<dyn AssetReadSeek>>;
+}
+
+#[derive(Clone)]
 pub struct Workspace {
     base_dir: PathBuf,
     graph_db_path_override: Option<PathBuf>,
+    asset_reader_source: Option<Arc<dyn AssetReaderSource>>,
 }
+
+impl fmt::Debug for Workspace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The source owns signed URLs in memory, so show only whether it is configured.
+        formatter
+            .debug_struct("Workspace")
+            .field("base_dir", &self.base_dir)
+            .field("graph_db_path_override", &self.graph_db_path_override)
+            .field(
+                "has_asset_reader_source",
+                &self.asset_reader_source.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl PartialEq for Workspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.base_dir == other.base_dir
+            && self.graph_db_path_override == other.graph_db_path_override
+            && match (&self.asset_reader_source, &other.asset_reader_source) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Workspace {}
 
 impl Workspace {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
             graph_db_path_override: None,
+            asset_reader_source: None,
         }
     }
 
@@ -31,6 +112,20 @@ impl Workspace {
     pub fn with_graph_db_path_override(mut self, path: impl Into<PathBuf>) -> Self {
         self.graph_db_path_override = Some(path.into());
         self
+    }
+
+    /// Uses an explicit reader for immutable assets missing from this direct graph workspace.
+    ///
+    /// Local content-addressed files remain the first choice. This capability is intended for a
+    /// direct graph view that opens referenced asset bytes on demand.
+    pub fn with_asset_reader_source(mut self, source: Arc<dyn AssetReaderSource>) -> Self {
+        self.asset_reader_source = Some(source);
+        self
+    }
+
+    /// Returns the explicitly configured reader for missing immutable assets, if any.
+    pub fn asset_reader_source(&self) -> Option<&Arc<dyn AssetReaderSource>> {
+        self.asset_reader_source.as_ref()
     }
 
     /// Returns whether the graph database path comes from an explicit override.

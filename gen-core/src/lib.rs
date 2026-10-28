@@ -14,7 +14,7 @@ pub mod region;
 pub mod strand;
 pub mod traits;
 
-pub use config::Workspace;
+pub use config::{AssetReadRequest, AssetReadSeek, AssetReaderSource, Workspace};
 use errors::HashError;
 pub use generated::gen_core_capnp;
 pub use path::PathBlock;

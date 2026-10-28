@@ -19,6 +19,7 @@ use crate::{
     ModelSelect, ModelSelectError,
     assets::{AssetRef, AssetUri, LocalAssetUri},
     db::{GraphConnection, max_rows_per_batch},
+    errors::FileAdditionError,
     file_types::FileTypes,
     gen_models_capnp::sequence,
     select::ModelSelectRow,
@@ -691,6 +692,7 @@ impl Sequence {
             };
             if LocalAssetUri::is_local_path_or_file_uri(&asset_ref.uri)
                 && let Err(error) = asset_ref.versioned_store_path(workspace)
+                && !remote_source_can_read_missing_asset(workspace, &error)
             {
                 sequence.asset_resolution_error = Some(error.to_string());
                 return Ok(sequence);
@@ -713,9 +715,16 @@ impl Sequence {
                     upstream_asset_ref_id: row.get(26)?,
                     materialized_checksum: row.get(27)?,
                 };
-                if !LocalAssetUri::is_local_path_or_file_uri(&index_asset.uri)
-                    || index_asset.versioned_store_path(workspace).is_ok()
-                {
+                let index_is_local = LocalAssetUri::is_local_path_or_file_uri(&index_asset.uri);
+                let index_is_available = if index_is_local {
+                    match index_asset.versioned_store_path(workspace) {
+                        Ok(_) => true,
+                        Err(error) => remote_source_can_read_missing_asset(workspace, &error),
+                    }
+                } else {
+                    true
+                };
+                if index_is_available {
                     sequence.index_asset_refs.push(index_asset);
                 }
             }
@@ -805,6 +814,21 @@ impl Sequence {
             }
         }
         sequences.into_values().collect()
+    }
+}
+
+/// Allows a direct browser workspace to resolve only archives absent from its local asset store.
+fn remote_source_can_read_missing_asset(workspace: &Workspace, error: &FileAdditionError) -> bool {
+    // A source can replace only an absent archive; path escapes and other local errors stay fatal.
+    #[cfg(target_os = "emscripten")]
+    {
+        matches!(error, FileAdditionError::FileNotFound(_))
+            && workspace.asset_reader_source().is_some()
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let _ = (workspace, error);
+        false
     }
 }
 

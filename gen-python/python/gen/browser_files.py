@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -100,18 +101,50 @@ def _repository_identity(repository_url: str) -> tuple[str, str]:
     raise BrowserFileError("The repository URL is invalid")
 
 
+def _is_loopback_http_url(url: str) -> bool:
+    """Recognize only explicit localhost and IP loopback HTTP origins for local development."""
+    try:
+        parts = urlsplit(url)
+        if (
+            parts.scheme.lower() not in {"http", "https"}
+            or parts.username is not None
+            or parts.password is not None
+            or parts.hostname is None
+        ):
+            return False
+        _ = parts.port
+    except ValueError:
+        return False
+
+    host = parts.hostname.casefold()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def signed_url_expiration(url: Any, repository_url: str, logical_path: str) -> datetime:
-    """Accept only short-lived GCS URLs for this repository's archived asset path."""
+    """Accept short-lived GCS URLs, or loopback storage URLs for local development."""
     if not isinstance(url, str):
         raise BrowserFileError("Repository file does not have a signed storage URL")
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
+        local_repository = _is_loopback_http_url(repository_url)
+        google_storage = (
+            parts.scheme.lower() == "https" and host == "storage.googleapis.com"
+        )
+        local_storage = (
+            local_repository
+            and parts.scheme.lower() in {"http", "https"}
+            and _is_loopback_http_url(url)
+        )
         if (
-            parts.scheme.lower() != "https"
-            or parts.username is not None
+            parts.username is not None
             or parts.password is not None
-            or host != "storage.googleapis.com"
+            or not (google_storage or local_storage)
         ):
             raise ValueError
 
