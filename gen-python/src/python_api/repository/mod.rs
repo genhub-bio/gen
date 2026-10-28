@@ -13,7 +13,7 @@ use gen_models::history::{HistoryStore, dolt::DoltHistoryStore};
 use gen_models::operations::{Remote as ModelRemote, RemoteBranch};
 use gen_models::{
     block_group::BlockGroup,
-    db::DbContext,
+    db::{DbContext, graph_write_transaction_behavior},
     errors::OperationError,
     history::dolt::{set_commit_author_email, set_commit_author_name},
     operations::{Defaults, OperationSummary, commit_operation_summary},
@@ -26,6 +26,7 @@ use pyo3::{
 #[cfg(feature = "remote")]
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use rusqlite::Transaction;
 
 use super::{
     block_group::PySequenceGraph,
@@ -136,11 +137,13 @@ where
 {
     // dolt_commit seals the SQL transaction after recording the operation. Keep
     // the guard alive until then so failures also roll back the graph mutations.
-    let _transaction = context
-        .graph()
-        .conn()
-        .unchecked_transaction()
-        .map_err(sqlite_err_to_pyerr)?;
+    // Direct graph workspaces share their VFS with live widget readers, so acquire the write
+    // transaction before the operation reads graph state. Local workspaces remain deferred.
+    let _transaction = Transaction::new_unchecked(
+        context.graph().conn(),
+        graph_write_transaction_behavior(context.workspace()),
+    )
+    .map_err(sqlite_err_to_pyerr)?;
     let (value, operation_summary) = op(context)?;
     commit_operation_summary(context, &operation_summary).map_err(map_operation_error)?;
 

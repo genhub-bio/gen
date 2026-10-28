@@ -1,7 +1,7 @@
 use std::{ops::Deref, path::Path, rc::Rc, sync::Arc};
 
 use gen_core::{config::Workspace, errors::ConfigError};
-use rusqlite::{Connection, limits::Limit};
+use rusqlite::{Connection, TransactionBehavior, limits::Limit};
 
 use crate::{
     history::dolt::{active_branch, checkout, connect_branch},
@@ -24,6 +24,19 @@ pub fn max_rows_per_batch(conn: &Connection, params_per_row: usize) -> usize {
     (max_params / params_per_row).max(1)
 }
 
+/// Selects write transaction behavior for a graph workspace.
+///
+/// Direct graph views can have live widget connections reading the same VFS, so writes reserve
+/// their transaction before the operation reads graph state. Ordinary disk-backed workspaces keep
+/// SQLite's existing deferred transaction behavior.
+pub fn graph_write_transaction_behavior(workspace: &Workspace) -> TransactionBehavior {
+    if workspace.has_graph_db_path_override() {
+        TransactionBehavior::Immediate
+    } else {
+        TransactionBehavior::Deferred
+    }
+}
+
 #[derive(Debug)]
 pub struct GraphConnection(pub Connection);
 
@@ -42,9 +55,31 @@ impl GraphConnection {
     /// The returned flag is true when the caller already owned the transaction. Pass it to
     /// [`Self::end_transaction`] so only the transaction started by this method is finalized.
     pub fn start_transaction(&self) -> rusqlite::Result<bool> {
+        self.start_transaction_with_behavior(TransactionBehavior::Deferred)
+    }
+
+    /// Starts a transaction with the requested behavior unless a caller already owns one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a SQLite error if the transaction cannot be started.
+    pub fn start_transaction_with_behavior(
+        &self,
+        behavior: TransactionBehavior,
+    ) -> rusqlite::Result<bool> {
         let in_transaction = !self.is_autocommit();
         if !in_transaction {
-            self.execute("BEGIN;", [])?;
+            let statement = match behavior {
+                TransactionBehavior::Deferred => "BEGIN DEFERRED;",
+                TransactionBehavior::Immediate => "BEGIN IMMEDIATE;",
+                TransactionBehavior::Exclusive => "BEGIN EXCLUSIVE;",
+                _ => {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "unsupported graph transaction behavior".to_string(),
+                    ));
+                }
+            };
+            self.execute_batch(statement)?;
         }
         Ok(in_transaction)
     }
@@ -84,9 +119,43 @@ impl GraphConnection {
         &self,
         operation: impl FnOnce() -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        let in_transaction = self.start_transaction()?;
+        self.with_transaction_behavior(TransactionBehavior::Deferred, operation)
+    }
+
+    /// Runs an operation under the requested transaction behavior unless an outer transaction exists.
+    ///
+    /// Dolt commit statements may seal the SQL transaction themselves, so this also preserves the
+    /// existing conditional commit and rollback behavior used by [`Self::with_transaction`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the operation error, a SQLite error starting the transaction, or a commit error.
+    pub fn with_transaction_behavior<T, E>(
+        &self,
+        behavior: TransactionBehavior,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        let in_transaction = self
+            .start_transaction_with_behavior(behavior)
+            .map_err(E::from)?;
         let result = operation();
-        self.end_transaction(in_transaction, result)
+        if in_transaction || self.is_autocommit() {
+            return result;
+        }
+
+        match result {
+            Ok(value) => {
+                self.execute_batch("COMMIT;").map_err(E::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.execute_batch("ROLLBACK;").map_err(E::from)?;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -325,6 +394,21 @@ mod tests {
             .expect("should persist current branch intent");
 
         (workspace, temp_dir)
+    }
+
+    #[test]
+    fn test_graph_write_transaction_behavior_preserves_workspace_defaults() {
+        assert!(matches!(
+            super::graph_write_transaction_behavior(&Workspace::new("local-repository")),
+            rusqlite::TransactionBehavior::Deferred
+        ));
+
+        let direct_workspace = Workspace::new("direct-repository")
+            .with_graph_db_path_override("file:///owned/default.db?vfs=cloud_graph");
+        assert!(matches!(
+            super::graph_write_transaction_behavior(&direct_workspace),
+            rusqlite::TransactionBehavior::Immediate
+        ));
     }
 
     #[test]

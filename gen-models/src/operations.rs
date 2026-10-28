@@ -36,7 +36,7 @@ use crate::{
         AssetRef, AssetRole, AssetUri, CompressionType, LocalAssetUri, OperationAsset,
         OperationKind, OperationLog, stage_bgzf_asset_copy,
     },
-    db::{ConfigConnection, DbContext},
+    db::{ConfigConnection, DbContext, graph_write_transaction_behavior},
     errors::{
         AddFilesOperationError, FileAdditionError, FileStoreError, OperationError, RemoteError,
     },
@@ -396,23 +396,31 @@ pub fn add_files_operation(
             )
         })
         .collect::<Vec<_>>();
-    track_asset_refs(
-        graph_conn,
-        Some(&log_id),
-        &OperationKind::AddFile,
-        &summary,
-        &asset_refs,
-    )?;
-    let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
-    if history_store.status()?.is_empty() {
-        return Err(AddFilesOperationError::OperationError(
-            OperationError::NoChanges,
-        ));
-    }
+    let track_files = || {
+        track_asset_refs(
+            graph_conn,
+            Some(&log_id),
+            &OperationKind::AddFile,
+            &summary,
+            &asset_refs,
+        )?;
+        let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
+        if history_store.status()?.is_empty() {
+            return Err(AddFilesOperationError::OperationError(
+                OperationError::NoChanges,
+            ));
+        }
 
-    history_store
-        .commit_all(&summary)
-        .map_err(AddFilesOperationError::from)
+        history_store
+            .commit_all(&summary)
+            .map_err(AddFilesOperationError::from)
+    };
+    if workspace.has_graph_db_path_override() {
+        graph_conn
+            .with_transaction_behavior(graph_write_transaction_behavior(workspace), track_files)
+    } else {
+        track_files()
+    }
 }
 
 pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<Sha256Hash, std::io::Error> {

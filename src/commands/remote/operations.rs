@@ -2912,6 +2912,8 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{DoltHashId, HashId, Sha256Hash, config::Workspace};
     use gen_http::Client;
+    #[cfg(feature = "remote-native")]
+    use gen_models::sequence::Sequence;
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
@@ -2921,12 +2923,12 @@ mod tests {
         operations::{
             Defaults, FileAddition, OperationFile, Remote,
             RemoteOperationKind as StoredRemoteOperationKind, RemoteOperationRecord,
-            calculate_reader_checksum,
+            add_files_operation, calculate_reader_checksum,
         },
     };
     #[cfg(feature = "remote-native")]
     use gen_models::{
-        db::DbContext,
+        db::{DbContext, graph_write_transaction_behavior},
         history::dolt::{active_branch, connect_branch, create_branch},
     };
     use noodles::bgzf;
@@ -3235,6 +3237,157 @@ mod tests {
             .is_err(),
             "the named VFS should no longer open after its owner and secondary handles drop"
         );
+    }
+
+    #[cfg(feature = "remote-native")]
+    #[test]
+    #[ignore = "requires local-writes-only URI support from the rusqdoltlite browser-cloud branch"]
+    fn test_local_only_named_vfs_accepts_successive_graph_writes_after_reads() {
+        let temp = tempdir().expect("should create local-only graph workspace");
+        let workspace = Workspace::new(temp.path().join("repo"));
+        workspace.ensure_gen_dir();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph path");
+        let source = get_connection(&graph_path).expect("should create source graph");
+        Collection::create(&source, "default").expect("should create source collection");
+        Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ATCGATCGA")
+            .save(&source)
+            .expect("should seed graph sequence");
+        commit_all(&source, "source graph").expect("should commit source graph");
+        let source_journal_mode: String = source
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("should read the source graph journal mode");
+        assert_eq!(source_journal_mode.to_ascii_lowercase(), "wal");
+        drop(source);
+
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&graph_path);
+        let original_write_count = gcs_database.write_request_count();
+        let mut direct_uri = Url::parse(&gcs_database.uri()).expect("should parse fake GCS URI");
+        direct_uri
+            .query_pairs_mut()
+            .append_pair("local_writes_only", "true");
+        let direct_uri = direct_uri.to_string();
+        let anchor_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let anchor = Connection::open_with_flags(&direct_uri, anchor_flags)
+            .expect("should open the local-write-only CAB anchor");
+        let anchor_journal_mode: String = anchor
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("should read the anchor journal mode");
+        let anchor_foreign_keys: bool = anchor
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("should read the anchor foreign-key setting");
+        let anchor_busy_timeout: u32 = anchor
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("should read the anchor busy timeout");
+        let database_path = anchor
+            .blockcachevfs_path()
+            .expect("should get the registered VFS database path");
+        let vfs_name = anchor
+            .blockcachevfs_name()
+            .expect("should get the registered VFS name");
+        let mut graph_url = Url::from_file_path(Path::new(&database_path))
+            .expect("should build the named VFS file URI");
+        graph_url.query_pairs_mut().append_pair("vfs", vfs_name);
+        let graph_uri = graph_url.as_str().to_owned();
+
+        let graph_workspace = workspace
+            .clone()
+            .with_graph_db_path_override(PathBuf::from(&graph_uri));
+        let graph = crate::get_workspace_graph_connection_for_branch(&graph_workspace, None)
+            .expect("should open the writable named VFS view");
+        let graph_journal_mode: String = graph
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("should read the graph journal mode");
+        let graph_foreign_keys: bool = graph
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("should read the graph foreign-key setting");
+        let graph_busy_timeout: u32 = graph
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("should read the graph busy timeout");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve local config path");
+        let config = get_config_connection(Some(config_path)).expect("should open local config");
+        let mut context = DbContext::new(graph_workspace.clone(), graph, config)
+            .expect("should create the secondary graph context");
+        context.set_graph_anchor(Arc::new(Mutex::new(anchor)));
+
+        let repository_collection_count: i64 = context
+            .graph()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM collections", [], |row| row.get(0))
+            .expect("should query the remote graph through its named VFS");
+        assert_eq!(repository_collection_count, 1);
+
+        let copy_transaction = rusqlite::Transaction::new_unchecked(
+            context.graph().conn(),
+            graph_write_transaction_behavior(context.workspace()),
+        )
+        .expect("should begin the sample-copy transaction");
+        Collection::create(context.graph().conn(), "notebook-edited")
+            .expect("should record the copied-sample metadata");
+        commit_all(context.graph().conn(), "copy sample")
+            .expect("should commit the copied-sample metadata");
+        drop(copy_transaction);
+        assert!(context.graph().conn().is_autocommit());
+
+        let page_connection =
+            crate::get_workspace_graph_connection_for_branch(&graph_workspace, None)
+                .expect("should open a GraphPage-style named VFS connection");
+        let copied_collection_count: i64 = page_connection
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE name = 'notebook-edited'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should read the copied-sample metadata through a page connection");
+        assert_eq!(copied_collection_count, 1);
+        let page_is_autocommit = page_connection.is_autocommit();
+
+        let replacement_transaction = rusqlite::Transaction::new_unchecked(
+            context.graph().conn(),
+            graph_write_transaction_behavior(context.workspace()),
+        )
+        .expect("should begin the replacement edit transaction");
+        Sequence::new()
+            .sequence_type("DNA")
+            .sequence("TTTTTTTTTT")
+            .save(context.graph().conn())
+            .expect("should store a replacement sequence after reads and a prior commit");
+        commit_all(context.graph().conn(), "replace sequence")
+            .expect("should commit the replacement sequence");
+        drop(replacement_transaction);
+        assert!(context.graph().conn().is_autocommit());
+
+        let notebook_path = workspace.base_dir().join("notebook.ipynb");
+        std::fs::write(&notebook_path, "{}\n").expect("should write a notebook asset");
+        add_files_operation(
+            &context,
+            &[OperationFile::new(
+                notebook_path.to_string_lossy().into_owned(),
+            )],
+            Some("save notebook"),
+        )
+        .expect("should track the notebook asset through the local-only graph view");
+
+        assert_eq!(
+            gcs_database.write_request_count(),
+            original_write_count,
+            "local-only graph writes must not publish to GCS"
+        );
+        assert_eq!(anchor_journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(graph_journal_mode.to_ascii_lowercase(), "wal");
+        assert!(anchor_foreign_keys);
+        assert!(graph_foreign_keys);
+        assert_eq!(anchor_busy_timeout, 5_000);
+        assert_eq!(graph_busy_timeout, 5_000);
+        assert!(page_is_autocommit);
     }
 
     #[cfg(feature = "remote-native")]
