@@ -12,7 +12,7 @@ use gen_models::{
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
         HistoryEntry, HistoryStore,
-        dolt::{DoltBranchRow, DoltHistoryStore, branch_rows},
+        dolt::{DoltBranchRow, DoltHistoryStore, branch_rows, hash_of},
     },
     operations::{OperationFile, RemoteBranch, add_files_operation},
 };
@@ -360,6 +360,33 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Resolves a Dolt ref, including a remote-tracking ref, to its immutable commit hash.
+    ///
+    /// Remote-tracking refs are not returned by `get_branches()`. Use the fully qualified form,
+    /// such as `refs/remotes/origin/main`, to distinguish one from a local branch with the same
+    /// shorthand name. The returned hash stays fixed even when the ref later advances.
+    ///
+    /// # Errors
+    ///
+    /// Raises `RuntimeError` when Dolt cannot resolve the provided ref.
+    fn resolve_ref(&self, reference: &str) -> PyResult<PyHashId> {
+        let conn = self.context.graph().conn();
+        if let Some(remote_ref) = reference.strip_prefix("refs/remotes/") {
+            let remote_ref = format!("remotes/{remote_ref}");
+            conn.query_row(
+                "SELECT hash FROM dolt_remote_branches WHERE name = ?1",
+                [&remote_ref],
+                |row| row.get(0),
+            )
+            .map(PyHashId::from_dolt)
+            .map_err(history_err_to_pyerr)
+        } else {
+            hash_of(conn, reference)
+                .map(PyHashId::from_dolt)
+                .map_err(history_err_to_pyerr)
+        }
+    }
+
     /// Returns every branch, ordered by name.
     fn get_branches(&self) -> PyResult<Vec<PyBranch>> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
@@ -621,13 +648,21 @@ impl PyRepository {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "remote")]
+    use gen_core::config::Workspace;
+    #[cfg(feature = "remote")]
+    use gen_models::history::dolt::hash_of;
     use gen_models::{
         collection::Collection,
         history::{HistoryStore, dolt::DoltHistoryStore},
     };
     use pyo3::{IntoPyObject as _, Py, Python};
+    #[cfg(feature = "remote")]
+    use tempfile::tempdir;
 
     use super::PyRepository;
+    #[cfg(feature = "remote")]
+    use crate::python_api::repository::clone_repository;
 
     fn make_repository() -> (r#gen::test_helpers::TestContext, PyRepository) {
         let context = r#gen::test_helpers::setup_gen_on_disk();
@@ -635,6 +670,15 @@ mod tests {
             context: context.db_context().clone(),
         };
         (context, repository)
+    }
+
+    #[cfg(feature = "remote")]
+    fn commit_collection(repository: &PyRepository, name: &str) {
+        Collection::create(repository.context.graph().conn(), name)
+            .expect("should create collection");
+        DoltHistoryStore::new(repository.context.graph().conn())
+            .commit_all(&format!("add {name}"))
+            .expect("should commit collection");
     }
 
     #[test]
@@ -658,7 +702,7 @@ mod tests {
             assert!(!feature.is_current, "new branch should not be current");
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             let checked_out = repository
-                .checkout(feature_object.bind(python).as_any(), false, false)
+                .checkout(feature_object.bind(python).as_any(), false, false, true)
                 .expect("should checkout Branch object");
             assert!(
                 checked_out.is_current,
@@ -682,7 +726,7 @@ mod tests {
                 .into_pyobject(python)
                 .expect("should create Python branch name");
             repository
-                .checkout(main.as_any(), false, false)
+                .checkout(main.as_any(), false, false, true)
                 .expect("should checkout branch name");
             assert!(
                 Collection::all(repository.context.graph().conn())
@@ -719,6 +763,94 @@ mod tests {
                     .iter()
                     .all(|collection| collection.name != "feature"),
                 "reset should restore graph state from the selected operation"
+            );
+        });
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn test_resolve_ref_pins_remote_head_after_pull_with_local_edits() {
+        Python::initialize();
+        Python::attach(|python| {
+            let remote_dir = tempdir().expect("should create remote directory");
+            let remote_repository = PyRepository::open_workspace(Workspace::new(remote_dir.path()))
+                .expect("should initialize remote repository");
+            commit_collection(&remote_repository, "base");
+
+            let local_parent = tempdir().expect("should create local parent directory");
+            let local_path = local_parent.path().join("local");
+            let remote_url = format!("file://{}", remote_dir.path().display());
+            let mut local_repository =
+                clone_repository(python, &remote_url, Some(local_path), None, None)
+                    .expect("should clone remote repository");
+
+            let tracking_ref = "refs/remotes/origin/main";
+            let initial_remote_hash = hash_of(remote_repository.context.graph().conn(), "main")
+                .expect("should resolve initial remote head");
+            assert_eq!(
+                local_repository
+                    .resolve_ref(tracking_ref)
+                    .expect("should resolve the canonical tracking ref")
+                    .__str__(),
+                initial_remote_hash.to_string(),
+                "the initial tracking ref should name the cloned remote head"
+            );
+
+            commit_collection(&local_repository, "local-only");
+            let local_only_hash = hash_of(local_repository.context.graph().conn(), "HEAD")
+                .expect("should resolve local-only commit");
+            local_repository
+                .create_branch("origin/main", None)
+                .expect("should create a local branch that collides with shorthand remote name");
+            assert_eq!(
+                gen_models::history::dolt::branch_hash(
+                    local_repository.context.graph().conn(),
+                    "origin/main",
+                )
+                .expect("should read the colliding local branch")
+                .expect("should find the colliding local branch"),
+                local_only_hash,
+                "the local shorthand collision should point to local work"
+            );
+
+            commit_collection(&remote_repository, "remote-only");
+            let published_hash = hash_of(remote_repository.context.graph().conn(), "main")
+                .expect("should resolve newly published remote head");
+
+            r#gen::commands::remote::operations::execute_pull_with_assets(
+                local_repository.context.workspace(),
+                None,
+                None,
+                false,
+            )
+            .expect("should pull graph history without assets");
+            local_repository
+                .refresh_graph_connection()
+                .expect("should refresh the graph after pull");
+
+            assert_eq!(
+                local_repository
+                    .resolve_ref(tracking_ref)
+                    .expect("should resolve the advanced canonical tracking ref")
+                    .__str__(),
+                published_hash.to_string(),
+                "pull should advance the tracking ref to the published remote head"
+            );
+            assert_eq!(
+                gen_models::history::dolt::branch_hash(
+                    local_repository.context.graph().conn(),
+                    "origin/main",
+                )
+                .expect("should read the colliding local branch after pull")
+                .expect("should find the colliding local branch after pull"),
+                local_only_hash,
+                "pull should leave the same-named local branch unchanged"
+            );
+            assert_ne!(
+                hash_of(local_repository.context.graph().conn(), "HEAD",)
+                    .expect("should resolve the merged local head"),
+                published_hash,
+                "the local head should retain local edits independently of the remote head"
             );
         });
     }

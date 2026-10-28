@@ -50,9 +50,13 @@ class FakeRemoteRepository:
     def __init__(self, branch="main"):
         self.calls = []
         self.branches = {branch: "a" * 40}
+        self.branch_remotes = {branch: "origin"}
         self.branch = branch
         self.asset_views = {branch: []}
         self.remote_heads = {}
+        self.remote_refs = {}
+        self.resolve_calls = []
+        self.post_pull_local_head = None
 
     @property
     def current_branch(self):
@@ -64,7 +68,7 @@ class FakeRemoteRepository:
                 name,
                 head,
                 is_current=name == self.branch,
-                remote="origin" if name.startswith("origin/") else None,
+                remote=self.branch_remotes.get(name),
             )
             for name, head in self.branches.items()
         ]
@@ -72,6 +76,13 @@ class FakeRemoteRepository:
 
     def get_assets(self, branch=None):
         return list(self.asset_views.get(branch or self.branch, []))
+
+    def resolve_ref(self, reference):
+        self.resolve_calls.append(reference)
+        try:
+            return self.remote_refs[reference]
+        except KeyError:
+            raise RuntimeError(f"No commit resolved for '{reference}'") from None
 
     def fetch(self, remote=None, branch=None, *, include_assets=True):
         self.calls.append(("fetch", remote, branch, include_assets))
@@ -94,10 +105,10 @@ class FakeRemoteRepository:
         tracking = self.remote_heads.get(self.branch)
         if tracking is not None:
             head, assets = tracking
-            self.branches[self.branch] = head
-            self.branches[f"origin/{self.branch}"] = head
+            self.branches[self.branch] = self.post_pull_local_head or head
             self.asset_views[self.branch] = list(assets)
-            self.asset_views[f"origin/{self.branch}"] = list(assets)
+            self.asset_views[head] = list(assets)
+            self.remote_refs[f"refs/remotes/origin/{self.branch}"] = head
 
 
 class RecordingRepository:
@@ -381,6 +392,17 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
                     return repository
             except (AttributeError, RuntimeError):
                 continue
+            for branch in repository.get_branches():
+                if branch.remote != "origin":
+                    continue
+                try:
+                    tracking_hash = str(
+                        repository.resolve_ref(f"refs/remotes/origin/{branch.name}")
+                    )
+                except RuntimeError:
+                    continue
+                if tracking_hash == snapshot_hash:
+                    return repository
         return None
 
     async def _fetch_repository_files(self, repository_url, branch, snapshot_hash):
@@ -390,7 +412,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
             return []
 
         files = []
-        for asset in repository.get_assets():
+        for asset in repository.get_assets(branch=snapshot_hash):
             path = asset.logical_path or asset.name
             if not isinstance(path, str) or not path:
                 continue
@@ -518,6 +540,9 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         path = "remote/new.txt"
         asset = FakeAsset(path)
         remote_head = "c" * 40
+        local_merge_head = "d" * 40
+        repository.branches["origin/main"] = "e" * 40
+        repository.post_pull_local_head = local_merge_head
         repository.remote_heads["main"] = (remote_head, [asset])
         with (
             patch("gen.browser._browser_origin", return_value="https://genhub.example"),
@@ -533,8 +558,15 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old_file_map, [])
 
         self.assertEqual(session.refresh(), remote_head)
+        self.assertEqual(str(session.repository.current_branch.head), local_merge_head)
+        self.assertEqual(session._working_commit, local_merge_head)
+        self.assertEqual(session.base_commit, remote_head)
         self.assertIn(path, session.files)
         self.assertEqual(repository.calls, [("pull", None, None, False)])
+        self.assertEqual(
+            repository.resolve_calls,
+            ["refs/remotes/origin/main"],
+        )
         await session.files[path].url()
         self.assertEqual(
             self.asset_metadata_calls[-1],
@@ -650,7 +682,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         path = "reads/nested/remote.fa"
         asset = FakeAsset(path)
         payload = bytes(range(256)) * 1024
-        session.repository.get_assets = lambda: [asset]
+        session.repository.get_assets = lambda branch=None: [asset]
         self.remote_asset_contents[path] = payload
         self.asset_sizes[path] = len(payload)
         session._record_published_ref()
@@ -775,7 +807,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
             session = await self._open_local_graph()
         self.addCleanup(session.close)
 
-        session.repository.get_assets = lambda: [
+        session.repository.get_assets = lambda branch=None: [
             SimpleNamespace(
                 logical_path="assets/no-identity.fa",
                 name="no-identity.fa",
@@ -798,7 +830,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         path = "reads/input.fa.gz"
         stored_gzip = gzip.compress(b">chr1\nACGTACGT\n")
         asset = FakeAsset(path, archive_needs_decode=False)
-        session.repository.get_assets = lambda: [asset]
+        session.repository.get_assets = lambda branch=None: [asset]
         self.remote_asset_contents[path] = stored_gzip
         session._record_published_ref()
 
@@ -829,7 +861,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first_member.unused_data)
 
         remote_asset = FakeAsset(path, archive_needs_decode=True)
-        session.repository.get_assets = lambda: [remote_asset]
+        session.repository.get_assets = lambda branch=None: [remote_asset]
         self.remote_asset_contents[path] = stored_bgzf
         session._record_published_ref()
 
@@ -905,7 +937,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
             FakeAsset(imported_asset_path, name="simple.fa"),
             FakeAsset("large.fa"),
         ]
-        session.repository.get_assets = lambda: assets
+        session.repository.get_assets = lambda branch=None: assets
         self.asset_sizes["large.fa"] = 8 * 1024 * 1024 + 1
         self.remote_asset_contents["large.fa"] = b"x" * (8 * 1024 * 1024 + 1)
         self.remote_asset_contents[imported_asset_path] = b">simple\nACGT\n"
@@ -1068,7 +1100,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
             session = await self._open_local_graph()
         self.addCleanup(session.close)
         asset = FakeAsset("remote/pending.txt")
-        session.repository.get_assets = lambda: [asset]
+        session.repository.get_assets = lambda branch=None: [asset]
         session._record_published_ref()
 
         opened = asyncio.Event()
