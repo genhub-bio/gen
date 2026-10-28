@@ -11,7 +11,7 @@ use gen_core::{DoltHashId, HashId, config::Workspace};
 use gen_models::operations::{Remote as ModelRemote, RemoteBranch};
 use gen_models::{
     block_group::BlockGroup,
-    db::DbContext,
+    db::{DbContext, graph_write_transaction_behavior},
     errors::OperationError,
     history::{
         HistoryStore,
@@ -29,6 +29,7 @@ use pyo3::{
 #[cfg(feature = "remote")]
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use rusqlite::Transaction;
 
 use super::{
     block_group::PySequenceGraph,
@@ -169,7 +170,11 @@ where
 
     // dolt_commit seals the SQL transaction after recording the operation. Keep
     // the guard alive until then so failures also roll back the graph mutations.
-    let _transaction = graph.unchecked_transaction().map_err(sqlite_err_to_pyerr)?;
+    let _transaction = Transaction::new_unchecked(
+        graph,
+        graph_write_transaction_behavior(context.workspace()),
+    )
+    .map_err(sqlite_err_to_pyerr)?;
     let (value, operation_summary) = op(context)?;
     commit_operation_summary(context, &operation_summary).map_err(map_operation_error)?;
 
@@ -186,6 +191,17 @@ where
 {
     let graph = context.graph().conn();
     let was_autocommit = graph.is_autocommit();
+    let _transaction = if was_autocommit {
+        Some(
+            Transaction::new_unchecked(
+                graph,
+                graph_write_transaction_behavior(context.workspace()),
+            )
+            .map_err(sqlite_err_to_pyerr)?,
+        )
+    } else {
+        None
+    };
     context.begin_savepoint().map_err(sqlite_err_to_pyerr)?;
     let changes_before = graph.total_changes();
     match operation() {
