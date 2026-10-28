@@ -31,6 +31,9 @@ use gen_models::{
 use rusqlite::params;
 use tempfile::tempdir;
 
+#[path = "support/fake_gcs.rs"]
+mod fake_gcs;
+
 fn gen_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_gen"))
 }
@@ -2835,8 +2838,8 @@ mod remotes {
     use serde_json::json;
 
     use super::{
-        Path, PathBuf, assert_success, asset_refs, fs, get_connection, operations_stdout, run_gen,
-        tempdir,
+        Path, PathBuf, assert_success, asset_refs, fake_gcs::FakeGcsServer, fs, get_connection,
+        operations_stdout, run_gen, tempdir,
     };
 
     fn resolved_ref_hash(repo_root: &Path, reference: &str) -> String {
@@ -3169,7 +3172,7 @@ mod remotes {
     }
 
     fn serve_http_repository(
-        graph_url: &str,
+        graph_url: Arc<Mutex<String>>,
         payloads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     ) -> (String, Arc<AtomicBool>, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("should bind mock GenHub server");
@@ -3181,9 +3184,9 @@ mod remotes {
             .expect("should read mock GenHub address");
         let origin = format!("http://{address}");
         let repository_url = format!("{origin}/api/repos/alice/example");
-        let graph_url = graph_url.to_string();
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = Arc::clone(&stop);
+        let capability_graph_url = Arc::clone(&graph_url);
         let handle = thread::spawn(move || {
             let mut requests = Vec::new();
             while !server_stop.load(Ordering::Acquire) {
@@ -3198,6 +3201,10 @@ mod remotes {
                 let request = read_http_request(&mut stream);
                 let request_line = request.lines().next().unwrap_or_default();
                 let response = if request_line.contains("/remote-capability ") {
+                    let graph_url = capability_graph_url
+                        .lock()
+                        .expect("should lock current GCS graph capability")
+                        .clone();
                     json!({
                         "remote_url": graph_url,
                         "expires_at": "2030-01-01T00:00:00Z",
@@ -3600,10 +3607,9 @@ mod remotes {
         );
     }
 
-    // Ensure that http clones + pulls: download all required versioned files and materialize the correct
-    // assets at logical paths.
+    // Ensure direct GCS graph reads and HTTP asset transfers materialize versioned files correctly.
     #[test]
-    fn test_clone_and_pull_from_http_remote_populate_versioned_assets() {
+    fn test_clone_and_pull_from_gcs_remote_populate_versioned_assets() {
         let source_repo_dir = tempdir().expect("should create source repository directory");
         let clone_parent_dir = tempdir().expect("should create clone parent directory");
         let server_root_dir = tempdir().expect("should create Dolt server root directory");
@@ -3652,14 +3658,18 @@ mod remotes {
         // This is the push that populates our server assets with the local source repo.
         push(&source_graph, "integration", "main").expect("should seed remote graph");
         drop(source_graph);
+        let fake_gcs = FakeGcsServer::start();
+        let source_graph_path = source_repo_dir.path().join(".gen/default.db");
+        let initial_gcs_database = fake_gcs.create_database(&source_graph_path);
+        let graph_url = Arc::new(Mutex::new(initial_gcs_database.uri()));
 
         // Now, we assert that on cloning from the server we get all the versioned assets + materialized assets
         let payloads = Arc::new(Mutex::new(managed_asset_payloads(source_repo_dir.path())));
         let (repository_url, server_stop, server) =
-            serve_http_repository(&graph_url, Arc::clone(&payloads));
+            serve_http_repository(Arc::clone(&graph_url), Arc::clone(&payloads));
         assert_success(
             &run_gen(clone_parent_dir.path(), &["clone", &repository_url]),
-            "clone from HTTP remote should succeed",
+            "clone from direct GCS graph remote should succeed",
         );
         let cloned_repo_path = clone_parent_dir.path().join("example");
         // We use this later to verify that we've updated stuff from a pull
@@ -3671,7 +3681,7 @@ mod remotes {
             &[logical_path],
         );
         let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
-            .expect("HTTP clone should materialize the original FASTA");
+            .expect("GCS clone should materialize the original FASTA");
         let old_fasta_asset = asset_refs(&cloned_repo_path)
             .into_iter()
             .find(|asset_ref| asset_ref.logical_path.as_deref() == Some(logical_path))
@@ -3705,12 +3715,16 @@ mod remotes {
             .expect("should reopen source graph database");
         push(&source_graph, "integration", "main").expect("should update remote graph");
         drop(source_graph);
+        let updated_gcs_database = fake_gcs.create_database(&source_graph_path);
+        *graph_url
+            .lock()
+            .expect("should update current GCS graph capability") = updated_gcs_database.uri();
         *payloads.lock().expect("should lock asset payloads") =
             managed_asset_payloads(source_repo_dir.path());
 
         assert_success(
             &run_gen(&cloned_repo_path, &["pull"]),
-            "pull from HTTP remote should succeed",
+            "pull from direct GCS graph remote should succeed",
         );
         assert!(
             asset_store_contents(&cloned_repo_path).len() > cloned_assets_before_pull.len(),

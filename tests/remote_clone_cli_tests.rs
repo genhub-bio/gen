@@ -12,10 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use fake_gcs::FakeGcsServer;
 use r#gen::{core::Workspace, get_connection};
 use gen_models::{assets::AssetRef, history::dolt::commit_all};
 use tempfile::{TempDir, tempdir};
 use url::Url;
+
+#[path = "support/fake_gcs.rs"]
+mod fake_gcs;
 
 const TEST_TRANSFER_ID: &str = "00000000-0000-0000-0000-000000000001";
 const STREAM_PAUSE: Duration = Duration::from_millis(1_150);
@@ -44,7 +48,9 @@ fn assert_success(output: &std::process::Output, context: &str) {
 
 struct SourceFixture {
     _temporary_directory: TempDir,
+    _fake_gcs: FakeGcsServer,
     graph_url: String,
+    local_graph_url: String,
     asset_id: String,
     stored_filename: String,
     stored_bytes: Vec<u8>,
@@ -103,14 +109,19 @@ fn source_fixture() -> SourceFixture {
         .expect("should identify versioned source asset")
         .to_string();
     let stored_bytes = std::fs::read(stored_path).expect("should read versioned source asset");
-    let graph_url = Url::from_file_path(&graph_path)
+    drop(graph);
+    let fake_gcs = FakeGcsServer::start();
+    let gcs_database = fake_gcs.create_database(&graph_path);
+    let graph_url = gcs_database.uri();
+    let local_graph_url = Url::from_file_path(&graph_path)
         .expect("should create source graph file URL")
         .to_string();
-    drop(graph);
 
     SourceFixture {
         _temporary_directory: temporary_directory,
+        _fake_gcs: fake_gcs,
         graph_url,
+        local_graph_url,
         asset_id,
         stored_filename,
         stored_bytes,
@@ -629,6 +640,39 @@ fn test_clone_cli_reports_wait_and_download_progress_with_content_length_totals(
         server.join().len(),
         3,
         "clone should use the expected three HTTP requests"
+    );
+}
+
+#[test]
+fn test_clone_cli_rejects_non_cloud_network_capabilities() {
+    let source = source_fixture();
+    let server = CloneServer::start(
+        &source.local_graph_url,
+        &source.asset_id,
+        AssetResponse::Stream(source.stored_bytes.clone()),
+    );
+    let clone_parent = tempdir().expect("should create clone destination parent");
+    let process = RunningClone::spawn(clone_parent.path(), &server.repository_url);
+
+    let (status, stdout, stderr) = process.finish();
+    assert!(
+        !status.success(),
+        "clone should reject a non-cloud graph capability"
+    );
+    let combined_output = format!("{stdout}\n{stderr}");
+    assert!(
+        !combined_output.contains(&source.local_graph_url),
+        "CLI should not print the rejected capability URL: {combined_output}"
+    );
+    let requests = server.join();
+    assert_eq!(
+        requests.len(),
+        1,
+        "clone should reject before asset transfer"
+    );
+    assert!(
+        requests[0].contains("/remote-capability"),
+        "clone should only request the graph capability"
     );
 }
 

@@ -5,9 +5,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path, PurePath
+import subprocess
 import tempfile
+from queue import Empty, Queue
 from threading import Thread
 import unittest
+from urllib.request import url2pathname
 from unittest.mock import patch
 
 import gen
@@ -29,7 +32,7 @@ def archived_asset_bytes_by_id(repository):
         uri, checksum = asset_refs[asset_id]
         if not uri.startswith("file://"):
             raise AssertionError(f"asset {asset_id} is not locally archived")
-        suffix = Path(uri.removeprefix("file://")).name.partition(".")[2]
+        suffix = Path(url2pathname(uri.removeprefix("file://"))).name.partition(".")[2]
         filename = f"{checksum.hex()}.{suffix}" if suffix else checksum.hex()
         archived_assets[asset_id] = (asset_directory / filename).read_bytes()
 
@@ -91,6 +94,128 @@ def genhub_server(respond):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@contextmanager
+def direct_gcs_database(local_database):
+    """Seed a graph into a test GCS server for the production direct-read path."""
+    repository_root = Path(__file__).resolve().parents[2]
+    build = subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--message-format=json-render-diagnostics",
+            "--manifest-path",
+            str(repository_root / "gen-python" / "Cargo.toml"),
+            "--example",
+            "remote_gcs_fixture",
+            "--features",
+            "abi3,extension-module",
+        ],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(
+            "Could not build the direct GCS fixture:\n" + build.stderr[-4000:]
+        )
+    executable = None
+    for line in build.stdout.splitlines():
+        try:
+            artifact = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            artifact.get("reason") == "compiler-artifact"
+            and artifact.get("target", {}).get("name") == "remote_gcs_fixture"
+        ):
+            executable = artifact.get("executable")
+            break
+    if executable is None:
+        raise RuntimeError("Cargo did not report the direct GCS fixture executable")
+
+    stderr_file = tempfile.TemporaryFile(mode="w+t")
+    process = subprocess.Popen(
+        [executable, str(local_database)],
+        cwd=repository_root,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=stderr_file,
+        text=True,
+        bufsize=1,
+    )
+    ready_uri = Queue()
+    Thread(
+        target=lambda: ready_uri.put(process.stdout.readline()),
+        daemon=True,
+    ).start()
+    failed = False
+
+    def fixture_failure(message):
+        stderr_file.flush()
+        stderr_file.seek(0)
+        details = stderr_file.read().strip()
+        if details:
+            if len(details) > 8000:
+                details = f"{details[:4000]}\n... stderr omitted ...\n{details[-4000:]}"
+            message = f"{message}\n{details}"
+        return RuntimeError(message)
+
+    try:
+        try:
+            graph_uri = ready_uri.get(timeout=120)
+        except Empty as error:
+            failed = True
+            process.kill()
+            process.communicate(timeout=10)
+            raise fixture_failure(
+                "Timed out starting the direct GCS fixture"
+            ) from error
+        if not graph_uri:
+            failed = True
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+            raise fixture_failure(
+                "The direct GCS fixture exited before publishing its URI"
+            )
+
+        try:
+            yield graph_uri.strip()
+        except BaseException:
+            failed = True
+            raise
+    finally:
+        try:
+            if process.poll() is None:
+                try:
+                    process.stdin.write("\n")
+                    process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                    if not failed:
+                        raise RuntimeError(
+                            "The direct GCS fixture did not stop cleanly"
+                        )
+            if process.returncode != 0 and not failed:
+                raise fixture_failure(
+                    f"The direct GCS fixture exited with status {process.returncode}"
+                )
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stdin is not None:
+                process.stdin.close()
+            stderr_file.close()
 
 
 class RemoteTests(unittest.TestCase):
@@ -337,18 +462,15 @@ class RemoteTests(unittest.TestCase):
             ),
         )
 
-    @unittest.skipIf(
-        os.name == "nt", "mock capabilities use native file remote transport"
-    )
     def test_http_api_key_covers_graph_assets_and_rejects_legacy_push(self):
         upstream_path = self.root / "upstream"
         upstream = gen.Repository(str(upstream_path))
         self.import_sequence(upstream, "base")
-        graph_url = (upstream_path / ".gen" / "default.db").as_uri()
 
         # Return the complete reachable inventory on every transfer query. GenHub validates
         # requests against branch history, which includes each archived FASTA and its indexes.
         known_assets = archived_asset_bytes_by_id(upstream)
+        del upstream
         server_origin = {}
 
         def respond(path, headers, _body):
@@ -356,7 +478,7 @@ class RemoteTests(unittest.TestCase):
                 return 401, {"message": "private repository"}
             if path.endswith("/remote-capability"):
                 return 200, {
-                    "remote_url": graph_url,
+                    "remote_url": graph_uri,
                     "expires_at": "2035-01-01T00:00:00Z",
                     "default_branch": "main",
                     "transfer_id": "00000000-0000-0000-0000-000000000001",
@@ -373,7 +495,10 @@ class RemoteTests(unittest.TestCase):
                 }
             return 200, {"assets": []}
 
-        with genhub_server(respond) as (url, requests, served_assets):
+        with (
+            direct_gcs_database(upstream_path / ".gen" / "default.db") as graph_uri,
+            genhub_server(respond) as (url, requests, served_assets),
+        ):
             server_origin["url"] = url.split("/repos/", 1)[0]
             served_assets.update(known_assets)
             with patch.dict(os.environ, {"GENHUB_API_KEY": "accepted-test-key"}):
@@ -416,7 +541,8 @@ class RemoteTests(unittest.TestCase):
             )
             self.assertTrue(capabilities[3]["force"])
             self.assertGreaterEqual(
-                sum(path.endswith("/asset-transfers") for path, _ in authenticated), 1
+                sum(path.endswith("/asset-transfers") for path, _ in authenticated),
+                1,
             )
             self.assertEqual(
                 sum(

@@ -1,9 +1,9 @@
 //! GenHub capability coordination for graph transfers.
 //!
-//! Clone and pull need short-lived Dolt URLs, while push uses a persisted idempotency token to
-//! identify a direct-GCS staging session. This module keeps token renewal tied to that same
-//! session: long block uploads may outlive one CAB token, but they must never switch repositories,
-//! prefixes, operation scope, or publication origin while refreshing it.
+//! Clone, pull, and fetch use short-lived GCS read capabilities, while push uses a persisted
+//! idempotency token to identify a direct-GCS staging session. This module keeps push token renewal
+//! tied to that same session: long block uploads may outlive one CAB token, but they must never
+//! switch repositories, prefixes, operation scope, or publication origin while refreshing it.
 
 use std::{
     error::Error,
@@ -425,10 +425,10 @@ fn same_http_origin(expected_origin: &str, candidate_url: &str) -> bool {
         && expected.origin() == candidate.origin()
 }
 
-/// GenHub graph operations need scoped credentials, while local file remotes need none.
+/// GenHub graph operations need scoped credentials, while configured local file remotes need none.
 ///
-/// `run_graph_transfer` uses temporary Dolt URLs for clone/pull; the push coordinator supplies its
-/// persisted idempotency token here to reopen the same direct-GCS staging session.
+/// Read operations receive a GCS BlockCacheVFS URI in `remote_url`. The push coordinator supplies
+/// its persisted idempotency token here to reopen the same direct-GCS staging session.
 pub(super) fn transfer_authorization(
     remote: &Remote,
     operation: RemoteOperation,

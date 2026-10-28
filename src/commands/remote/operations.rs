@@ -18,13 +18,13 @@
 //! A repository remote URL and an asset URI have separate meanings here. A repository
 //! `file://` remote points directly to another Dolt database (or a workspace containing
 //! `.gen/default.db`), so graph operations use that path directly and transfers happen
-//! directly between the workspaces. For a GenHub remote, clone and pull use a scoped,
-//! short-lived HTTP capability as the graph database's Dolt remote. Push instead opens a
-//! direct GCS database URI behind an in-process loopback `RemoteServer`, stages the Dolt push,
-//! and asks GenHub to publish the accepted manifest. An idempotency token persisted with the
-//! push operation lets an interrupted push resume its staged session. Failure to restore a
-//! temporary clone or pull URL is reported as a warning because the graph transfer may already
-//! have succeeded and the canonical URL will be restored on the next attempt.
+//! directly between the workspaces. For a GenHub remote, clone, pull, and fetch use a scoped,
+//! short-lived GCS capability through BlockCacheVFS. Push opens a direct GCS
+//! database URI behind an in-process loopback `RemoteServer`, stages the Dolt push, and asks
+//! GenHub to publish the accepted manifest. An idempotency token persisted with the push operation
+//! lets an interrupted push resume its staged session. Failure to restore a temporary clone or
+//! pull URL is reported as a warning because the graph transfer may already have succeeded and the
+//! canonical URL will be restored on the next attempt.
 //!
 //! Assets referenced by the transferred branch are handled after the graph operation.
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
@@ -103,7 +103,10 @@ use reqwest::{
     blocking::{Body, Client, Response},
     header::{CONTENT_RANGE, RANGE},
 };
-use rusqlite::{Error as SqlError, RemoteFailureKind};
+use rusqlite::{
+    Error as SqlError, OpenFlags, RemoteFailureKind, RemoteServer, RemoteServerOptions,
+    blockcachevfs::{CloudConnectionIdentity, CloudConnectionUri},
+};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 use uuid::Uuid;
@@ -209,6 +212,22 @@ fn ensure_graph_remote(
 }
 
 fn restore_canonical_url(graph: &GraphConnection, remote: &Remote) {
+    let graph_remotes = match remote_rows(graph) {
+        Ok(graph_remotes) => graph_remotes,
+        Err(error) => {
+            eprintln!(
+                "Warning: failed to inspect graph remotes while restoring '{}': {error}",
+                remote.name
+            );
+            return;
+        }
+    };
+    if !graph_remotes
+        .iter()
+        .any(|graph_remote| graph_remote.name == remote.name)
+    {
+        return;
+    }
     if let Err(error) = set_remote_url(graph, &remote.name, &remote.url) {
         eprintln!(
             "Warning: failed to restore the canonical URL for graph remote '{}': {error}",
@@ -219,6 +238,79 @@ fn restore_canonical_url(graph: &GraphConnection, remote: &Remote) {
 
 fn is_authorization_error(error: &SqlError) -> bool {
     error.remote_failure_kind() == Some(RemoteFailureKind::Authorization)
+}
+
+struct CapabilityGraphRemote {
+    url: String,
+    _cloud_server: RemoteServer,
+}
+
+#[derive(Default)]
+struct CapabilityTransportIdentity {
+    cloud: Option<CloudConnectionIdentity>,
+}
+
+/// Serves a read CAB through a temporary loopback remote backed by BlockCacheVFS.
+///
+/// The server owns the read-only cloud connection during clone, fetch, or pull. Its local URL
+/// contains no credentials.
+fn capability_graph_remote(
+    remote_url: &str,
+    identity: &mut CapabilityTransportIdentity,
+) -> Result<CapabilityGraphRemote, SqlError> {
+    let cloud_uri = validate_capability_transport_identity(remote_url, identity)?;
+    let read_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let cloud_server = RemoteServer::start_with_options(
+        Path::new(cloud_uri.as_str()),
+        &RemoteServerOptions::new().database_open_flags(read_flags),
+    )
+    .map_err(normalize_cloud_open_authorization_error)?;
+    Ok(CapabilityGraphRemote {
+        url: cloud_server.database_url(DEFAULT_GRAPH_DB_NAME),
+        _cloud_server: cloud_server,
+    })
+}
+
+/// Raw GCS HTTP authorization statuses become typed failures so callers can request a fresh CAB.
+fn normalize_cloud_open_authorization_error(error: SqlError) -> SqlError {
+    let is_http_authorization_error = error
+        .sqlite_error()
+        .is_some_and(|sqlite_error| matches!(sqlite_error.extended_code, 401 | 403));
+    if is_http_authorization_error {
+        SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_AUTH),
+            Some("cloud graph capability was rejected".to_string()),
+        )
+    } else {
+        error
+    }
+}
+
+/// A renewed read CAB may rotate credentials but cannot change its cloud object scope.
+fn validate_capability_transport_identity(
+    remote_url: &str,
+    identity: &mut CapabilityTransportIdentity,
+) -> Result<CloudConnectionUri, SqlError> {
+    let cloud_uri = CloudConnectionUri::parse(remote_url)?;
+    let cloud_identity = cloud_uri.identity();
+    if identity
+        .cloud
+        .as_ref()
+        .is_some_and(|expected| expected != &cloud_identity)
+    {
+        return Err(changed_capability_scope_error());
+    }
+    identity.cloud = Some(cloud_identity);
+    Ok(cloud_uri)
+}
+
+fn changed_capability_scope_error() -> SqlError {
+    SqlError::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+        Some("GenHub changed the graph capability scope during renewal".to_string()),
+    )
 }
 
 fn resolve_remote(
@@ -309,9 +401,22 @@ fn run_graph_transfer(
     }
 
     let mut last_error = None;
+    let mut capability_identity = CapabilityTransportIdentity::default();
     for attempt in 0..2 {
-        let authorization =
-            transfer_authorization(remote, operation, Some(branch), force, None, login_origin)?;
+        let authorization = match transfer_authorization(
+            remote,
+            operation,
+            Some(branch),
+            force,
+            None,
+            login_origin,
+        ) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                restore_canonical_url(graph, remote);
+                return Err(error);
+            }
+        };
         let Some(remote_url) = authorization.remote_url.as_deref() else {
             restore_canonical_url(graph, remote);
             return Err(format!(
@@ -320,13 +425,20 @@ fn run_graph_transfer(
             )
             .into());
         };
-        ensure_graph_remote(graph, &remote.name, remote_url)?;
-        match transfer() {
+        let transfer_result = match capability_graph_remote(remote_url, &mut capability_identity) {
+            Ok(graph_remote) => match ensure_graph_remote(graph, &remote.name, &graph_remote.url) {
+                Ok(()) => transfer(),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        match transfer_result {
             Ok(()) => {
                 restore_canonical_url(graph, remote);
                 return Ok(authorization.push_lease);
             }
             Err(error) if attempt == 0 && is_authorization_error(&error) => {
+                restore_canonical_url(graph, remote);
                 last_error = Some(error);
             }
             Err(error) => {
@@ -1852,6 +1964,7 @@ pub fn clone_into_workspace(
         2
     };
     let mut clone_result = None;
+    let mut capability_identity = CapabilityTransportIdentity::default();
     for attempt in 0..attempt_count {
         let attempt_number = attempt + 1;
         if attempt > 0 {
@@ -1888,24 +2001,40 @@ pub fn clone_into_workspace(
                 login_origin,
             )
         };
-        let authorization = authorization_result.map_err(|error| {
-            clone_transfer_failure(authorization_phase, started, error.as_ref())
-        })?;
-        let remote_url = authorization.remote_url.as_deref().ok_or_else(|| {
-            clone_transfer_failure(
+        let authorization = match authorization_result {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                restore_canonical_url(&graph, remote);
+                return Err(clone_transfer_failure(
+                    authorization_phase,
+                    started,
+                    error.as_ref(),
+                ));
+            }
+        };
+        let Some(remote_url) = authorization.remote_url.as_deref() else {
+            restore_canonical_url(&graph, remote);
+            return Err(clone_transfer_failure(
                 "reading the GenHub graph clone capability",
                 started,
                 &std::io::Error::other(
                     "GenHub clone capability did not include a graph remote URL",
                 ),
-            )
-        })?;
+            ));
+        };
         progress.println(&format!(
             "Cloning graph history (attempt {attempt_number}/{attempt_count})..."
         ));
         let clone_result_for_attempt = {
             let _heartbeat = progress.heartbeat("cloning graph history from the remote");
-            clone_remote(&graph, remote_url)
+            if remote.url.starts_with("file://") {
+                clone_remote(&graph, remote_url)
+            } else {
+                match capability_graph_remote(remote_url, &mut capability_identity) {
+                    Ok(graph_remote) => clone_remote(&graph, &graph_remote.url),
+                    Err(error) => Err(error),
+                }
+            }
         };
         match clone_result_for_attempt {
             Ok(()) => {
@@ -2697,14 +2826,23 @@ pub fn clone_destination_path(
 
 #[cfg(test)]
 mod tests {
+    mod fake_gcs {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/fake_gcs.rs"
+        ));
+    }
+
     #[cfg(unix)]
-    use std::io::{BufRead as _, BufReader};
+    use std::os::unix::fs::symlink as create_file_symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file as create_file_symlink;
     use std::{
         collections::HashMap,
         env,
         ffi::OsString,
         fs,
-        io::{Cursor, Read as _, Write as _},
+        io::{BufRead as _, BufReader, Cursor, Read as _, Write as _},
         net::TcpListener,
         path::{Path, PathBuf},
         sync::Mutex,
@@ -2713,6 +2851,7 @@ mod tests {
     };
 
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
+    use fake_gcs::FakeGcsServer;
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{DoltHashId, HashId, Sha256Hash, config::Workspace};
     use gen_models::{
@@ -2732,17 +2871,16 @@ mod tests {
     use rusqlite::{Connection, Error as SqlError, blockcachevfs::AuthRefreshReason};
     use serde_json::json;
     use tempfile::tempdir;
+    use url::Url;
     use uuid::Uuid;
 
     use super::{
         AssetDownloadBatch, AssetTransferRange, AssetTransferRun, AssetTransferTarget,
         DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
-        download_to_staged_path_with_progress, execute_pull, execute_push, file_graph_url,
-        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
-        transfer_assets,
+        clone_into_workspace, download_to_staged_path_with_progress, ensure_graph_remote,
+        execute_pull, execute_push, file_graph_url, get_remaining_assets_to_transfer,
+        resolve_remote, run_graph_transfer, temporary_path, transfer_assets, upload_asset,
     };
-    #[cfg(unix)]
-    use super::{clone_into_workspace, upload_asset};
     use crate::{
         commands::remote::{
             client::{
@@ -2756,6 +2894,18 @@ mod tests {
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
     const RETRIED_TRANSFER_ID: Uuid = Uuid::from_u128(2);
+
+    fn file_path_uri(path: &Path) -> String {
+        Url::from_file_path(path)
+            .map(String::from)
+            .expect("should convert fixture file path to a file URI")
+    }
+
+    fn file_directory_uri(path: &Path) -> String {
+        Url::from_directory_path(path)
+            .map(String::from)
+            .expect("should convert fixture directory path to a file URI")
+    }
 
     fn download_to_versioned_store(
         client: &Client,
@@ -3274,202 +3424,82 @@ mod tests {
     }
 
     mod clone {
-        use std::{
-            io::{self, Read as _, Write as _},
-            net::TcpListener,
-            sync::{
-                Arc,
-                atomic::{AtomicBool, Ordering},
-            },
-            thread,
-            time::Duration,
-        };
-
         use gen_core::config::Workspace;
-        use gen_models::{collection::Collection, history::dolt::commit_all, operations::Remote};
-        use tempfile::{TempDir, tempdir};
-        use url::Url;
+        use gen_models::{history::dolt::remote_rows, operations::Remote};
+        use serde_json::json;
+        use tempfile::tempdir;
 
-        use super::super::clone_into_workspace;
-        use crate::{get_config_connection, get_connection};
-
-        struct CloneFixture {
-            _temp: TempDir,
-            expired_server: thread::JoinHandle<()>,
-            capability_stop: Arc<AtomicBool>,
-            capability_server: thread::JoinHandle<Vec<String>>,
-            remote: Remote,
-            workspace: Workspace,
-        }
-
-        impl CloneFixture {
-            fn new() -> Self {
-                let temp = tempdir().expect("should create clone fixture directory");
-                let source_path = temp.path().join("source.db");
-                let source =
-                    get_connection(&source_path).expect("should create source graph database");
-                Collection::create(&source, "clone-fixture")
-                    .expect("should create source graph state");
-                commit_all(&source, "seed clone fixture")
-                    .expect("should commit source graph state");
-                drop(source);
-                let valid_remote_url = Url::from_file_path(&source_path)
-                    .expect("should convert source graph path to a file URL")
-                    .to_string();
-
-                let (expired_remote_url, expired_server) = serve_expired_remote();
-                let capability_stop = Arc::new(AtomicBool::new(false));
-                let (remote, capability_server) = serve_capabilities(
-                    &expired_remote_url,
-                    &valid_remote_url,
-                    Arc::clone(&capability_stop),
-                );
-                let workspace = Workspace::new(temp.path().join("clone"));
-
-                Self {
-                    _temp: temp,
-                    expired_server,
-                    capability_stop,
-                    capability_server,
-                    remote,
-                    workspace,
-                }
-            }
-        }
-
-        fn serve_expired_remote() -> (String, thread::JoinHandle<()>) {
-            let listener =
-                TcpListener::bind("127.0.0.1:0").expect("should bind expired capability server");
-            let address = listener
-                .local_addr()
-                .expect("should read expired capability server address");
-            let handle = thread::spawn(move || {
-                let (mut stream, _) = listener
-                    .accept()
-                    .expect("should accept expired capability request");
-                let mut request = [0_u8; 4096];
-                let _ = stream
-                    .read(&mut request)
-                    .expect("should read expired capability request");
-                stream
-                    .write_all(
-                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .expect("should write expired capability response");
-            });
-            (format!("http://{address}/origin.db"), handle)
-        }
-
-        fn serve_capabilities(
-            expired_remote_url: &str,
-            valid_remote_url: &str,
-            stop: Arc<AtomicBool>,
-        ) -> (Remote, thread::JoinHandle<Vec<String>>) {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("should bind capability server");
-            listener
-                .set_nonblocking(true)
-                .expect("should make capability server nonblocking");
-            let address = listener
-                .local_addr()
-                .expect("should read capability server address");
-            let expired_remote_url = expired_remote_url.to_string();
-            let valid_remote_url = valid_remote_url.to_string();
-            let handle = thread::spawn(move || {
-                let mut requests = Vec::new();
-                let mut capability_count = 0;
-                while requests.len() < 3 && !stop.load(Ordering::Acquire) {
-                    let (mut stream, _) = match listener.accept() {
-                        Ok(connection) => connection,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                            continue;
-                        }
-                        Err(error) => panic!("should accept capability request: {error}"),
-                    };
-                    let mut request = [0_u8; 8192];
-                    let read = stream
-                        .read(&mut request)
-                        .expect("should read capability request");
-                    let request = String::from_utf8_lossy(&request[..read]).into_owned();
-                    let body = if request
-                        .starts_with("POST /api/repos/alice/example/remote-capability ")
-                    {
-                        capability_count += 1;
-                        let remote_url = if capability_count == 1 {
-                            &expired_remote_url
-                        } else {
-                            &valid_remote_url
-                        };
-                        format!(
-                            "{{\"remote_url\":\"{remote_url}\",\
-                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                             \"default_branch\":\"main\",\
-                             \"transfer_id\":\"{}\"}}",
-                            super::TEST_TRANSFER_ID
-                        )
-                    } else if request.starts_with("POST /api/repos/alice/example/asset-transfers ")
-                    {
-                        "{\"assets\":[]}".to_string()
-                    } else {
-                        panic!("unexpected clone fixture request: {request}");
-                    };
-                    requests.push(request);
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .expect("should write capability response");
-                }
-                requests
-            });
-            (
-                Remote {
-                    name: "origin".to_string(),
-                    url: format!("http://{address}/api/repos/alice/example"),
-                },
-                handle,
-            )
-        }
+        use super::{
+            super::{clone_into_workspace, ensure_graph_remote},
+            ENVIRONMENT_LOCK, EnvironmentGuard, TEST_TRANSFER_ID, serve_capability_replies,
+        };
+        use crate::{get_config_connection, get_raw_connection};
 
         #[test]
-        fn test_clone_rejected_capability_retries_with_a_fresh_capability() {
-            let CloneFixture {
-                _temp,
-                expired_server,
-                capability_stop,
-                capability_server,
-                remote,
-                workspace,
-            } = CloneFixture::new();
+        fn test_clone_rejects_unsupported_network_capabilities() {
+            let _environment_lock = ENVIRONMENT_LOCK
+                .lock()
+                .expect("should lock process environment");
+            let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "read-test-key");
 
-            workspace.ensure_gen_dir();
-            let config = get_config_connection(Some(
-                workspace
-                    .gen_db_path()
-                    .expect("should resolve clone config path"),
-            ))
-            .expect("should create clone config database");
-            Remote::create(&config, &remote.name, &remote.url)
-                .expect("should configure clone remote");
-            let result = clone_into_workspace(&config, &remote, &workspace);
-            capability_stop.store(true, Ordering::Release);
-            expired_server
-                .join()
-                .expect("expired capability server should finish");
-            let requests = capability_server
-                .join()
-                .expect("capability server should finish");
-            let capability_requests = requests
-                .iter()
-                .filter(|request| request.contains("/remote-capability "))
-                .count();
+            for graph_url in [
+                "https://genhub.bio/api/repos/alice/example/dolt/capability/default.db",
+                "file:///tmp/graph/default.db",
+            ] {
+                let body = json!({
+                    "remote_url": graph_url,
+                    "expires_at": "2035-01-01T00:00:00Z",
+                    "default_branch": "main",
+                    "transfer_id": TEST_TRANSFER_ID,
+                })
+                .to_string();
+                let (repository_url, capability_server) =
+                    serve_capability_replies(vec![Some((200, body))]);
+                let temp = tempdir().expect("should create clone fixture");
+                let workspace = Workspace::new(temp.path().join("clone"));
+                workspace.ensure_gen_dir();
+                let config = get_config_connection(Some(
+                    workspace
+                        .gen_db_path()
+                        .expect("should resolve clone config path"),
+                ))
+                .expect("should open clone config");
+                let remote = Remote::create(&config, "origin", &repository_url)
+                    .expect("should configure clone remote");
+                let graph = get_raw_connection(
+                    workspace
+                        .graph_db_path()
+                        .expect("should resolve clone graph path"),
+                )
+                .expect("should open clone graph");
+                ensure_graph_remote(&graph, &remote.name, &remote.url)
+                    .expect("should seed the canonical graph remote");
+                drop(graph);
 
-            assert_eq!(
-                capability_requests, 2,
-                "clone should request a fresh capability after the first capability is rejected; result={result:?}"
-            );
-            assert_eq!(result.expect("clone retry should succeed"), "main");
+                let error = clone_into_workspace(&config, &remote, &workspace)
+                    .expect_err("should reject an unsupported cloud capability");
+                let requests = capability_server
+                    .join()
+                    .expect("should finish capability server");
+                let graph = get_raw_connection(
+                    workspace
+                        .graph_db_path()
+                        .expect("should resolve cloned graph path"),
+                )
+                .expect("should reopen cloned graph");
+                let graph_remotes = remote_rows(&graph)
+                    .expect("should read graph remotes after rejected capability");
+
+                assert_eq!(
+                    requests.len(),
+                    1,
+                    "clone should not renew an unsupported grant"
+                );
+                assert!(!error.to_string().contains(graph_url));
+                assert!(graph_remotes.iter().any(|graph_remote| {
+                    graph_remote.name == remote.name && graph_remote.url == remote.url
+                }));
+            }
         }
     }
 
@@ -4835,7 +4865,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_clone_materializes_source_symlinked_asset_as_regular_files() {
         let temp = tempdir().expect("should create clone transfer workspace");
@@ -4864,7 +4893,7 @@ mod tests {
                 .expect("should have source archive parent"),
         )
         .expect("should create source archive directory");
-        std::os::unix::fs::symlink(&external_payload, &source_archive)
+        create_file_symlink(&external_payload, &source_archive)
             .expect("should link retained asset to source payload");
         assert!(
             fs::symlink_metadata(&source_archive)
@@ -4883,12 +4912,8 @@ mod tests {
                 .expect("should resolve destination config path"),
         ))
         .expect("should open destination config");
-        let remote = Remote::create(
-            &config,
-            "origin",
-            &format!("file://{}", source_root.display()),
-        )
-        .expect("should configure source workspace remote");
+        let remote = Remote::create(&config, "origin", &file_directory_uri(&source_root))
+            .expect("should configure source workspace remote");
 
         clone_into_workspace(&config, &remote, &destination_workspace)
             .expect("should clone source asset bytes");
@@ -4918,7 +4943,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_pull_materializes_source_symlinked_asset_as_regular_files() {
         let temp = tempdir().expect("should create pull transfer workspace");
@@ -4946,12 +4970,10 @@ mod tests {
         .expect("should open destination graph");
         clone_remote(
             &destination_graph,
-            &format!(
-                "file://{}",
-                source_workspace
+            &file_path_uri(
+                &source_workspace
                     .graph_db_path()
-                    .expect("should resolve source graph path")
-                    .display()
+                    .expect("should resolve source graph path"),
             ),
         )
         .expect("should clone source base state");
@@ -4963,12 +4985,8 @@ mod tests {
                 .expect("should resolve destination config path"),
         ))
         .expect("should open destination config");
-        let remote = Remote::create(
-            &config,
-            "origin",
-            &format!("file://{}", source_root.display()),
-        )
-        .expect("should configure source workspace remote");
+        let remote = Remote::create(&config, "origin", &file_directory_uri(&source_root))
+            .expect("should configure source workspace remote");
         Defaults::set_default_remote(&config, Some(&remote.name))
             .expect("should set source workspace as default remote");
 
@@ -4993,7 +5011,7 @@ mod tests {
                 .expect("should have source archive parent"),
         )
         .expect("should create source archive directory");
-        std::os::unix::fs::symlink(&external_payload, &source_archive)
+        create_file_symlink(&external_payload, &source_archive)
             .expect("should link retained asset to source payload");
         assert!(
             fs::symlink_metadata(&source_archive)
@@ -5030,7 +5048,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_http_roundtrip_transfers_source_symlinked_asset_as_regular_files() {
         let temp = tempdir().expect("should create HTTP transfer workspace");
@@ -5052,7 +5069,7 @@ mod tests {
                 .expect("should have source archive parent"),
         )
         .expect("should create source archive directory");
-        std::os::unix::fs::symlink(&external_payload, &source_archive)
+        create_file_symlink(&external_payload, &source_archive)
             .expect("should link retained asset to source payload");
         assert!(
             fs::symlink_metadata(&source_archive)
@@ -5211,7 +5228,11 @@ mod tests {
         drop(local_graph);
 
         let (asset_url, asset_server) = serve_asset(contents);
-        let (remote_url, api_server) = serve_pull_api(&graph_url, asset.id, &asset_url, 1, false);
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&remote_graph_path);
+        let cloud_graph_url = gcs_database.uri();
+        let (remote_url, api_server) =
+            serve_pull_api(&cloud_graph_url, asset.id, &asset_url, 1, false);
         let config = get_config_connection(Some(
             workspace
                 .gen_db_path()
@@ -5282,7 +5303,11 @@ mod tests {
         drop(remote_graph);
 
         let (asset_url, asset_server) = serve_asset(contents);
-        let (remote_url, api_server) = serve_pull_api(&graph_url, asset.id, &asset_url, 2, true);
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&remote_graph_path);
+        let cloud_graph_url = gcs_database.uri();
+        let (remote_url, api_server) =
+            serve_pull_api(&cloud_graph_url, asset.id, &asset_url, 2, true);
         let config = get_config_connection(Some(
             workspace
                 .gen_db_path()
@@ -5392,8 +5417,11 @@ mod tests {
 
         let (first_asset_url, first_asset_server) = serve_asset(first_contents);
         let (second_asset_url, second_asset_server) = serve_asset(second_contents);
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&remote_graph_path);
+        let cloud_graph_url = gcs_database.uri();
         let (remote_url, api_server) = serve_checkpoint_pull_api(
-            &graph_url,
+            &cloud_graph_url,
             (first_asset.id, &first_asset_url),
             (second_asset.id, &second_asset_url),
         );
@@ -5566,7 +5594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pull_authorization_failure_retries_with_a_fresh_capability() {
+    fn test_pull_rejects_non_cloud_network_capability() {
         let _environment_lock = ENVIRONMENT_LOCK
             .lock()
             .expect("should lock process environment");
@@ -5576,30 +5604,23 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let server = thread::spawn(move || {
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().expect("should accept capability request");
-                let mut request = [0_u8; 8192];
-                let _ = stream
-                    .read(&mut request)
-                    .expect("should read capability request");
-                let body = format!(
-                    "{{\"remote_url\":\"http://127.0.0.1:1/transfer-{attempt}\",\
-                     \"expires_at\":\"2030-01-01T00:00:00Z\",\
-                     \"default_branch\":\"main\",\
-                     \"transfer_id\":\"{}\"}}",
-                    if attempt == 0 {
-                        TEST_TRANSFER_ID
-                    } else {
-                        RETRIED_TRANSFER_ID
-                    }
-                );
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .expect("should write capability response");
-            }
+            let (mut stream, _) = listener.accept().expect("should accept capability request");
+            let mut request = [0_u8; 8192];
+            let _ = stream
+                .read(&mut request)
+                .expect("should read capability request");
+            let body = format!(
+                "{{\"remote_url\":\"http://127.0.0.1:1/legacy-transfer\",\
+                 \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                 \"default_branch\":\"main\",\
+                 \"transfer_id\":\"{TEST_TRANSFER_ID}\"}}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("should write capability response");
         });
 
         let connection = Connection::open_in_memory().expect("should open graph database");
@@ -5608,30 +5629,20 @@ mod tests {
             name: "origin".to_string(),
             url: format!("http://{address}/api/repos/alice/example"),
         };
-        let mut attempts = 0;
-        let transfer_lease = run_graph_transfer(
+        ensure_graph_remote(&graph, &remote.name, &remote.url)
+            .expect("should configure canonical graph remote");
+        let error = run_graph_transfer(
             &graph,
             &remote,
             RemoteOperation::Pull,
             "main",
             false,
-            || {
-                attempts += 1;
-                if attempts == 1 {
-                    Err(SqlError::SqliteFailure(
-                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
-                        Some("expired capability".to_string()),
-                    ))
-                } else {
-                    Ok(())
-                }
-            },
+            || panic!("Dolt should not run after rejecting a non-cloud capability"),
         )
-        .expect("should retry authorization failure");
+        .expect_err("should reject the signed HTTP network capability");
         server.join().expect("capability server should finish");
 
-        assert_eq!(attempts, 2);
-        assert_eq!(transfer_lease, None);
+        assert!(!error.to_string().contains("legacy-transfer"));
         let remotes = remote_rows(&graph).expect("should read restored canonical URL");
         assert!(
             remotes
@@ -5708,7 +5719,6 @@ mod tests {
         assert_eq!(failed_operations, 1);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_push_transfers_source_symlinked_asset_as_regular_archive() {
         let temp = tempdir().expect("should create push transfer workspace");
@@ -5736,12 +5746,10 @@ mod tests {
         .expect("should open destination graph");
         clone_remote(
             &destination_graph,
-            &format!(
-                "file://{}",
-                source_workspace
+            &file_path_uri(
+                &source_workspace
                     .graph_db_path()
-                    .expect("should resolve source graph path")
-                    .display()
+                    .expect("should resolve source graph path"),
             ),
         )
         .expect("should clone source base state to destination");
@@ -5768,7 +5776,7 @@ mod tests {
                 .expect("should have source archive parent"),
         )
         .expect("should create source archive directory");
-        std::os::unix::fs::symlink(&external_payload, &source_archive)
+        create_file_symlink(&external_payload, &source_archive)
             .expect("should link retained asset to source payload");
         assert!(
             fs::symlink_metadata(&source_archive)
@@ -5784,12 +5792,8 @@ mod tests {
                 .expect("should resolve source config path"),
         ))
         .expect("should open source config");
-        let remote = Remote::create(
-            &config,
-            "origin",
-            &format!("file://{}", destination_root.display()),
-        )
-        .expect("should configure destination workspace remote");
+        let remote = Remote::create(&config, "origin", &file_directory_uri(&destination_root))
+            .expect("should configure destination workspace remote");
         Defaults::set_default_remote(&config, Some(&remote.name))
             .expect("should set destination workspace as default remote");
 
@@ -7212,5 +7216,516 @@ mod tests {
             failed_at,
             "terminal asset-phase lease errors must retire the UUID"
         );
+    }
+
+    #[cfg(feature = "remote")]
+    mod direct_gcs_reads {
+        use std::{
+            io::Write as _,
+            net::TcpListener,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            thread,
+            time::{Duration, Instant},
+        };
+
+        use gen_core::config::Workspace;
+        use gen_models::{db::GraphConnection, history::dolt::remote_rows, operations::Remote};
+        use rusqlite::{
+            Connection, Error as SqlError, RemoteFailureKind, blockcachevfs::CloudConnectionUri,
+        };
+        use serde_json::json;
+        use tempfile::tempdir;
+
+        use super::{
+            super::{
+                CapabilityTransportIdentity, RemoteOperation, clone_into_workspace,
+                ensure_graph_remote, fetch, run_graph_transfer,
+                validate_capability_transport_identity,
+            },
+            ENVIRONMENT_LOCK, EnvironmentGuard, TEST_TRANSFER_ID, read_mock_http_request,
+            serve_capability_replies,
+        };
+        use crate::get_config_connection;
+
+        fn read_capability_body(remote_url: &str) -> String {
+            json!({
+                "remote_url": remote_url,
+                "expires_at": "2035-01-01T00:00:00Z",
+                "default_branch": "main",
+                "transfer_id": TEST_TRANSFER_ID,
+            })
+            .to_string()
+        }
+
+        fn read_capability_uri(bucket: &str, token: &str, endpoint: &str) -> String {
+            CloudConnectionUri::gcs(
+                bucket,
+                "repos/alice/example/.gen/graph_db/",
+                "test-project",
+                token,
+                "default.db",
+                Some(endpoint),
+            )
+            .expect("should build read CAB URI")
+            .as_str()
+            .to_string()
+        }
+
+        fn serve_read_capability_replies(
+            replies: Vec<String>,
+        ) -> (String, thread::JoinHandle<Vec<String>>) {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("should bind read capability server");
+            listener
+                .set_nonblocking(true)
+                .expect("should bound read capability server waits");
+            let address = listener
+                .local_addr()
+                .expect("should read read capability server address");
+            let server = thread::spawn(move || {
+                let mut requests = Vec::with_capacity(replies.len());
+                for body in replies {
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    let (mut stream, _) = loop {
+                        match listener.accept() {
+                            Ok(accepted) => break accepted,
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(error) => {
+                                panic!(
+                                    "should accept read capability request before timeout: {error}"
+                                )
+                            }
+                        }
+                    };
+                    requests.push(read_mock_http_request(&mut stream));
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should write read capability response");
+                }
+                requests
+            });
+            (format!("http://{address}/api/repos/alice/example"), server)
+        }
+
+        fn serve_read_gcs_authorization_failures(
+            first_token_status: u16,
+            renewed_token_status: u16,
+        ) -> (String, Arc<AtomicBool>, thread::JoinHandle<Vec<String>>) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("should bind fake GCS server");
+            listener
+                .set_nonblocking(true)
+                .expect("should make fake GCS listener nonblocking");
+            let address = listener
+                .local_addr()
+                .expect("should read fake GCS server address");
+            let finished = Arc::new(AtomicBool::new(false));
+            let server_finished = Arc::clone(&finished);
+            let server = thread::spawn(move || {
+                let mut requests = Vec::new();
+                let mut last_request = Instant::now();
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = read_mock_http_request(&mut stream);
+                            let request_lowercase = request.to_ascii_lowercase();
+                            let status = if request_lowercase.contains("first-") {
+                                first_token_status
+                            } else {
+                                renewed_token_status
+                            };
+                            let reason = match status {
+                                401 => "Unauthorized",
+                                403 => "Forbidden",
+                                _ => panic!("unexpected fake GCS status {status}"),
+                            };
+                            let body =
+                                format!(r#"{{"error":{{"code":{status},"message":"{reason}"}}}}"#);
+                            write!(
+                                stream,
+                                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .expect("should reject fake GCS request");
+                            requests.push(request);
+                            last_request = Instant::now();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if server_finished.load(Ordering::Acquire)
+                                && last_request.elapsed() > Duration::from_millis(100)
+                            {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("should accept fake GCS request: {error}"),
+                    }
+                }
+                requests
+            });
+            (format!("http://{address}/"), finished, server)
+        }
+
+        fn assert_gcs_requests_are_read_only(requests: &[String]) {
+            assert!(!requests.is_empty(), "should issue a direct GCS request");
+            assert!(requests.iter().all(|request| {
+                !request.starts_with("POST ")
+                    && !request.starts_with("PUT ")
+                    && !request.starts_with("DELETE ")
+            }));
+        }
+
+        #[test]
+        fn test_read_capability_scope_allows_token_rotation_but_rejects_scope_changes() {
+            let first_uri = CloudConnectionUri::gcs(
+                "read-bucket",
+                "repos/alice/example/.gen/graph_db/",
+                "test-project",
+                "first-private-token",
+                "default.db",
+                None,
+            )
+            .expect("should build initial read CAB");
+            let renewed_uri = CloudConnectionUri::gcs(
+                "read-bucket",
+                "repos/alice/example/.gen/graph_db/",
+                "test-project",
+                "renewed-private-token",
+                "default.db",
+                None,
+            )
+            .expect("should build renewed read CAB");
+            let changed_scope_uri = CloudConnectionUri::gcs(
+                "other-bucket",
+                "repos/alice/example/.gen/graph_db/",
+                "test-project",
+                "changed-private-token",
+                "default.db",
+                None,
+            )
+            .expect("should build changed-scope CAB");
+            let mut identity = CapabilityTransportIdentity::default();
+
+            validate_capability_transport_identity(first_uri.as_str(), &mut identity)
+                .expect("should accept the initial read scope");
+            validate_capability_transport_identity(renewed_uri.as_str(), &mut identity)
+                .expect("should accept a rotated token for the same read scope");
+            let changed_scopes = [
+                changed_scope_uri,
+                CloudConnectionUri::gcs(
+                    "read-bucket",
+                    "repos/alice/other/.gen/graph_db/",
+                    "test-project",
+                    "changed-prefix-token",
+                    "default.db",
+                    None,
+                )
+                .expect("should build changed-prefix CAB"),
+                CloudConnectionUri::gcs(
+                    "read-bucket",
+                    "repos/alice/example/.gen/graph_db/",
+                    "other-project",
+                    "changed-project-token",
+                    "default.db",
+                    None,
+                )
+                .expect("should build changed-project CAB"),
+                CloudConnectionUri::gcs(
+                    "read-bucket",
+                    "repos/alice/example/.gen/graph_db/",
+                    "test-project",
+                    "changed-database-token",
+                    "other.db",
+                    None,
+                )
+                .expect("should build changed-database CAB"),
+                CloudConnectionUri::gcs(
+                    "read-bucket",
+                    "repos/alice/example/.gen/graph_db/",
+                    "test-project",
+                    "changed-endpoint-token",
+                    "default.db",
+                    Some("http://127.0.0.1:4444/"),
+                )
+                .expect("should build changed-endpoint CAB"),
+            ];
+            for changed_uri in changed_scopes {
+                let error =
+                    validate_capability_transport_identity(changed_uri.as_str(), &mut identity)
+                        .expect_err("should reject a renewed CAB with changed cloud scope");
+
+                assert!(
+                    error
+                        .to_string()
+                        .contains("changed the graph capability scope")
+                );
+                assert!(!error.to_string().contains("token"));
+            }
+
+            for invalid_url in [
+                "https://genhub.bio/api/repos/alice/example/dolt/capability/default.db",
+                "file:///tmp/graph/default.db",
+            ] {
+                let error = validate_capability_transport_identity(invalid_url, &mut identity)
+                    .expect_err("should reject a non-cloud capability URI");
+                assert!(!error.to_string().contains(invalid_url));
+            }
+        }
+
+        #[test]
+        fn test_cloud_pull_transfer_retries_read_cab_and_restores_canonical_remote() {
+            let _environment_lock = ENVIRONMENT_LOCK
+                .lock()
+                .expect("should lock process environment");
+            let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "read-test-key");
+            let (endpoint, stop, gcs_server) = serve_read_gcs_authorization_failures(401, 403);
+            let first_uri = read_capability_uri("read-bucket", "first-read-token", &endpoint);
+            let renewed_uri = read_capability_uri("read-bucket", "renewed-read-token", &endpoint);
+            let (repository_url, capability_server) = serve_read_capability_replies(vec![
+                read_capability_body(&first_uri),
+                read_capability_body(&renewed_uri),
+            ]);
+            let graph = GraphConnection(
+                Connection::open_in_memory().expect("should open local graph fixture"),
+            );
+            let remote = Remote {
+                name: "origin".to_string(),
+                url: repository_url,
+            };
+            ensure_graph_remote(&graph, &remote.name, &remote.url)
+                .expect("should configure canonical graph remote");
+            let transfer_result = run_graph_transfer(
+                &graph,
+                &remote,
+                RemoteOperation::Pull,
+                "main",
+                false,
+                || fetch(&graph, &remote.name, Some("main")),
+            );
+            stop.store(true, Ordering::Release);
+            let capability_requests = capability_server
+                .join()
+                .expect("should finish capability server");
+            let gcs_requests = gcs_server.join().expect("should finish fake GCS server");
+            let error =
+                transfer_result.expect_err("should preserve the read CAB authorization error");
+            let gcs_error = error
+                .downcast_ref::<SqlError>()
+                .expect("should return the typed SQLite transfer error");
+
+            assert_eq!(
+                capability_requests.len(),
+                2,
+                "should refresh the read CAB once"
+            );
+            assert_gcs_requests_are_read_only(&gcs_requests);
+            assert!(gcs_requests.iter().any(|request| {
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer first-read-token")
+            }));
+            assert!(gcs_requests.iter().any(|request| {
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer renewed-read-token")
+            }));
+            assert_eq!(
+                gcs_error.remote_failure_kind(),
+                Some(RemoteFailureKind::Authorization)
+            );
+            assert!(!error.to_string().contains("first-read-token"));
+            assert!(!error.to_string().contains("renewed-read-token"));
+            let graph_remotes = remote_rows(&graph).expect("should read restored graph remotes");
+            assert!(graph_remotes.iter().any(|graph_remote| {
+                graph_remote.name == remote.name && graph_remote.url == remote.url
+            }));
+        }
+
+        #[test]
+        fn test_clone_retries_direct_gcs_read_cab_without_graph_writes() {
+            let _environment_lock = ENVIRONMENT_LOCK
+                .lock()
+                .expect("should lock process environment");
+            let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "read-test-key");
+            let (endpoint, stop, gcs_server) = serve_read_gcs_authorization_failures(401, 403);
+            let first_uri = read_capability_uri("read-bucket", "first-clone-token", &endpoint);
+            let renewed_uri = read_capability_uri("read-bucket", "renewed-clone-token", &endpoint);
+            let (repository_url, capability_server) = serve_read_capability_replies(vec![
+                read_capability_body(&first_uri),
+                read_capability_body(&renewed_uri),
+            ]);
+            let temp = tempdir().expect("should create clone fixture");
+            let workspace = Workspace::new(temp.path().join("clone"));
+            workspace.ensure_gen_dir();
+            let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+                .expect("should open clone config");
+            let remote = Remote {
+                name: "origin".to_string(),
+                url: repository_url,
+            };
+
+            let error = clone_into_workspace(&config, &remote, &workspace)
+                .expect_err("should fail after retrying unauthorized direct GCS reads");
+            stop.store(true, Ordering::Release);
+            let capability_requests = capability_server
+                .join()
+                .expect("should finish capability server");
+            let gcs_requests = gcs_server.join().expect("should finish fake GCS server");
+
+            assert_eq!(
+                capability_requests.len(),
+                2,
+                "clone should refresh its read CAB once"
+            );
+            assert_gcs_requests_are_read_only(&gcs_requests);
+            assert!(gcs_requests.iter().any(|request| {
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer first-clone-token")
+            }));
+            assert!(gcs_requests.iter().any(|request| {
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer renewed-clone-token")
+            }));
+            assert!(!error.to_string().contains("first-clone-token"));
+            assert!(!error.to_string().contains("renewed-clone-token"));
+        }
+
+        #[test]
+        fn test_clone_capability_refresh_failure_restores_canonical_remote_url() {
+            let _environment_lock = ENVIRONMENT_LOCK
+                .lock()
+                .expect("should lock process environment");
+            let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "read-test-key");
+            let (endpoint, stop, gcs_server) = serve_read_gcs_authorization_failures(403, 403);
+            let temporary_uri = read_capability_uri("read-bucket", "first-clone-token", &endpoint);
+            let (repository_url, capability_server) = serve_capability_replies(vec![
+                Some((200, read_capability_body(&temporary_uri))),
+                Some((503, r#"{"code":503,"message":"unavailable"}"#.to_string())),
+            ]);
+            let temp = tempdir().expect("should create clone fixture");
+            let workspace = Workspace::new(temp.path().join("clone"));
+            workspace.ensure_gen_dir();
+            let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+                .expect("should open clone config");
+            let remote = Remote {
+                name: "origin".to_string(),
+                url: repository_url,
+            };
+            let graph = GraphConnection(
+                Connection::open(
+                    workspace
+                        .graph_db_path()
+                        .expect("should resolve failed clone graph path"),
+                )
+                .expect("should open failed clone graph fixture"),
+            );
+            ensure_graph_remote(&graph, &remote.name, "file:///temporary/clone.db")
+                .expect("should seed a temporary graph remote");
+            drop(graph);
+
+            let error = clone_into_workspace(&config, &remote, &workspace)
+                .expect_err("should return a failed read capability refresh");
+            stop.store(true, Ordering::Release);
+            let capability_requests = capability_server
+                .join()
+                .expect("should finish capability server");
+            let gcs_requests = gcs_server.join().expect("should finish fake GCS server");
+            let graph = GraphConnection(
+                Connection::open(
+                    workspace
+                        .graph_db_path()
+                        .expect("should resolve failed clone graph path"),
+                )
+                .expect("should reopen failed clone graph"),
+            );
+            let graph_remotes = remote_rows(&graph).expect("should read graph remotes");
+
+            assert_eq!(
+                capability_requests.len(),
+                2,
+                "clone should request a refreshed capability after an authorization failure"
+            );
+            assert_gcs_requests_are_read_only(&gcs_requests);
+            assert!(graph_remotes.iter().any(|graph_remote| {
+                graph_remote.name == remote.name && graph_remote.url == remote.url
+            }));
+            assert!(
+                !graph_remotes
+                    .iter()
+                    .any(|graph_remote| graph_remote.url.starts_with("gcs://"))
+            );
+            assert!(!error.to_string().contains("first-clone-token"));
+        }
+
+        #[test]
+        fn test_read_capability_failure_restores_canonical_url_after_refresh_error() {
+            let _environment_lock = ENVIRONMENT_LOCK
+                .lock()
+                .expect("should lock process environment");
+            let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "read-test-key");
+            let (endpoint, stop, gcs_server) = serve_read_gcs_authorization_failures(403, 403);
+            let first_uri = read_capability_uri("read-bucket", "first-read-token", &endpoint);
+            let (repository_url, capability_server) = serve_capability_replies(vec![
+                Some((200, read_capability_body(&first_uri))),
+                Some((503, r#"{"code":503,"message":"unavailable"}"#.to_string())),
+            ]);
+            let graph = GraphConnection(
+                Connection::open_in_memory().expect("should open local graph fixture"),
+            );
+            let remote = Remote {
+                name: "origin".to_string(),
+                url: repository_url,
+            };
+            ensure_graph_remote(&graph, &remote.name, &remote.url)
+                .expect("should seed the canonical graph remote");
+            let error = run_graph_transfer(
+                &graph,
+                &remote,
+                RemoteOperation::Pull,
+                "main",
+                false,
+                || fetch(&graph, &remote.name, Some("main")),
+            )
+            .expect_err("should return the read capability refresh failure");
+            stop.store(true, Ordering::Release);
+            let capability_requests = capability_server
+                .join()
+                .expect("should finish capability server");
+            let gcs_requests = gcs_server.join().expect("should finish fake GCS server");
+            let graph_remotes = remote_rows(&graph).expect("should read graph remotes");
+
+            assert_eq!(
+                capability_requests.len(),
+                2,
+                "should attempt one capability refresh"
+            );
+            assert_gcs_requests_are_read_only(&gcs_requests);
+            assert!(gcs_requests.iter().any(|request| {
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer first-read-token")
+            }));
+            assert!(
+                graph_remotes
+                    .iter()
+                    .any(|graph_remote| graph_remote.name == "origin"
+                        && graph_remote.url == remote.url),
+                "failed refresh should leave the canonical repository URL configured"
+            );
+            assert!(!error.to_string().contains("first-read-token"));
+        }
     }
 }
