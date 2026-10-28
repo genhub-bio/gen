@@ -8,7 +8,7 @@ use flate2::read::MultiGzDecoder;
 use gen_core::{BranchName, CommitRef, DoltHashId};
 use gen_models::{
     assets::{AssetRef, Assets},
-    db::DbContext,
+    db::{DbContext, graph_write_transaction_behavior},
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
         HistoryEntry, HistoryStore,
@@ -602,10 +602,15 @@ impl PyRepository {
         r#gen::history::ensure_clean_working_set(&history_store, "merge")
             .map_err(history_err_to_pyerr)?;
         let name = branch_name(branch)?;
+        // Direct graph views reserve the write transaction before reading; local workspaces keep
+        // their previous deferred transaction behavior through the shared policy helper.
         self.context
             .graph()
             .conn()
-            .with_transaction(|| history_store.merge(&CommitRef(name)))
+            .with_transaction_behavior(
+                graph_write_transaction_behavior(self.context.workspace()),
+                || history_store.merge(&CommitRef(name)),
+            )
             .map_err(|error| r#gen::history::history_action_error("Merge", &error))
             .map_err(history_err_to_pyerr)?;
         self.head_operation()
