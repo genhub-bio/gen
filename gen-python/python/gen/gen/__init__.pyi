@@ -507,6 +507,18 @@ class Repository:
                 new_region="construct",
             )
         """
+    def resolve_ref(self, reference: builtins.str) -> HashId:
+        r"""
+        Resolves a Dolt ref, including a remote-tracking ref, to its immutable commit hash.
+
+        Remote-tracking refs are not returned by `get_branches()`. Use the fully qualified form,
+        such as `refs/remotes/origin/main`, to distinguish one from a local branch with the same
+        shorthand name. The returned hash stays fixed even when the ref later advances.
+
+        # Errors
+
+        Raises `RuntimeError` when Dolt cannot resolve the provided ref.
+        """
     def get_branches(self) -> builtins.list[Branch]:
         r"""
         Returns every branch, ordered by name.

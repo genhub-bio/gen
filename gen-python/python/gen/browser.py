@@ -710,20 +710,14 @@ class NotebookSession:
     def _remote_tracking_ref(
         self, branch_name: str
     ) -> tuple[str, dict[str, str]] | None:
-        """Return a verified origin tracking head and its asset identities, when present."""
-        tracking_name = f"origin/{branch_name}"
-        branch = next(
-            (
-                candidate
-                for candidate in self.repository.get_branches()
-                if candidate.name == tracking_name and candidate.remote == "origin"
-            ),
-            None,
-        )
-        if branch is None:
+        """Return a verified origin tracking ref hash and its assets, when present."""
+        tracking_ref = f"refs/remotes/origin/{branch_name}"
+        try:
+            tracking_hash = str(self.repository.resolve_ref(tracking_ref))
+        except RuntimeError:
             return None
         asset_ids: dict[str, str] = {}
-        for asset in self.repository.get_assets(branch=tracking_name):
+        for asset in self.repository.get_assets(branch=tracking_hash):
             try:
                 path = _tracked_asset_path(asset.logical_path or asset.name)
             except NotebookSessionError:
@@ -731,7 +725,7 @@ class NotebookSession:
             if not path:
                 continue
             asset_ids[path] = _asset_identity(asset)
-        return str(branch.head), asset_ids
+        return tracking_hash, asset_ids
 
     async def _refresh_file_catalog(
         self, snapshot_hash: str, *, force: bool = False
