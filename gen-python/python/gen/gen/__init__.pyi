@@ -774,6 +774,22 @@ class Repository:
         VFS. The graph's bearer URL stays inside its connection owner for the lifetime of this
         repository. This entry point is available to the browser-cloud build.
         """
+    def set_browser_asset_source(
+        self, branch: builtins.str, snapshot_hash: builtins.str
+    ) -> None:
+        r"""
+        Pins lazy browser asset reads to a verified published branch and graph snapshot.
+
+        Direct browser repositories use this when their published graph ref advances. It does not
+        issue a network request; the next missing asset read obtains a transfer manifest for the
+        selected immutable snapshot. Ordinary repositories without a direct source are unchanged.
+        """
+    def clear_browser_asset_source(self) -> None:
+        r"""
+        Prevents future lazy reads from obtaining or renewing signed asset URLs.
+
+        Ordinary repositories without a direct browser source are unchanged.
+        """
     def get_sequence_graph(self, id: HashId | str) -> SequenceGraph:
         r"""
         Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use

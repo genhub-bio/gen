@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch
 
 import gen
 from gen.browser import NotebookSessionError, _capture_active_notebook
-from gen.browser_files import BrowserFileError
+from gen.browser_files import BrowserFileError, signed_url_expiration
 
 REPOSITORY_URL = "https://genhub.example/api/repos/test/repository"
 NOTEBOOK = {
@@ -57,6 +57,9 @@ class FakeRemoteRepository:
         self.remote_refs = {}
         self.resolve_calls = []
         self.post_pull_local_head = None
+        self.asset_source_calls = []
+        self.asset_source_error = None
+        self.asset_source_clears = 0
 
     @property
     def current_branch(self):
@@ -83,6 +86,14 @@ class FakeRemoteRepository:
             return self.remote_refs[reference]
         except KeyError:
             raise RuntimeError(f"No commit resolved for '{reference}'") from None
+
+    def set_browser_asset_source(self, branch, snapshot_hash):
+        self.asset_source_calls.append((branch, snapshot_hash))
+        if self.asset_source_error is not None:
+            raise self.asset_source_error
+
+    def clear_browser_asset_source(self):
+        self.asset_source_clears += 1
 
     def fetch(self, remote=None, branch=None, *, include_assets=True):
         self.calls.append(("fetch", remote, branch, include_assets))
@@ -300,6 +311,59 @@ class FakeAssetResponse:
         self.body = FakeReadableBody(reader)
 
 
+class SignedAssetUrlTests(unittest.TestCase):
+    def _signed_url(self, origin, *, namespace="test", repository="repository"):
+        signed_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return (
+            f"{origin}/storage/v1/bucket/o/repos/{namespace}/{repository}/.gen/assets/"
+            f"{'a' * 64}.none.bgz?X-Goog-Date={signed_date}"
+            "&X-Goog-Expires=900&X-Goog-Signature=local-signature"
+        )
+
+    def test_loopback_storage_urls_are_accepted_only_for_loopback_repositories(self):
+        local_repository_urls = (
+            "http://localhost:3000/api/repos/test/repository",
+            "http://127.0.0.1:3000/api/repos/test/repository",
+        )
+        local_storage_urls = (
+            self._signed_url("http://127.0.0.1:4443"),
+            self._signed_url("https://[::1]:4443"),
+        )
+
+        for repository_url, storage_url in zip(
+            local_repository_urls, local_storage_urls, strict=True
+        ):
+            with self.subTest(repository_url=repository_url, storage_url=storage_url):
+                expires_at = signed_url_expiration(
+                    storage_url, repository_url, "reference.fa"
+                )
+                self.assertGreater(expires_at, datetime.now(timezone.utc))
+
+    def test_production_repository_rejects_loopback_storage_urls(self):
+        storage_url = self._signed_url("http://127.0.0.1:4443")
+
+        with self.assertRaisesRegex(BrowserFileError, "safe, expiring storage URL"):
+            signed_url_expiration(storage_url, REPOSITORY_URL, "reference.fa")
+
+    def test_loopback_repository_rejects_remote_http_and_credentialed_storage_urls(
+        self,
+    ):
+        repository_url = "http://localhost:3000/api/repos/test/repository"
+        invalid_urls = (
+            self._signed_url("http://storage.googleapis.com"),
+            self._signed_url("http://storage.example.test"),
+            self._signed_url("http://user:secret@127.0.0.1:4443"),
+            self._signed_url("http://127.0.0.1:4443", repository="other-repository"),
+        )
+
+        for storage_url in invalid_urls:
+            with self.subTest(storage_url=storage_url):
+                with self.assertRaisesRegex(
+                    BrowserFileError, "safe, expiring storage URL"
+                ):
+                    signed_url_expiration(storage_url, repository_url, "reference.fa")
+
+
 class CaptureWidget:
     def __init__(self, document=None, error="", respond=True):
         self._capture_request_id = ""
@@ -507,6 +571,34 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.repository_url, REPOSITORY_URL)
         self.assertEqual(session.repository.calls, [])
 
+    async def test_published_asset_source_is_pinned_and_cleared_with_session(self):
+        repository = FakeRemoteRepository()
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch(
+                "gen.Repository",
+                SimpleNamespace(open_remote_graph=lambda *_args, **_kwargs: repository),
+            ),
+        ):
+            session = await gen.NotebookSession.open(REPOSITORY_URL)
+
+        self.assertEqual(repository.asset_source_calls, [("main", "a" * 40)])
+        session._record_published_ref()
+        self.assertEqual(repository.asset_source_calls, [("main", "a" * 40)])
+
+        repository.asset_source_error = RuntimeError("temporary transfer failure")
+        with self.assertRaisesRegex(NotebookSessionError, "lazy access"):
+            session._record_published_ref(
+                snapshot_hash="b" * 40,
+                branch="main",
+                asset_ids={},
+            )
+        self.assertEqual(session.base_commit, "a" * 40)
+        self.assertEqual(session._published_branch, "main")
+
+        session.close()
+        self.assertEqual(repository.asset_source_clears, 1)
+
     async def test_open_selects_a_nondefault_branch_without_fetch_or_pull(self):
         self.source_repository.create_branch("feature", self.base_commit)
         self.source_repository.checkout(self.branch)
@@ -566,6 +658,10 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             repository.resolve_calls,
             ["refs/remotes/origin/main"],
+        )
+        self.assertEqual(
+            repository.asset_source_calls,
+            [("main", "a" * 40), ("main", remote_head)],
         )
         await session.files[path].url()
         self.assertEqual(

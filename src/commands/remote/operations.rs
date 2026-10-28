@@ -117,6 +117,16 @@ use sha2::{Digest as _, Sha256};
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(any(
+    all(feature = "browser-cloud", target_os = "emscripten"),
+    all(test, feature = "browser-cloud")
+))]
+mod browser_asset_source;
+#[cfg(any(
+    all(feature = "browser-cloud", target_os = "emscripten"),
+    all(test, feature = "browser-cloud")
+))]
+mod browser_range;
 mod capability;
 #[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
 mod direct_read;
@@ -2251,6 +2261,57 @@ fn remote_push_asset_error(
     }
 }
 
+/// Returns whether `ancestor` appears on the first-parent history ending at `descendant`.
+///
+/// Asset transfer deltas are based on the destination branch's first-parent history, so a
+/// capability's published graph base is usable only when that exact ancestry relation holds.
+fn is_first_parent_ancestor(
+    graph: &GraphConnection,
+    ancestor: &DoltHashId,
+    descendant: &DoltHashId,
+) -> Result<bool, SqlError> {
+    graph.query_row(
+        "WITH RECURSIVE first_parent(commit_hash) AS ( \
+             SELECT ?2 \
+             WHERE EXISTS(SELECT 1 FROM dolt_commit_ancestors WHERE commit_hash = ?2) \
+             UNION \
+             SELECT parents.parent_hash \
+             FROM first_parent \
+             JOIN dolt_commit_ancestors AS parents \
+               ON parents.commit_hash = first_parent.commit_hash \
+             WHERE parents.parent_hash IS NOT NULL AND parents.parent_index = 0 \
+         ) \
+         SELECT EXISTS(SELECT 1 FROM first_parent WHERE commit_hash = ?1)",
+        [ancestor, descendant],
+        |row| row.get(0),
+    )
+}
+
+/// Uses the direct graph's published ref as an asset baseline for an untracked new branch.
+///
+/// The source is useful only for the exact GenHub repository it opened, and only while the
+/// capability's commit is on the destination's first-parent chain. Force pushes and branches with
+/// an existing remote baseline retain the normal transfer behavior.
+fn asset_source_base_for_new_branch(
+    graph: &GraphConnection,
+    workspace: &Workspace,
+    remote: &Remote,
+    force: bool,
+    tracking_hash: Option<&DoltHashId>,
+    destination_hash: &DoltHashId,
+) -> Option<DoltHashId> {
+    if force || tracking_hash.is_some() {
+        return None;
+    }
+    let canonical_url = canonical_remote_url(&remote.url).ok()?;
+    let source = workspace.asset_reader_source()?;
+    let source_base = source.published_base_hash_for_remote(&canonical_url)?;
+    is_first_parent_ancestor(graph, &source_base, destination_hash)
+        .ok()
+        .filter(|is_ancestor| *is_ancestor)
+        .map(|_| source_base)
+}
+
 fn same_push_session_scope(
     operation: &RemoteOperationRecord,
     destination_hash: &DoltHashId,
@@ -2351,6 +2412,20 @@ pub fn execute_push(
             previous_hash.as_ref(),
         )?;
         let destination_hash = hash_of(&graph, &branch)?;
+        if operation.assets_transfer_checkpoint.is_none()
+            && let Some(source_base) = asset_source_base_for_new_branch(
+                &graph,
+                workspace,
+                &remote,
+                force,
+                previous_hash.as_ref(),
+                &destination_hash,
+            )
+        {
+            // The source is an already-published graph snapshot. Persist it as the initial asset
+            // checkpoint so a retry keeps the same baseline even if the reader source is renewed.
+            operation.advance_assets_transfer_checkpoint(&config, &source_base)?;
+        }
         let same_session_scope = same_push_session_scope(&operation, &destination_hash, force);
         if !same_session_scope
             && let Err(error) =
@@ -3288,6 +3363,39 @@ mod tests {
 
     fn direct_push_capability_body(request: &str, origin: &str, transfer_id: Uuid) -> String {
         let scope = push_session_scope();
+        json!({
+            "remote_url": null,
+            "expires_at": (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339(),
+            "default_branch": "main",
+            "transfer_id": transfer_id,
+            "direct_push": {
+                "database_uri": push_database_uri(),
+                "token_expires_at": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339(),
+                "session_id": request_session_id(request),
+                "session_scope": {
+                    "principal": scope.principal,
+                    "target_database": scope.target_database,
+                    "operations": scope.operations,
+                },
+                "publish_url": format!("{origin}/api/publish?capability=mock-signed-value"),
+                "abort_url": format!("{origin}/api/abort?capability=mock-signed-value")
+            }
+        })
+        .to_string()
+    }
+
+    #[cfg(feature = "browser-cloud")]
+    fn direct_push_capability_body_for_branch(
+        request: &str,
+        origin: &str,
+        transfer_id: Uuid,
+        branch: &str,
+    ) -> String {
+        let scope = ClientSessionScope {
+            principal: "repository:repo-id".to_string(),
+            target_database: "default.db".to_string(),
+            operations: format!(r#"["write","push","{branch}",false]"#),
+        };
         json!({
             "remote_url": null,
             "expires_at": (Utc::now() + ChronoDuration::minutes(30)).to_rfc3339(),
@@ -6223,6 +6331,401 @@ mod tests {
             )
             .expect("should count failed push operations");
         assert_eq!(failed_operations, 1);
+    }
+
+    #[cfg(feature = "browser-cloud")]
+    #[test]
+    fn test_new_branch_asset_baseline_requires_matching_nonforced_first_parent_source() {
+        use gen_core::config::AssetReaderSource;
+        use gen_models::history::dolt::{checkout, create_branch, merge};
+
+        use super::browser_asset_source::BrowserAssetSource;
+
+        let temp = tempdir().expect("should create asset baseline fixture");
+        let graph =
+            get_connection(temp.path().join("graph.db")).expect("should create graph database");
+        Collection::create(&graph, "asset-baseline-common")
+            .expect("should create common base collection");
+        let common_base =
+            commit_all(&graph, "asset baseline common").expect("should commit common base");
+        create_branch(&graph, "source").expect("should create source branch");
+        checkout(&graph, "source").expect("should check out source branch");
+        Collection::create(&graph, "asset-baseline-source")
+            .expect("should create source-only collection");
+        let second_parent =
+            commit_all(&graph, "asset baseline source").expect("should commit source branch");
+        checkout(&graph, "main").expect("should return to main branch");
+        Collection::create(&graph, "asset-baseline-main")
+            .expect("should create main-only collection");
+        commit_all(&graph, "asset baseline main advance").expect("should advance main");
+        let merge_head = graph
+            .with_transaction(|| merge(&graph, "source"))
+            .expect("should merge source branch into main");
+
+        let remote_url = "https://genhub.bio/api/repos/alice/example";
+        let source = Arc::new(
+            BrowserAssetSource::new(
+                crate::commands::remote::client::RepositoryRemote::parse(remote_url)
+                    .expect("should parse repository URL"),
+                "bucket".to_string(),
+                "https://storage.googleapis.com",
+                "main",
+                second_parent,
+            )
+            .expect("should create direct graph asset source"),
+        );
+        let workspace = Workspace::new(temp.path()).with_asset_reader_source(source.clone());
+        let remote = Remote {
+            name: "origin".to_string(),
+            url: remote_url.to_string(),
+        };
+
+        assert!(
+            !super::is_first_parent_ancestor(&graph, &second_parent, &merge_head)
+                .expect("should inspect first-parent history"),
+            "a second-parent commit must not be treated as the asset transfer baseline"
+        );
+        assert_eq!(
+            super::asset_source_base_for_new_branch(
+                &graph,
+                &workspace,
+                &remote,
+                false,
+                None,
+                &merge_head,
+            ),
+            None,
+            "the source commit is reachable only through the merge's second parent"
+        );
+
+        source
+            .set_ref("main", &common_base.to_string())
+            .expect("should pin the verified common base");
+        assert_eq!(
+            super::asset_source_base_for_new_branch(
+                &graph,
+                &workspace,
+                &remote,
+                false,
+                None,
+                &merge_head,
+            ),
+            Some(common_base),
+            "a matching published source on first-parent history can bound a new-branch push"
+        );
+        assert_eq!(
+            super::asset_source_base_for_new_branch(
+                &graph,
+                &workspace,
+                &remote,
+                false,
+                Some(&common_base),
+                &merge_head,
+            ),
+            None,
+            "an existing tracking ref retains the normal baseline"
+        );
+        assert_eq!(
+            super::asset_source_base_for_new_branch(
+                &graph,
+                &workspace,
+                &remote,
+                true,
+                None,
+                &merge_head,
+            ),
+            None,
+            "force pushes retain the normal full asset transfer behavior"
+        );
+        let other_remote = Remote {
+            name: "other".to_string(),
+            url: "https://genhub.bio/api/repos/alice/another".to_string(),
+        };
+        assert_eq!(
+            super::asset_source_base_for_new_branch(
+                &graph,
+                &workspace,
+                &other_remote,
+                false,
+                None,
+                &merge_head,
+            ),
+            None,
+            "assets from a different repository must not be treated as present remotely"
+        );
+    }
+
+    #[cfg(feature = "browser-cloud")]
+    #[test]
+    fn test_new_branch_push_reuses_published_asset_baseline_without_old_archive() {
+        use gen_core::config::AssetReaderSource;
+        use gen_models::history::dolt::{active_branch, checkout, create_branch};
+
+        use super::browser_asset_source::BrowserAssetSource;
+
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind push test server");
+        listener
+            .set_nonblocking(true)
+            .expect("should bound push test server waits");
+        let address = listener
+            .local_addr()
+            .expect("should read push test server address");
+        let server_origin = format!("http://{address}");
+        let remote_url = format!("{server_origin}/api/repos/alice/example");
+        let branch = "notebook-work";
+        let temp = tempdir().expect("should create direct graph push workspace");
+        let workspace_root = temp.path().join("local");
+        let setup_workspace = Workspace::new(&workspace_root);
+        setup_workspace.ensure_gen_dir();
+        let graph = get_connection(setup_workspace.graph_db_path().unwrap())
+            .expect("should create graph database");
+        Collection::create(&graph, "published-base")
+            .expect("should create published base collection");
+        let old_asset = test_asset(b"old published reference sequence", "reference.fa", 1);
+        AssetRef::create(&graph, &old_asset).expect("should add old published asset metadata");
+        let base_hash = commit_all(&graph, "published base with reference asset")
+            .expect("should commit published asset base");
+        Collection::create(&graph, "published-refresh")
+            .expect("should create refreshed published collection");
+        let refreshed_source_hash = commit_all(&graph, "refresh published source")
+            .expect("should commit refreshed published source");
+        create_branch(&graph, branch).expect("should create notebook branch");
+        checkout(&graph, branch).expect("should select notebook branch");
+
+        let notebook_bytes = b"{\"cells\":[],\"metadata\":{},\"nbformat\":4,\"nbformat_minor\":5}";
+        let notebook_asset = test_asset(notebook_bytes, "notebooks/work.ipynb", 2);
+        AssetRef::create(&graph, &notebook_asset).expect("should add notebook asset metadata");
+        let destination_hash =
+            commit_all(&graph, "save notebook work").expect("should commit notebook asset");
+        assert_eq!(
+            active_branch(&graph).expect("should read active branch"),
+            branch
+        );
+        drop(graph);
+
+        let source = Arc::new(
+            BrowserAssetSource::new(
+                crate::commands::remote::client::RepositoryRemote::parse(&remote_url)
+                    .expect("should parse repository URL"),
+                "bucket".to_string(),
+                "https://storage.googleapis.com",
+                "main",
+                base_hash,
+            )
+            .expect("should create direct graph asset source"),
+        );
+        let cloned_source = Arc::clone(&source);
+        let asset_reader_source: Arc<dyn AssetReaderSource> = cloned_source;
+        let workspace =
+            Workspace::new(&workspace_root).with_asset_reader_source(asset_reader_source);
+        workspace.ensure_gen_dir();
+
+        let notebook_path = workspace.base_dir().join("notebooks/work.ipynb");
+        fs::create_dir_all(
+            notebook_path
+                .parent()
+                .expect("notebook path should have a parent"),
+        )
+        .expect("should create notebook directory");
+        fs::write(&notebook_path, notebook_bytes).expect("should write new notebook bytes");
+        let old_archive_path = versioned_asset_path(&workspace, &old_asset);
+        assert!(
+            !old_archive_path.exists(),
+            "the direct graph workspace should not contain old published archives"
+        );
+
+        let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+            .expect("should open push config");
+        let remote =
+            Remote::create(&config, "origin", &remote_url).expect("should configure GenHub remote");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set default remote");
+        Defaults::set_current_branch(&config, Some(branch))
+            .expect("should select the notebook branch in workspace config");
+        let session_id = seed_push_lease(
+            &config,
+            branch,
+            &destination_hash,
+            TEST_TRANSFER_ID,
+            Utc::now().timestamp() + 3600,
+        );
+
+        let old_asset_id = old_asset.id;
+        let notebook_asset_id = notebook_asset.id;
+        let server_branch = branch.to_string();
+        let expected_branch = server_branch.clone();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut upload_attempt = 0;
+            for _ in 0..8 {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => {
+                            panic!("should accept push request before timeout: {error}")
+                        }
+                    }
+                };
+                let request = read_mock_http_request(&mut stream);
+                let body = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or_default();
+                let response = if request.contains("/remote-capability ") {
+                    let request_body: serde_json::Value =
+                        serde_json::from_str(body).expect("should parse capability request");
+                    if request_body["operation"] == "push" {
+                        let body = direct_push_capability_body_for_branch(
+                            &request,
+                            &server_origin,
+                            TEST_TRANSFER_ID,
+                            &server_branch,
+                        );
+                        ("200 OK", body)
+                    } else {
+                        (
+                            "503 Service Unavailable",
+                            r#"{"code":503,"message":"tracking fetch unavailable"}"#.to_string(),
+                        )
+                    }
+                } else if request.contains("/asset-transfers/complete ") {
+                    ("204 No Content", String::new())
+                } else if request.contains("/asset-transfers ") {
+                    let request_body: serde_json::Value =
+                        serde_json::from_str(body).expect("should parse asset transfer request");
+                    let new_asset = json!({
+                        "id": notebook_asset_id,
+                        "url": format!("{server_origin}/objects/{notebook_asset_id}?sig=uploaded")
+                    });
+                    let assets = if !request_body["from_commit"].is_null() {
+                        json!([new_asset])
+                    } else {
+                        let old_asset = json!({
+                            "id": old_asset_id,
+                            "url": format!("{server_origin}/objects/{old_asset_id}?sig=already-published")
+                        });
+                        // A null baseline reproduces the server's normal cumulative plan, which
+                        // includes the old archive that is intentionally absent from this client.
+                        json!([old_asset, new_asset])
+                    };
+                    let response_body = json!({ "assets": assets }).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                        response_body.len()
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("should return push asset plan");
+                    requests.push(request);
+                    if request_body["from_commit"].is_null() {
+                        // Let the caller fail if it tries to upload the old asset; do not leave a
+                        // mock listener waiting for requests that a correct client never makes.
+                        return requests;
+                    }
+                    continue;
+                } else if request.starts_with("PUT /objects/") {
+                    assert!(
+                        request.starts_with(&format!("PUT /objects/{notebook_asset_id}?")),
+                        "the push should upload only the new notebook asset"
+                    );
+                    upload_attempt += 1;
+                    if upload_attempt == 1 {
+                        ("500 Internal Server Error", String::new())
+                    } else {
+                        ("200 OK", String::new())
+                    }
+                } else {
+                    panic!("unexpected push test request: {request}");
+                };
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.0,
+                    response.1.len(),
+                    response.1
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("should return push test response");
+                requests.push(request);
+            }
+            requests
+        });
+
+        assert!(
+            execute_push(&workspace, None, None, false).is_err(),
+            "the first upload attempt should leave its session resumable"
+        );
+        let stored_checkpoint: DoltHashId = config
+            .query_row(
+                "SELECT assets_transfer_checkpoint FROM remote_operations \
+                 WHERE operation = 'push' AND branch_name = ?1",
+                [branch],
+                |row| row.get(0),
+            )
+            .expect("should read the persisted published asset baseline");
+        assert_eq!(stored_checkpoint, base_hash);
+        source
+            .set_ref("main", &refreshed_source_hash.to_string())
+            .expect("should advance the source pin before the retry");
+        execute_push(&workspace, None, None, false)
+            .expect("retry should keep the published asset baseline and push the notebook");
+        let requests = server.join().expect("should finish push test server");
+        let transfer_requests = requests
+            .iter()
+            .filter(|request| request.contains("/asset-transfers "))
+            .map(|request| {
+                serde_json::from_str::<serde_json::Value>(
+                    request
+                        .split_once("\r\n\r\n")
+                        .expect("asset transfer should contain a request body")
+                        .1,
+                )
+                .expect("should parse asset transfer request body")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(transfer_requests.len(), 2);
+        for transfer_body in &transfer_requests {
+            assert_eq!(transfer_body["branch"], expected_branch);
+            assert_eq!(transfer_body["from_commit"], base_hash.to_string());
+            assert_eq!(transfer_body["to_commit"], destination_hash.to_string());
+        }
+        let upload_requests = requests
+            .iter()
+            .filter(|request| request.starts_with("PUT /objects/"))
+            .collect::<Vec<_>>();
+        assert_eq!(upload_requests.len(), 2);
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {session_id}"))
+        );
+        assert!(
+            upload_requests
+                .iter()
+                .all(|request| request.starts_with(&format!("PUT /objects/{notebook_asset_id}?")))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.starts_with(&format!("PUT /objects/{old_asset_id}?"))),
+            "the old remote asset must not be read or uploaded"
+        );
+        assert!(
+            !old_archive_path.exists(),
+            "pushing the notebook must not hydrate old archives"
+        );
+        assert_eq!(fs::read(&notebook_path).unwrap(), notebook_bytes);
     }
 
     #[test]

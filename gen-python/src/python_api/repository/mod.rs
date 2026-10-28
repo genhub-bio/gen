@@ -296,6 +296,11 @@ impl PyRepository {
     /// `path` holds local Gen configuration and the credential-free name of the registered graph
     /// VFS. The graph's bearer URL stays inside its connection owner for the lifetime of this
     /// repository. This entry point is available to the browser-cloud build.
+    ///
+    /// # Errors
+    ///
+    /// Raises `ValueError` if the workspace already contains a `.gen` directory, or
+    /// `RuntimeError` if capability acquisition, graph opening, or branch selection fails.
     #[cfg(feature = "remote")]
     #[staticmethod]
     #[pyo3(signature = (repository_url, path, branch=None, committer=None, email=None))]
@@ -325,7 +330,9 @@ impl PyRepository {
             let opened = opened.map_err(PyRuntimeError::new_err)?;
             let anchor = opened.anchor;
             let graph = opened.graph;
-            let workspace = Workspace::new(path).with_graph_db_path_override(opened.graph_path);
+            let workspace = Workspace::new(path)
+                .with_graph_db_path_override(opened.graph_path)
+                .with_asset_reader_source(opened.asset_reader_source);
             let gen_dir = workspace.ensure_gen_dir();
             let config_connection = get_config_connection(Some(gen_dir.join("gen.db")))
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -372,6 +379,35 @@ impl PyRepository {
             .graph_db_path()
             .unwrap_or_else(|_| self.context.workspace().ensure_gen_dir().join("default.db"));
         path_to_py_path(py, &path)
+    }
+
+    /// Pins lazy browser asset reads to a verified published branch and graph snapshot.
+    ///
+    /// Direct browser repositories use this when their published graph ref advances. It does not
+    /// issue a network request; the next missing asset read obtains a transfer manifest for the
+    /// selected immutable snapshot. Ordinary repositories without a direct source are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Raises `RuntimeError` if the branch/hash is invalid or the direct asset source has closed.
+    #[cfg(feature = "remote")]
+    fn set_browser_asset_source(&self, branch: &str, snapshot_hash: &str) -> PyResult<()> {
+        if let Some(source) = self.context.workspace().asset_reader_source() {
+            source
+                .set_ref(branch, snapshot_hash)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Prevents future lazy reads from obtaining or renewing signed asset URLs.
+    ///
+    /// Ordinary repositories without a direct browser source are unchanged.
+    #[cfg(feature = "remote")]
+    fn clear_browser_asset_source(&self) {
+        if let Some(source) = self.context.workspace().asset_reader_source() {
+            source.close();
+        }
     }
 
     // Raw database access
