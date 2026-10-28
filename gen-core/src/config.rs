@@ -12,13 +12,30 @@ pub const DEFAULT_GRAPH_DB_NAME: &str = "default.db";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workspace {
     base_dir: PathBuf,
+    graph_db_path_override: Option<PathBuf>,
 }
 
 impl Workspace {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
+            graph_db_path_override: None,
         }
+    }
+
+    /// Uses an explicit graph database path, including a credential-free SQLite URI for a
+    /// database exposed through a registered VFS.
+    ///
+    /// The override belongs to this workspace handle only; GenHub credentials remain owned by
+    /// the connection that registered the VFS and are never stored in workspace configuration.
+    pub fn with_graph_db_path_override(mut self, path: impl Into<PathBuf>) -> Self {
+        self.graph_db_path_override = Some(path.into());
+        self
+    }
+
+    /// Returns whether the graph database path comes from an explicit override.
+    pub fn has_graph_db_path_override(&self) -> bool {
+        self.graph_db_path_override.is_some()
     }
 
     pub fn from_current_dir() -> Self {
@@ -65,6 +82,10 @@ impl Workspace {
     }
 
     pub fn graph_db_path(&self) -> Result<PathBuf, ConfigError> {
+        if let Some(path) = &self.graph_db_path_override {
+            return Ok(path.clone());
+        }
+
         self.find_gen_dir()
             .map(|dir| dir.join(DEFAULT_GRAPH_DB_NAME))
             .ok_or(ConfigError::GenDirectoryNotFound)
@@ -194,6 +215,19 @@ mod tests {
             workspace.graph_db_path().unwrap(),
             gen_dir.join(DEFAULT_GRAPH_DB_NAME)
         );
+    }
+
+    #[test]
+    fn test_graph_db_path_uses_explicit_override() {
+        let temp = tempdir().unwrap();
+        let workspace = Workspace::new(temp.path())
+            .with_graph_db_path_override("file:///owned/default.db?vfs=cloud_session");
+
+        assert_eq!(
+            workspace.graph_db_path().unwrap(),
+            PathBuf::from("file:///owned/default.db?vfs=cloud_session")
+        );
+        assert!(workspace.has_graph_db_path_override());
     }
 
     #[test]

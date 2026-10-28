@@ -193,8 +193,11 @@ impl PyRepository {
     }
 
     #[cfg(feature = "remote")]
-    /// Pulls a remote branch using the same merge and asset workflow as the Gen CLI.
-    #[pyo3(signature = (remote=None, branch=None))]
+    /// Pulls a remote branch, optionally downloading its referenced asset files.
+    ///
+    /// `include_assets=False` updates graph history and refs while leaving asset bytes for a
+    /// caller-managed or lazy read path. The default preserves the eager CLI behavior.
+    #[pyo3(signature = (remote=None, branch=None, *, include_assets=true))]
     fn pull(
         &mut self,
         python: Python<'_>,
@@ -204,15 +207,17 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
             &Bound<'_, PyAny>,
         >,
+        include_assets: bool,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
         let result = python.detach(|| {
-            r#gen::commands::remote::operations::execute_pull(
+            r#gen::commands::remote::operations::execute_pull_with_assets(
                 &workspace,
                 remote.as_deref(),
                 branch.as_deref(),
+                include_assets,
             )
             .map_err(|error| error.to_string())
         });
@@ -221,7 +226,10 @@ impl PyRepository {
 
     #[cfg(feature = "remote")]
     /// Fetches a branch into its remote-tracking ref without changing the checkout.
-    #[pyo3(signature = (remote=None, branch=None))]
+    ///
+    /// `include_assets=False` skips downloading immutable asset history. The default remains
+    /// eager so existing repositories retain their current behavior.
+    #[pyo3(signature = (remote=None, branch=None, *, include_assets=true))]
     fn fetch(
         &mut self,
         python: Python<'_>,
@@ -231,15 +239,17 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
             &Bound<'_, PyAny>,
         >,
+        include_assets: bool,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
         let result = python.detach(|| {
-            r#gen::commands::remote::operations::execute_fetch(
+            r#gen::commands::remote::operations::execute_fetch_with_assets(
                 &workspace,
                 remote.as_deref(),
                 branch.as_deref(),
+                include_assets,
             )
             .map_err(|error| error.to_string())
         });

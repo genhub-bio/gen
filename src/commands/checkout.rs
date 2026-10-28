@@ -53,6 +53,22 @@ pub fn execute(
     branch: Option<&str>,
     hash: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    execute_with_asset_materialization(graph, config, workspace, branch, hash, true)
+}
+
+/// Checks out a ref and optionally restores its file assets into the workspace.
+///
+/// # Errors
+///
+/// Returns an error if the ref cannot be checked out or enabled asset materialization fails.
+pub fn execute_with_asset_materialization(
+    graph: &GraphConnection,
+    config: &ConfigConnection,
+    workspace: &Workspace,
+    branch: Option<&str>,
+    hash: Option<&str>,
+    materialize_assets: bool,
+) -> Result<(), Box<dyn Error>> {
     // We want to connect to the current branch here instead of the branch we are checking out. This lets us
     // track and record the current state of assets prior to the checkout, so we can distinguish whether
     // a file should be replaced or if it needs to be preserved as a conflict.
@@ -86,7 +102,9 @@ pub fn execute(
         Defaults::set_current_branch(config, Some(name))
             .map_err(|error| format!("Failed to save current branch '{name}': {error}"))?;
         let commit_hash = hash_of(graph, name)?;
-        materialize_checked_out_assets(graph, workspace, &commit_hash, &previous_assets)?;
+        if materialize_assets {
+            materialize_checked_out_assets(graph, workspace, &commit_hash, &previous_assets)?;
+        }
     } else if let Some(hash_name) = hash {
         if branch_exists(graph, hash_name)? {
             println!("Checking out branch {hash_name}");
@@ -95,7 +113,9 @@ pub fn execute(
             Defaults::set_current_branch(config, Some(hash_name))
                 .map_err(|error| format!("Failed to save current branch '{hash_name}': {error}"))?;
             let commit_hash = hash_of(graph, hash_name)?;
-            materialize_checked_out_assets(graph, workspace, &commit_hash, &previous_assets)?;
+            if materialize_assets {
+                materialize_checked_out_assets(graph, workspace, &commit_hash, &previous_assets)?;
+            }
         } else {
             let commit_hash =
                 history_store.resolve_operation_hash(&CommitRef(hash_name.to_string()))?;
@@ -123,13 +143,13 @@ mod tests {
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
         file_types::FileTypes,
-        history::dolt::commit_all,
-        operations::{FileAddition, calculate_reader_checksum},
+        history::dolt::{active_branch, commit_all, connect_branch, create_branch},
+        operations::{Defaults, FileAddition, calculate_reader_checksum},
     };
     use noodles::bgzf;
     use tempfile::tempdir;
 
-    use super::materialize_checked_out_assets;
+    use super::{execute_with_asset_materialization, materialize_checked_out_assets};
     use crate::get_connection;
 
     fn asset(
@@ -249,6 +269,60 @@ mod tests {
             fs::read(current_versioned_path).expect("should read retained BGZF archive"),
             current_archive,
             "checkout should leave archived BGZF bytes intact"
+        );
+    }
+
+    #[test]
+    fn test_checkout_without_materialization_does_not_require_asset_archive() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let graph = get_connection(workspace.graph_db_path().unwrap())
+            .expect("should create graph database");
+        let config = crate::get_config_connection(Some(workspace.gen_db_path().unwrap()))
+            .expect("should create config database");
+        let main_branch = active_branch(&graph).expect("should read initial branch");
+        create_branch(&graph, "asset-branch").expect("should create asset branch");
+        connect_branch(&graph, "asset-branch").expect("should select asset branch");
+
+        let logical_contents = b">chr1\nAACCGG\n";
+        let archived_contents = archived_fasta(logical_contents);
+        let missing_asset = asset(
+            ".gen/assets/missing.fa.bgz",
+            "missing.fa",
+            &archived_contents,
+            calculate_reader_checksum(Cursor::new(logical_contents))
+                .expect("should checksum logical FASTA bytes"),
+            1,
+        );
+        AssetRef::create(&graph, &missing_asset).expect("should add missing archive metadata");
+        commit_all(&graph, "add remote asset metadata").expect("should commit asset metadata");
+        connect_branch(&graph, &main_branch).expect("should return to main branch");
+        Defaults::set_current_branch(&config, Some(&main_branch))
+            .expect("should save current branch");
+
+        execute_with_asset_materialization(
+            &graph,
+            &config,
+            &workspace,
+            Some("asset-branch"),
+            None,
+            false,
+        )
+        .expect("branch checkout should not need the asset archive");
+
+        assert_eq!(
+            active_branch(&graph).expect("should read checked-out branch"),
+            "asset-branch"
+        );
+        assert_eq!(
+            Defaults::get_current_branch(&config).as_deref(),
+            Some("asset-branch"),
+            "checkout should still save the current branch"
+        );
+        assert!(
+            !temp.path().join("missing.fa").exists(),
+            "checkout should leave absent asset bytes unmaterialized"
         );
     }
 }

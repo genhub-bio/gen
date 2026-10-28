@@ -146,12 +146,20 @@ impl<C> DbHandle<C> {
 
 pub type GraphHandle = DbHandle<GraphConnection>;
 pub type ConfigHandle = DbHandle<ConfigConnection>;
+/// A shared owner for a connection that registers a VFS used by secondary graph handles.
+///
+/// Callers retain this handle only for its lifetime; they must query through a separate graph
+/// connection. The mutex makes the owner safe to carry with browser widgets that cross threads.
+pub type GraphVfsAnchor = Arc<std::sync::Mutex<Connection>>;
 
 #[derive(Clone)]
 pub struct DbContext {
     workspace: Arc<Workspace>,
     graph: GraphHandle,
     config: ConfigHandle,
+    // The connection that registers a credentialed BlockCacheVFS must outlive every secondary
+    // SQLite handle opened through its VFS name. Cloned model contexts share this owner.
+    graph_anchor: Option<GraphVfsAnchor>,
 }
 
 impl DbContext {
@@ -167,6 +175,7 @@ impl DbContext {
             workspace,
             graph,
             config,
+            graph_anchor: None,
         }
     }
 
@@ -220,6 +229,20 @@ impl DbContext {
         self.graph = DbHandle::new(self.workspace.clone(), graph_conn.into());
     }
 
+    /// Keeps the owner of a registered graph VFS alive while secondary graph handles use it.
+    ///
+    /// Browser CAB connections own the VFS registration and credential refresh callback. A
+    /// separate graph connection uses the registered VFS by name, so retaining this anchor across
+    /// context clones and graph refreshes prevents the VFS from being torn down mid-session.
+    pub fn set_graph_anchor(&mut self, anchor: GraphVfsAnchor) {
+        self.graph_anchor = Some(anchor);
+    }
+
+    /// Returns a clone of the lifetime guard for a registered graph VFS, if present.
+    pub fn graph_anchor(&self) -> Option<GraphVfsAnchor> {
+        self.graph_anchor.as_ref().map(Arc::clone)
+    }
+
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
     }
@@ -243,7 +266,10 @@ impl DbContext {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use gen_core::config::Workspace;
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
     use super::{DbContext, get_config_connection, get_connection};
@@ -364,6 +390,41 @@ mod tests {
         assert!(
             !base_dir.exists(),
             "workspace should be removed after context drops"
+        );
+    }
+
+    #[test]
+    fn test_graph_anchor_lives_until_the_last_context_clone_drops() {
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should open graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should open config connection");
+        let mut context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should open context on the saved branch");
+        let anchor = Arc::new(Mutex::new(
+            Connection::open_in_memory().expect("should create anchor connection"),
+        ));
+        let weak_anchor = Arc::downgrade(&anchor);
+        context.set_graph_anchor(Arc::clone(&anchor));
+        let context_clone = context.clone();
+
+        drop(anchor);
+        drop(context);
+        assert!(
+            weak_anchor.upgrade().is_some(),
+            "a cloned context should keep the VFS owner alive after its source drops"
+        );
+
+        drop(context_clone);
+        assert!(
+            weak_anchor.upgrade().is_none(),
+            "the VFS owner should release after the last context drops"
         );
     }
 

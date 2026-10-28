@@ -49,6 +49,96 @@ pub(super) struct GraphTransferAuthorization {
     pub(super) capability_response: Option<CapabilityResponse>,
 }
 
+#[cfg(any(
+    all(feature = "browser-cloud", target_os = "emscripten"),
+    all(test, feature = "remote-native", not(target_os = "emscripten"))
+))]
+struct ReadCapabilityTokenState {
+    access_token: String,
+    expires_at: DateTime<Utc>,
+    issued_at: DateTime<Utc>,
+}
+
+/// Reuses one short-lived CAB token for ordinary block requests and renews it only when needed.
+///
+/// The VFS asks for a token before each cloud request. Keeping this cache with the VFS callback
+/// prevents a graph read from requesting a new GenHub capability for every block.
+#[cfg(any(
+    all(feature = "browser-cloud", target_os = "emscripten"),
+    all(test, feature = "remote-native", not(target_os = "emscripten"))
+))]
+pub(super) struct ReadCapabilityTokenCache {
+    state: Mutex<ReadCapabilityTokenState>,
+}
+
+#[cfg(any(
+    all(feature = "browser-cloud", target_os = "emscripten"),
+    all(test, feature = "remote-native", not(target_os = "emscripten"))
+))]
+impl ReadCapabilityTokenCache {
+    /// Creates a per-VFS cache from the capability used to open its cloud connection.
+    pub(super) fn new(
+        access_token: String,
+        expires_at: DateTime<Utc>,
+        issued_at: DateTime<Utc>,
+    ) -> Result<Self, AuthError> {
+        if access_token.is_empty() || expires_at <= issued_at {
+            return Err(AuthError(
+                "GenHub returned an invalid graph capability".to_string(),
+            ));
+        }
+        Ok(Self {
+            state: Mutex::new(ReadCapabilityTokenState {
+                access_token,
+                expires_at,
+                issued_at,
+            }),
+        })
+    }
+
+    /// Returns a still-valid token or fetches a replacement for this VFS only.
+    #[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+    pub(super) fn auth_token<F>(
+        &self,
+        reason: AuthRefreshReason,
+        refresh: F,
+    ) -> Result<String, AuthError>
+    where
+        F: FnOnce() -> Result<(String, DateTime<Utc>), AuthError>,
+    {
+        self.auth_token_at(reason, Utc::now(), refresh)
+    }
+
+    fn auth_token_at<F>(
+        &self,
+        reason: AuthRefreshReason,
+        now: DateTime<Utc>,
+        refresh: F,
+    ) -> Result<String, AuthError>
+    where
+        F: FnOnce() -> Result<(String, DateTime<Utc>), AuthError>,
+    {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AuthError("GenHub graph capability state is unavailable".to_string()))?;
+        let should_refresh = matches!(reason, AuthRefreshReason::Unauthorized)
+            || read_capability_needs_refresh(state.expires_at, state.issued_at, now);
+        if should_refresh {
+            let (access_token, expires_at) = refresh()?;
+            if access_token.is_empty() || expires_at <= now {
+                return Err(AuthError(
+                    "GenHub returned an invalid graph capability".to_string(),
+                ));
+            }
+            state.access_token = access_token;
+            state.expires_at = expires_at;
+            state.issued_at = now;
+        }
+        Ok(state.access_token.clone())
+    }
+}
+
 const PUSH_AUTHORIZATION_REFRESH_MARGIN_SECONDS: i64 = 60;
 
 type PushCapabilityFetcher =
@@ -437,12 +527,37 @@ fn capability_needs_refresh(
     } else {
         direct_push.token_expires_at
     };
+    authorization_needs_refresh(
+        expires_at,
+        issued_at,
+        now,
+        PUSH_AUTHORIZATION_REFRESH_MARGIN_SECONDS,
+    )
+}
+
+#[cfg(any(
+    all(feature = "browser-cloud", target_os = "emscripten"),
+    all(test, feature = "remote-native", not(target_os = "emscripten"))
+))]
+fn read_capability_needs_refresh(
+    expires_at: DateTime<Utc>,
+    issued_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    authorization_needs_refresh(expires_at, issued_at, now, 60)
+}
+
+fn authorization_needs_refresh(
+    expires_at: DateTime<Utc>,
+    issued_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    maximum_margin_seconds: i64,
+) -> bool {
     let lifetime_milliseconds = expires_at
         .signed_duration_since(issued_at)
         .num_milliseconds()
         .max(0);
-    let margin_milliseconds =
-        (lifetime_milliseconds / 10).min(PUSH_AUTHORIZATION_REFRESH_MARGIN_SECONDS * 1_000);
+    let margin_milliseconds = (lifetime_milliseconds / 10).min(maximum_margin_seconds * 1_000);
     now >= expires_at - ChronoDuration::milliseconds(margin_milliseconds)
 }
 
@@ -604,7 +719,10 @@ mod tests {
     use rusqlite::blockcachevfs::AuthRefreshReason;
     use uuid::Uuid;
 
-    use super::{PushCapabilityFetcher, PushCapabilityRenewal, push_capability_error};
+    use super::{
+        PushCapabilityFetcher, PushCapabilityRenewal, ReadCapabilityTokenCache,
+        push_capability_error,
+    };
     use crate::commands::remote::client::{
         CapabilityResponse, DirectPushCapability, RemoteClientError,
         SessionScope as ClientSessionScope,
@@ -655,6 +773,76 @@ mod tests {
 
     fn push_abort_url(token: &str) -> String {
         format!("https://genhub.bio/api/abort?capability={token}")
+    }
+
+    #[test]
+    fn test_read_capability_token_cache_reuses_tokens_until_expiry_or_unauthorized() {
+        let now = Utc::now();
+        let initial_expiry = now + ChronoDuration::hours(1);
+        let cache = ReadCapabilityTokenCache::new("initial-token".to_string(), initial_expiry, now)
+            .expect("should create the per-VFS capability token cache");
+        let refresh_count = Arc::new(Mutex::new(0));
+
+        for _ in 0..8 {
+            let refresh_count = Arc::clone(&refresh_count);
+            assert_eq!(
+                cache
+                    .auth_token_at(AuthRefreshReason::Request, now, move || {
+                        *refresh_count.lock().expect("should lock refresh counter") += 1;
+                        Ok(("unexpected-token".to_string(), initial_expiry))
+                    })
+                    .expect("should reuse a valid token"),
+                "initial-token"
+            );
+        }
+        assert_eq!(
+            *refresh_count.lock().expect("should lock refresh counter"),
+            0,
+            "ordinary block requests should not acquire more capabilities"
+        );
+
+        let refresh_count_for_unauthorized = Arc::clone(&refresh_count);
+        assert_eq!(
+            cache
+                .auth_token_at(AuthRefreshReason::Unauthorized, now, move || {
+                    *refresh_count_for_unauthorized
+                        .lock()
+                        .expect("should lock refresh counter") += 1;
+                    Ok(("renewed-token".to_string(), initial_expiry))
+                })
+                .expect("should renew after an authorization rejection"),
+            "renewed-token"
+        );
+        assert_eq!(
+            cache
+                .auth_token_at(AuthRefreshReason::Request, now, || {
+                    panic!("a renewed token should be reused for ordinary requests")
+                })
+                .expect("should reuse the renewed token"),
+            "renewed-token"
+        );
+
+        let near_expiry = initial_expiry - ChronoDuration::seconds(30);
+        let refresh_count_for_expiry = Arc::clone(&refresh_count);
+        assert_eq!(
+            cache
+                .auth_token_at(AuthRefreshReason::Request, near_expiry, move || {
+                    *refresh_count_for_expiry
+                        .lock()
+                        .expect("should lock refresh counter") += 1;
+                    Ok((
+                        "preemptively-renewed-token".to_string(),
+                        near_expiry + ChronoDuration::hours(1),
+                    ))
+                })
+                .expect("should renew a token near its expiry"),
+            "preemptively-renewed-token"
+        );
+        assert_eq!(
+            *refresh_count.lock().expect("should lock refresh counter"),
+            2,
+            "only unauthorized and near-expiry requests should fetch a capability"
+        );
     }
 
     #[test]
