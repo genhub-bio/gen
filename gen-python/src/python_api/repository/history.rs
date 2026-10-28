@@ -230,6 +230,12 @@ impl PyAsset {
         self.asset.logical_path.as_deref()
     }
 
+    /// Whether the archived bytes are BGZF encoded and must be decoded for logical content.
+    #[getter]
+    fn archive_needs_decode(&self) -> bool {
+        self.asset.materialized_checksum.is_some()
+    }
+
     /// Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash and
     /// the bytes may be compressed (BGZF), so use `save_as()` for a plain copy you can name, read
     /// and share. Raises `FileNotFoundError` when the
@@ -412,7 +418,10 @@ impl PyRepository {
     /// Set `create=True` to create a new branch at HEAD before checking it out. Creating an
     /// existing branch is an error unless `exist_ok=True`, which switches to it instead; use that
     /// in notebook cells that may be run more than once.
-    #[pyo3(signature = (branch, *, create=false, exist_ok=false))]
+    ///
+    /// Set `materialize_assets=False` to switch refs without restoring asset files into the
+    /// workspace. The default continues to materialize checked-out assets.
+    #[pyo3(signature = (branch, *, create=false, exist_ok=false, materialize_assets=true))]
     fn checkout(
         &self,
         #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<
@@ -421,6 +430,7 @@ impl PyRepository {
         >,
         create: bool,
         exist_ok: bool,
+        materialize_assets: bool,
     ) -> PyResult<PyBranch> {
         let name = branch_name(branch)?;
         let already_exists = self.find_branch(&name).is_ok();
@@ -435,12 +445,13 @@ impl PyRepository {
                 .map_err(history_err_to_pyerr)?;
             self.create_branch(&name, None)?;
         }
-        r#gen::commands::checkout::execute(
+        r#gen::commands::checkout::execute_with_asset_materialization(
             self.context.graph().conn(),
             self.context.config().conn(),
             self.context.workspace(),
             None,
             Some(&name),
+            materialize_assets,
         )
         .map_err(history_err_to_pyerr)?;
         self.find_branch(&name)

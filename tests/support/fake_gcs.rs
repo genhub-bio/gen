@@ -29,11 +29,14 @@ struct ObjectStore {
     buckets: HashSet<String>,
     objects: HashMap<String, StoredObject>,
     next_generation: u64,
+    write_request_count: u64,
+    writes_denied: bool,
 }
 
 pub struct FakeGcsServer {
     endpoint: String,
     stopped: Arc<AtomicBool>,
+    store: Arc<Mutex<ObjectStore>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -79,6 +82,7 @@ impl FakeGcsServer {
         Self {
             endpoint: format!("http://{address}"),
             stopped,
+            store,
             worker: Some(worker),
         }
     }
@@ -93,6 +97,7 @@ impl FakeGcsServer {
             prefix,
             project: project.to_string(),
             endpoint: self.endpoint.clone(),
+            store: Arc::clone(&self.store),
         };
         database.initialize_container();
         database.upload(local_database);
@@ -105,9 +110,32 @@ pub struct FakeGcsDatabase {
     prefix: String,
     project: String,
     endpoint: String,
+    store: Arc<Mutex<ObjectStore>>,
 }
 
 impl FakeGcsDatabase {
+    pub fn write_request_count(&self) -> u64 {
+        self.store
+            .lock()
+            .expect("should lock fake GCS object store")
+            .write_request_count
+    }
+
+    pub fn set_writes_denied(&self, denied: bool) {
+        self.store
+            .lock()
+            .expect("should lock fake GCS object store")
+            .writes_denied = denied;
+    }
+
+    pub fn storage(&self) -> Storage {
+        Storage::google_json_with_endpoint(
+            &self.project,
+            format!("{}/{}/", self.bucket, self.prefix.trim_matches('/')),
+            &self.endpoint,
+        )
+    }
+
     pub fn uri(&self) -> String {
         CloudConnectionUri::gcs(
             &self.bucket,
@@ -230,6 +258,10 @@ fn handle_request(store: &Arc<Mutex<ObjectStore>>, request: &HttpRequest) -> Vec
             return json_response("400 Bad Request", json!({"error":"missing bucket name"}));
         };
         let mut store = store.lock().expect("should lock fake GCS object store");
+        store.write_request_count += 1;
+        if store.writes_denied {
+            return json_response("403 Forbidden", json!({"error":"writes are disabled"}));
+        }
         let status = if store.buckets.insert(bucket.clone()) {
             "200 OK"
         } else {
@@ -243,6 +275,10 @@ fn handle_request(store: &Arc<Mutex<ObjectStore>>, request: &HttpRequest) -> Vec
             return json_response("400 Bad Request", json!({"error":"missing object name"}));
         };
         let mut store = store.lock().expect("should lock fake GCS object store");
+        store.write_request_count += 1;
+        if store.writes_denied {
+            return json_response("403 Forbidden", json!({"error":"writes are disabled"}));
+        }
         store.next_generation += 1;
         let generation = store.next_generation.to_string();
         store.objects.insert(

@@ -3,6 +3,14 @@ use std::{fs, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
 use gen_core::{HashId, config::Workspace};
+#[cfg(feature = "remote")]
+use gen_models::history::{HistoryStore, dolt::DoltHistoryStore};
+#[cfg(all(
+    feature = "remote",
+    feature = "browser-cloud",
+    target_os = "emscripten"
+))]
+use gen_models::operations::{Remote as ModelRemote, RemoteBranch};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
@@ -11,8 +19,6 @@ use gen_models::{
     operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
-#[cfg(feature = "remote")]
-use gen_models::{history::HistoryStore, history::dolt::DoltHistoryStore};
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
@@ -178,21 +184,14 @@ impl PyRepository {
     /// Reopens the graph connection after orchestration performed work through another connection.
     #[cfg(feature = "remote")]
     pub(crate) fn refresh_graph_connection(&mut self) -> PyResult<()> {
-        let graph_path = self
-            .context
-            .workspace()
-            .graph_db_path()
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let intended_branch = Defaults::get_current_branch(self.context.config().conn());
-        let graph_connection =
-            get_connection_for_branch(graph_path.clone(), intended_branch.as_deref()).map_err(
-                |error| {
-                    PyRuntimeError::new_err(format!(
-                        "Failed to reopen database '{}': {error}",
-                        graph_path.display()
-                    ))
-                },
-            )?;
+        let graph_connection = r#gen::get_workspace_graph_connection_for_branch(
+            self.context.workspace(),
+            intended_branch.as_deref(),
+        )
+        .map_err(|error| {
+            PyRuntimeError::new_err(format!("Failed to reopen graph database: {error}"))
+        })?;
         self.context.set_graph(graph_connection);
         Ok(())
     }
@@ -290,6 +289,70 @@ impl PyRepository {
         let repository = Self::open_workspace(workspace)?;
         repository.set_committer(committer, email)?;
         Ok(repository)
+    }
+
+    /// Opens a GenHub graph directly through a scoped read capability, without cloning it.
+    ///
+    /// `path` holds local Gen configuration and the credential-free name of the registered graph
+    /// VFS. The graph's bearer URL stays inside its connection owner for the lifetime of this
+    /// repository. This entry point is available to the browser-cloud build.
+    #[cfg(feature = "remote")]
+    #[staticmethod]
+    #[pyo3(signature = (repository_url, path, branch=None, committer=None, email=None))]
+    fn open_remote_graph(
+        python: Python<'_>,
+        repository_url: &str,
+        path: PathBuf,
+        branch: Option<&str>,
+        committer: Option<&str>,
+        email: Option<&str>,
+    ) -> PyResult<Self> {
+        #[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+        {
+            if path.join(".gen").exists() {
+                return Err(PyValueError::new_err(
+                    "open_remote_graph requires a workspace without an existing .gen directory",
+                ));
+            }
+            let repository_url = repository_url.to_string();
+            let branch = branch.map(str::to_string);
+            let opened = python.detach(|| {
+                r#gen::commands::remote::operations::open_browser_graph(
+                    &repository_url,
+                    branch.as_deref(),
+                )
+            });
+            let opened = opened.map_err(PyRuntimeError::new_err)?;
+            let anchor = opened.anchor;
+            let graph = opened.graph;
+            let workspace = Workspace::new(path).with_graph_db_path_override(opened.graph_path);
+            let gen_dir = workspace.ensure_gen_dir();
+            let config_connection = get_config_connection(Some(gen_dir.join("gen.db")))
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            ModelRemote::create(&config_connection, "origin", &opened.canonical_remote_url)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            Defaults::set_default_remote(&config_connection, Some("origin"))
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            Defaults::set_current_branch(&config_connection, Some(&opened.branch))
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            RemoteBranch::set_remote_validated(&config_connection, &opened.branch, Some("origin"))
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+
+            let mut context = DbContext::new(workspace, graph, config_connection)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            context.set_graph_anchor(std::sync::Arc::new(std::sync::Mutex::new(anchor)));
+            let repository = Self { context };
+            repository.set_committer(committer, email)?;
+            Ok(repository)
+        }
+
+        #[cfg(not(all(feature = "browser-cloud", target_os = "emscripten")))]
+        {
+            let _ = (python, repository_url, path, branch, committer, email);
+            Err(PyRuntimeError::new_err(
+                "open_remote_graph requires Gen's browser-cloud build",
+            ))
+        }
     }
 
     /// Path of the `.gen` directory holding this repository's databases and assets.

@@ -4,7 +4,7 @@ use std::{
 };
 
 use r#gen::{
-    get_connection_for_branch,
+    get_connection_for_branch, get_workspace_graph_connection_for_branch,
     views::{
         annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
@@ -33,7 +33,7 @@ use gen_graph::GenGraph;
 use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
-    db::GraphConnection,
+    db::{GraphConnection, GraphVfsAnchor},
     history::dolt::active_branch,
 };
 use gen_tui::{
@@ -261,6 +261,9 @@ struct GraphPage {
     // Viewer callbacks reopen connections and must keep the plotted graph's branch.
     branch: Option<String>,
     workspace: Workspace,
+    // Graph callbacks reopen secondary handles by VFS name; retain the VFS owner even if the
+    // Repository object that created this widget is dropped.
+    _graph_anchor: Option<GraphVfsAnchor>,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
@@ -287,14 +290,15 @@ struct FileTrack {
     loaded_window: Option<(i64, i64)>,
 }
 
-/// The information needed to lazily build a `GraphPage` on first visit,
-/// without holding a live (non-`Send`) database handle in the meantime.
+/// The information needed to lazily build a `GraphPage` on first visit without retaining its
+/// query connection. A shared VFS anchor may remain attached to protect a direct cloud graph.
 #[derive(Clone)]
 struct PageRef {
     name: String,
     db_path: PathBuf,
     branch: String,
     workspace: Workspace,
+    graph_anchor: Option<GraphVfsAnchor>,
     block_group_id: HashId,
     show_history: bool,
 }
@@ -321,6 +325,7 @@ impl GraphPage {
         name: String,
         db_path: PathBuf,
         workspace: Workspace,
+        graph_anchor: Option<GraphVfsAnchor>,
         mut graph: GenGraph,
         show_history: bool,
     ) -> Self {
@@ -333,6 +338,7 @@ impl GraphPage {
             db_path,
             branch: None,
             workspace,
+            _graph_anchor: graph_anchor,
             block_group_id: None,
             controller,
             overlays: Vec::new(),
@@ -343,8 +349,12 @@ impl GraphPage {
     }
 
     fn open_conn(&self) -> PyResult<GraphConnection> {
-        get_connection_for_branch(&self.db_path, self.branch.as_deref())
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        let connection = if self.workspace.has_graph_db_path_override() {
+            get_workspace_graph_connection_for_branch(&self.workspace, self.branch.as_deref())
+        } else {
+            get_connection_for_branch(&self.db_path, self.branch.as_deref())
+        };
+        connection.map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
     fn all_node_ids(&self) -> HashSet<HashId> {
@@ -1095,6 +1105,7 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> P
         )
     })?;
     let graph_conn = context.graph().conn();
+    let graph_anchor = context.graph_anchor();
     let db_path = graph_conn
         .path()
         .map(PathBuf::from)
@@ -1105,6 +1116,7 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> P
         sg.name.clone(),
         db_path,
         context.workspace().clone(),
+        graph_anchor,
         graph,
         show_history,
     );
@@ -1115,8 +1127,8 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> P
     Ok(page)
 }
 
-/// Capture the information needed to lazily build a page for `sg` later,
-/// without holding a live (non-`Send`) database handle in the meantime.
+/// Capture the information needed to lazily build a page for `sg` later without retaining its
+/// query connection. A shared VFS anchor may stay attached to keep a direct cloud graph available.
 fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<PageRef> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
@@ -1135,6 +1147,7 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyRe
         branch: active_branch(context.graph().conn())
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
         workspace: context.workspace().clone(),
+        graph_anchor: context.graph_anchor(),
         block_group_id: sg.id,
         show_history,
     })
@@ -1182,6 +1195,7 @@ impl PyGraphController {
                 String::new(),
                 db_path,
                 workspace,
+                None,
                 graph,
                 show_history,
             )))],
@@ -1227,8 +1241,15 @@ impl PyGraphController {
     fn active(&mut self) -> PyResult<&mut GraphPage> {
         let page = &mut self.pages[self.current_index];
         if let Page::Pending(page_ref) = page {
-            let conn = get_connection_for_branch(&page_ref.db_path, Some(&page_ref.branch))
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let conn = if page_ref.workspace.has_graph_db_path_override() {
+                get_workspace_graph_connection_for_branch(
+                    &page_ref.workspace,
+                    Some(&page_ref.branch),
+                )
+            } else {
+                get_connection_for_branch(&page_ref.db_path, Some(&page_ref.branch))
+            }
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let graph =
                 BlockGroup::get_graph(&conn, &page_ref.workspace, &page_ref.block_group_id, None)
                     .map_err(block_group_err_to_pyerr)?;
@@ -1236,6 +1257,7 @@ impl PyGraphController {
                 page_ref.name.clone(),
                 page_ref.db_path.clone(),
                 page_ref.workspace.clone(),
+                page_ref.graph_anchor.clone(),
                 graph,
                 page_ref.show_history,
             );

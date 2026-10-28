@@ -128,6 +128,11 @@ class Asset:
         `path` continues to identify the archived copy inside `.gen`.
         """
     @property
+    def archive_needs_decode(self) -> builtins.bool:
+        r"""
+        Whether the archived bytes are BGZF encoded and must be decoded for logical content.
+        """
+    @property
     def path(self) -> pathlib.Path:
         r"""
         Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash and
@@ -523,6 +528,7 @@ class Repository:
         *,
         create: builtins.bool = False,
         exist_ok: builtins.bool = False,
+        materialize_assets: builtins.bool = True,
     ) -> Branch:
         r"""
         Checks out a branch by name or Branch object and returns its updated metadata.
@@ -530,6 +536,9 @@ class Repository:
         Set `create=True` to create a new branch at HEAD before checking it out. Creating an
         existing branch is an error unless `exist_ok=True`, which switches to it instead; use that
         in notebook cells that may be run more than once.
+
+        Set `materialize_assets=False` to switch refs without restoring asset files into the
+        workspace. The default continues to materialize checked-out assets.
         """
     def get_operations(
         self,
@@ -738,6 +747,21 @@ class Repository:
         directory. `committer` and `email` become the identity recorded on operations made through
         this object.
         """
+    @staticmethod
+    def open_remote_graph(
+        repository_url: builtins.str,
+        path: builtins.str | os.PathLike | pathlib.Path,
+        branch: typing.Optional[builtins.str] = None,
+        committer: typing.Optional[builtins.str] = None,
+        email: typing.Optional[builtins.str] = None,
+    ) -> Repository:
+        r"""
+        Opens a GenHub graph directly through a scoped read capability, without cloning it.
+
+        `path` holds local Gen configuration and the credential-free name of the registered graph
+        VFS. The graph's bearer URL stays inside its connection owner for the lifetime of this
+        repository. This entry point is available to the browser-cloud build.
+        """
     def get_sequence_graph(self, id: HashId | str) -> SequenceGraph:
         r"""
         Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use
@@ -801,16 +825,30 @@ class Repository:
         discards remote work, so use it only when asked.
         """
     def pull(
-        self, remote: str | Remote | None = None, branch: str | Branch | None = None
+        self,
+        remote: str | Remote | None = None,
+        branch: str | Branch | None = None,
+        *,
+        include_assets: builtins.bool = True,
     ) -> None:
         r"""
-        Pulls a remote branch using the same merge and asset workflow as the Gen CLI.
+        Pulls a remote branch, optionally downloading its referenced asset files.
+
+        `include_assets=False` updates graph history and refs while leaving asset bytes for a
+        caller-managed or lazy read path. The default preserves the eager CLI behavior.
         """
     def fetch(
-        self, remote: str | Remote | None = None, branch: str | Branch | None = None
+        self,
+        remote: str | Remote | None = None,
+        branch: str | Branch | None = None,
+        *,
+        include_assets: builtins.bool = True,
     ) -> None:
         r"""
         Fetches a branch into its remote-tracking ref without changing the checkout.
+
+        `include_assets=False` skips downloading immutable asset history. The default remains
+        eager so existing repositories retain their current behavior.
         """
     def build_index(
         self, sequence_kind: builtins.str = "dna", k: builtins.int = 16

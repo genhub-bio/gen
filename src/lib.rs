@@ -82,6 +82,40 @@ pub fn get_raw_connection(
     Ok(GraphConnection(conn))
 }
 
+/// Opens a workspace graph database through its explicitly configured registered VFS URI.
+///
+/// This path avoids creating a missing remote graph or running local migrations against it. Normal
+/// workspace database paths continue through [`get_connection_for_branch`] unchanged.
+///
+/// # Errors
+///
+/// Returns a connection error if the named VFS URI cannot be opened or the requested branch cannot
+/// be selected.
+pub fn get_workspace_graph_connection_for_branch(
+    workspace: &Workspace,
+    branch: Option<&str>,
+) -> Result<GraphConnection, core::errors::ConnectionError> {
+    let db_path = workspace.graph_db_path()?;
+    if !workspace.has_graph_db_path_override() {
+        return get_connection_for_branch(db_path, branch);
+    }
+
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    rusqlite::vtab::array::load_module(&conn)?;
+    let graph = GraphConnection(conn);
+    if let Some(branch) = branch
+        && active_branch(&graph)? != branch
+    {
+        checkout(&graph, branch)?;
+    }
+    Ok(graph)
+}
+
 pub fn get_config_connection(
     db_path: impl Into<Option<PathBuf>>,
 ) -> Result<ConfigConnection, core::errors::ConnectionError> {
