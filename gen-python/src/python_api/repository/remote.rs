@@ -431,7 +431,7 @@ mod tests {
 
             commit_collection(&remote_repository, "pulled");
             local_repository
-                .pull(python, None, None)
+                .pull(python, None, None, true)
                 .expect("should pull current tracked branch");
             assert!(
                 has_collection(&local_repository, "pulled"),
@@ -459,7 +459,12 @@ mod tests {
             };
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             local_repository
-                .fetch(python, None, Some(feature_object.bind(python).as_any()))
+                .fetch(
+                    python,
+                    None,
+                    Some(feature_object.bind(python).as_any()),
+                    true,
+                )
                 .expect("should fetch Branch object");
             assert_eq!(
                 active_branch(local_repository.context.graph().conn())
