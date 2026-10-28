@@ -160,7 +160,9 @@ def direct_gcs_database(local_database):
         stderr_file.seek(0)
         details = stderr_file.read().strip()
         if details:
-            message = f"{message}\n{details[-4000:]}"
+            if len(details) > 8000:
+                details = f"{details[:4000]}\n... stderr omitted ...\n{details[-4000:]}"
+            message = f"{message}\n{details}"
         return RuntimeError(message)
 
     try:
