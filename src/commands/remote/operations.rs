@@ -118,7 +118,11 @@ use url::Url;
 use uuid::Uuid;
 
 mod capability;
+#[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+mod direct_read;
 mod push_session;
+#[cfg(all(feature = "browser-cloud", target_os = "emscripten"))]
+pub use direct_read::{BrowserGraphOpen, open_browser_graph};
 use push_session::PushGraphTransferError;
 #[cfg(any(
     all(feature = "remote-native", not(target_os = "emscripten")),
@@ -159,7 +163,7 @@ use crate::{
             UploadBodyReader, format_elapsed,
         },
     },
-    get_config_connection, get_connection_for_branch, get_raw_connection,
+    get_config_connection, get_raw_connection, get_workspace_graph_connection_for_branch,
 };
 
 const BROWSER_ASSET_RANGE_BYTES: u64 = 4 * 1024 * 1024;
@@ -2294,7 +2298,7 @@ pub fn execute_push(
     let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let intended_branch = Defaults::get_current_branch(&config);
-    let graph = get_connection_for_branch(workspace.graph_db_path()?, intended_branch.as_deref())?;
+    let graph = get_workspace_graph_connection_for_branch(workspace, intended_branch.as_deref())?;
     let persisted_branch = connect_persisted_branch(&graph, &config)?;
     let branch = if let Some(explicit_branch) = explicit_branch {
         explicit_branch.to_string()
@@ -2604,14 +2608,31 @@ pub fn execute_pull(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    execute_pull_with_assets(workspace, explicit_remote, explicit_branch, true)
+}
+
+/// Pulls graph history and optionally transfers the referenced asset files.
+///
+/// Browser sessions that read asset bytes lazily pass `include_assets = false`; the graph pull,
+/// branch tracking, and transfer checkpoint behavior remain the same.
+///
+/// # Errors
+///
+/// Returns an error if the graph transfer fails or, when enabled, an asset cannot be transferred.
+pub fn execute_pull_with_assets(
+    workspace: &Workspace,
+    explicit_remote: Option<&str>,
+    explicit_branch: Option<&str>,
+    include_assets: bool,
+) -> Result<(), Box<dyn Error>> {
     let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let graph_path = workspace.graph_db_path()?;
-    if !graph_path.exists() {
+    if !workspace.has_graph_db_path_override() && !graph_path.exists() {
         return Err("Cannot pull without an existing graph database; use `gen clone` to initialize a workspace from a remote repository".into());
     }
     let intended_branch = Defaults::get_current_branch(&config);
-    let graph = get_connection_for_branch(&graph_path, intended_branch.as_deref())?;
+    let graph = get_workspace_graph_connection_for_branch(workspace, intended_branch.as_deref())?;
     let persisted_branch = connect_persisted_branch(&graph, &config)?;
     let branch = explicit_branch
         .map(str::to_string)
@@ -2619,13 +2640,17 @@ pub fn execute_pull(
         .unwrap_or(active_branch(&graph)?);
     let remote = resolve_remote(&config, explicit_remote, &branch)?;
     let previous_hash = branch_hash(&graph, &branch)?;
-    let mut operation = RemoteOperationRecord::begin_or_resume(
-        &config,
-        &remote.name,
-        &branch,
-        StoredRemoteOperationKind::Pull,
-        previous_hash.as_ref(),
-    )?;
+    let mut operation = if include_assets {
+        Some(RemoteOperationRecord::begin_or_resume(
+            &config,
+            &remote.name,
+            &branch,
+            StoredRemoteOperationKind::Pull,
+            previous_hash.as_ref(),
+        )?)
+    } else {
+        None
+    };
     if let Err(error) = run_graph_transfer(
         &graph,
         &remote,
@@ -2634,41 +2659,45 @@ pub fn execute_pull(
         false,
         || pull(&graph, &remote.name, &branch),
     ) {
-        if let Err(metadata_error) = operation.fail(&config) {
+        if let Some(operation) = operation.as_ref()
+            && let Err(metadata_error) = operation.fail(&config)
+        {
             eprintln!(
                 "Warning: failed to record unsuccessful pull operation for branch '{branch}': {metadata_error}"
             );
         }
         return Err(error);
     }
-    let destination_hash = hash_of(&graph, &branch)?;
-    operation.set_destination(&config, &destination_hash)?;
-    let assets_transfer_checkpoint = operation.assets_transfer_checkpoint;
-    let previous_hash = operation.from_commit;
-    transfer_assets(
-        &graph,
-        workspace,
-        &remote,
-        RemoteOperation::Pull,
-        AssetTransferRun {
-            target: AssetTransferTarget {
-                branch: &branch,
-                history_ref: &branch,
-                range: AssetTransferRange {
-                    from_commit: assets_transfer_checkpoint.as_ref(),
-                    previous_hash: previous_hash.as_ref(),
-                    materialize: true,
+    if let Some(operation) = operation.as_mut() {
+        let destination_hash = hash_of(&graph, &branch)?;
+        operation.set_destination(&config, &destination_hash)?;
+        let assets_transfer_checkpoint = operation.assets_transfer_checkpoint;
+        let previous_hash = operation.from_commit;
+        transfer_assets(
+            &graph,
+            workspace,
+            &remote,
+            RemoteOperation::Pull,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: &branch,
+                    history_ref: &branch,
+                    range: AssetTransferRange {
+                        from_commit: assets_transfer_checkpoint.as_ref(),
+                        previous_hash: previous_hash.as_ref(),
+                        materialize: true,
+                    },
                 },
+                progress: &progress,
             },
-            progress: &progress,
-        },
-        |commit_hash| {
-            operation.advance_assets_transfer_checkpoint(&config, commit_hash)?;
-            Ok(())
-        },
-        || Ok(()),
-    )?;
-    operation.complete(&config)?;
+            |commit_hash| {
+                operation.advance_assets_transfer_checkpoint(&config, commit_hash)?;
+                Ok(())
+            },
+            || Ok(()),
+        )?;
+        operation.complete(&config)?;
+    }
     RemoteBranch::set_remote_validated(&config, &branch, Some(&remote.name))?;
     println!("Pulled branch '{branch}' from '{}'.", remote.name);
     Ok(())
@@ -2682,9 +2711,23 @@ pub fn execute_fetch(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    execute_fetch_with_assets(workspace, explicit_remote, explicit_branch, true)
+}
+
+/// Fetches graph refs and optionally hydrates their asset history.
+///
+/// # Errors
+///
+/// Returns an error if the graph fetch fails or, when enabled, asset history cannot be hydrated.
+pub fn execute_fetch_with_assets(
+    workspace: &Workspace,
+    explicit_remote: Option<&str>,
+    explicit_branch: Option<&str>,
+    include_assets: bool,
+) -> Result<(), Box<dyn Error>> {
     let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
-    let graph = get_connection_for_branch(workspace.graph_db_path()?, None)?;
+    let graph = get_workspace_graph_connection_for_branch(workspace, None)?;
     let branch = explicit_branch
         .map(str::to_string)
         .or_else(|| Defaults::get_current_branch(&config))
@@ -2699,27 +2742,29 @@ pub fn execute_fetch(
         || fetch(&graph, &remote.name, Some(&branch)),
     )?;
 
-    let tracking_ref = format!("{}/{}", remote.name, branch);
-    transfer_assets(
-        &graph,
-        workspace,
-        &remote,
-        RemoteOperation::Pull,
-        AssetTransferRun {
-            target: AssetTransferTarget {
-                branch: &branch,
-                history_ref: &tracking_ref,
-                range: AssetTransferRange {
-                    from_commit: None,
-                    previous_hash: None,
-                    materialize: false,
+    if include_assets {
+        let tracking_ref = format!("{}/{}", remote.name, branch);
+        transfer_assets(
+            &graph,
+            workspace,
+            &remote,
+            RemoteOperation::Pull,
+            AssetTransferRun {
+                target: AssetTransferTarget {
+                    branch: &branch,
+                    history_ref: &tracking_ref,
+                    range: AssetTransferRange {
+                        from_commit: None,
+                        previous_hash: None,
+                        materialize: false,
+                    },
                 },
+                progress: &progress,
             },
-            progress: &progress,
-        },
-        |_| Ok(()),
-        || Ok(()),
-    )?;
+            |_| Ok(()),
+            || Ok(()),
+        )?;
+    }
     println!("Fetched branch '{branch}' from '{}'.", remote.name);
     Ok(())
 }
@@ -2797,17 +2842,27 @@ mod tests {
         collection::Collection,
         db::{ConfigConnection, GraphConnection},
         file_types::FileTypes,
-        history::dolt::{clone_remote, commit_all, remote_rows, remove_remote},
+        history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
         operations::{
             Defaults, FileAddition, OperationFile, Remote,
             RemoteOperationKind as StoredRemoteOperationKind, RemoteOperationRecord,
             calculate_reader_checksum,
         },
     };
+    #[cfg(feature = "remote-native")]
+    use gen_models::{
+        db::DbContext,
+        history::dolt::{active_branch, connect_branch, create_branch},
+    };
     use noodles::bgzf;
     #[cfg(feature = "remote-native")]
     use rusqlite::blockcachevfs::AuthRefreshReason;
     use rusqlite::{Connection, Error as SqlError};
+    #[cfg(feature = "remote-native")]
+    use rusqlite::{
+        OpenFlags,
+        blockcachevfs::{AttachSpec, BlockCacheVfs, Config},
+    };
     use serde_json::json;
     use tempfile::tempdir;
     use url::Url;
@@ -2817,11 +2872,14 @@ mod tests {
         AssetDownloadBatch, AssetTransferRange, AssetTransferRun, AssetTransferTarget,
         DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
         clone_into_workspace, download_to_staged_path_with_progress, ensure_graph_remote,
-        execute_pull, execute_push, file_graph_url, get_remaining_assets_to_transfer,
-        resolve_remote, run_graph_transfer, temporary_path, transfer_assets, upload_asset,
+        execute_fetch_with_assets, execute_pull, execute_pull_with_assets, execute_push,
+        file_graph_url, get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer,
+        temporary_path, transfer_assets, upload_asset,
     };
     #[cfg(feature = "remote-native")]
     use crate::commands::remote::client::{CapabilityResponse, DirectPushCapability};
+    #[cfg(feature = "remote-native")]
+    use crate::get_ro_connection;
     use crate::{
         asset_materialization::{
             AssetCopyStage, copy_versioned_asset as copy_local_asset,
@@ -2876,6 +2934,306 @@ mod tests {
             url,
             None,
         )
+    }
+
+    #[cfg(feature = "remote-native")]
+    #[test]
+    fn test_direct_cab_graph_reads_and_unpublished_write_overlay() {
+        let temp = tempdir().expect("should create direct CAB graph workspace");
+        let workspace = Workspace::new(temp.path().join("repo"));
+        workspace.ensure_gen_dir();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve source graph path");
+        let graph = get_connection(graph_path.clone()).expect("should create source graph");
+        Collection::create(&graph, "main-only").expect("should create main collection");
+        let asset = test_asset(b"asset metadata", "readme.txt", 1);
+        AssetRef::create(&graph, &asset).expect("should add source asset metadata");
+        commit_all(&graph, "source graph").expect("should commit source graph");
+        create_branch(&graph, "feature").expect("should create feature branch");
+        connect_branch(&graph, "feature").expect("should connect feature branch");
+        Collection::create(&graph, "feature-only").expect("should add feature collection");
+        commit_all(&graph, "feature graph").expect("should commit feature graph");
+        connect_branch(&graph, "main").expect("should restore source main branch");
+        drop(graph);
+
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&graph_path);
+        let original_write_count = gcs_database.write_request_count();
+        let cloud_uri = gcs_database.uri();
+
+        let read_only = get_ro_connection(&cloud_uri).expect("should open read-only CAB graph");
+        let main_connection = read_only;
+        assert_eq!(
+            active_branch(&main_connection).expect("should read CAB branch"),
+            "main"
+        );
+        let assets = AssetRef::get_cumulative_assets_at(&main_connection, None, None)
+            .expect("should read CAB asset history");
+        assert!(
+            assets
+                .iter()
+                .any(|remote_asset| remote_asset.id == asset.id)
+        );
+        drop(main_connection);
+
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve local config path");
+        let config = get_config_connection(Some(config_path)).expect("should open local config");
+        Defaults::set_current_branch(&config, Some("feature"))
+            .expect("should select feature branch in local config");
+        let read_only = get_ro_connection(&cloud_uri).expect("should reopen read-only CAB graph");
+        let binding_error = DbContext::new(workspace.clone(), read_only, config);
+        assert!(matches!(
+            binding_error,
+            Err(SqlError::SqliteFailure(sqlite_error, _))
+                if sqlite_error.code == rusqlite::ErrorCode::ReadOnly
+        ));
+
+        let config = get_config_connection(Some(
+            workspace
+                .gen_db_path()
+                .expect("should resolve local config path"),
+        ))
+        .expect("should reopen local config");
+        let writable = Connection::open_with_flags(
+            &cloud_uri,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("should open the plain CAB VFS for local branch binding");
+        let context = DbContext::new(workspace.clone(), GraphConnection(writable), config)
+            .expect("should bind local feature selection to the CAB connection");
+        assert_eq!(
+            active_branch(context.graph().conn()).expect("should read selected CAB branch"),
+            "feature"
+        );
+        let feature_only_count: i64 = context
+            .graph()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE name = 'feature-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should query feature graph through CAB");
+        assert_eq!(feature_only_count, 1);
+        drop(context);
+        assert_eq!(
+            gcs_database.write_request_count(),
+            original_write_count,
+            "read-only open and asset history plus local VFS branch binding must not write GCS objects"
+        );
+
+        let writable = Connection::open_with_flags(
+            &cloud_uri,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("should open the plain CAB VFS without a scoped session");
+        let writable = GraphConnection(writable);
+        Collection::create(&writable, "local-overlay-only")
+            .expect("should write into the plain VFS local overlay");
+        let local_overlay_count: i64 = writable
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE name = 'local-overlay-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should observe local overlay write in its open connection");
+        assert_eq!(local_overlay_count, 1);
+        drop(writable);
+        assert_eq!(
+            gcs_database.write_request_count(),
+            original_write_count,
+            "dropping a plain CAB VFS connection must not upload its local overlay"
+        );
+
+        let reopened = get_ro_connection(&cloud_uri).expect("should reopen canonical CAB graph");
+        let canonical_overlay_count: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE name = 'local-overlay-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should query canonical graph after local overlay closes");
+        assert_eq!(canonical_overlay_count, 0);
+        assert_eq!(gcs_database.write_request_count(), original_write_count);
+    }
+
+    #[cfg(feature = "remote-native")]
+    #[test]
+    fn test_context_clone_keeps_named_cloud_vfs_registered_until_final_drop() {
+        let temp = tempdir().expect("should create named VFS lifetime workspace");
+        let workspace = Workspace::new(temp.path().join("repo"));
+        workspace.ensure_gen_dir();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve source graph path");
+        let source = get_connection(&graph_path).expect("should create source graph");
+        Collection::create(&source, "anchor-lifetime")
+            .expect("should seed the graph for a cloud VFS");
+        commit_all(&source, "anchor lifetime graph").expect("should commit the source graph");
+        drop(source);
+
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&graph_path);
+        let anchor = Connection::open_with_flags(
+            gcs_database.uri(),
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("should open the CAB VFS owner connection");
+        let database_path = anchor
+            .blockcachevfs_path()
+            .expect("should get the owned VFS database path");
+        let vfs_name = anchor
+            .blockcachevfs_name()
+            .expect("should get the owned VFS name");
+        let mut graph_url = Url::from_file_path(Path::new(&database_path))
+            .expect("should construct a file URI for the owned VFS");
+        graph_url.query_pairs_mut().append_pair("vfs", vfs_name);
+        let graph_uri = graph_url.as_str().to_string();
+        let graph = Connection::open_with_flags(
+            &graph_uri,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("should open the secondary graph connection by VFS name");
+        let config = get_config_connection(Some(
+            workspace
+                .gen_db_path()
+                .expect("should resolve local config path"),
+        ))
+        .expect("should open local config");
+        let mut context = DbContext::new(
+            workspace.with_graph_db_path_override(PathBuf::from(&graph_uri)),
+            GraphConnection(graph),
+            config,
+        )
+        .expect("should create a context with its secondary VFS connection");
+        let anchor = Arc::new(Mutex::new(anchor));
+        let weak_anchor = Arc::downgrade(&anchor);
+        context.set_graph_anchor(Arc::clone(&anchor));
+        let context_clone = context.clone();
+
+        drop(anchor);
+        drop(context);
+        assert!(
+            weak_anchor.upgrade().is_some(),
+            "a cloned context should retain the VFS owner after the original context drops"
+        );
+        let live_connection = Connection::open_with_flags(
+            &graph_uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("the named VFS should remain registered while a context clone lives");
+        let collection_count: i64 = live_connection
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE name = 'anchor-lifetime'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should query through the still-registered VFS");
+        assert_eq!(collection_count, 1);
+        drop(live_connection);
+        drop(context_clone);
+
+        assert!(
+            weak_anchor.upgrade().is_none(),
+            "the final context drop should release the VFS owner"
+        );
+        assert!(
+            Connection::open_with_flags(
+                &graph_uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .is_err(),
+            "the named VFS should no longer open after its owner and secondary handles drop"
+        );
+    }
+
+    #[cfg(feature = "remote-native")]
+    #[test]
+    fn test_unscoped_vfs_staging_requires_gcs_write_access_under_cache_pressure() {
+        let temp = tempdir().expect("should create VFS pressure workspace");
+        let workspace = Workspace::new(temp.path().join("repo"));
+        workspace.ensure_gen_dir();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve source graph path");
+        let graph = get_connection(graph_path.clone()).expect("should create source graph");
+        Collection::create(&graph, "baseline").expect("should create baseline collection");
+        commit_all(&graph, "baseline").expect("should commit baseline graph");
+        drop(graph);
+
+        let fake_gcs = FakeGcsServer::start();
+        let gcs_database = fake_gcs.create_database(&graph_path);
+        let writes_before_pressure = gcs_database.write_request_count();
+        gcs_database.set_writes_denied(true);
+
+        let cache_directory = tempdir().expect("should create low-capacity VFS cache");
+        let vfs = BlockCacheVfs::builder(cache_directory.path())
+            .expect("should create block cache builder")
+            .name("unscoped-read-only-cab-pressure-test")
+            .expect("should set test VFS name")
+            .config(Config::CacheSize(4 * 1024 * 1024))
+            .config(Config::StageWatermark(1))
+            .auth_callback(|_provider, _account, _container| Ok("fake-gcs-token".to_string()))
+            .init_owned()
+            .expect("should initialize low-capacity VFS");
+        let attachment = AttachSpec::new(gcs_database.storage()).alias("remote_graph");
+        vfs.attach(&attachment)
+            .expect("should attach existing read-only CAB container");
+        let graph = vfs
+            .open_with_flags(
+                "/remote_graph/default.db",
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .expect("should open plain unscoped VFS graph");
+        let graph = GraphConnection(graph);
+        Collection::create(&graph, "pressure-write")
+            .expect("should write initial graph page into local cache");
+        let error = commit_all(&graph, "pressure commit")
+            .expect_err("commit should fail when the stage watermark attempts a denied GCS PUT");
+        let pressure_write_count = gcs_database.write_request_count();
+        assert!(
+            pressure_write_count > writes_before_pressure,
+            "stage watermark should attempt a GCS write before failing"
+        );
+        match error {
+            SqlError::SqliteFailure(sqlite_error, _) => assert_eq!(
+                sqlite_error.extended_code,
+                rusqlite::ffi::SQLITE_ERROR,
+                "Dolt currently collapses the staged GCS authorization failure"
+            ),
+            other => panic!("expected a failed Dolt commit, got {other:?}"),
+        }
+        drop(graph);
+        assert!(
+            gcs_database.write_request_count() > writes_before_pressure,
+            "low cache pressure should attempt a staged GCS write"
+        );
+
+        let read_only = get_ro_connection(gcs_database.uri())
+            .expect("should reopen canonical graph after rejected stage");
+        let pressure_rows: i64 = read_only
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE name = 'pressure-write'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should query canonical graph after rejected stage");
+        assert_eq!(pressure_rows, 0);
     }
 
     #[cfg(feature = "remote-native")]
@@ -5199,6 +5557,87 @@ mod tests {
             .expect("should count completed pull operations");
         assert_eq!(completed_operations, 1);
         asset_server.join().expect("asset server should finish");
+    }
+
+    #[test]
+    fn test_pull_and_fetch_can_skip_assets_then_default_pull_hydrates_them() {
+        let temp = tempdir().expect("should create remote fixture root");
+        let remote_workspace = Workspace::new(temp.path().join("remote"));
+        remote_workspace.ensure_gen_dir();
+        let remote_graph = get_connection(remote_workspace.graph_db_path().unwrap())
+            .expect("should create remote graph database");
+        Collection::create(&remote_graph, "base").expect("should create base collection");
+        commit_all(&remote_graph, "initial state").expect("should commit initial state");
+        let remote_graph_path = remote_workspace.graph_db_path().unwrap();
+        drop(remote_graph);
+
+        let workspace = Workspace::new(temp.path().join("local"));
+        workspace.ensure_gen_dir();
+        let local_graph = get_raw_connection(workspace.graph_db_path().unwrap())
+            .expect("should open local graph database");
+        clone_remote(&local_graph, &file_path_uri(&remote_graph_path))
+            .expect("should clone graph before the asset commit");
+        drop(local_graph);
+
+        let contents = b"deferred asset bytes\n";
+        let asset = test_asset(contents, "feature.gfa", 1);
+        let remote_graph =
+            get_connection(&remote_graph_path).expect("should reopen remote graph database");
+        AssetRef::create(&remote_graph, &asset).expect("should add remote asset metadata");
+        commit_all(&remote_graph, "add deferred asset")
+            .expect("should commit remote asset metadata");
+        drop(remote_graph);
+        let remote_asset_path = versioned_asset_path(&remote_workspace, &asset);
+        fs::create_dir_all(remote_asset_path.parent().unwrap())
+            .expect("should create remote asset store");
+        fs::write(&remote_asset_path, contents).expect("should write remote asset bytes");
+
+        let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+            .expect("should open local config database");
+        let remote_url = Url::from_directory_path(remote_workspace.base_dir())
+            .expect("should create remote workspace URL")
+            .to_string();
+        let remote =
+            Remote::create(&config, "origin", &remote_url).expect("should configure origin");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set default remote");
+
+        execute_fetch_with_assets(&workspace, None, None, false)
+            .expect("fetch should update remote refs without assets");
+        let local_graph = get_connection(workspace.graph_db_path().unwrap())
+            .expect("should reopen local graph database");
+        let tracking_hash = hash_of(&local_graph, "origin/main")
+            .expect("fetch should create the remote-tracking branch");
+        assert!(
+            AssetRef::get_cumulative_assets_at(&local_graph, None, Some(&tracking_hash))
+                .expect("should read fetched asset metadata")
+                .iter()
+                .any(|fetched_asset| fetched_asset.id == asset.id),
+            "fetch should transfer graph metadata even when asset bytes are omitted"
+        );
+        assert!(
+            !versioned_asset_path(&workspace, &asset).exists(),
+            "fetch with include_assets=false should not download archived bytes"
+        );
+
+        execute_pull_with_assets(&workspace, None, None, false)
+            .expect("pull should update the current branch without assets");
+        assert!(
+            !versioned_asset_path(&workspace, &asset).exists(),
+            "pull with include_assets=false should not download archived bytes"
+        );
+        assert!(
+            !workspace.base_dir().join("feature.gfa").exists(),
+            "graph-only pull should not materialize logical asset files"
+        );
+
+        execute_pull(&workspace, None, None)
+            .expect("default pull should hydrate assets after a graph-only pull");
+        assert_eq!(
+            fs::read(workspace.base_dir().join("feature.gfa")).expect("should read hydrated asset"),
+            contents,
+            "the eager default should still download and materialize asset bytes"
+        );
     }
 
     #[test]

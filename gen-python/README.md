@@ -35,10 +35,11 @@ sample.plot()  # or sg.plot()
 
 ## GenHub browser notebooks
 
-The `gen.browser` module clones an authenticated GenHub repository into a
-temporary browser workspace. It uses Gen's normal clone, pull, and push APIs;
-the browser session cookie is sent by the Gen remote transport. Edits stay local
-until the commit widget pushes a branch:
+The `gen.browser` module opens an authenticated GenHub graph directly through
+Gen's browser cloud remote. File metadata is listed lazily and file bodies are
+read from their signed asset URLs only when requested. The browser session
+cookie is used only for same-origin repository requests; edits stay local until
+the commit widget pushes a branch:
 
 Browser-cloud builds use `rusqdoltlite` 0.41.2 from the pinned `browser-cloud`
 Git revision in both Cargo manifests. An isolated build may override that
@@ -55,7 +56,16 @@ session = await NotebookSession.open(
 repo = session.repository
 graphs = repo.get_sequence_graphs()
 
-# Pull the selected branch when you want to refresh the local workspace.
+# Discover tracked logical files without downloading their contents.
+print(list(session.files))
+file = session.files["reference/chr1.fa"]
+file_url = await file.url()  # short-lived; keep it out of notebook output
+
+# Stream logical (decompressed when Gen marks the archive as encoded) bytes.
+async with file.open() as stream:
+    first_chunk = await stream.read(64 * 1024)
+
+# Refresh graph metadata without materializing every file body.
 session.refresh()
 
 # Save the active notebook into Gen history with the repository changes.

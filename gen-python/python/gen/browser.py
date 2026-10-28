@@ -9,13 +9,21 @@ import json
 import mimetypes
 import os
 import secrets
-import stat
 import tempfile
 import unicodedata
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
+
+from .browser_files import (
+    BrowserFileError,
+    RepositoryAssetFile,
+    fetch_asset_response,
+    fetch_repository_files,
+    signed_url_expiration,
+)
 
 
 class NotebookSessionError(RuntimeError):
@@ -27,8 +35,20 @@ _MAX_CONTENTS_FILE_BYTES = _MAX_NOTEBOOK_BYTES
 _NOTEBOOK_CAPTURE_TIMEOUT = 30
 _DEFAULT_NOTEBOOK_PATH = "notebooks/Untitled.ipynb"
 _CONTENTS_COMM_TARGET = "genhub.repository.contents"
-_CONTENTS_RESERVED_COMPONENTS = {".gen", ".git"}
+_CONTENTS_RESERVED_COMPONENTS = {".git"}
 _CONTENTS_DATABASE_NAMES = {"default.db", "gen.db"}
+_CONTENTS_OUTSIDE_ROOT_COMPONENTS = (".gen", "outside_root")
+_CONTENTS_DIRECTORY_EPOCH = "1970-01-01T00:00:00+00:00"
+
+
+def _valid_contents_timestamp(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def _contents_path(value: Any) -> str:
@@ -82,10 +102,53 @@ def _contents_path(value: Any) -> str:
     return value
 
 
+def _tracked_asset_path(value: Any) -> str:
+    path = _contents_path(value)
+    if path in {".gen", "/".join(_CONTENTS_OUTSIDE_ROOT_COMPONENTS)}:
+        raise NotebookSessionError("Gen workspace directories are not repository files")
+    return path
+
+
+def _safe_contents_name(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        _contents_path(value)
+    except NotebookSessionError:
+        return False
+    return True
+
+
+def _asset_identity(asset: Any) -> str:
+    try:
+        identity = str(asset.id)
+    except (AttributeError, TypeError) as error:
+        raise NotebookSessionError(
+            "Gen asset metadata is missing its content identity"
+        ) from error
+    if not identity:
+        raise NotebookSessionError("Gen asset content identity is invalid")
+    return identity
+
+
 def _validate_contents_components(components: list[str]) -> None:
     if any(
         component.casefold() in _CONTENTS_RESERVED_COMPONENTS
         for component in components
+    ):
+        raise NotebookSessionError("Repository path contains an internal component")
+    gen_components = [
+        index
+        for index, component in enumerate(components)
+        if component.casefold() == ".gen"
+    ]
+    if gen_components and not (
+        gen_components == [0]
+        and components[0] == ".gen"
+        and (
+            len(components) == 1
+            or (len(components) > 1 and components[1] == "outside_root")
+        )
     ):
         raise NotebookSessionError("Repository path contains an internal component")
     for component in components:
@@ -289,11 +352,34 @@ def _validate_branch(value: Any) -> str | None:
     return value
 
 
-class NotebookSession:
-    """An isolated Gen clone with explicit branch publication.
+class _SessionFileMapping(Mapping[str, RepositoryAssetFile]):
+    """Read-only, current-ref view of the assets tracked by one notebook session."""
 
-    Open a session with a same-origin GenHub repository URL. Repository changes stay
-    in its temporary local workspace until the commit widget pushes a branch.
+    def __init__(self, session: NotebookSession) -> None:
+        self._session = session
+
+    def __getitem__(self, path: str) -> RepositoryAssetFile:
+        self._session._synchronize_file_refs()
+        return self._session._file_catalog[path]
+
+    def __iter__(self):
+        self._session._synchronize_file_refs()
+        return iter(tuple(self._session._file_catalog))
+
+    def __len__(self) -> int:
+        self._session._synchronize_file_refs()
+        return len(self._session._file_catalog)
+
+    def __repr__(self) -> str:
+        self._session._synchronize_file_refs()
+        return f"RepositoryFiles({list(self._session._file_catalog)!r})"
+
+
+class NotebookSession:
+    """A browser-side Gen graph session with explicit branch publication.
+
+    Open a session with a same-origin GenHub repository URL. The graph stays CAB-backed;
+    repository file bodies are read only when requested, and commits use normal Gen push.
     """
 
     def __init__(
@@ -309,10 +395,27 @@ class NotebookSession:
         self.repository_url = repository_url
         self.source_branch = source_branch
         self.base_commit = base_commit
+        self._working_branch = source_branch
+        self._working_commit = base_commit
+        self._published_branch = source_branch
+        self._published_asset_ids: dict[str, str] = {}
         self._temporary_directory = temporary_directory
         self.notebook_path = notebook_path
         self._contents_comm: Any | None = None
+        self._contents_tasks: set[asyncio.Task[Any]] = set()
+        self._active_streams: set[Any] = set()
+        self._file_catalog: dict[str, RepositoryAssetFile] = {}
+        self._files_view: Mapping[str, RepositoryAssetFile] = _SessionFileMapping(self)
+        self._file_refs_hash: str | None = None
+        self._manifest_loaded_hash: str | None = None
+        self._published_file_metadata: dict[str, dict[str, Any]] = {}
         self._closed = False
+
+    @property
+    def files(self) -> Mapping[str, RepositoryAssetFile]:
+        """Map repository-relative logical asset paths to lazy session-bound files."""
+        self._synchronize_file_refs()
+        return self._files_view
 
     def close(self) -> None:
         """Detach the read-only browser and remove this session's workspace."""
@@ -321,6 +424,21 @@ class NotebookSession:
         self._closed = True
         comm = self._contents_comm
         self._contents_comm = None
+        for task in tuple(self._contents_tasks):
+            task.cancel()
+        self._contents_tasks.clear()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            for stream in tuple(self._active_streams):
+                stream.close_local()
+        else:
+            for stream in tuple(self._active_streams):
+                loop.create_task(stream.close())
+        self._file_catalog.clear()
+        self._file_refs_hash = None
+        self._manifest_loaded_hash = None
+        self._published_file_metadata.clear()
         if comm is not None:
             try:
                 comm.close()
@@ -328,13 +446,19 @@ class NotebookSession:
                 pass
         self._temporary_directory.cleanup()
 
-    def expose_contents(self) -> Any:
-        """Open a session-bound read-only Jupyter Contents comm for materialized assets.
+    def _register_asset_stream(self, stream: Any) -> None:
+        if self._closed:
+            raise NotebookSessionError("This notebook repository session is closed")
+        self._active_streams.add(stream)
 
-        The browser receives only current tracked files materialized in this clone's
-        workspace. Requests resolve ``Repository.get_assets()`` on demand, so pulls and
-        branch checkouts are reflected without copying archived assets into another
-        store.
+    def _unregister_asset_stream(self, stream: Any) -> None:
+        self._active_streams.discard(stream)
+
+    def expose_contents(self) -> Any:
+        """Open a session-bound Jupyter Contents comm for lazy repository assets.
+
+        The comm exposes current tracked metadata without fetching file bodies. Contents
+        reads stream only their requested signed URL, pinned to this session's branch head.
         """
         if self._closed:
             raise NotebookSessionError("This notebook repository session is closed")
@@ -358,7 +482,14 @@ class NotebookSession:
                 return
             content = message.get("content", {}) if isinstance(message, dict) else {}
             request = content.get("data", {}) if isinstance(content, dict) else {}
-            self._handle_contents_request(comm, request)
+            try:
+                task = asyncio.get_running_loop().create_task(
+                    self._handle_contents_request(comm, request)
+                )
+            except RuntimeError:
+                return
+            self._contents_tasks.add(task)
+            task.add_done_callback(self._contents_tasks.discard)
 
         def detached(_message: Any) -> None:
             if self._contents_comm is comm:
@@ -368,34 +499,49 @@ class NotebookSession:
         comm.on_close(detached)
         return comm
 
-    def _handle_contents_request(self, comm: Any, request: Any) -> None:
+    async def _handle_contents_request(self, comm: Any, request: Any) -> None:
         if not isinstance(request, dict):
             return
         request_id = request.get("id")
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
             return
         try:
-            if request.get("method") != "get":
-                raise NotebookSessionError("Only read-only get requests are supported")
-            if type(request.get("content")) is not bool:
-                raise NotebookSessionError(
-                    "Contents requests must specify a boolean content flag"
+            method = request.get("method")
+            if method == "url":
+                path = _contents_path(request.get("path"))
+                file = self.files.get(path)
+                if file is None:
+                    raise NotebookSessionError("Path is not a tracked repository file")
+                url = await file.url()
+                response = {
+                    "id": request_id,
+                    "url": str(url),
+                    "mimetype": file.mimetype,
+                }
+            elif method == "get":
+                if type(request.get("content")) is not bool:
+                    raise NotebookSessionError(
+                        "Contents requests must specify a boolean content flag"
+                    )
+                requested_format = request.get("format")
+                if requested_format is not None and (
+                    not isinstance(requested_format, str)
+                    or requested_format not in {"text", "base64", "json"}
+                ):
+                    raise NotebookSessionError(
+                        "Contents format must be text, base64, or json"
+                    )
+                model = await self._contents_model(
+                    request.get("path"),
+                    content=request["content"],
+                    format=requested_format,
                 )
-            requested_format = request.get("format")
-            if requested_format is not None and (
-                not isinstance(requested_format, str)
-                or requested_format not in {"text", "base64", "json"}
-            ):
+                response = {"id": request_id, "model": model}
+            else:
                 raise NotebookSessionError(
-                    "Contents format must be text, base64, or json"
+                    "Only read-only get and url requests are supported"
                 )
-            model = self._contents_model(
-                request.get("path"),
-                content=request["content"],
-                format=requested_format,
-            )
-            response = {"id": request_id, "model": model}
-        except NotebookSessionError as error:
+        except (BrowserFileError, NotebookSessionError) as error:
             response = {"id": request_id, "error": {"message": str(error)}}
         except Exception:
             response = {
@@ -409,77 +555,413 @@ class NotebookSession:
                 if self._contents_comm is comm:
                     self._contents_comm = None
 
-    def _contents_workspace(self) -> Path:
-        return Path(self._temporary_directory.name).resolve()
+    def _synchronize_file_refs(self, *, force: bool = False) -> None:
+        """Rebuild the synchronous logical-path map when the graph ref advances."""
+        if self._closed:
+            raise NotebookSessionError("This notebook repository session is closed")
+        current_branch = self.repository.current_branch
+        if current_branch is None:
+            raise NotebookSessionError("The repository has no checked out branch")
+        current_branch_name = current_branch.name
+        current_hash = str(current_branch.head)
+        ref_changed = (
+            current_branch_name != self._working_branch
+            or current_hash != self._working_commit
+        )
+        if ref_changed:
+            self.source_branch = current_branch_name
+            self._working_branch = current_branch_name
+            self._working_commit = current_hash
+            self._file_catalog.clear()
+            self._file_refs_hash = None
+            self._notify_contents_changed()
+        if not force and self._file_refs_hash == current_hash:
+            return
 
-    def _contents_database_paths(self, workspace: Path) -> set[Path]:
-        database_paths = {
-            workspace / "default.db",
-            workspace / ".gen" / "default.db",
-            Path(self.repository.gen_dir) / "default.db",
-        }
-        return {
-            sibling
-            for database_path in database_paths
-            for sibling in (
-                database_path,
-                database_path.with_name(f"{database_path.name}-wal"),
-                database_path.with_name(f"{database_path.name}-shm"),
-                database_path.with_name(f"{database_path.name}-journal"),
-            )
-        }
-
-    def _materialized_contents_files(self) -> dict[str, Path]:
-        workspace = self._contents_workspace()
-        database_paths = self._contents_database_paths(workspace)
-        files: dict[str, Path] = {}
+        refreshed: dict[str, RepositoryAssetFile] = {}
         for asset in self.repository.get_assets():
+            if asset.name is not None and not _safe_contents_name(asset.name):
+                continue
+            candidate = asset.logical_path or asset.name
             try:
-                relative_path = _contents_path(asset.logical_path)
+                path = _tracked_asset_path(candidate)
             except NotebookSessionError:
                 continue
-            if not relative_path:
+            if not path:
                 continue
-            candidate = workspace
-            components = relative_path.split("/")
             try:
-                for component in components:
-                    candidate = candidate / component
-                    file_status = candidate.lstat()
-                    if stat.S_ISLNK(file_status.st_mode):
-                        raise NotebookSessionError(
-                            "Symbolic links are not available in repository browsing"
-                        )
-                if not stat.S_ISREG(file_status.st_mode):
-                    continue
-                resolved = candidate.resolve(strict=True)
-                if not resolved.is_relative_to(workspace):
-                    continue
-                if any(
-                    os.path.samefile(resolved, database_path)
-                    for database_path in database_paths
-                    if database_path.exists()
-                ):
-                    continue
-            except (
-                FileNotFoundError,
-                NotADirectoryError,
-                OSError,
-                NotebookSessionError,
+                archive_needs_decode = asset.archive_needs_decode
+            except AttributeError:
+                raise NotebookSessionError(
+                    "Gen asset metadata is missing its archive decoding flag"
+                ) from None
+            if type(archive_needs_decode) is not bool:
+                raise NotebookSessionError("Gen asset archive metadata is invalid")
+            previous = self._file_catalog.get(path)
+            asset_id = _asset_identity(asset)
+            if (
+                previous is not None
+                and previous._snapshot_hash == current_hash
+                and previous._asset_id == asset_id
+            ):
+                refreshed[path] = previous
+                continue
+            name = asset.name if isinstance(asset.name, str) else None
+            is_published = self._published_asset_ids.get(path) == asset_id
+            refreshed[path] = RepositoryAssetFile(
+                self,
+                path=path,
+                name=name or path.rsplit("/", 1)[-1],
+                size=None,
+                last_modified=_CONTENTS_DIRECTORY_EPOCH,
+                file_type="file",
+                mimetype=mimetypes.guess_type(path)[0],
+                archive_needs_decode=archive_needs_decode,
+                asset=asset,
+                snapshot_hash=current_hash,
+                published_snapshot_hash=self.base_commit if is_published else None,
+            )
+            cached_metadata = self._published_file_metadata.get(path)
+            if (
+                is_published
+                and cached_metadata is not None
+                and cached_metadata["asset_id"] == asset_id
+                and cached_metadata["snapshot_hash"] == self.base_commit
+            ):
+                refreshed[path]._set_metadata(
+                    name=cached_metadata["name"],
+                    size=cached_metadata["size"],
+                    last_modified=cached_metadata["last_modified"],
+                    file_type=cached_metadata["file_type"],
+                    mimetype=cached_metadata["mimetype"],
+                    archive_needs_decode=archive_needs_decode,
+                    url=cached_metadata["url"],
+                    url_expires_at=cached_metadata["url_expires_at"],
+                )
+
+        self._file_catalog.clear()
+        self._file_catalog.update(refreshed)
+        self._file_refs_hash = current_hash
+        for path, file in tuple(self._file_catalog.items()):
+            try:
+                self._local_asset_path(file)
+            except NotebookSessionError:
+                del self._file_catalog[path]
+
+    def _record_published_ref(
+        self,
+        snapshot_hash: str | None = None,
+        branch: str | None = None,
+        asset_ids: dict[str, str] | None = None,
+    ) -> None:
+        """Pin the current graph state as the last successfully opened/published remote ref."""
+        current_branch = self.repository.current_branch
+        if current_branch is None:
+            raise NotebookSessionError("The repository has no checked out branch")
+        resolved_branch = branch or current_branch.name
+        resolved_hash = snapshot_hash or str(current_branch.head)
+        if resolved_branch != current_branch.name:
+            raise NotebookSessionError(
+                "The selected graph branch changed while recording it"
+            )
+        if asset_ids is None and resolved_hash != str(current_branch.head):
+            raise NotebookSessionError(
+                "The graph head changed while recording its published snapshot"
+            )
+
+        ref_changed = (
+            self._published_branch != resolved_branch
+            or self.base_commit != resolved_hash
+        )
+        working_ref_changed = (
+            self._working_branch != current_branch.name
+            or self._working_commit != str(current_branch.head)
+        )
+        self.source_branch = resolved_branch
+        self.base_commit = resolved_hash
+        self._published_branch = resolved_branch
+        self._published_asset_ids = (
+            self._current_asset_ids() if asset_ids is None else dict(asset_ids)
+        )
+        if ref_changed:
+            self._manifest_loaded_hash = None
+            self._published_file_metadata.clear()
+        if ref_changed or working_ref_changed:
+            self._file_catalog.clear()
+            self._file_refs_hash = None
+        self._working_branch = resolved_branch
+        self._working_commit = str(current_branch.head)
+        self._synchronize_file_refs(force=True)
+        if ref_changed:
+            self._notify_contents_changed()
+
+    def _current_asset_ids(self) -> dict[str, str]:
+        assets: dict[str, str] = {}
+        for asset in self.repository.get_assets():
+            try:
+                path = _tracked_asset_path(asset.logical_path or asset.name)
+            except NotebookSessionError:
+                continue
+            if not path:
+                continue
+            assets[path] = _asset_identity(asset)
+        return assets
+
+    def _remote_tracking_ref(
+        self, branch_name: str
+    ) -> tuple[str, dict[str, str]] | None:
+        """Return a verified origin tracking head and its asset identities, when present."""
+        tracking_name = f"origin/{branch_name}"
+        branch = next(
+            (
+                candidate
+                for candidate in self.repository.get_branches()
+                if candidate.name == tracking_name and candidate.remote == "origin"
+            ),
+            None,
+        )
+        if branch is None:
+            return None
+        asset_ids: dict[str, str] = {}
+        for asset in self.repository.get_assets(branch=tracking_name):
+            try:
+                path = _tracked_asset_path(asset.logical_path or asset.name)
+            except NotebookSessionError:
+                continue
+            if not path:
+                continue
+            asset_ids[path] = _asset_identity(asset)
+        return str(branch.head), asset_ids
+
+    async def _refresh_file_catalog(
+        self, snapshot_hash: str, *, force: bool = False
+    ) -> None:
+        """Refresh signed URL metadata for the session's pinned repository commit."""
+        self._synchronize_file_refs()
+        if snapshot_hash != self.base_commit:
+            raise NotebookSessionError(
+                "Repository file metadata is pinned to an older commit"
+            )
+        if not force and self._manifest_loaded_hash == snapshot_hash:
+            return
+        try:
+            response_files = await fetch_repository_files(
+                self.repository_url, self._published_branch, snapshot_hash
+            )
+        except BrowserFileError as error:
+            raise NotebookSessionError(str(error)) from None
+
+        if self._closed or snapshot_hash != self.base_commit:
+            raise NotebookSessionError(
+                "Repository file metadata belongs to a stale commit"
+            )
+        for response_file in response_files:
+            path_value = response_file.get("path") or response_file.get("name")
+            try:
+                path = _tracked_asset_path(path_value)
+            except NotebookSessionError:
+                continue
+            if not path:
+                continue
+            file = self._file_catalog.get(path)
+            if (
+                file is None
+                or file._published_snapshot_hash != snapshot_hash
+                or self._published_asset_ids.get(path) != file._asset_id
             ):
                 continue
-            files[relative_path] = resolved
-        return files
+            try:
+                expires_at = signed_url_expiration(
+                    response_file.get("url"), self.repository_url, path
+                )
+            except BrowserFileError:
+                # External URI references and malformed URLs are not storage capabilities.
+                continue
+            size = response_file.get("size")
+            if type(size) is not int or size < 0:
+                size = file.size
+            name = response_file.get("name")
+            if not isinstance(name, str) or not name:
+                name = path.rsplit("/", 1)[-1]
+            elif not _safe_contents_name(name):
+                continue
+            last_modified = response_file.get("last_modified")
+            if not isinstance(last_modified, str):
+                last_modified = _CONTENTS_DIRECTORY_EPOCH
+            file_type = response_file.get("file_type")
+            if not isinstance(file_type, str):
+                file_type = "file"
+            metadata = {
+                "asset_id": file._asset_id,
+                "snapshot_hash": snapshot_hash,
+                "name": name,
+                "size": size,
+                "last_modified": last_modified
+                if _valid_contents_timestamp(last_modified)
+                else _CONTENTS_DIRECTORY_EPOCH,
+                "file_type": file_type,
+                "mimetype": mimetypes.guess_type(path)[0],
+                "url": response_file.get("url"),
+                "url_expires_at": expires_at,
+            }
+            self._published_file_metadata[path] = metadata
+            file._set_metadata(
+                name=metadata["name"],
+                size=metadata["size"],
+                last_modified=metadata["last_modified"],
+                file_type=metadata["file_type"],
+                mimetype=metadata["mimetype"],
+                archive_needs_decode=file._archive_needs_decode,
+                url=metadata["url"],
+                url_expires_at=metadata["url_expires_at"],
+            )
+        self._manifest_loaded_hash = snapshot_hash
 
-    def _contents_model(
+    def _ensure_file_current(self, file: RepositoryAssetFile) -> None:
+        self._synchronize_file_refs()
+        if (
+            file._snapshot_hash != self._working_commit
+            or self._file_catalog.get(file.path) is not file
+        ):
+            raise NotebookSessionError(
+                "Repository file belongs to an older graph commit"
+            )
+
+    def _local_asset_path(self, file: RepositoryAssetFile) -> Path | None:
+        self._ensure_file_current(file)
+        try:
+            local_path = Path(file._asset.path)
+        except FileNotFoundError:
+            return None
+        except (AttributeError, OSError, RuntimeError, TypeError):
+            raise NotebookSessionError(
+                "Local repository asset path is invalid"
+            ) from None
+        try:
+            if not local_path.exists():
+                return None
+            assets_root = (Path(self.repository.gen_dir) / "assets").resolve()
+            resolved = local_path.resolve(strict=True)
+            if not resolved.is_file() or not resolved.is_relative_to(assets_root):
+                raise NotebookSessionError(
+                    "Local asset path is outside repository storage"
+                )
+        except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError):
+            raise NotebookSessionError(
+                "Local repository asset path is invalid"
+            ) from None
+
+        database_paths = {
+            root / f"{database_name}{suffix}"
+            for root in (
+                Path(self._temporary_directory.name),
+                Path(self.repository.gen_dir),
+            )
+            for database_name in ("default.db", "gen.db")
+            for suffix in ("", "-wal", "-shm", "-journal")
+        }
+        for database_path in database_paths:
+            try:
+                if database_path.exists() and os.path.samefile(resolved, database_path):
+                    raise NotebookSessionError("Database files are not available")
+            except OSError:
+                continue
+        return resolved
+
+    async def _ensure_file_url(
+        self, file: RepositoryAssetFile, *, force: bool = False
+    ) -> None:
+        self._ensure_file_current(file)
+        if (
+            file._published_snapshot_hash != self.base_commit
+            or self._published_asset_ids.get(file.path) != file._asset_id
+        ):
+            raise NotebookSessionError(
+                "File has not been published to repository storage yet"
+            )
+        expires_at = file._url_expires_at
+        expired = file._url is not None and (
+            expires_at is None
+            or expires_at <= datetime.now(timezone.utc) + timedelta(seconds=30)
+        )
+        if force or self._manifest_loaded_hash != self.base_commit or expired:
+            await self._refresh_file_catalog(self.base_commit, force=force or expired)
+        self._ensure_file_current(file)
+        if file._url is None:
+            raise NotebookSessionError(
+                "File has not been published to repository storage yet"
+            )
+        if file._url_expires_at is None or file._url_expires_at <= datetime.now(
+            timezone.utc
+        ) + timedelta(seconds=30):
+            if force:
+                raise NotebookSessionError(
+                    "Could not obtain a current signed repository file URL"
+                )
+            await self._refresh_file_catalog(self.base_commit, force=True)
+            self._ensure_file_current(file)
+            if (
+                file._url is None
+                or file._url_expires_at is None
+                or file._url_expires_at
+                <= datetime.now(timezone.utc) + timedelta(seconds=30)
+            ):
+                raise NotebookSessionError(
+                    "Could not obtain a current signed repository file URL"
+                )
+
+    async def _open_asset_response(self, file: RepositoryAssetFile) -> Any:
+        if self._closed:
+            raise NotebookSessionError("This notebook repository session is closed")
+        self._ensure_file_current(file)
+        await self._ensure_file_url(file)
+        if file._url is None:
+            raise NotebookSessionError(
+                "File has not been published to repository storage yet"
+            )
+        response = await fetch_asset_response(file._url)
+        if self._closed:
+            await self._cancel_asset_response(response)
+            raise NotebookSessionError("This notebook repository session is closed")
+        if response.status in {401, 403}:
+            await self._cancel_asset_response(response)
+            await self._ensure_file_url(file, force=True)
+            if file._url is None:
+                raise NotebookSessionError(
+                    "File has not been published to repository storage yet"
+                )
+            response = await fetch_asset_response(file._url)
+            if self._closed:
+                await self._cancel_asset_response(response)
+                raise NotebookSessionError("This notebook repository session is closed")
+        if not response.ok:
+            await self._cancel_asset_response(response)
+            raise NotebookSessionError(
+                f"Could not read repository file (HTTP {response.status})"
+            )
+        return response
+
+    @staticmethod
+    async def _cancel_asset_response(response: Any) -> None:
+        body = getattr(response, "body", None)
+        cancel = getattr(body, "cancel", None)
+        if cancel is None:
+            return
+        try:
+            await cancel()
+        except Exception:
+            pass
+
+    async def _contents_model(
         self, path: Any, *, content: bool, format: str | None = None
     ) -> dict[str, Any]:
+        self._synchronize_file_refs()
         relative_path = _contents_path(path)
-        files = self._materialized_contents_files()
-        file_path = files.get(relative_path)
-        if file_path is not None:
-            return self._contents_file_model(
-                relative_path, file_path, content=content, requested_format=format
+        files = self._file_catalog
+        file = files.get(relative_path)
+        if file is not None:
+            return await self._contents_file_model(
+                file, content=content, requested_format=format
             )
 
         directories = {""}
@@ -490,7 +972,7 @@ class NotebookSession:
             )
         if relative_path not in directories:
             raise NotebookSessionError(
-                "Path is not a tracked materialized file or directory"
+                "Path is not a tracked repository file or directory"
             )
 
         name = relative_path.rsplit("/", 1)[-1] if relative_path else ""
@@ -504,13 +986,13 @@ class NotebookSession:
             "writable": False,
             "size": None,
         }
-        modified = self._contents_directory_timestamp(relative_path)
+        modified = self._contents_directory_timestamp(relative_path, files)
         model["created"] = modified
         model["last_modified"] = modified
         if content:
             prefix = f"{relative_path}/" if relative_path else ""
             children: dict[str, dict[str, Any]] = {}
-            for file_name, child_path in files.items():
+            for file_name, child_file in files.items():
                 if not file_name.startswith(prefix):
                     continue
                 remainder = file_name[len(prefix) :]
@@ -518,36 +1000,32 @@ class NotebookSession:
                 child_relative_path = f"{prefix}{child_name}"
                 if separator:
                     children[child_name] = self._contents_directory_model(
-                        child_name, child_relative_path
+                        child_name, child_relative_path, files
                     )
                 else:
-                    children[child_name] = self._contents_file_model(
-                        child_relative_path,
-                        child_path,
+                    children[child_name] = await self._contents_file_model(
+                        child_file,
                         content=False,
                         requested_format=None,
                     )
             model["content"] = [children[key] for key in sorted(children)]
         return model
 
-    def _contents_directory_timestamp(self, path: str) -> str:
-        directory = self._contents_workspace()
-        if path:
-            for component in path.split("/"):
-                directory = directory / component
-                directory_status = directory.lstat()
-                if not stat.S_ISDIR(directory_status.st_mode):
-                    raise NotebookSessionError(
-                        "Repository directory changed while listing contents"
-                    )
-        else:
-            directory_status = directory.lstat()
-        return datetime.fromtimestamp(
-            directory_status.st_mtime, timezone.utc
-        ).isoformat()
+    def _contents_directory_timestamp(
+        self, path: str, files: Mapping[str, RepositoryAssetFile]
+    ) -> str:
+        prefix = f"{path}/" if path else ""
+        timestamps = [
+            file.last_modified
+            for file_path, file in files.items()
+            if file_path.startswith(prefix)
+        ]
+        return max(timestamps, default=_CONTENTS_DIRECTORY_EPOCH)
 
-    def _contents_directory_model(self, name: str, path: str) -> dict[str, Any]:
-        modified = self._contents_directory_timestamp(path)
+    def _contents_directory_model(
+        self, name: str, path: str, files: Mapping[str, RepositoryAssetFile]
+    ) -> dict[str, Any]:
+        modified = self._contents_directory_timestamp(path, files)
         return {
             "name": name,
             "path": path,
@@ -561,45 +1039,39 @@ class NotebookSession:
             "last_modified": modified,
         }
 
-    @staticmethod
-    def _contents_file_model(
-        path: str,
-        file_path: Path,
+    async def _contents_file_model(
+        self,
+        file: RepositoryAssetFile,
         *,
         content: bool,
         requested_format: str | None,
     ) -> dict[str, Any]:
-        file_status = file_path.stat()
-        modified = datetime.fromtimestamp(
-            file_status.st_mtime, timezone.utc
-        ).isoformat()
+        path = file.path
         model: dict[str, Any] = {
-            "name": path.rsplit("/", 1)[-1],
+            "name": file.name,
             "path": path,
             "type": "notebook" if path.lower().endswith(".ipynb") else "file",
             "content": None,
             "format": None,
-            "mimetype": mimetypes.guess_type(path)[0],
+            "mimetype": file.mimetype,
             "writable": False,
-            "size": file_status.st_size,
-            "created": modified,
-            "last_modified": modified,
+            "size": file.size,
+            "created": file.last_modified,
+            "last_modified": file.last_modified,
         }
         if not content:
             return model
 
-        if file_status.st_size > _MAX_CONTENTS_FILE_BYTES:
-            raise NotebookSessionError(
-                "File exceeds the 8 MiB browser read limit. Use Gen in a notebook cell "
-                "to query large genomic files without opening them in the editor"
-            )
-        with file_path.open("rb") as stream:
-            file_contents = stream.read(_MAX_CONTENTS_FILE_BYTES + 1)
-        if len(file_contents) > _MAX_CONTENTS_FILE_BYTES:
-            raise NotebookSessionError(
-                "File exceeds the 8 MiB browser read limit. Use Gen in a notebook cell "
-                "to query large genomic files without opening them in the editor"
-            )
+        try:
+            file_contents = await file.read(_MAX_CONTENTS_FILE_BYTES)
+        except BrowserFileError as error:
+            if "browser read limit" in str(error):
+                raise NotebookSessionError(
+                    "File exceeds the 8 MiB browser read limit. Use Gen in a notebook cell "
+                    "to query large genomic files without opening them in the editor"
+                ) from None
+            raise NotebookSessionError(str(error)) from None
+        model["size"] = file.size
         resolved_format = requested_format or (
             "json" if path.lower().endswith(".ipynb") else None
         )
@@ -657,42 +1129,34 @@ class NotebookSession:
         email: str | None = None,
         notebook_path: str | None = None,
     ) -> NotebookSession:
-        """Clone a GenHub repository and open its selected branch locally."""
+        """Open a CAB-backed GenHub graph on the selected branch without cloning assets."""
         repository_url = _absolute_repository_url(repository_url)
         branch = _validate_branch(branch)
         if notebook_path is not None:
             notebook_path = _validate_notebook_path(notebook_path)
         temporary_directory = tempfile.TemporaryDirectory(prefix="gen-notebook-")
         try:
-            from . import clone
+            from . import Repository
 
-            repository = clone(
+            repository = Repository.open_remote_graph(
                 repository_url,
                 path=temporary_directory.name,
+                branch=branch,
                 committer=committer,
                 email=email,
             )
             current_branch = repository.current_branch
             if current_branch is None:
                 raise NotebookSessionError(
-                    "The cloned repository has no checked out branch"
+                    "The opened repository has no checked out branch"
                 )
             source_branch = branch or current_branch.name
-            if source_branch != current_branch.name:
-                repository.fetch("origin", source_branch)
-                local_branches = {item.name for item in repository.get_branches()}
-                if source_branch not in local_branches:
-                    repository.create_branch(source_branch, f"origin/{source_branch}")
-                repository.checkout(source_branch)
-                repository.set_branch_remote("origin")
-                repository.pull()
-            current_branch = repository.current_branch
             if current_branch is None or current_branch.name != source_branch:
                 raise NotebookSessionError(
                     f"Gen could not check out branch '{source_branch}'"
                 )
             base_commit = str(current_branch.head)
-            return cls(
+            session = cls(
                 repository,
                 repository_url,
                 source_branch,
@@ -700,31 +1164,49 @@ class NotebookSession:
                 temporary_directory,
                 notebook_path,
             )
+            session._record_published_ref(base_commit, source_branch)
+            return session
         except Exception as error:
             temporary_directory.cleanup()
             if isinstance(error, NotebookSessionError):
                 raise
             raise NotebookSessionError(
-                f"Could not clone GenHub repository: {error}"
+                f"Could not open GenHub repository: {error}"
             ) from error
 
     def refresh(self) -> str:
-        """Pull the selected branch from its configured GenHub remote."""
+        """Refresh the selected graph ref and invalidate files from the prior commit."""
         if self._closed:
             raise NotebookSessionError("This notebook repository session is closed")
         try:
-            self.repository.pull()
+            self.repository.pull(include_assets=False)
         except Exception as error:
             raise NotebookSessionError(
                 f"Could not pull branch '{self.source_branch}': {error}"
             ) from error
         current_branch = self.repository.current_branch
-        if current_branch is None or current_branch.name != self.source_branch:
+        if current_branch is None:
             raise NotebookSessionError(
-                "The repository checkout changed while refreshing the notebook"
+                "The repository has no checked out branch after refreshing"
             )
-        self.base_commit = str(current_branch.head)
-        self._notify_contents_changed()
+        tracking_ref = self._remote_tracking_ref(current_branch.name)
+        if tracking_ref is None:
+            self._synchronize_file_refs(force=True)
+            if (
+                current_branch.name != self._published_branch
+                or str(current_branch.head) != self.base_commit
+            ):
+                raise NotebookSessionError(
+                    "The graph refreshed, but its published remote head could not be verified; "
+                    "repository file URLs remain pinned to the previous published commit"
+                )
+            return self.base_commit
+        published_hash, asset_ids = tracking_ref
+        self._record_published_ref(
+            snapshot_hash=published_hash,
+            branch=current_branch.name,
+            asset_ids=asset_ids,
+        )
         return self.base_commit
 
     async def commit(
@@ -763,7 +1245,11 @@ class NotebookSession:
                     )
             else:
                 try:
-                    self.repository.checkout(target_branch, create=True)
+                    self.repository.checkout(
+                        target_branch,
+                        create=True,
+                        materialize_assets=False,
+                    )
                     self.repository.set_branch_remote("origin")
                 except (OSError, RuntimeError, TypeError, ValueError) as error:
                     raise NotebookSessionError(
@@ -810,7 +1296,15 @@ class NotebookSession:
             raise NotebookSessionError(
                 f"Could not push branch '{target_branch}': {error}"
             ) from error
-        self.base_commit = commit_hash
+        self._record_published_ref(commit_hash, target_branch)
+        try:
+            await self._refresh_file_catalog(commit_hash)
+        except NotebookSessionError:
+            self._file_catalog.clear()
+            self._notify_contents_changed()
+            raise NotebookSessionError(
+                "The branch was published, but repository file metadata could not be refreshed"
+            ) from None
         return {"branch": target_branch, "commit_hash": commit_hash}
 
     def commit_widget(self) -> Any:
