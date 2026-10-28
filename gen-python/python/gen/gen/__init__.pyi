@@ -121,6 +121,13 @@ class Asset:
         The file's original name, if known.
         """
     @property
+    def logical_path(self) -> typing.Optional[builtins.str]:
+        r"""
+        Repository-relative path used for this asset in the materialized workspace, including
+        parent directories. Unlike `name`, it identifies the checked-out file in the workspace;
+        `path` continues to identify the archived copy inside `.gen`.
+        """
+    @property
     def path(self) -> pathlib.Path:
         r"""
         Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash and

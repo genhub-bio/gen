@@ -222,6 +222,14 @@ impl PyAsset {
         self.asset.name.clone()
     }
 
+    /// Repository-relative path used for this asset in the materialized workspace, including
+    /// parent directories. Unlike `name`, it identifies the checked-out file in the workspace;
+    /// `path` continues to identify the archived copy inside `.gen`.
+    #[getter]
+    fn logical_path(&self) -> Option<&str> {
+        self.asset.logical_path.as_deref()
+    }
+
     /// Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash and
     /// the bytes may be compressed (BGZF), so use `save_as()` for a plain copy you can name, read
     /// and share. Raises `FileNotFoundError` when the

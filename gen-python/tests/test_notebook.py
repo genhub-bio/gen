@@ -1,8 +1,10 @@
 """Exercise browser notebook sessions with a native Gen repository."""
 
 import asyncio
+import base64
 import gzip
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -149,6 +151,33 @@ class FakeWidgetContainer:
         self.children = children
 
 
+class FakeComm:
+    def __init__(self, target_name, data):
+        self.target_name = target_name
+        self.data = data
+        self.sent = []
+        self.closed = False
+        self._message_callback = None
+        self._close_callback = None
+
+    def on_msg(self, callback):
+        self._message_callback = callback
+
+    def on_close(self, callback):
+        self._close_callback = callback
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def close(self):
+        self.closed = True
+        if self._close_callback is not None:
+            self._close_callback({})
+
+    def receive(self, data):
+        self._message_callback({"content": {"data": data}})
+
+
 class CaptureWidget:
     def __init__(self, document=None, error="", respond=True):
         self._capture_request_id = ""
@@ -204,6 +233,13 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
 
     def _release_source_repository(self):
         self.source_repository = None
+
+    def _add_workspace_asset(self, session, relative_path, contents):
+        path = Path(session._temporary_directory.name) / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+        session.repository.add_file(path)
+        return path
 
     def _clone_local_repository(
         self, repository_url, *, path, committer=None, email=None
@@ -300,6 +336,255 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.refresh(), self.base_commit)
         self.assertEqual(session.repository.calls, [("pull", None, None)])
+
+    async def test_contents_lists_and_reads_materialized_assets_on_demand(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_clone()
+        self.addCleanup(session.close)
+
+        self._add_workspace_asset(session, "docs/README.txt", b"repository notes")
+        self._add_workspace_asset(session, "docs/50%GC.fa", b">chr1\nACGT\n")
+        self._add_workspace_asset(session, "data/opaque.bin", b"\x00\x01\xff")
+        self._add_workspace_asset(
+            session,
+            "images/icon.svg",
+            b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        )
+        self._add_workspace_asset(
+            session,
+            "notebooks/example.ipynb",
+            json.dumps(NOTEBOOK).encode("utf-8"),
+        )
+        untracked = Path(session._temporary_directory.name) / "docs/untracked.txt"
+        untracked.write_text("not a tracked asset")
+
+        with (
+            patch.object(
+                Path,
+                "open",
+                side_effect=AssertionError("directory listing read file bytes"),
+            ),
+            patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("directory listing read file bytes"),
+            ),
+        ):
+            root = session._contents_model("", content=True)
+        self.assertEqual(root["type"], "directory")
+        self.assertFalse(root["writable"])
+        self.assertIsInstance(root["created"], str)
+        self.assertIsInstance(root["last_modified"], str)
+        self.assertIn("docs", {entry["name"] for entry in root["content"]})
+        self.assertNotIn("untracked.txt", {entry["name"] for entry in root["content"]})
+
+        docs = session._contents_model("docs", content=True)
+        self.assertEqual(
+            [entry["name"] for entry in docs["content"]],
+            ["50%GC.fa", "README.txt"],
+        )
+        text_file = session._contents_model("docs/README.txt", content=True)
+        self.assertEqual(text_file["content"], "repository notes")
+        self.assertEqual(text_file["format"], "text")
+        self.assertFalse(text_file["writable"])
+        self.assertIsInstance(text_file["created"], str)
+        self.assertIsInstance(text_file["last_modified"], str)
+        percent_name = session._contents_model("docs/50%GC.fa", content=True)
+        self.assertEqual(percent_name["content"], ">chr1\nACGT\n")
+
+        binary = session._contents_model("data/opaque.bin", content=True)
+        self.assertEqual(binary["format"], "base64")
+        self.assertEqual(base64.b64decode(binary["content"]), b"\x00\x01\xff")
+        svg = session._contents_model("images/icon.svg", content=True, format="base64")
+        self.assertEqual(svg["format"], "base64")
+        self.assertEqual(svg["mimetype"], "image/svg+xml")
+        self.assertEqual(
+            base64.b64decode(svg["content"]),
+            b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        )
+
+        notebook_listing = session._contents_model("notebooks", content=True)
+        notebook_entry = next(
+            entry
+            for entry in notebook_listing["content"]
+            if entry["name"] == "example.ipynb"
+        )
+        self.assertEqual(notebook_entry["type"], "notebook")
+        self.assertIsNone(notebook_entry["content"])
+
+        notebook = session._contents_model("notebooks/example.ipynb", content=True)
+        self.assertEqual(notebook["type"], "notebook")
+        self.assertEqual(notebook["format"], "json")
+        self.assertEqual(notebook["content"], NOTEBOOK)
+
+    async def test_contents_follow_the_checked_out_branch_asset_view(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_clone()
+        self.addCleanup(session.close)
+        main_branch = session.repository.current_branch.name
+        session.repository.create_branch("contents-feature")
+        session.repository.checkout("contents-feature")
+        self._add_workspace_asset(session, "feature-only.txt", b"feature")
+
+        session.repository.checkout(main_branch)
+        with self.assertRaises(NotebookSessionError):
+            session._contents_model("feature-only.txt", content=True)
+
+        session.repository.checkout("contents-feature")
+        model = session._contents_model("feature-only.txt", content=True)
+        self.assertEqual(model["content"], "feature")
+
+    async def test_contents_hide_database_names_and_reject_aliased_paths(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_clone()
+        self.addCleanup(session.close)
+        workspace = Path(session._temporary_directory.name)
+        database_path = Path(session.repository.gen_dir) / "default.db"
+
+        self._add_workspace_asset(session, "default.db", b"tracked database name")
+        self._add_workspace_asset(session, "records/default.db-wal", b"sidecar")
+        tracked_paths = {
+            asset.logical_path for asset in session.repository.get_assets()
+        }
+        self.assertIn("default.db", tracked_paths)
+        self.assertIn("records/default.db-wal", tracked_paths)
+
+        alias_directory = workspace / "aliases"
+        alias_directory.mkdir()
+        symlink_to_database = alias_directory / "database-link"
+        os.symlink(database_path, symlink_to_database)
+        hardlink_to_database = alias_directory / "database-copy"
+        os.link(database_path, hardlink_to_database)
+        outside_file = Path(self.directory.name) / "outside.txt"
+        outside_file.write_text("outside the repository")
+        symlink_outside = alias_directory / "outside-link"
+        os.symlink(outside_file, symlink_outside)
+
+        assets = [
+            type("Asset", (), {"logical_path": path})()
+            for path in (
+                "default.db",
+                "records/default.db-wal",
+                "aliases/database-link",
+                "aliases/database-copy",
+                "aliases/outside-link",
+                ".gen/default.db",
+                "large.fa",
+            )
+        ]
+        large_file = workspace / "large.fa"
+        with large_file.open("wb") as file:
+            file.truncate(8 * 1024 * 1024 + 1)
+        session.repository.get_assets = lambda: assets
+
+        root = session._contents_model("", content=True)
+        self.assertEqual([entry["name"] for entry in root["content"]], ["large.fa"])
+        self.assertEqual(root["content"][0]["size"], 8 * 1024 * 1024 + 1)
+        with self.assertRaisesRegex(NotebookSessionError, "8 MiB browser read limit"):
+            session._contents_model("large.fa", content=True)
+        for path in (
+            "default.db",
+            "records/default.db-wal",
+            ".gen/default.db",
+            ".git/config",
+            "../outside.txt",
+            "/etc/passwd",
+            "aliases\\outside-link",
+            "%2e%2e/outside.txt",
+            "docs%2fREADME.txt",
+            "%252e%252e/outside.txt",
+        ):
+            with self.subTest(path=path), self.assertRaises(NotebookSessionError):
+                session._contents_model(path, content=True)
+        for path in (
+            "aliases/database-link",
+            "aliases/database-copy",
+            "aliases/outside-link",
+        ):
+            with self.subTest(path=path), self.assertRaises(NotebookSessionError):
+                session._contents_model(path, content=True)
+
+    async def test_contents_comm_is_session_scoped_refreshes_and_detaches(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            first = await self._open_local_clone()
+            second = await self._open_local_clone()
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        self._add_workspace_asset(first, "shared.txt", b"first repository")
+        self._add_workspace_asset(second, "shared.txt", b"second repository")
+
+        opened_comms = []
+
+        def create_comm(*, target_name, data):
+            comm = FakeComm(target_name, data)
+            opened_comms.append(comm)
+            return comm
+
+        comm_module = type(sys)("comm")
+        comm_module.create_comm = create_comm
+        with patch.dict(sys.modules, {"comm": comm_module}):
+            first_comm = first.expose_contents()
+            second_comm = second.expose_contents()
+
+        self.assertEqual(first_comm.data, {"type": "ready", "protocol": 1})
+        self.assertEqual(first_comm.target_name, "genhub.repository.contents")
+        self.assertIs(first.expose_contents(), first_comm)
+        first_comm.receive(
+            {"id": "first", "method": "get", "path": "shared.txt", "content": True}
+        )
+        second_comm.receive(
+            {"id": "second", "method": "get", "path": "shared.txt", "content": True}
+        )
+        self.assertEqual(first_comm.sent[-1]["model"]["content"], "first repository")
+        self.assertEqual(second_comm.sent[-1]["model"]["content"], "second repository")
+        second_comm.receive(
+            {
+                "id": "binary-format",
+                "method": "get",
+                "path": "shared.txt",
+                "content": True,
+                "format": "base64",
+            }
+        )
+        self.assertEqual(second_comm.sent[-1]["model"]["format"], "base64")
+        self.assertEqual(
+            base64.b64decode(second_comm.sent[-1]["model"]["content"]),
+            b"second repository",
+        )
+        second_comm.receive(
+            {"id": "write", "method": "put", "path": "shared.txt", "content": True}
+        )
+        self.assertIn("error", second_comm.sent[-1])
+
+        self._add_workspace_asset(second, "after-refresh.txt", b"new ref")
+        second.refresh()
+        self.assertEqual(second_comm.sent[-1], {"type": "changed", "path": ""})
+        second_comm.receive(
+            {
+                "id": "refresh",
+                "method": "get",
+                "path": "after-refresh.txt",
+                "content": True,
+            }
+        )
+        self.assertEqual(second_comm.sent[-1]["model"]["content"], "new ref")
+
+        sent_before_close = len(first_comm.sent)
+        first.close()
+        self.assertTrue(first_comm.closed)
+        first_comm.receive(
+            {"id": "closed", "method": "get", "path": "shared.txt", "content": True}
+        )
+        self.assertEqual(len(first_comm.sent), sent_before_close)
+        self.assertEqual(len(opened_comms), 2)
 
     async def test_notebook_is_added_as_an_asset_and_pushed_only_on_commit(self):
         with patch(

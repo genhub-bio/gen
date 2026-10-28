@@ -3,23 +3,99 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import json
+import mimetypes
+import os
 import secrets
+import stat
 import tempfile
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 
 class NotebookSessionError(RuntimeError):
-    """Raised when opening or publishing a browser notebook session fails."""
+    """Raised for failures opening, browsing, or publishing notebook sessions."""
 
 
 _MAX_NOTEBOOK_BYTES = 8 * 1024 * 1024
+_MAX_CONTENTS_FILE_BYTES = _MAX_NOTEBOOK_BYTES
 _NOTEBOOK_CAPTURE_TIMEOUT = 30
 _DEFAULT_NOTEBOOK_PATH = "notebooks/Untitled.ipynb"
+_CONTENTS_COMM_TARGET = "genhub.repository.contents"
+_CONTENTS_RESERVED_COMPONENTS = {".gen", ".git"}
+_CONTENTS_DATABASE_NAMES = {"default.db", "gen.db"}
+
+
+def _contents_path(value: Any) -> str:
+    """Validate a canonical repository-relative path used by the read-only browser."""
+    if not isinstance(value, str):
+        raise NotebookSessionError("Repository paths must be strings")
+    if value == "":
+        return value
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise NotebookSessionError("Repository paths must be valid UTF-8") from error
+    if len(encoded) > 4096:
+        raise NotebookSessionError("Repository path is too long")
+    if (
+        value.startswith("/")
+        or "\\" in value
+        or ":" in value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise NotebookSessionError("Repository path must be a safe relative path")
+    components = value.split("/")
+    if any(component in {"", ".", ".."} for component in components):
+        raise NotebookSessionError("Repository path contains a reserved component")
+    decoded_path = value
+    for _ in range(16):
+        next_decoded_path = unquote(decoded_path, errors="replace")
+        if next_decoded_path == decoded_path:
+            break
+        if (
+            next_decoded_path.startswith("/")
+            or next_decoded_path.count("/") != decoded_path.count("/")
+            or "\\" in next_decoded_path
+            or ":" in next_decoded_path
+            or any(
+                unicodedata.category(character) == "Cc"
+                for character in next_decoded_path
+            )
+        ):
+            raise NotebookSessionError("Repository path contains an encoded separator")
+        decoded_path = next_decoded_path
+        decoded_components = decoded_path.split("/")
+        if any(component in {"", ".", ".."} for component in decoded_components):
+            raise NotebookSessionError("Repository path contains an encoded traversal")
+        _validate_contents_components(decoded_components)
+    else:
+        still_encoded = unquote(decoded_path, errors="replace") != decoded_path
+        if still_encoded:
+            raise NotebookSessionError("Repository path has too many encoded layers")
+    _validate_contents_components(components)
+    return value
+
+
+def _validate_contents_components(components: list[str]) -> None:
+    if any(
+        component.casefold() in _CONTENTS_RESERVED_COMPONENTS
+        for component in components
+    ):
+        raise NotebookSessionError("Repository path contains an internal component")
+    for component in components:
+        name = component.casefold()
+        if name in _CONTENTS_DATABASE_NAMES or any(
+            name.startswith(f"{database_name}{suffix}")
+            for database_name in _CONTENTS_DATABASE_NAMES
+            for suffix in ("-wal", "-shm", "-journal", ".")
+        ):
+            raise NotebookSessionError("Repository database files are not available")
 
 
 def _validate_notebook_path(value: Any) -> str:
@@ -235,10 +311,341 @@ class NotebookSession:
         self.base_commit = base_commit
         self._temporary_directory = temporary_directory
         self.notebook_path = notebook_path
+        self._contents_comm: Any | None = None
+        self._closed = False
 
     def close(self) -> None:
-        """Remove this session's temporary repository workspace."""
+        """Detach the read-only browser and remove this session's workspace."""
+        if self._closed:
+            return
+        self._closed = True
+        comm = self._contents_comm
+        self._contents_comm = None
+        if comm is not None:
+            try:
+                comm.close()
+            except Exception:
+                pass
         self._temporary_directory.cleanup()
+
+    def expose_contents(self) -> Any:
+        """Open a session-bound read-only Jupyter Contents comm for materialized assets.
+
+        The browser receives only current tracked files materialized in this clone's
+        workspace. Requests resolve ``Repository.get_assets()`` on demand, so pulls and
+        branch checkouts are reflected without copying archived assets into another
+        store.
+        """
+        if self._closed:
+            raise NotebookSessionError("This notebook repository session is closed")
+        if self._contents_comm is not None:
+            return self._contents_comm
+        try:
+            from comm import create_comm
+        except ImportError as error:
+            raise NotebookSessionError(
+                "Repository file browsing requires Jupyter comm support"
+            ) from error
+
+        comm = create_comm(
+            target_name=_CONTENTS_COMM_TARGET,
+            data={"type": "ready", "protocol": 1},
+        )
+        self._contents_comm = comm
+
+        def receive(message: Any) -> None:
+            if self._closed or self._contents_comm is not comm:
+                return
+            content = message.get("content", {}) if isinstance(message, dict) else {}
+            request = content.get("data", {}) if isinstance(content, dict) else {}
+            self._handle_contents_request(comm, request)
+
+        def detached(_message: Any) -> None:
+            if self._contents_comm is comm:
+                self._contents_comm = None
+
+        comm.on_msg(receive)
+        comm.on_close(detached)
+        return comm
+
+    def _handle_contents_request(self, comm: Any, request: Any) -> None:
+        if not isinstance(request, dict):
+            return
+        request_id = request.get("id")
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+            return
+        try:
+            if request.get("method") != "get":
+                raise NotebookSessionError("Only read-only get requests are supported")
+            if type(request.get("content")) is not bool:
+                raise NotebookSessionError(
+                    "Contents requests must specify a boolean content flag"
+                )
+            requested_format = request.get("format")
+            if requested_format is not None and (
+                not isinstance(requested_format, str)
+                or requested_format not in {"text", "base64", "json"}
+            ):
+                raise NotebookSessionError(
+                    "Contents format must be text, base64, or json"
+                )
+            model = self._contents_model(
+                request.get("path"),
+                content=request["content"],
+                format=requested_format,
+            )
+            response = {"id": request_id, "model": model}
+        except NotebookSessionError as error:
+            response = {"id": request_id, "error": {"message": str(error)}}
+        except Exception:
+            response = {
+                "id": request_id,
+                "error": {"message": "Could not read repository contents"},
+            }
+        if not self._closed and self._contents_comm is comm:
+            try:
+                comm.send(response)
+            except Exception:
+                if self._contents_comm is comm:
+                    self._contents_comm = None
+
+    def _contents_workspace(self) -> Path:
+        return Path(self._temporary_directory.name).resolve()
+
+    def _contents_database_paths(self, workspace: Path) -> set[Path]:
+        database_paths = {
+            workspace / "default.db",
+            workspace / ".gen" / "default.db",
+            Path(self.repository.gen_dir) / "default.db",
+        }
+        return {
+            sibling
+            for database_path in database_paths
+            for sibling in (
+                database_path,
+                database_path.with_name(f"{database_path.name}-wal"),
+                database_path.with_name(f"{database_path.name}-shm"),
+                database_path.with_name(f"{database_path.name}-journal"),
+            )
+        }
+
+    def _materialized_contents_files(self) -> dict[str, Path]:
+        workspace = self._contents_workspace()
+        database_paths = self._contents_database_paths(workspace)
+        files: dict[str, Path] = {}
+        for asset in self.repository.get_assets():
+            try:
+                relative_path = _contents_path(asset.logical_path)
+            except NotebookSessionError:
+                continue
+            if not relative_path:
+                continue
+            candidate = workspace
+            components = relative_path.split("/")
+            try:
+                for component in components:
+                    candidate = candidate / component
+                    file_status = candidate.lstat()
+                    if stat.S_ISLNK(file_status.st_mode):
+                        raise NotebookSessionError(
+                            "Symbolic links are not available in repository browsing"
+                        )
+                if not stat.S_ISREG(file_status.st_mode):
+                    continue
+                resolved = candidate.resolve(strict=True)
+                if not resolved.is_relative_to(workspace):
+                    continue
+                if any(
+                    os.path.samefile(resolved, database_path)
+                    for database_path in database_paths
+                    if database_path.exists()
+                ):
+                    continue
+            except (
+                FileNotFoundError,
+                NotADirectoryError,
+                OSError,
+                NotebookSessionError,
+            ):
+                continue
+            files[relative_path] = resolved
+        return files
+
+    def _contents_model(
+        self, path: Any, *, content: bool, format: str | None = None
+    ) -> dict[str, Any]:
+        relative_path = _contents_path(path)
+        files = self._materialized_contents_files()
+        file_path = files.get(relative_path)
+        if file_path is not None:
+            return self._contents_file_model(
+                relative_path, file_path, content=content, requested_format=format
+            )
+
+        directories = {""}
+        for file_name in files:
+            components = file_name.split("/")
+            directories.update(
+                "/".join(components[:index]) for index in range(1, len(components))
+            )
+        if relative_path not in directories:
+            raise NotebookSessionError(
+                "Path is not a tracked materialized file or directory"
+            )
+
+        name = relative_path.rsplit("/", 1)[-1] if relative_path else ""
+        model: dict[str, Any] = {
+            "name": name,
+            "path": relative_path,
+            "type": "directory",
+            "content": None,
+            "format": None,
+            "mimetype": None,
+            "writable": False,
+            "size": None,
+        }
+        modified = self._contents_directory_timestamp(relative_path)
+        model["created"] = modified
+        model["last_modified"] = modified
+        if content:
+            prefix = f"{relative_path}/" if relative_path else ""
+            children: dict[str, dict[str, Any]] = {}
+            for file_name, child_path in files.items():
+                if not file_name.startswith(prefix):
+                    continue
+                remainder = file_name[len(prefix) :]
+                child_name, separator, _tail = remainder.partition("/")
+                child_relative_path = f"{prefix}{child_name}"
+                if separator:
+                    children[child_name] = self._contents_directory_model(
+                        child_name, child_relative_path
+                    )
+                else:
+                    children[child_name] = self._contents_file_model(
+                        child_relative_path,
+                        child_path,
+                        content=False,
+                        requested_format=None,
+                    )
+            model["content"] = [children[key] for key in sorted(children)]
+        return model
+
+    def _contents_directory_timestamp(self, path: str) -> str:
+        directory = self._contents_workspace()
+        if path:
+            for component in path.split("/"):
+                directory = directory / component
+                directory_status = directory.lstat()
+                if not stat.S_ISDIR(directory_status.st_mode):
+                    raise NotebookSessionError(
+                        "Repository directory changed while listing contents"
+                    )
+        else:
+            directory_status = directory.lstat()
+        return datetime.fromtimestamp(
+            directory_status.st_mtime, timezone.utc
+        ).isoformat()
+
+    def _contents_directory_model(self, name: str, path: str) -> dict[str, Any]:
+        modified = self._contents_directory_timestamp(path)
+        return {
+            "name": name,
+            "path": path,
+            "type": "directory",
+            "content": None,
+            "format": None,
+            "mimetype": None,
+            "writable": False,
+            "size": None,
+            "created": modified,
+            "last_modified": modified,
+        }
+
+    @staticmethod
+    def _contents_file_model(
+        path: str,
+        file_path: Path,
+        *,
+        content: bool,
+        requested_format: str | None,
+    ) -> dict[str, Any]:
+        file_status = file_path.stat()
+        modified = datetime.fromtimestamp(
+            file_status.st_mtime, timezone.utc
+        ).isoformat()
+        model: dict[str, Any] = {
+            "name": path.rsplit("/", 1)[-1],
+            "path": path,
+            "type": "notebook" if path.lower().endswith(".ipynb") else "file",
+            "content": None,
+            "format": None,
+            "mimetype": mimetypes.guess_type(path)[0],
+            "writable": False,
+            "size": file_status.st_size,
+            "created": modified,
+            "last_modified": modified,
+        }
+        if not content:
+            return model
+
+        if file_status.st_size > _MAX_CONTENTS_FILE_BYTES:
+            raise NotebookSessionError(
+                "File exceeds the 8 MiB browser read limit. Use Gen in a notebook cell "
+                "to query large genomic files without opening them in the editor"
+            )
+        with file_path.open("rb") as stream:
+            file_contents = stream.read(_MAX_CONTENTS_FILE_BYTES + 1)
+        if len(file_contents) > _MAX_CONTENTS_FILE_BYTES:
+            raise NotebookSessionError(
+                "File exceeds the 8 MiB browser read limit. Use Gen in a notebook cell "
+                "to query large genomic files without opening them in the editor"
+            )
+        resolved_format = requested_format or (
+            "json" if path.lower().endswith(".ipynb") else None
+        )
+        if resolved_format == "json":
+            try:
+                model["content"] = json.loads(file_contents.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise NotebookSessionError(
+                    "JSON asset does not contain valid UTF-8 JSON"
+                ) from error
+            model["format"] = "json"
+            if path.lower().endswith(".ipynb"):
+                model["mimetype"] = "application/x-ipynb+json"
+        elif resolved_format == "base64":
+            model["content"] = base64.b64encode(file_contents).decode("ascii")
+            model["format"] = "base64"
+            model["mimetype"] = model["mimetype"] or "application/octet-stream"
+        elif resolved_format == "text":
+            try:
+                model["content"] = file_contents.decode("utf-8")
+                model["format"] = "text"
+                model["mimetype"] = model["mimetype"] or "text/plain"
+            except UnicodeDecodeError as error:
+                raise NotebookSessionError(
+                    "File is not valid UTF-8 text; request it as base64"
+                ) from error
+        else:
+            try:
+                model["content"] = file_contents.decode("utf-8")
+                model["format"] = "text"
+                model["mimetype"] = model["mimetype"] or "text/plain"
+            except UnicodeDecodeError:
+                model["content"] = base64.b64encode(file_contents).decode("ascii")
+                model["format"] = "base64"
+                model["mimetype"] = model["mimetype"] or "application/octet-stream"
+        return model
+
+    def _notify_contents_changed(self) -> None:
+        comm = self._contents_comm
+        if self._closed or comm is None:
+            return
+        try:
+            comm.send({"type": "changed", "path": ""})
+        except Exception:
+            if self._contents_comm is comm:
+                self._contents_comm = None
 
     @classmethod
     async def open(
@@ -303,6 +710,8 @@ class NotebookSession:
 
     def refresh(self) -> str:
         """Pull the selected branch from its configured GenHub remote."""
+        if self._closed:
+            raise NotebookSessionError("This notebook repository session is closed")
         try:
             self.repository.pull()
         except Exception as error:
@@ -315,6 +724,7 @@ class NotebookSession:
                 "The repository checkout changed while refreshing the notebook"
             )
         self.base_commit = str(current_branch.head)
+        self._notify_contents_changed()
         return self.base_commit
 
     async def commit(
