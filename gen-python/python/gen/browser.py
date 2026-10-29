@@ -38,17 +38,22 @@ _CONTENTS_COMM_TARGET = "genhub.repository.contents"
 _CONTENTS_RESERVED_COMPONENTS = {".git"}
 _CONTENTS_DATABASE_NAMES = {"default.db", "gen.db"}
 _CONTENTS_OUTSIDE_ROOT_COMPONENTS = (".gen", "outside_root")
-_CONTENTS_DIRECTORY_EPOCH = "1970-01-01T00:00:00+00:00"
+
+
+def _parse_contents_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            return None
+        return timestamp.astimezone(timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _valid_contents_timestamp(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return True
+    return _parse_contents_timestamp(value) is not None
 
 
 def _contents_path(value: Any) -> str:
@@ -129,6 +134,33 @@ def _asset_identity(asset: Any) -> str:
     if not identity:
         raise NotebookSessionError("Gen asset content identity is invalid")
     return identity
+
+
+def _asset_size(asset: Any) -> int | None:
+    try:
+        size = asset.size
+    except (AttributeError, TypeError):
+        return None
+    if type(size) is int and size >= 0:
+        return size
+    return None
+
+
+def _asset_last_modified(asset: Any) -> str:
+    try:
+        created_on = asset.created_on
+    except (AttributeError, TypeError):
+        return ""
+    if type(created_on) is not int or created_on == 0:
+        return ""
+    seconds, nanoseconds = divmod(created_on, 1_000_000_000)
+    try:
+        timestamp = datetime.fromtimestamp(seconds, timezone.utc).replace(
+            microsecond=nanoseconds // 1_000
+        )
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return timestamp.isoformat()
 
 
 def _validate_contents_components(components: list[str]) -> None:
@@ -622,8 +654,8 @@ class NotebookSession:
                 self,
                 path=path,
                 name=name or path.rsplit("/", 1)[-1],
-                size=None,
-                last_modified=_CONTENTS_DIRECTORY_EPOCH,
+                size=_asset_size(asset),
+                last_modified=_asset_last_modified(asset),
                 file_type="file",
                 mimetype=mimetypes.guess_type(path)[0],
                 archive_needs_decode=archive_needs_decode,
@@ -810,8 +842,8 @@ class NotebookSession:
             elif not _safe_contents_name(name):
                 continue
             last_modified = response_file.get("last_modified")
-            if not isinstance(last_modified, str):
-                last_modified = _CONTENTS_DIRECTORY_EPOCH
+            if not _valid_contents_timestamp(last_modified):
+                last_modified = file.last_modified
             file_type = response_file.get("file_type")
             if not isinstance(file_type, str):
                 file_type = "file"
@@ -822,7 +854,7 @@ class NotebookSession:
                 "size": size,
                 "last_modified": last_modified
                 if _valid_contents_timestamp(last_modified)
-                else _CONTENTS_DIRECTORY_EPOCH,
+                else "",
                 "file_type": file_type,
                 "mimetype": mimetypes.guess_type(path)[0],
                 "url": response_file.get("url"),
@@ -1040,11 +1072,14 @@ class NotebookSession:
     ) -> str:
         prefix = f"{path}/" if path else ""
         timestamps = [
-            file.last_modified
+            (parsed, file.last_modified)
             for file_path, file in files.items()
             if file_path.startswith(prefix)
+            if (parsed := _parse_contents_timestamp(file.last_modified)) is not None
         ]
-        return max(timestamps, default=_CONTENTS_DIRECTORY_EPOCH)
+        if not timestamps:
+            return ""
+        return max(timestamps, key=lambda timestamp: timestamp[0])[1]
 
     def _contents_directory_model(
         self, name: str, path: str, files: Mapping[str, RepositoryAssetFile]
