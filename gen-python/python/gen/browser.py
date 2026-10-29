@@ -155,10 +155,11 @@ def _asset_last_modified(asset: Any) -> str:
         return ""
     seconds, nanoseconds = divmod(created_on, 1_000_000_000)
     try:
-        timestamp = datetime.fromtimestamp(seconds, timezone.utc).replace(
-            microsecond=nanoseconds // 1_000
+        # Avoid platform C gmtime limits so signed pre-epoch timestamps remain readable.
+        timestamp = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
+            seconds=seconds, microseconds=nanoseconds // 1_000
         )
-    except (OverflowError, OSError, ValueError):
+    except (OverflowError, ValueError):
         return ""
     return timestamp.isoformat()
 
