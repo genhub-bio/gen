@@ -530,6 +530,12 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         if tasks:
             await asyncio.gather(*tasks)
 
+    async def _send_control_comm(self, session, comm, request):
+        comm.receive(request)
+        tasks = tuple(session._control_tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
     def _open_local_repository(
         self, repository_url, *, path, branch=None, committer=None, email=None
     ):
@@ -1345,6 +1351,287 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(opened_comms), 2)
         with self.assertRaisesRegex(BrowserFileError, "session is closed"):
             await first_file.read(16)
+
+    async def test_control_comm_commits_graph_and_notebook_on_its_session(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph(
+                notebook_path="notebooks/active.ipynb"
+            )
+            other_session = await self._open_local_graph()
+        self.addCleanup(session.close)
+        self.addCleanup(other_session.close)
+        repository = session.repository
+        other_repository = other_session.repository
+        marker_path = Path(session._temporary_directory.name) / "scratch.txt"
+        marker_path.write_bytes(b"untracked work stays in this workspace")
+
+        opened_comms = []
+
+        def create_comm(*, target_name, data):
+            comm = FakeComm(target_name, data)
+            opened_comms.append(comm)
+            return comm
+
+        comm_module = type(sys)("comm")
+        comm_module.create_comm = create_comm
+        with patch.dict(sys.modules, {"comm": comm_module}):
+            comm = session.expose_controls()
+            other_comm = other_session.expose_controls()
+
+        self.assertEqual(
+            comm.data,
+            {
+                "type": "ready",
+                "protocol": 1,
+                "repository_url": REPOSITORY_URL,
+                "branch": self.branch,
+                "notebook_path": "notebooks/active.ipynb",
+            },
+        )
+        self.assertEqual(comm.target_name, "genhub.notebook.control")
+        self.assertIs(session.expose_controls(), comm)
+        self.assertEqual(len(opened_comms), 2)
+        self.assertEqual(other_comm.data["branch"], self.branch)
+        self.assertIs(session.repository, repository)
+
+        await self._send_control_comm(
+            session,
+            comm,
+            {
+                "id": "graph-only",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": False,
+            },
+        )
+        graph_result = comm.sent[-1]
+        self.assertEqual(graph_result["id"], "graph-only")
+        self.assertEqual(graph_result["result"]["branch"], self.branch)
+        self.assertEqual(
+            graph_result["result"]["commit_hash"],
+            str(repository.current_branch.head),
+        )
+
+        notebook_path = "notebooks/header.ipynb"
+        branch_request = {
+            "id": "new-branch-notebook",
+            "method": "commit",
+            "target_branch": "header-edits",
+            "create_branch": True,
+            "notebook": NOTEBOOK,
+            "notebook_path": notebook_path,
+        }
+        await self._send_control_comm(session, comm, branch_request)
+        branch_result = comm.sent[-1]
+        self.assertEqual(branch_result["id"], branch_request["id"])
+        self.assertEqual(branch_result["result"]["branch"], "header-edits")
+        self.assertEqual(repository.current_branch.name, "header-edits")
+        self.assertEqual(session.notebook_path, notebook_path)
+        self.assertIs(session.repository, repository)
+        self.assertEqual(
+            marker_path.read_bytes(), b"untracked work stays in this workspace"
+        )
+        self.assertEqual(
+            [call[1] for call in repository.calls if call[0] == "add_file"],
+            [str(Path(session._temporary_directory.name) / notebook_path)],
+        )
+        self.assertEqual(other_repository.current_branch.name, self.branch)
+        self.assertEqual(repository.calls[-1], ("push", None, "header-edits", False))
+
+        push_count = sum(call[0] == "push" for call in repository.calls)
+        await self._send_control_comm(session, comm, branch_request)
+        self.assertEqual(
+            comm.sent[-1],
+            {
+                "id": branch_request["id"],
+                "error": {"message": "This request ID has already been used"},
+            },
+        )
+        self.assertEqual(
+            sum(call[0] == "push" for call in repository.calls), push_count
+        )
+
+    async def test_control_comm_rejects_malformed_requests_without_mutation(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph()
+        self.addCleanup(session.close)
+
+        comm_module = type(sys)("comm")
+        comm_module.create_comm = lambda *, target_name, data: FakeComm(
+            target_name, data
+        )
+        with patch.dict(sys.modules, {"comm": comm_module}):
+            comm = session.expose_controls()
+
+        initial_calls = list(session.repository.calls)
+        invalid_requests = [
+            {
+                "id": "unsupported-method",
+                "method": "execute",
+                "target_branch": self.branch,
+                "create_branch": False,
+            },
+            {
+                "id": "extra-field",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": False,
+                "code": "graph.delete_all()",
+            },
+            {
+                "id": "invalid-flag",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": 1,
+            },
+            {
+                "id": "missing-notebook",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": False,
+                "notebook_path": "notebooks/partial.ipynb",
+            },
+            {
+                "id": "invalid-notebook",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": False,
+                "notebook": [],
+                "notebook_path": "notebooks/invalid.ipynb",
+            },
+        ]
+        for request in invalid_requests:
+            with self.subTest(request_id=request["id"]):
+                await self._send_control_comm(session, comm, request)
+                self.assertEqual(comm.sent[-1]["id"], request["id"])
+                self.assertIn("error", comm.sent[-1])
+                self.assertEqual(session.repository.calls, initial_calls)
+
+    async def test_control_comm_rejects_concurrent_commits(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph()
+        self.addCleanup(session.close)
+
+        started = asyncio.Event()
+        finish_commit = asyncio.Event()
+        calls = []
+
+        async def blocked_commit(target_branch, *, create_branch=False, **kwargs):
+            calls.append((target_branch, create_branch, kwargs))
+            started.set()
+            await finish_commit.wait()
+            return {"branch": target_branch, "commit_hash": "a" * 40}
+
+        session.commit = blocked_commit
+        comm_module = type(sys)("comm")
+        comm_module.create_comm = lambda *, target_name, data: FakeComm(
+            target_name, data
+        )
+        with patch.dict(sys.modules, {"comm": comm_module}):
+            comm = session.expose_controls()
+
+        first_request = {
+            "id": "commit-one",
+            "method": "commit",
+            "target_branch": self.branch,
+            "create_branch": False,
+        }
+        second_request = {
+            "id": "commit-two",
+            "method": "commit",
+            "target_branch": self.branch,
+            "create_branch": False,
+        }
+        comm.receive(first_request)
+        await started.wait()
+        comm.receive(second_request)
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            comm.sent[-1],
+            {
+                "id": "commit-two",
+                "error": {"message": "A notebook commit is already in progress"},
+            },
+        )
+        finish_commit.set()
+        await asyncio.gather(*tuple(session._control_tasks))
+        self.assertEqual(
+            comm.sent[-1],
+            {
+                "id": "commit-one",
+                "result": {"branch": self.branch, "commit_hash": "a" * 40},
+            },
+        )
+
+    async def test_control_comm_returns_commit_errors_and_closes_pending_requests(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph()
+        self.addCleanup(session.close)
+        session.repository.push_error = RuntimeError("login required")
+
+        comm_module = type(sys)("comm")
+        comm_module.create_comm = lambda *, target_name, data: FakeComm(
+            target_name, data
+        )
+        with patch.dict(sys.modules, {"comm": comm_module}):
+            comm = session.expose_controls()
+
+        await self._send_control_comm(
+            session,
+            comm,
+            {
+                "id": "failed-push",
+                "method": "commit",
+                "target_branch": "header-draft",
+                "create_branch": True,
+                "notebook": NOTEBOOK,
+                "notebook_path": "notebooks/draft.ipynb",
+            },
+        )
+        self.assertEqual(comm.sent[-1]["id"], "failed-push")
+        self.assertIn("login required", comm.sent[-1]["error"]["message"])
+        self.assertEqual(session.repository.current_branch.name, "header-draft")
+        self.assertTrue(
+            (Path(session._temporary_directory.name) / "notebooks/draft.ipynb").exists()
+        )
+
+        started = asyncio.Event()
+        wait_for_close = asyncio.Event()
+
+        async def blocked_commit(target_branch, *, create_branch=False, **kwargs):
+            started.set()
+            await wait_for_close.wait()
+            return {"branch": target_branch, "commit_hash": "b" * 40}
+
+        session.commit = blocked_commit
+        comm.receive(
+            {
+                "id": "pending-close",
+                "method": "commit",
+                "target_branch": "header-draft",
+                "create_branch": False,
+            }
+        )
+        await started.wait()
+        pending_tasks = tuple(session._control_tasks)
+        session.close()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        self.assertTrue(comm.closed)
+        self.assertFalse(session._control_tasks)
+        self.assertFalse(
+            any(message.get("id") == "pending-close" for message in comm.sent)
+        )
 
     async def test_close_cancels_pending_remote_contents_reads(self):
         with patch(
