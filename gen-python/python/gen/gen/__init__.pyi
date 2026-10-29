@@ -128,6 +128,16 @@ class Asset:
         `path` continues to identify the archived copy inside `.gen`.
         """
     @property
+    def size(self) -> typing.Optional[builtins.int]:
+        r"""
+        The asset's recorded size in bytes, if known.
+        """
+    @property
+    def created_on(self) -> builtins.int:
+        r"""
+        The time this asset reference was recorded, in nanoseconds since the Unix epoch.
+        """
+    @property
     def archive_needs_decode(self) -> builtins.bool:
         r"""
         Whether the archived bytes are BGZF encoded and must be decoded for logical content.
@@ -773,6 +783,11 @@ class Repository:
         `path` holds local Gen configuration and the credential-free name of the registered graph
         VFS. The graph's bearer URL stays inside its connection owner for the lifetime of this
         repository. This entry point is available to the browser-cloud build.
+
+        # Errors
+
+        Raises `ValueError` if the workspace already contains a `.gen` directory, or
+        `RuntimeError` if capability acquisition, graph opening, or branch selection fails.
         """
     def set_browser_asset_source(
         self, branch: builtins.str, snapshot_hash: builtins.str
@@ -783,6 +798,10 @@ class Repository:
         Direct browser repositories use this when their published graph ref advances. It does not
         issue a network request; the next missing asset read obtains a transfer manifest for the
         selected immutable snapshot. Ordinary repositories without a direct source are unchanged.
+
+        # Errors
+
+        Raises `RuntimeError` if the branch/hash is invalid or the direct asset source has closed.
         """
     def clear_browser_asset_source(self) -> None:
         r"""

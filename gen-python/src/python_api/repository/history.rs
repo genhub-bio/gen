@@ -230,6 +230,18 @@ impl PyAsset {
         self.asset.logical_path.as_deref()
     }
 
+    /// The asset's recorded size in bytes, if known.
+    #[getter]
+    fn size(&self) -> Option<i64> {
+        self.asset.size
+    }
+
+    /// The time this asset reference was recorded, in nanoseconds since the Unix epoch.
+    #[getter]
+    fn created_on(&self) -> i64 {
+        self.asset.created_on
+    }
+
     /// Whether the archived bytes are BGZF encoded and must be decoded for logical content.
     #[getter]
     fn archive_needs_decode(&self) -> bool {
@@ -653,19 +665,21 @@ impl PyRepository {
 
 #[cfg(test)]
 mod tests {
+    use gen_core::HashId;
     #[cfg(feature = "remote")]
     use gen_core::config::Workspace;
     #[cfg(feature = "remote")]
     use gen_models::history::dolt::hash_of;
     use gen_models::{
+        assets::{AssetRef, AssetRole},
         collection::Collection,
         history::{HistoryStore, dolt::DoltHistoryStore},
     };
-    use pyo3::{IntoPyObject as _, Py, Python};
+    use pyo3::{IntoPyObject as _, Py, Python, types::PyAnyMethods as _};
     #[cfg(feature = "remote")]
     use tempfile::tempdir;
 
-    use super::PyRepository;
+    use super::{PyAsset, PyRepository};
     #[cfg(feature = "remote")]
     use crate::python_api::repository::clone_repository;
 
@@ -768,6 +782,54 @@ mod tests {
                     .iter()
                     .all(|collection| collection.name != "feature"),
                 "reset should restore graph state from the selected operation"
+            );
+        });
+    }
+
+    #[test]
+    fn test_asset_size_and_creation_time_are_read_only_python_properties() {
+        Python::initialize();
+        Python::attach(|python| {
+            let (_context, repository) = make_repository();
+            let created_on = 1_790_000_000_123_456_789;
+            let asset_ref = AssetRef {
+                id: HashId([1; 16]),
+                uri: "file:///reference.fa".to_string(),
+                file_type: "fasta".to_string(),
+                checksum: None,
+                size: Some(42),
+                role: AssetRole::Input,
+                logical_path: Some("reference.fa".to_string()),
+                name: Some("reference.fa".to_string()),
+                created_on,
+                upstream_asset_ref_id: None,
+                materialized_checksum: None,
+            };
+            let asset = Py::new(python, PyAsset::new(asset_ref, &repository.context))
+                .expect("should create Python asset");
+            let asset = asset.bind(python);
+
+            assert_eq!(
+                asset
+                    .getattr("size")
+                    .expect("should read asset size")
+                    .extract::<Option<i64>>()
+                    .expect("should convert asset size"),
+                Some(42),
+                "the asset size should be exposed without reading its bytes"
+            );
+            assert_eq!(
+                asset
+                    .getattr("created_on")
+                    .expect("should read asset creation time")
+                    .extract::<i64>()
+                    .expect("should convert asset creation time"),
+                created_on,
+                "asset timestamps should retain their stored nanosecond precision"
+            );
+            assert!(
+                asset.setattr("size", 43).is_err(),
+                "asset metadata should remain read-only"
             );
         });
     }
