@@ -35,6 +35,7 @@ _MAX_CONTENTS_FILE_BYTES = _MAX_NOTEBOOK_BYTES
 _NOTEBOOK_CAPTURE_TIMEOUT = 30
 _DEFAULT_NOTEBOOK_PATH = "notebooks/Untitled.ipynb"
 _CONTENTS_COMM_TARGET = "genhub.repository.contents"
+_CONTROL_COMM_TARGET = "genhub.notebook.control"
 _CONTENTS_RESERVED_COMPONENTS = {".git"}
 _CONTENTS_DATABASE_NAMES = {"default.db", "gen.db"}
 _CONTENTS_OUTSIDE_ROOT_COMPONENTS = (".gen", "outside_root")
@@ -436,6 +437,10 @@ class NotebookSession:
         self.notebook_path = notebook_path
         self._contents_comm: Any | None = None
         self._contents_tasks: set[asyncio.Task[Any]] = set()
+        self._control_comm: Any | None = None
+        self._control_tasks: set[asyncio.Task[Any]] = set()
+        self._control_request_ids: set[str] = set()
+        self._control_commit_in_progress = False
         self._active_streams: set[Any] = set()
         self._file_catalog: dict[str, RepositoryAssetFile] = {}
         self._files_view: Mapping[str, RepositoryAssetFile] = _SessionFileMapping(self)
@@ -461,6 +466,13 @@ class NotebookSession:
         for task in tuple(self._contents_tasks):
             task.cancel()
         self._contents_tasks.clear()
+        control_comm = self._control_comm
+        self._control_comm = None
+        for task in tuple(self._control_tasks):
+            task.cancel()
+        self._control_tasks.clear()
+        self._control_request_ids.clear()
+        self._control_commit_in_progress = False
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -482,9 +494,11 @@ class NotebookSession:
             except Exception:
                 pass
         self._asset_source_ref = None
-        if comm is not None:
+        for session_comm in (comm, control_comm):
+            if session_comm is None:
+                continue
             try:
-                comm.close()
+                session_comm.close()
             except Exception:
                 pass
         self._temporary_directory.cleanup()
@@ -597,6 +611,165 @@ class NotebookSession:
             except Exception:
                 if self._contents_comm is comm:
                     self._contents_comm = None
+
+    def expose_controls(self) -> Any:
+        """Open a persistent session-bound Comm for explicit notebook commits.
+
+        The Comm remains independent of a setup cell and accepts only validated commit
+        requests, which are delegated to `commit` without executing kernel code.
+        """
+        if self._closed:
+            raise NotebookSessionError("This notebook repository session is closed")
+        if self._control_comm is not None:
+            return self._control_comm
+        current_branch = self.repository.current_branch
+        if current_branch is None:
+            raise NotebookSessionError("The repository has no checked out branch")
+        try:
+            from comm import create_comm
+        except ImportError as error:
+            raise NotebookSessionError(
+                "Notebook commit controls require Jupyter comm support"
+            ) from error
+
+        comm = create_comm(
+            target_name=_CONTROL_COMM_TARGET,
+            data={
+                "type": "ready",
+                "protocol": 1,
+                "repository_url": self.repository_url,
+                "branch": current_branch.name,
+                "notebook_path": self.notebook_path,
+            },
+        )
+        self._control_comm = comm
+
+        def receive(message: Any) -> None:
+            if self._closed or self._control_comm is not comm:
+                return
+            content = message.get("content", {}) if isinstance(message, dict) else {}
+            request = content.get("data", {}) if isinstance(content, dict) else {}
+            try:
+                task = asyncio.get_running_loop().create_task(
+                    self._handle_control_request(comm, request)
+                )
+            except RuntimeError:
+                return
+            self._control_tasks.add(task)
+            task.add_done_callback(self._control_tasks.discard)
+
+        def detached(_message: Any) -> None:
+            if self._control_comm is comm:
+                self._control_comm = None
+
+        comm.on_msg(receive)
+        comm.on_close(detached)
+        return comm
+
+    async def _handle_control_request(self, comm: Any, request: Any) -> None:
+        if (
+            self._closed
+            or self._control_comm is not comm
+            or not isinstance(request, dict)
+        ):
+            return
+        request_id = request.get("id")
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+            return
+
+        try:
+            allowed_fields = {
+                "id",
+                "method",
+                "target_branch",
+                "create_branch",
+                "notebook",
+                "notebook_path",
+            }
+            if set(request) - allowed_fields:
+                raise NotebookSessionError(
+                    "Notebook control request has unsupported fields"
+                )
+            if request.get("method") != "commit":
+                raise NotebookSessionError("Only commit requests are supported")
+            target_branch = request.get("target_branch")
+            if not isinstance(target_branch, str):
+                raise NotebookSessionError("target_branch must be a string")
+            create_branch = request.get("create_branch")
+            if type(create_branch) is not bool:
+                raise NotebookSessionError("create_branch must be a boolean")
+
+            has_notebook = "notebook" in request
+            has_notebook_path = "notebook_path" in request
+            if has_notebook != has_notebook_path:
+                raise NotebookSessionError(
+                    "notebook and notebook_path must be provided together"
+                )
+            if has_notebook:
+                notebook = request["notebook"]
+                notebook_path = request["notebook_path"]
+                if not isinstance(notebook, dict):
+                    raise NotebookSessionError("notebook must be a JSON object")
+                if not isinstance(notebook_path, str):
+                    raise NotebookSessionError("notebook_path must be a string")
+            else:
+                notebook = None
+                notebook_path = None
+        except NotebookSessionError as error:
+            self._send_control_response(
+                comm,
+                {"id": request_id, "error": {"message": str(error)}},
+            )
+            return
+
+        if request_id in self._control_request_ids:
+            self._send_control_response(
+                comm,
+                {
+                    "id": request_id,
+                    "error": {"message": "This request ID has already been used"},
+                },
+            )
+            return
+        self._control_request_ids.add(request_id)
+        if self._control_commit_in_progress:
+            self._send_control_response(
+                comm,
+                {
+                    "id": request_id,
+                    "error": {"message": "A notebook commit is already in progress"},
+                },
+            )
+            return
+
+        self._control_commit_in_progress = True
+        try:
+            commit_options = {}
+            if has_notebook:
+                commit_options = {
+                    "notebook": notebook,
+                    "notebook_path": notebook_path,
+                }
+            result = await self.commit(
+                target_branch,
+                create_branch=create_branch,
+                **commit_options,
+            )
+            response = {"id": request_id, "result": result}
+        except Exception as error:
+            response = {"id": request_id, "error": {"message": str(error)}}
+        finally:
+            self._control_commit_in_progress = False
+        self._send_control_response(comm, response)
+
+    def _send_control_response(self, comm: Any, response: dict[str, Any]) -> None:
+        if self._closed or self._control_comm is not comm:
+            return
+        try:
+            comm.send(response)
+        except Exception:
+            if self._control_comm is comm:
+                self._control_comm = None
 
     def _synchronize_file_refs(self, *, force: bool = False) -> None:
         """Rebuild the synchronous logical-path map when the graph ref advances."""
