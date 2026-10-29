@@ -248,6 +248,8 @@ class FakeAsset:
         name=None,
         asset_id=None,
         archive_needs_decode=False,
+        size=None,
+        created_on=None,
     ):
         self.logical_path = path
         self.name = name or path.rsplit("/", 1)[-1]
@@ -257,6 +259,8 @@ class FakeAsset:
             else hashlib.sha256(f"asset:{path}".encode()).hexdigest()
         )
         self.archive_needs_decode = archive_needs_decode
+        self.size = size
+        self.created_on = created_on
         self._stored_path = None
 
     @property
@@ -598,6 +602,159 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
 
         session.close()
         self.assertEqual(repository.asset_source_clears, 1)
+
+    async def test_asset_metadata_uses_graph_refs_across_updates_and_refresh(self):
+        initial_created_on = 1_792_088_854_873_000_000
+        updated_created_on = 1_792_670_400_654_321_000
+        refreshed_created_on = 1_793_145_600_111_222_000
+        initial_asset = FakeAsset(
+            "reads/reference.fa",
+            asset_id="initial-content-id",
+            size=12,
+            created_on=initial_created_on,
+        )
+        unknown_asset = FakeAsset("unknown-only/unknown.txt", size=-1, created_on=0)
+        before_epoch_asset = FakeAsset(
+            "pre-epoch/old.txt", size=3, created_on=-1_000_000_000
+        )
+        repository = FakeRemoteRepository()
+        repository.asset_views["main"] = [
+            initial_asset,
+            unknown_asset,
+            before_epoch_asset,
+        ]
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch(
+                "gen.Repository",
+                SimpleNamespace(open_remote_graph=lambda *_args, **_kwargs: repository),
+            ),
+        ):
+            session = await gen.NotebookSession.open(REPOSITORY_URL)
+        self.addCleanup(session.close)
+        self.opened_repositories.append(repository)
+
+        initial_model = await session._contents_model(
+            "reads/reference.fa", content=False
+        )
+        self.assertEqual(initial_model["size"], 12)
+        self.assertEqual(
+            initial_model["last_modified"], "2026-10-15T18:27:34.873000+00:00"
+        )
+        unknown_model = await session._contents_model(
+            "unknown-only/unknown.txt", content=False
+        )
+        self.assertIsNone(unknown_model["size"])
+        self.assertEqual(unknown_model["created"], "")
+        self.assertEqual(unknown_model["last_modified"], "")
+        before_epoch_model = await session._contents_model(
+            "pre-epoch/old.txt", content=False
+        )
+        self.assertEqual(
+            before_epoch_model["last_modified"], "1969-12-31T23:59:59+00:00"
+        )
+        unknown_directory = await session._contents_model("unknown-only", content=False)
+        self.assertEqual(unknown_directory["last_modified"], "")
+        reads_directory = await session._contents_model("reads", content=False)
+        self.assertEqual(
+            reads_directory["last_modified"], "2026-10-15T18:27:34.873000+00:00"
+        )
+
+        repository.branches["main"] = "b" * 40
+        updated_asset = FakeAsset(
+            "reads/reference.fa",
+            asset_id="updated-content-id",
+            size=15,
+            created_on=updated_created_on,
+        )
+        repository.asset_views["main"] = [updated_asset, unknown_asset]
+        updated_model = await session._contents_model(
+            "reads/reference.fa", content=False
+        )
+        self.assertEqual(updated_model["size"], 15)
+        self.assertEqual(
+            updated_model["last_modified"], "2026-10-22T12:00:00.654321+00:00"
+        )
+        reads_directory = await session._contents_model("reads", content=False)
+        self.assertEqual(
+            reads_directory["last_modified"], "2026-10-22T12:00:00.654321+00:00"
+        )
+
+        remote_head = "c" * 40
+        refreshed_asset = FakeAsset(
+            "reads/refreshed.fa",
+            asset_id="refreshed-content-id",
+            size=22,
+            created_on=refreshed_created_on,
+        )
+        repository.remote_heads["main"] = (
+            remote_head,
+            [refreshed_asset, unknown_asset],
+        )
+        self.assertEqual(session.refresh(), remote_head)
+        refreshed_model = await session._contents_model(
+            "reads/refreshed.fa", content=False
+        )
+        self.assertEqual(refreshed_model["size"], 22)
+        self.assertEqual(
+            refreshed_model["last_modified"], "2026-10-28T00:00:00.111222+00:00"
+        )
+        reads_directory = await session._contents_model("reads", content=False)
+        self.assertEqual(
+            reads_directory["last_modified"], "2026-10-28T00:00:00.111222+00:00"
+        )
+
+        metadata_signed_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        metadata_url = (
+            "https://storage.googleapis.com/repos/test/repository/.gen/assets/"
+            f"{'d' * 64}.none.bgz?X-Goog-Date={metadata_signed_date}"
+            "&X-Goog-Expires=900&X-Goog-Signature=test-signature"
+        )
+        with patch(
+            "gen.browser.fetch_repository_files",
+            return_value=[
+                {
+                    "name": "refreshed.fa",
+                    "path": "reads/refreshed.fa",
+                    "size": -1,
+                    "last_modified": "not a timestamp",
+                    "file_type": "file",
+                    "url": metadata_url,
+                }
+            ],
+        ):
+            await session.files["reads/refreshed.fa"].url()
+        self.assertEqual(session.files["reads/refreshed.fa"].size, 22)
+        self.assertEqual(
+            session.files["reads/refreshed.fa"].last_modified,
+            "2026-10-28T00:00:00.111222+00:00",
+        )
+        self.assertEqual(self.asset_body_requests, [])
+
+    async def test_asset_ref_creation_time_is_available_without_manifest_fetch(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph()
+        self.addCleanup(session.close)
+
+        asset = next(
+            asset
+            for asset in session.repository.get_assets()
+            if asset.name == "source.fa"
+        )
+        path = asset.logical_path or asset.name
+        created_on = asset.created_on
+        seconds, nanoseconds = divmod(created_on, 1_000_000_000)
+        expected_timestamp = datetime.fromtimestamp(seconds, timezone.utc).replace(
+            microsecond=nanoseconds // 1_000
+        )
+        model = await session._contents_model(path, content=False)
+
+        self.assertEqual(model["last_modified"], expected_timestamp.isoformat())
+        self.assertEqual(model["created"], expected_timestamp.isoformat())
+        self.assertEqual(self.asset_metadata_calls, [])
+        self.assertEqual(self.asset_body_requests, [])
 
     async def test_open_selects_a_nondefault_branch_without_fetch_or_pull(self):
         self.source_repository.create_branch("feature", self.base_commit)
