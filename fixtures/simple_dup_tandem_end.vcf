@@ -1,0 +1,8 @@
+##fileformat=VCFv4.2
+##contig=<ID=m123,length=34>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the variant">
+##ALT=<ID=DUP:TANDEM,Description="Tandem Duplication">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	dup
+m123	12	.	G	<DUP:TANDEM>	.	PASS	SVTYPE=DUP;END=15	GT	1/1
