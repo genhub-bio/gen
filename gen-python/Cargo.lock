@@ -2525,8 +2525,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdoltlite-sys"
-version = "0.38.23"
-source = "git+https://github.com/Chris7/rusqdoltlite.git?rev=9c388d4ad69722792f659ebe764d631e602b74e3#9c388d4ad69722792f659ebe764d631e602b74e3"
+version = "0.38.26"
+source = "git+https://github.com/Chris7/rusqdoltlite.git?rev=8674d13400e7064d4dd213e5f7db9998e6a2a4ff#8674d13400e7064d4dd213e5f7db9998e6a2a4ff"
 dependencies = [
  "cc",
  "curl-sys",
@@ -2555,9 +2555,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.29"
+version = "1.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
 dependencies = [
  "cc",
  "libc",
@@ -4486,8 +4486,8 @@ dependencies = [
 
 [[package]]
 name = "rusqdoltlite"
-version = "0.41.2"
-source = "git+https://github.com/Chris7/rusqdoltlite.git?rev=9c388d4ad69722792f659ebe764d631e602b74e3#9c388d4ad69722792f659ebe764d631e602b74e3"
+version = "0.41.3"
+source = "git+https://github.com/Chris7/rusqdoltlite.git?rev=8674d13400e7064d4dd213e5f7db9998e6a2a4ff#8674d13400e7064d4dd213e5f7db9998e6a2a4ff"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",
