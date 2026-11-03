@@ -2579,7 +2579,7 @@ mod tests {
         let conn = context.graph().conn();
         let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/simple.gff");
 
-        add_annotation_file(
+        let operation_summary = add_annotation_file(
             &context,
             fixture_path.to_str().expect("should encode fixture path"),
             None,
@@ -2588,7 +2588,14 @@ mod tests {
             Some("annotation diff contract"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should commit annotation-file asset refs");
+        .expect("should record annotation-file asset refs");
+        let annotation_commit = commit_all(conn, &operation_summary.summary)
+            .expect("should commit annotation-file asset refs");
+        assert_eq!(
+            DoltHistoryStore::new(conn).current_head().unwrap(),
+            Some(annotation_commit),
+            "the caller should advance history for the recorded annotation metadata"
+        );
 
         let mut log_statement = conn
             .prepare(

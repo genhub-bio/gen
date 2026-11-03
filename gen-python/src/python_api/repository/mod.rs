@@ -10,7 +10,7 @@ use gen_models::{
         HistoryStore,
         dolt::{DoltHistoryStore, set_commit_author_email, set_commit_author_name},
     },
-    operations::{Defaults, OperationSummary, commit_operation_summary},
+    operations::{Defaults, OperationSummary, commit_operation_summary, record_operation_summary},
     sample::Sample,
 };
 use pyo3::{
@@ -112,7 +112,7 @@ fn discard_untouched_workspace(workspace: &Workspace) -> PyResult<()> {
     Ok(())
 }
 
-/// Runs `op` in one graph transaction and records it as one operation.
+/// Records one graph operation in the connection's current transaction mode.
 ///
 pub(crate) fn run_context_operation_write<F, T, M>(
     context: &DbContext,
@@ -123,17 +123,81 @@ where
     F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
     M: FnOnce(OperationError) -> PyErr,
 {
+    let graph = context.graph().conn();
+    if !graph.is_autocommit() {
+        context
+            .begin_deferred_operation()
+            .map_err(sqlite_err_to_pyerr)?;
+        let result = (|| {
+            let changes_before = graph.total_changes();
+            let (value, operation_summary) = op(context)?;
+            let changed = graph.total_changes() != changes_before;
+            if changed {
+                record_operation_summary(context, &operation_summary)
+                    .map_err(map_operation_error)?;
+            }
+            Ok((value, changed))
+        })();
+        return match result {
+            Ok((value, true)) => Ok(value),
+            Ok((value, false)) => {
+                context
+                    .discard_deferred_operation()
+                    .map_err(sqlite_err_to_pyerr)?;
+                Ok(value)
+            }
+            Err(error) => {
+                context
+                    .discard_deferred_operation()
+                    .map_err(|rollback_error| {
+                        PyRuntimeError::new_err(format!(
+                            "{error}; additionally failed to roll back the edit: {rollback_error}"
+                        ))
+                    })?;
+                Err(error)
+            }
+        };
+    }
+
     // dolt_commit seals the SQL transaction after recording the operation. Keep
     // the guard alive until then so failures also roll back the graph mutations.
-    let _transaction = context
-        .graph()
-        .conn()
-        .unchecked_transaction()
-        .map_err(sqlite_err_to_pyerr)?;
+    let _transaction = graph.unchecked_transaction().map_err(sqlite_err_to_pyerr)?;
     let (value, operation_summary) = op(context)?;
     commit_operation_summary(context, &operation_summary).map_err(map_operation_error)?;
 
     Ok(value)
+}
+
+/// Runs one metadata or asset mutation in its own savepoint.
+pub(crate) fn run_context_staged_write<F, T>(context: &DbContext, operation: F) -> PyResult<T>
+where
+    F: FnOnce() -> PyResult<T>,
+{
+    context
+        .begin_deferred_operation()
+        .map_err(sqlite_err_to_pyerr)?;
+    let changes_before = context.graph().conn().total_changes();
+    match operation() {
+        Ok(value) => {
+            if context.graph().conn().total_changes() == changes_before {
+                context
+                    .discard_deferred_operation()
+                    .map_err(sqlite_err_to_pyerr)?;
+                return Ok(value);
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            context
+                .discard_deferred_operation()
+                .map_err(|rollback_error| {
+                    PyRuntimeError::new_err(format!(
+                        "{error}; additionally failed to roll back the edit: {rollback_error}"
+                    ))
+                })?;
+            Err(error)
+        }
+    }
 }
 
 /// The main entry point for the gen Python module.
@@ -308,7 +372,7 @@ impl PyRepository {
     // Raw database access
 
     /// Run raw SQL against the graph database. Low-level: prefer the editing and import APIs, which
-    /// record operations.
+    /// record operations. Transactions and savepoints follow SQLite behavior.
     #[gen_stub(skip)]
     fn execute(&self, query: &str) -> PyResult<()> {
         self.context

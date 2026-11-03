@@ -31,7 +31,7 @@ use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
     locus::GraphLocus,
-    operations::{OperationInfo, OperationSummary, commit_operation_summary},
+    operations::{OperationInfo, OperationSummary},
     sample::Sample,
 };
 use pyo3::{
@@ -81,37 +81,25 @@ fn run_translation_operation<F>(
 where
     F: FnOnce() -> Result<BlockGroup, TranslationError>,
 {
-    let graph_conn = context.graph().conn();
-    graph_conn
-        .execute("BEGIN TRANSACTION", [])
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
-    let protein_bg = match translate() {
-        Ok(block_group) => block_group,
-        Err(err) => {
-            graph_conn.execute("ROLLBACK", []).ok();
-            return Err(PyRuntimeError::new_err(err.to_string()));
-        }
-    };
-
-    graph_conn
-        .execute("END TRANSACTION", [])
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
-    let operation_summary = OperationSummary::new(
-        OperationInfo {
-            files: vec![],
-            description: "translate annotation".to_string(),
+    run_context_operation_write(
+        context,
+        |_| {
+            let protein_block_group =
+                translate().map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let operation_summary = OperationSummary::new(
+                OperationInfo {
+                    files: vec![],
+                    description: "translate annotation".to_string(),
+                },
+                format!(
+                    " {}: protein sequence graph derived from {label}",
+                    protein_block_group.name
+                ),
+            );
+            Ok((protein_block_group, operation_summary))
         },
-        format!(
-            " {}: protein sequence graph derived from {label}",
-            protein_bg.name
-        ),
-    );
-    commit_operation_summary(context, &operation_summary)
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
-    Ok(protein_bg)
+        |error| PyRuntimeError::new_err(error.to_string()),
+    )
 }
 
 /// A sequence graph returned by a ``Repository``.

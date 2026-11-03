@@ -80,9 +80,14 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
   base of a stacked edit's original sequence raises `ValueError`, since the alternative shares
   those points; insert inside it or at the alternative's ends.
 - Graph-level exports cover the **whole sample**, not only that graph.
-- Mutating calls record operations themselves; there is no transaction API. `repo.get_operations()`
-  is the audit trail.
-- `graph.region()` does not mutate. `sample.copy()` records an operation but leaves the original sample untouched. Inspect the return type before chaining:
+- Mutating calls record operations automatically in SQLite autocommit mode. Use
+  `repo.edit_session()` to try and undo a series of edits, imports or updates, then commit them as
+  one history entry; nested sessions use SQLite savepoints, and leaving a context without
+  `session.commit(message)` rolls back that savepoint. See
+  [references/version-control.md](references/version-control.md). `repo.get_operations()` is the
+  committed audit trail.
+- `graph.region()` does not mutate. `sample.copy()` records an operation by default but leaves the
+  original sample untouched. Inspect the return type before chaining:
   VCF updates return `list[Sample]`, most other updates return one `Sample`.
 - Cells that mutate fail when re-run ("already exists"). `import_sequence(..., exist_ok=True)` can
   reuse an existing graph only when its sequence matches. `sample.copy()` errors if its destination

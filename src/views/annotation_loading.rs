@@ -357,7 +357,10 @@ mod tests {
     use gen_models::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         block_group::BlockGroup,
-        history::dolt::{active_branch, connect_branch, create_branch},
+        history::{
+            HistoryStore,
+            dolt::{DoltHistoryStore, active_branch, connect_branch, create_branch},
+        },
         operations::commit_operation_summary,
         sample::Sample,
     };
@@ -408,7 +411,7 @@ mod tests {
             .to_str()
             .expect("should encode GFF fixture path")
             .to_string();
-        let history_ref = add_annotation_file(
+        let operation_summary = add_annotation_file(
             &context,
             &annotation_path_string,
             Some("gff3"),
@@ -417,8 +420,11 @@ mod tests {
             Some("add feature annotations"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should add the feature annotation file")
-        .to_string();
+        .expect("should record the feature annotation file");
+        let history_ref = DoltHistoryStore::new(conn)
+            .commit_all(&operation_summary.summary)
+            .expect("should commit the feature annotation file")
+            .to_string();
         let block_group = BlockGroup::get_by_name(conn, "test", Sample::DEFAULT_NAME, "m123", None)
             .expect("should find the imported block group");
         let entry = load_annotation_file_entries(conn, None)

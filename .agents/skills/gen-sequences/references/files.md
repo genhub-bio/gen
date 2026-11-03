@@ -56,7 +56,7 @@ Its `sample` argument (and `import_reference_sequence()`'s `reference`) accepts 
 `Sample`; a sample object supplies its collection unless explicitly overridden. Do not
 assume file imports or updates also accept sample objects: their sample arguments are strings.
 Calling `import_sequence()` repeatedly with the same `sample` builds that sample up graph by
-graph; duplicate graph names fail. Each call records an operation, so use FASTA for large
+graph; duplicate graph names fail. Each call records an operation by default, so use FASTA for large
 file imports. The default sample name is `"reference"`.
 
 ```python

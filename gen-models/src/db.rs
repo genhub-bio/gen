@@ -4,7 +4,7 @@ use gen_core::{config::Workspace, errors::ConfigError};
 use rusqlite::{Connection, limits::Limit};
 
 use crate::{
-    history::dolt::{active_branch, checkout, connect_branch},
+    history::dolt::{active_branch, checkout, connect_branch, is_current_branch_dirty},
     migrations::{run_config_migrations, run_migrations},
     operations::Defaults,
 };
@@ -147,6 +147,22 @@ impl<C> DbHandle<C> {
 pub type GraphHandle = DbHandle<GraphConnection>;
 pub type ConfigHandle = DbHandle<ConfigConnection>;
 
+const DEFERRED_OPERATION_SAVEPOINT: &str = "gen_edit_operation";
+const MISSING_DEFERRED_OPERATION_SAVEPOINT: &str = "no such savepoint: gen_edit_operation";
+
+fn is_missing_deferred_operation_savepoint(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, Some(message))
+            if code.code == rusqlite::ErrorCode::Unknown
+                && message == MISSING_DEFERRED_OPERATION_SAVEPOINT
+    )
+}
+
+fn quote_savepoint_name(savepoint_name: &str) -> String {
+    format!("\"{}\"", savepoint_name.replace('"', "\"\""))
+}
+
 #[derive(Clone)]
 pub struct DbContext {
     workspace: Arc<Workspace>,
@@ -232,6 +248,141 @@ impl DbContext {
         &self.config
     }
 
+    /// Starts a SQLite transaction and uniquely named savepoint for an outer session.
+    pub fn begin_deferred_operation_session(&self) -> rusqlite::Result<(String, bool)> {
+        let graph = self.graph.conn();
+        let is_outermost = graph.is_autocommit();
+        if is_outermost {
+            graph.execute_batch("BEGIN TRANSACTION")?;
+        }
+        let savepoint_name = match graph.query_row(
+            "SELECT 'gen_edit_session_' || lower(hex(randomblob(16)))",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(savepoint_name) => savepoint_name,
+            Err(error) => {
+                if is_outermost {
+                    let _ = graph.execute_batch("ROLLBACK");
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = graph.execute_batch(&format!(
+            "SAVEPOINT {}",
+            quote_savepoint_name(&savepoint_name)
+        )) {
+            if is_outermost {
+                let _ = graph.execute_batch("ROLLBACK");
+            }
+            return Err(error);
+        }
+        Ok((savepoint_name, is_outermost))
+    }
+
+    /// Opens a savepoint around one domain operation in the active SQL transaction.
+    pub fn begin_deferred_operation(&self) -> rusqlite::Result<()> {
+        self.graph
+            .conn()
+            .execute_batch(&format!("SAVEPOINT {DEFERRED_OPERATION_SAVEPOINT}"))
+    }
+
+    /// Rolls back and removes a failed operation savepoint, preserving earlier trial edits.
+    pub fn discard_deferred_operation(&self) -> rusqlite::Result<()> {
+        let graph = self.graph.conn();
+        graph.execute_batch(&format!(
+            "ROLLBACK TO SAVEPOINT {DEFERRED_OPERATION_SAVEPOINT}"
+        ))?;
+        graph.execute_batch(&format!("RELEASE SAVEPOINT {DEFERRED_OPERATION_SAVEPOINT}"))?;
+        Ok(())
+    }
+
+    /// Undoes the newest operation savepoint on the SQLite connection, if one exists.
+    pub fn undo_deferred_operation(&self) -> rusqlite::Result<bool> {
+        let graph = self.graph.conn();
+        if let Err(error) = graph.execute_batch(&format!(
+            "ROLLBACK TO SAVEPOINT {DEFERRED_OPERATION_SAVEPOINT}"
+        )) {
+            if is_missing_deferred_operation_savepoint(&error) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        graph.execute_batch(&format!("RELEASE SAVEPOINT {DEFERRED_OPERATION_SAVEPOINT}"))?;
+        Ok(true)
+    }
+
+    /// Commits the outermost edit session or releases an inner session into its parent.
+    pub fn commit_deferred_operation_session<T>(
+        &self,
+        savepoint_name: &str,
+        is_outermost: bool,
+        commit: impl FnOnce() -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Option<T>> {
+        let graph = self.graph.conn();
+        graph.execute_batch(&format!(
+            "RELEASE SAVEPOINT {}",
+            quote_savepoint_name(savepoint_name)
+        ))?;
+        if !is_outermost {
+            return Ok(None);
+        }
+        let is_dirty = match is_current_branch_dirty(graph) {
+            Ok(is_dirty) => is_dirty,
+            Err(error) => {
+                if !graph.is_autocommit() {
+                    let _ = graph.execute_batch("ROLLBACK");
+                }
+                return Err(error);
+            }
+        };
+        if !is_dirty {
+            graph.execute_batch("ROLLBACK")?;
+            return Ok(None);
+        }
+
+        match commit() {
+            Ok(value) => {
+                if !graph.is_autocommit()
+                    && let Err(error) = graph.execute_batch("COMMIT")
+                {
+                    if !graph.is_autocommit() {
+                        let _ = graph.execute_batch("ROLLBACK");
+                    }
+                    return Err(error);
+                }
+                Ok(Some(value))
+            }
+            Err(error) => {
+                if !graph.is_autocommit() {
+                    let _ = graph.execute_batch("ROLLBACK");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Rolls back and releases the current edit-session savepoint.
+    pub fn rollback_deferred_operation_session(
+        &self,
+        savepoint_name: &str,
+        is_outermost: bool,
+    ) -> rusqlite::Result<()> {
+        let graph = self.graph.conn();
+        graph.execute_batch(&format!(
+            "ROLLBACK TO SAVEPOINT {}",
+            quote_savepoint_name(savepoint_name)
+        ))?;
+        graph.execute_batch(&format!(
+            "RELEASE SAVEPOINT {}",
+            quote_savepoint_name(savepoint_name)
+        ))?;
+        if is_outermost {
+            graph.execute_batch("ROLLBACK")?;
+        }
+        Ok(())
+    }
+
     pub fn repo_root(&self) -> Result<std::path::PathBuf, ConfigError> {
         self.workspace.repo_root()
     }
@@ -243,6 +394,8 @@ impl DbContext {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{c_char, c_int, c_void};
+
     use gen_core::config::Workspace;
     use tempfile::tempdir;
 
@@ -254,6 +407,21 @@ mod tests {
         sample::{NewSample, Sample},
         test_helpers::get_connection as test_graph_connection,
     };
+
+    unsafe extern "C" fn deny_savepoint_actions(
+        _user_data: *mut c_void,
+        action: c_int,
+        _first_argument: *const c_char,
+        _second_argument: *const c_char,
+        _database: *const c_char,
+        _trigger: *const c_char,
+    ) -> c_int {
+        if action == rusqlite::ffi::SQLITE_SAVEPOINT {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
 
     fn branch_has_sample(context: &DbContext, sample_name: &str) -> bool {
         context
@@ -544,5 +712,208 @@ mod tests {
             commit_hash,
             "end_transaction should preserve a Dolt commit that sealed its transaction"
         );
+    }
+
+    #[test]
+    fn test_deferred_operation_undo_uses_nested_sqlite_savepoints() {
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should reopen graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should reopen config connection");
+        let context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should create repository context");
+        let graph_conn = context.graph().conn();
+        let (session_savepoint, _) = context
+            .begin_deferred_operation_session()
+            .expect("should begin deferred session");
+
+        assert!(
+            !context
+                .undo_deferred_operation()
+                .expect("should report an empty undo stack from SQLite"),
+            "an absent operation savepoint should report no operation to undo"
+        );
+
+        context
+            .begin_deferred_operation()
+            .expect("should begin first edit savepoint");
+        Collection::create(graph_conn, "first-pending-collection")
+            .expect("should write first pending collection");
+        context
+            .begin_deferred_operation()
+            .expect("should begin a nested edit savepoint with the same name");
+        Collection::create(graph_conn, "second-pending-collection")
+            .expect("should write second pending collection");
+
+        assert!(
+            context
+                .undo_deferred_operation()
+                .expect("should undo the newest nested savepoint")
+        );
+        let collections = Collection::all(graph_conn).expect("should read collections");
+        assert!(
+            collections
+                .iter()
+                .any(|collection| collection.name == "first-pending-collection"),
+            "undo should retain the earlier edit"
+        );
+        assert!(
+            collections
+                .iter()
+                .all(|collection| collection.name != "second-pending-collection"),
+            "undo should remove only the newest edit"
+        );
+
+        assert!(
+            context
+                .undo_deferred_operation()
+                .expect("should undo the remaining savepoint")
+        );
+        assert!(
+            !context
+                .undo_deferred_operation()
+                .expect("should report no remaining SQLite savepoint"),
+            "undo should stop when SQLite reports the fixed savepoint is absent"
+        );
+        context
+            .rollback_deferred_operation_session(&session_savepoint, true)
+            .expect("should roll back deferred session");
+        drop(context);
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_deferred_operation_undo_propagates_unrelated_sqlite_errors() {
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should reopen graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should reopen config connection");
+        let context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should create repository context");
+        let graph_conn = context.graph().conn();
+        let (session_savepoint, _) = context
+            .begin_deferred_operation_session()
+            .expect("should begin deferred session");
+        context
+            .begin_deferred_operation()
+            .expect("should begin edit savepoint");
+
+        let authorizer_result = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(
+                graph_conn.handle(),
+                Some(deny_savepoint_actions),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            authorizer_result,
+            rusqlite::ffi::SQLITE_OK,
+            "the authorizer should be installed"
+        );
+        let error = context
+            .undo_deferred_operation()
+            .expect_err("should propagate an unrelated SQLite authorization failure");
+        let authorizer_result = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(graph_conn.handle(), None, std::ptr::null_mut())
+        };
+        assert_eq!(
+            authorizer_result,
+            rusqlite::ffi::SQLITE_OK,
+            "the authorizer should be removed"
+        );
+        assert!(
+            error.to_string().contains("not authorized"),
+            "undo should return the unrelated SQLite error: {error}"
+        );
+
+        context
+            .rollback_deferred_operation_session(&session_savepoint, true)
+            .expect("should roll back deferred session");
+        drop(context);
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_failed_deferred_session_commit_rolls_back_and_closes_session() {
+        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should reopen graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should reopen config connection");
+        let context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should create repository context");
+        let graph_conn = context.graph().conn();
+        let head_before = graph_conn
+            .query_row("SELECT dolt_hashof('HEAD')", [], |row| {
+                row.get::<_, gen_core::DoltHashId>(0)
+            })
+            .expect("should read current HEAD");
+        let (session_savepoint, is_outermost) = context
+            .begin_deferred_operation_session()
+            .expect("should begin deferred session");
+        context
+            .begin_deferred_operation()
+            .expect("should begin edit savepoint");
+        Collection::create(graph_conn, "pending-collection")
+            .expect("should write pending graph data");
+
+        let error = context
+            .commit_deferred_operation_session(&session_savepoint, is_outermost, || {
+                Err::<(), _>(rusqlite::Error::InvalidParameterName(
+                    "expected commit callback failure".to_string(),
+                ))
+            })
+            .expect_err("should return a commit callback failure");
+        assert!(
+            error
+                .to_string()
+                .contains("expected commit callback failure"),
+            "the original commit error should be returned: {error}"
+        );
+        assert!(
+            graph_conn.is_autocommit(),
+            "failed finalization should leave no open transaction"
+        );
+        assert!(
+            Collection::all(graph_conn)
+                .expect("should read rolled-back collections")
+                .iter()
+                .all(|collection| collection.name != "pending-collection"),
+            "failed finalization should roll back staged graph data"
+        );
+        assert_eq!(
+            graph_conn
+                .query_row("SELECT dolt_hashof('HEAD')", [], |row| {
+                    row.get::<_, gen_core::DoltHashId>(0)
+                })
+                .expect("should read HEAD after failed finalization"),
+            head_before,
+            "failed finalization should preserve history HEAD"
+        );
+        let (fresh_savepoint, _) = context
+            .begin_deferred_operation_session()
+            .expect("should start a fresh session after failed commit cleanup");
+        context
+            .rollback_deferred_operation_session(&fresh_savepoint, true)
+            .expect("should roll back the fresh session");
+        drop(context);
+        drop(temp_dir);
     }
 }

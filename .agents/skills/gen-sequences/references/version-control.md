@@ -31,9 +31,11 @@ its string, to `get_sequence_graph()`.
 `HashId` is hashable and compares by value; it identifies graphs, annotations, assets,
 operations and branch heads. `str(hash_id)` is the hex digest.
 
-Mutating import/update/edit/copy APIs record operations automatically. The public API has no
-transaction context manager. Raw SQL (`execute`/`query`) is low-level and hidden from the
-stubs; use the operation-aware APIs instead.
+Mutating import/update/edit/copy APIs record operations automatically when the graph connection is
+in SQLite autocommit mode. Inside `repo.edit_session()` or another open SQL transaction, they join
+the working set, so existing graph and sample handles see trial writes while `get_operations()`
+continues to show committed history. Raw SQL (`execute`/`query`) is low-level and hidden from the
+stubs; use the operation-aware APIs unless you specifically need SQLite transaction control.
 
 ## Branches
 
@@ -61,9 +63,42 @@ repo.get_assets(branch=None)
 
 `get_operations()` returns newest-first `Operation` objects, so `get_operations(limit=1)[0]`
 is the latest. `Operation` fields: `id` (`HashId`), `parent_id`, `committer`, `email`, `date`,
-`message`, `is_head`. Every mutating call records one operation; pass `message=` where an
-edit method accepts it so the history reads as a design log. History is the audit trail:
-there is nothing to commit.
+`message`, `is_head`. In SQLite autocommit mode, each mutating call records one operation. Pass
+`message=` where an edit method accepts it so the history reads as a design log.
+
+## Deferred edit sessions
+
+Use a session to test a sequence of operations, inspect the resulting graph, then keep all remaining
+changes as one history entry:
+
+```python
+graph = repo.get_sequence_graphs(sample="design")[0]
+with repo.edit_session() as edits:
+    graph.replace("vector:4-8", "GGGG", message="try a motif")
+    repo.update_with_vcf("variants.vcf", sample="design")
+    print(str(graph))  # graph handles read the trial state
+    edits.undo()       # undo the latest successful operation
+    operation = edits.commit("update design sequences")
+```
+
+Entering a session creates a SQLite savepoint. Sessions can nest inside other sessions or an
+already-open SQL transaction, including one with existing working changes. Each successful write
+can be undone with `edits.undo()`, which rolls back the newest successful operation savepoint on the
+connection and returns whether it found one. Undo follows SQLite savepoint order rather than
+maintaining a per-session stack. A failed write rolls back only that write. Leaving a session without
+`commit(message)` rolls back its savepoint, including on exceptions. Committing an inner session
+releases it into its parent and returns `None`; committing an outermost session creates one Dolt
+history entry and returns its `Operation`, or returns `None` when empty. Annotation imports return
+`None` while a SQL transaction is open because their history id is assigned by the outermost commit.
+File blobs are content-addressed cache files; after rollback, newly stored bytes can remain without
+graph asset metadata.
+
+Once the outermost transaction commits or rolls back, later writes commit normally even if the
+Python `with` block has not exited. An inner commit leaves its parent transaction open. Branch
+changes, reset/merge/apply, remote operations and remote configuration changes require SQLite
+autocommit mode. Raw SQL through `execute()` and `query()` follows SQLite behavior and is available
+inside a session. `get_assets()` without a branch includes current working-set assets; an explicit
+branch reads committed assets only.
 
 ## Merge, apply and reset
 

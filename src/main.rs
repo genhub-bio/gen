@@ -763,7 +763,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(progress_bar) = progress_bar {
                 progress_bar.finish_and_clear();
             }
-            let commit_hash = add_result?;
+            let operation_summary = add_result?;
+            let commit_hash = DoltHistoryStore::new_with_config(
+                db_context.graph().conn(),
+                db_context.config().conn(),
+            )
+            .commit_all(&operation_summary.summary)?;
             println!("Annotation file added in operation {commit_hash}");
             Ok(())
         }

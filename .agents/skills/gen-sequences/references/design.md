@@ -15,7 +15,7 @@ to avoid.
 2. `sample.copy("design")` so the parent stays intact, then take the graph: `design[0]`.
 3. Find the target: `graph.region("vector:4-8")`, `graph.search("GAATTC")`, or an annotation.
 4. Edit with `replace`, `insert`, `delete`. Keep the returned `Locus` as the target for the
-   next edit; do not recompute coordinates by hand.
+next edit; do not recompute coordinates by hand.
 5. Read back as strings (`locus.sequence`, `graph.region(...).sequence`,
    `graph.all_sequences()`) and check the result before exporting.
 
@@ -37,7 +37,10 @@ live view: its list accessors query current membership, and a new iteration sees
 the handle was created. Replace/delete targets are region strings, loci, or annotations. These methods
 edit the graph's existing sample, not a new sample, so copy first when the original matters.
 Replace and insert return the new sequence's `Locus`; delete returns `None`. Each edit
-records an operation, using `message` when supplied. Replacement/insertion require nonempty
+records an operation by default, using `message` when supplied. Inside `repo.edit_session()` or an
+open SQL transaction, edits are deferred and can be undone individually or committed together; see
+`version-control.md`.
+Replacement/insertion require nonempty
 sequence; use delete to remove sequence.
 
 ```python

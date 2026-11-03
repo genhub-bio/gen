@@ -1,4 +1,5 @@
 use std::{
+    cell::{Cell, OnceCell},
     fs::{self, File},
     io::copy,
     path::PathBuf,
@@ -14,7 +15,9 @@ use gen_models::{
         HistoryEntry, HistoryStore,
         dolt::{DoltBranchRow, DoltHistoryStore, branch_exists, branch_rows, get_branch},
     },
-    operations::{OperationFile, RemoteBranch, add_files_operation},
+    operations::{
+        OperationFile, RemoteBranch, add_files_operation, add_files_operation_uncommitted,
+    },
 };
 use pyo3::{
     exceptions::{PyFileExistsError, PyFileNotFoundError, PyRuntimeError, PyValueError},
@@ -23,7 +26,7 @@ use pyo3::{
 };
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use super::PyRepository;
+use super::{PyRepository, run_context_staged_write};
 use crate::python_api::{
     hash_id::PyHashId,
     utils::{absolute_path, path_to_py_path},
@@ -31,6 +34,18 @@ use crate::python_api::{
 
 fn history_err_to_pyerr(error: impl ToString) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
+}
+
+fn add_files_err_to_pyerr(path: &str, error: AddFilesOperationError) -> PyErr {
+    match error {
+        AddFilesOperationError::OperationError(OperationError::NoChanges) => {
+            PyRuntimeError::new_err(format!("'{path}': this file is already in the repository"))
+        }
+        AddFilesOperationError::FileAdditionError(FileAdditionError::FileNotFound(missing)) => {
+            PyFileNotFoundError::new_err(missing)
+        }
+        other => PyRuntimeError::new_err(format!("Failed to add '{path}': {other}")),
+    }
 }
 
 /// A repository branch and its current head operation.
@@ -116,6 +131,49 @@ pub struct PyOperation {
     pub is_head: bool,
 }
 
+/// A context manager backed by an SQLite savepoint for staging repository mutations.
+#[gen_stub_pyclass]
+#[pyclass(name = "EditSession", unsendable)]
+pub struct PyEditSession {
+    context: DbContext,
+    entered: Cell<bool>,
+    closed: Cell<bool>,
+    outermost: Cell<bool>,
+    savepoint_name: OnceCell<String>,
+}
+
+impl PyEditSession {
+    fn ensure_open(&self) -> PyResult<()> {
+        if self.closed.get()
+            || !self.entered.get()
+            || self.savepoint_name.get().is_none()
+            || self.context.graph().conn().is_autocommit()
+        {
+            return Err(PyRuntimeError::new_err("edit session is closed or stale"));
+        }
+        Ok(())
+    }
+
+    fn close_after_action(&self) {
+        self.closed.set(true);
+    }
+}
+
+impl Drop for PyEditSession {
+    fn drop(&mut self) {
+        if self.entered.get()
+            && !self.closed.get()
+            && let Some(savepoint_name) = self.savepoint_name.get()
+        {
+            let _ = self
+                .context
+                .rollback_deferred_operation_session(savepoint_name, self.outermost.get());
+            self.closed.set(true);
+            self.entered.set(false);
+        }
+    }
+}
+
 impl From<HistoryEntry> for PyOperation {
     fn from(entry: HistoryEntry) -> Self {
         Self {
@@ -165,6 +223,111 @@ impl PyOperation {
         other
             .extract::<PyRef<PyOperation>>()
             .is_ok_and(|other| other.id == self.id)
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyEditSession {
+    /// Begins using the session as a context manager.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        if slf.closed.get() || slf.entered.get() {
+            return Err(PyRuntimeError::new_err(
+                "edit session is already entered or closed",
+            ));
+        }
+        let (savepoint_name, outermost) = slf
+            .context
+            .begin_deferred_operation_session()
+            .map_err(history_err_to_pyerr)?;
+        if slf.savepoint_name.set(savepoint_name).is_err() {
+            return Err(PyRuntimeError::new_err(
+                "edit session savepoint has already been created",
+            ));
+        }
+        slf.outermost.set(outermost);
+        slf.entered.set(true);
+        Ok(slf)
+    }
+
+    /// Rolls back an uncommitted session when its context exits.
+    fn __exit__(
+        &mut self,
+        _exception_type: Option<&Bound<'_, PyAny>>,
+        _exception: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        if self.entered.get() && !self.closed.get() {
+            let savepoint_name = self
+                .savepoint_name
+                .get()
+                .ok_or_else(|| PyRuntimeError::new_err("edit session has no SQL savepoint"))?;
+            self.context
+                .rollback_deferred_operation_session(savepoint_name, self.outermost.get())
+                .map_err(history_err_to_pyerr)?;
+            self.closed.set(true);
+        }
+        self.entered.set(false);
+        Ok(false)
+    }
+
+    /// Rolls back this SQL savepoint, preserving work in its parent transaction.
+    fn rollback(&mut self) -> PyResult<()> {
+        self.ensure_open()?;
+        let savepoint_name = self
+            .savepoint_name
+            .get()
+            .ok_or_else(|| PyRuntimeError::new_err("edit session has no SQL savepoint"))?;
+        self.context
+            .rollback_deferred_operation_session(savepoint_name, self.outermost.get())
+            .map_err(history_err_to_pyerr)?;
+        self.close_after_action();
+        Ok(())
+    }
+
+    /// Undoes the newest operation savepoint on the SQLite connection, if one exists.
+    fn undo(&self) -> PyResult<bool> {
+        self.ensure_open()?;
+        self.context
+            .undo_deferred_operation()
+            .map_err(history_err_to_pyerr)
+    }
+
+    /// Releases an inner savepoint or commits an outermost edit session as one history operation.
+    ///
+    /// Inner sessions return `None`; an empty outermost session also returns `None`.
+    fn commit(&mut self, message: &str) -> PyResult<Option<PyOperation>> {
+        self.ensure_open()?;
+        let history_store = DoltHistoryStore::new_with_config(
+            self.context.graph().conn(),
+            self.context.config().conn(),
+        );
+        let savepoint_name = self
+            .savepoint_name
+            .get()
+            .ok_or_else(|| PyRuntimeError::new_err("edit session has no SQL savepoint"))?;
+        let operation_hash = match self.context.commit_deferred_operation_session(
+            savepoint_name,
+            self.outermost.get(),
+            || history_store.commit_all(message),
+        ) {
+            Ok(operation_hash) => operation_hash,
+            Err(error) => {
+                self.close_after_action();
+                return Err(history_err_to_pyerr(error));
+            }
+        };
+        self.close_after_action();
+        match operation_hash {
+            Some(_) => history_store
+                .log(Some(1))
+                .map_err(history_err_to_pyerr)?
+                .into_iter()
+                .next()
+                .map(|entry| Some(PyOperation::from(entry)))
+                .ok_or_else(|| PyRuntimeError::new_err("committed operation was not found")),
+            None => Ok(None),
+        }
     }
 }
 
@@ -362,11 +525,34 @@ impl PyRepository {
             .map(PyOperation::from)
             .ok_or_else(|| PyRuntimeError::new_err("repository has no operations"))
     }
+
+    pub(super) fn ensure_no_active_transaction(&self, action: &str) -> PyResult<()> {
+        if !self.context.graph().conn().is_autocommit() {
+            return Err(PyRuntimeError::new_err(format!(
+                "cannot {action} while a SQLite transaction is active"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Creates an edit-session context manager backed by a SQLite savepoint.
+    ///
+    /// Enter the returned object with `with`. Nested commits release into their parent; only the
+    /// outermost `commit()` creates a Dolt history operation.
+    fn edit_session(&self) -> PyResult<PyEditSession> {
+        Ok(PyEditSession {
+            context: self.context.clone(),
+            entered: Cell::new(false),
+            closed: Cell::new(false),
+            outermost: Cell::new(false),
+            savepoint_name: OnceCell::new(),
+        })
+    }
+
     /// Returns every branch, ordered by name.
     fn get_branches(&self) -> PyResult<Vec<PyBranch>> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
@@ -398,6 +584,7 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | HashId | Operation | None", imports = ()))]
         start: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyBranch> {
+        self.ensure_no_active_transaction("create a branch")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let start_ref = start.map(operation_ref).transpose()?.map(CommitRef);
         history_store
@@ -414,6 +601,7 @@ impl PyRepository {
             PyAny,
         >,
     ) -> PyResult<()> {
+        self.ensure_no_active_transaction("delete a branch")?;
         let name = branch_name(branch)?;
         DoltHistoryStore::new(self.context.graph().conn())
             .delete_branch(&BranchName(name))
@@ -438,6 +626,7 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | HashId | Operation | None", imports = ()))]
         start: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyBranch> {
+        self.ensure_no_active_transaction("check out a branch")?;
         let name = branch_name(branch)?;
         let already_exists =
             branch_exists(self.context.graph().conn(), &name).map_err(history_err_to_pyerr)?;
@@ -504,7 +693,7 @@ impl PyRepository {
         Ok(entries.into_iter().map(PyOperation::from).collect())
     }
 
-    /// Returns the assets reachable from the current branch or a named branch.
+    /// Returns current working assets, or committed assets from an explicitly named branch.
     #[pyo3(signature = (branch=None))]
     fn get_assets(
         &self,
@@ -512,6 +701,7 @@ impl PyRepository {
             &Bound<'_, PyAny>,
         >,
     ) -> PyResult<Vec<PyAsset>> {
+        let include_working_assets = branch.is_none();
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let name = match branch {
             Some(branch) => branch_name(branch)?,
@@ -523,14 +713,31 @@ impl PyRepository {
                     .0
             }
         };
-        Assets::get_branch_assets(self.context.graph().conn(), &name)
-            .map_err(history_err_to_pyerr)
-            .map(|assets| {
-                assets
-                    .into_values()
-                    .map(|asset| PyAsset::new(asset, &self.context))
-                    .collect()
-            })
+        let mut assets = Assets::get_branch_assets(self.context.graph().conn(), &name)
+            .map_err(history_err_to_pyerr)?;
+        if include_working_assets {
+            let mut pending_assets = Assets::get_added_working_assets(self.context.graph().conn())
+                .map_err(history_err_to_pyerr)?;
+            // Match the committed materialized view's timestamp and ID tie-breaking order.
+            pending_assets.sort_by(|left, right| {
+                left.created_on
+                    .cmp(&right.created_on)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+            for asset in pending_assets {
+                if !asset.uri.starts_with("file://") {
+                    continue;
+                }
+                if let Some(logical_path) = asset.logical_path.as_ref() {
+                    assets.retain(|_, current| current.logical_path.as_ref() != Some(logical_path));
+                }
+                assets.insert(asset.id, asset);
+            }
+        }
+        Ok(assets
+            .into_values()
+            .map(|asset| PyAsset::new(asset, &self.context))
+            .collect())
     }
 
     /// Keep a file in the repository without importing it as sequence, for example a README or a
@@ -557,6 +764,23 @@ impl PyRepository {
         }
         let file = OperationFile::new(path);
         let asset_name = file.filename.clone();
+        if !self.context.graph().conn().is_autocommit() {
+            let asset_refs = run_context_staged_write(&self.context, || {
+                let operation_summary =
+                    add_files_operation_uncommitted(&self.context, &[file], message)
+                        .map_err(|error| add_files_err_to_pyerr(path, error))?;
+                operation_summary.prepared_asset_refs.ok_or_else(|| {
+                    PyRuntimeError::new_err("the added file was not recorded as an asset")
+                })
+            })?;
+            return asset_refs
+                .into_iter()
+                .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                .map(|asset| PyAsset::new(asset, &self.context))
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("the added file was not recorded as an asset")
+                });
+        }
         add_files_operation(&self.context, &[file], message).map_err(|error| match error {
             AddFilesOperationError::OperationError(OperationError::NoChanges) => {
                 PyRuntimeError::new_err(format!("'{path}': this file is already in the repository"))
@@ -588,6 +812,7 @@ impl PyRepository {
             PyAny,
         >,
     ) -> PyResult<PyOperation> {
+        self.ensure_no_active_transaction("merge branches")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "merge")
             .map_err(history_err_to_pyerr)?;
@@ -606,6 +831,7 @@ impl PyRepository {
         &self,
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
     ) -> PyResult<PyOperation> {
+        self.ensure_no_active_transaction("apply an operation")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "apply")
             .map_err(history_err_to_pyerr)?;
@@ -628,6 +854,7 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
         force: bool,
     ) -> PyResult<PyOperation> {
+        self.ensure_no_active_transaction("reset history")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         if !force {
             r#gen::history::ensure_clean_working_set(&history_store, "reset")

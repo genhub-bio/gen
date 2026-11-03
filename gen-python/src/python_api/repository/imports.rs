@@ -19,6 +19,7 @@ use gen_models::{
     db::GraphConnection,
     edge::Edge,
     errors::OperationError,
+    history::{HistoryStore, dolt::DoltHistoryStore},
     path::Path,
     sample::{NewSample, Sample},
 };
@@ -28,7 +29,7 @@ use pyo3::{
 };
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
-use super::{PyRepository, run_context_operation_write};
+use super::{PyRepository, run_context_operation_write, run_context_staged_write};
 use crate::python_api::{
     block_group::PySequenceGraph,
     hash_id::PyHashId,
@@ -221,8 +222,11 @@ impl PyRepository {
     /// The format is inferred from the filename unless provided. A neighboring tabix index is
     /// discovered unless an index path is provided. The file's features then appear in
     /// `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-    /// display and track name; `message` is the operation's commit message. `filename` and `index`
-    /// are path strings; a relative path is resolved against the current working directory.
+    /// display and track name; `message` is the operation's commit message. While a SQLite
+    /// transaction is open this returns `None` because the operation has no history id until the
+    /// outermost transaction is committed to Dolt.
+    /// `filename` and `index` are path strings; a relative path is resolved against the current
+    /// working directory.
     #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
     fn import_annotations(
         &self,
@@ -231,20 +235,38 @@ impl PyRepository {
         index: Option<&str>,
         name: Option<&str>,
         message: Option<&str>,
-    ) -> PyResult<PyHashId> {
+    ) -> PyResult<Option<PyHashId>> {
         let filename = absolute_path_string(filename)?;
         let index = index.map(absolute_path_string).transpose()?;
-        add_annotation_file(
-            &self.context,
-            &filename,
-            format,
-            index.as_deref(),
-            name,
-            message,
-            AnnotationFileChecksumOverrides::default(),
-        )
-        .map(PyHashId::from_dolt)
-        .map_err(|error| PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}")))
+        let commit_immediately = self.context.graph().conn().is_autocommit();
+        let operation_hash = run_context_staged_write(&self.context, || {
+            let operation_summary = add_annotation_file(
+                &self.context,
+                &filename,
+                format,
+                index.as_deref(),
+                name,
+                message,
+                AnnotationFileChecksumOverrides::default(),
+            )
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}"))
+            })?;
+            if commit_immediately {
+                DoltHistoryStore::new_with_config(
+                    self.context.graph().conn(),
+                    self.context.config().conn(),
+                )
+                .commit_all(&operation_summary.summary)
+                .map(Some)
+                .map_err(|error| {
+                    PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}"))
+                })
+            } else {
+                Ok(None)
+            }
+        })?;
+        Ok(operation_hash.map(PyHashId::from_dolt))
     }
 
     /// Import every record of a FASTA file into `sample` (default sample if omitted) and return the

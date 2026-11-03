@@ -135,6 +135,47 @@ is not set, the extension falls back to the same login process the CLI uses. See
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
 
+## Deferred edit sessions
+
+Edits and imports commit automatically by default when the graph connection is in SQLite
+autocommit mode. Use `repo.edit_session()` to try several operations against the live graph, undo
+recent operations, and keep the result in one history entry. Existing `Sample` and `SequenceGraph`
+handles from the repository see the trial state. `get_operations()` continues to show committed
+history while changes remain in the Dolt working set. Raw SQL transactions have the same effect:
+typed mutations join an open transaction, and SQLite decides when that work is committed or rolled
+back.
+
+```python
+graph = repo.get_sequence_graphs(sample="design")[0]
+with repo.edit_session() as edits:
+    graph.replace("vector:4-8", "GGGG", message="try a new motif")
+    repo.update_with_vcf("variants.vcf", reference="design")
+    # Read the trial graph, then undo the most recent successful operation if needed.
+    edits.undo()
+    operation = edits.commit("update design sequences")
+```
+
+Leaving the `with` block without `edits.commit(message)` rolls back that session's savepoint,
+including when the block raises. Sessions can nest, including inside an already-open SQLite
+transaction. An inner `commit()` releases its savepoint into the parent and returns `None`; only an
+outermost `commit()` creates a Dolt history operation and returns its `Operation`. An empty
+outermost session returns `None`. `edits.undo()` rolls back to the newest successful operation
+savepoint on the SQLite connection and returns whether it found one; it follows connection savepoint
+order, so nested contexts do not form separate undo stacks. A failed operation rolls back only its
+own changes.
+
+Once an outermost session commits or rolls back, SQLite returns to autocommit mode and later writes
+inside the still-open Python `with` block commit normally. Closing an inner session leaves its parent
+transaction open, so later writes remain in that parent. Branch changes, reset/merge/apply, and
+remote operations or configuration changes require SQLite autocommit mode. Raw `execute()` and
+`query()` follow SQLite behavior and are available while a session is open.
+
+Annotation-file imports return `None` while a SQLite transaction is open because their operation
+hash is not known until the outermost Dolt commit. By default, `get_assets()` includes assets from
+the current working set even after a raw SQL commit; passing a branch explicitly reads that
+branch's committed assets. Content-addressed file blobs may remain in `.gen` as unreferenced cache
+files after a rollback; graph rows and asset metadata are rolled back.
+
 ## Sequence editing
 
 `SequenceGraph.replace(target, sequence)` and `delete(target)` edit the sequence
@@ -222,11 +263,15 @@ for left in (a.end(), c.end()):
     sg.insert("ACGT", after=left)
 ```
 
-Each call runs one transaction and records one operation. Failures roll back
-both the edit and its operation record. Every editing method accepts an
-optional `message` used as the operation's commit message; when omitted, a
-description of the edit is generated instead. `stack=True` adds the edit as an
-alternative next to what is already there and leaves the active path unchanged.
+Each call records one operation when SQLite is in autocommit mode. Inside an
+open SQL transaction or `repo.edit_session()`, edits stay in the Dolt working
+set until the outermost commit. Failed calls roll back their own changes and
+operation record. Use `repo.edit_session()` to group a series of edits into one
+history entry; see [Deferred edit sessions](#deferred-edit-sessions). Every
+editing method accepts an optional `message` used as the operation's commit
+message; when omitted, a description of the edit is generated instead.
+`stack=True` adds the edit as an alternative next to what is already there and
+leaves the active path unchanged.
 
 At a join or fork, `delete` and `replace` reconnect every route at the target's
 boundary. This also applies immediately downstream of a heterozygous call;

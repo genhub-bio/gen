@@ -713,7 +713,7 @@ mod tests {
             Some("track fasta fixture"),
         )
         .expect("should commit add-file fixture");
-        add_annotation_file(
+        let annotation_summary = add_annotation_file(
             context,
             gff_path
                 .to_str()
@@ -724,7 +724,10 @@ mod tests {
             Some("track annotation fixture"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should commit annotation fixture");
+        .expect("should record annotation fixture");
+        DoltHistoryStore::new_with_config(context.graph().conn(), context.config().conn())
+            .commit_all(&annotation_summary.summary)
+            .expect("should commit annotation fixture");
         let annotation_operation = current_history_operation_hash(context);
         (add_file_commit_hash, annotation_operation)
     }
@@ -1206,7 +1209,7 @@ mod tests {
             .checkout_branch(&gen_core::BranchName("new-branch".to_string()))
             .unwrap();
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
-        add_annotation_file(
+        let annotation_summary = add_annotation_file(
             &context,
             gff_path
                 .to_str()
@@ -1217,7 +1220,10 @@ mod tests {
             Some("track branch annotation"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should commit branch annotation");
+        .expect("should record branch annotation");
+        history_store
+            .commit_all(&annotation_summary.summary)
+            .expect("should commit branch annotation");
         let op_2 = current_history_operation_hash(&context);
         let mut write_stream = Cursor::new(Vec::new());
         create_patch(&context, &[op_2], &mut write_stream).unwrap();

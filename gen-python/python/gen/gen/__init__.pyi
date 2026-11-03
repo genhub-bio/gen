@@ -10,6 +10,7 @@ __all__ = [
     "Annotation",
     "Asset",
     "Branch",
+    "EditSession",
     "HashId",
     "Locus",
     "Node",
@@ -175,6 +176,39 @@ class Branch:
         """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class EditSession:
+    r"""
+    A context manager backed by an SQLite savepoint for staging repository mutations.
+    """
+    def __enter__(self) -> EditSession:
+        r"""
+        Begins using the session as a context manager.
+        """
+    def __exit__(
+        self,
+        _exception_type: typing.Optional[typing.Any],
+        _exception: typing.Optional[typing.Any],
+        _traceback: typing.Optional[typing.Any],
+    ) -> builtins.bool:
+        r"""
+        Rolls back an uncommitted session when its context exits.
+        """
+    def rollback(self) -> None:
+        r"""
+        Rolls back this SQL savepoint, preserving work in its parent transaction.
+        """
+    def undo(self) -> builtins.bool:
+        r"""
+        Undoes the newest operation savepoint on the SQLite connection, if one exists.
+        """
+    def commit(self, message: builtins.str) -> typing.Optional[Operation]:
+        r"""
+        Releases an inner savepoint or commits an outermost edit session as one history operation.
+
+        Inner sessions return `None`; an empty outermost session also returns `None`.
+        """
 
 @typing.final
 class HashId:
@@ -495,6 +529,13 @@ class Repository:
                 new_region="construct",
             )
         """
+    def edit_session(self) -> EditSession:
+        r"""
+        Creates an edit-session context manager backed by a SQLite savepoint.
+
+        Enter the returned object with `with`. Nested commits release into their parent; only the
+        outermost `commit()` creates a Dolt history operation.
+        """
     def get_branches(self) -> builtins.list[Branch]:
         r"""
         Returns every branch, ordered by name.
@@ -537,7 +578,7 @@ class Repository:
         """
     def get_assets(self, branch: str | Branch | None = None) -> builtins.list[Asset]:
         r"""
-        Returns the assets reachable from the current branch or a named branch.
+        Returns current working assets, or committed assets from an explicitly named branch.
         """
     def add_file(
         self,
@@ -578,7 +619,7 @@ class Repository:
         index: typing.Optional[builtins.str] = None,
         name: typing.Optional[builtins.str] = None,
         message: typing.Optional[builtins.str] = None,
-    ) -> HashId:
+    ) -> typing.Optional[HashId]:
         r"""
         Record an annotation file in the repository and return the `HashId` of the operation that
         recorded it.
@@ -586,8 +627,11 @@ class Repository:
         The format is inferred from the filename unless provided. A neighboring tabix index is
         discovered unless an index path is provided. The file's features then appear in
         `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-        display and track name; `message` is the operation's commit message. `filename` and `index`
-        are path strings; a relative path is resolved against the current working directory.
+        display and track name; `message` is the operation's commit message. While a SQLite
+        transaction is open this returns `None` because the operation has no history id until the
+        outermost transaction is committed to Dolt.
+        `filename` and `index` are path strings; a relative path is resolved against the current
+        working directory.
         """
     def import_fasta(
         self,
