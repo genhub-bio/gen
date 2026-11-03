@@ -135,10 +135,10 @@ is not set, the extension falls back to the same login process the CLI uses. See
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
 
-## Deferred edit sessions
+## Repository transactions
 
 Edits and imports commit automatically by default when the graph connection is in SQLite
-autocommit mode. Use `repo.edit_session()` to try several operations against the live graph, undo
+autocommit mode. Use `repo.transaction()` to try several operations against the live graph, undo
 recent operations, and keep the result in one history entry. Existing `Sample` and `SequenceGraph`
 handles from the repository see the trial state. `get_operations()` continues to show committed
 history while changes remain in the Dolt working set. Raw SQL transactions have the same effect:
@@ -147,28 +147,30 @@ back.
 
 ```python
 graph = repo.get_sequence_graphs(sample="design")[0]
-with repo.edit_session() as edits:
+with repo.transaction() as transaction:
     graph.replace("vector:4-8", "GGGG", message="try a new motif")
     repo.update_with_vcf("variants.vcf", reference="design")
     # Read the trial graph, then undo the most recent successful operation if needed.
-    edits.undo()
-    operation = edits.commit("update design sequences")
+    transaction.undo()
+    operation = transaction.commit("update design sequences")
 ```
 
-Leaving the `with` block without `edits.commit(message)` rolls back that session's savepoint,
-including when the block raises. Sessions can nest, including inside an already-open SQLite
-transaction. An inner `commit()` releases its savepoint into the parent and returns `None`; only an
-outermost `commit()` creates a Dolt history operation and returns its `Operation`. An empty
-outermost session returns `None`. `edits.undo()` rolls back to the newest successful operation
+An outer transaction opens a SQLite transaction; nested transactions create savepoints. Nested
+transaction contexts close in reverse order, following SQLite's savepoint stack. Leaving the `with`
+block without `transaction.commit(message)` rolls back that transaction or nested savepoint,
+including when the block raises. Transactions can nest inside an already-open SQLite transaction.
+An inner `commit()` releases its savepoint into the parent and returns `None`;
+only an outermost `commit()` creates a Dolt history operation and returns its `Operation`. An empty
+outermost transaction returns `None`. `transaction.undo()` rolls back to the newest successful operation
 savepoint on the SQLite connection and returns whether it found one; it follows connection savepoint
 order, so nested contexts do not form separate undo stacks. A failed operation rolls back only its
 own changes.
 
-Once an outermost session commits or rolls back, SQLite returns to autocommit mode and later writes
-inside the still-open Python `with` block commit normally. Closing an inner session leaves its parent
+Once an outermost transaction commits or rolls back, SQLite returns to autocommit mode and later writes
+inside the still-open Python `with` block commit normally. Closing an inner transaction leaves its parent
 transaction open, so later writes remain in that parent. Branch changes, reset/merge/apply, and
 remote operations or configuration changes require SQLite autocommit mode. Raw `execute()` and
-`query()` follow SQLite behavior and are available while a session is open.
+`query()` follow SQLite behavior and are available while a transaction is open.
 
 Annotation-file imports return `None` while a SQLite transaction is open because their operation
 hash is not known until the outermost Dolt commit. By default, `get_assets()` includes assets from
@@ -264,10 +266,10 @@ for left in (a.end(), c.end()):
 ```
 
 Each call records one operation when SQLite is in autocommit mode. Inside an
-open SQL transaction or `repo.edit_session()`, edits stay in the Dolt working
+open SQL transaction or `repo.transaction()`, edits stay in the Dolt working
 set until the outermost commit. Failed calls roll back their own changes and
-operation record. Use `repo.edit_session()` to group a series of edits into one
-history entry; see [Deferred edit sessions](#deferred-edit-sessions). Every
+operation record. Use `repo.transaction()` to group a series of edits into one
+history entry; see [Repository transactions](#repository-transactions). Every
 editing method accepts an optional `message` used as the operation's commit
 message; when omitted, a description of the edit is generated instead.
 `stack=True` adds the edit as an alternative next to what is already there and

@@ -125,9 +125,7 @@ where
 {
     let graph = context.graph().conn();
     if !graph.is_autocommit() {
-        context
-            .begin_deferred_operation()
-            .map_err(sqlite_err_to_pyerr)?;
+        context.begin_savepoint().map_err(sqlite_err_to_pyerr)?;
         let result = (|| {
             let changes_before = graph.total_changes();
             let (value, operation_summary) = op(context)?;
@@ -141,19 +139,15 @@ where
         return match result {
             Ok((value, true)) => Ok(value),
             Ok((value, false)) => {
-                context
-                    .discard_deferred_operation()
-                    .map_err(sqlite_err_to_pyerr)?;
+                context.rollback_savepoint().map_err(sqlite_err_to_pyerr)?;
                 Ok(value)
             }
             Err(error) => {
-                context
-                    .discard_deferred_operation()
-                    .map_err(|rollback_error| {
-                        PyRuntimeError::new_err(format!(
-                            "{error}; additionally failed to roll back the edit: {rollback_error}"
-                        ))
-                    })?;
+                context.rollback_savepoint().map_err(|rollback_error| {
+                    PyRuntimeError::new_err(format!(
+                        "{error}; additionally failed to roll back the edit: {rollback_error}"
+                    ))
+                })?;
                 Err(error)
             }
         };
@@ -169,32 +163,26 @@ where
 }
 
 /// Runs one metadata or asset mutation in its own savepoint.
-pub(crate) fn run_context_staged_write<F, T>(context: &DbContext, operation: F) -> PyResult<T>
+pub(crate) fn run_context_savepoint_write<F, T>(context: &DbContext, operation: F) -> PyResult<T>
 where
     F: FnOnce() -> PyResult<T>,
 {
-    context
-        .begin_deferred_operation()
-        .map_err(sqlite_err_to_pyerr)?;
+    context.begin_savepoint().map_err(sqlite_err_to_pyerr)?;
     let changes_before = context.graph().conn().total_changes();
     match operation() {
         Ok(value) => {
             if context.graph().conn().total_changes() == changes_before {
-                context
-                    .discard_deferred_operation()
-                    .map_err(sqlite_err_to_pyerr)?;
+                context.rollback_savepoint().map_err(sqlite_err_to_pyerr)?;
                 return Ok(value);
             }
             Ok(value)
         }
         Err(error) => {
-            context
-                .discard_deferred_operation()
-                .map_err(|rollback_error| {
-                    PyRuntimeError::new_err(format!(
-                        "{error}; additionally failed to roll back the edit: {rollback_error}"
-                    ))
-                })?;
+            context.rollback_savepoint().map_err(|rollback_error| {
+                PyRuntimeError::new_err(format!(
+                    "{error}; additionally failed to roll back the edit: {rollback_error}"
+                ))
+            })?;
             Err(error)
         }
     }

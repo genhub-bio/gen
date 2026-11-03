@@ -777,8 +777,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .into_iter()
                 .map(OperationFile::new)
                 .collect::<Vec<_>>();
-            let commit_hash =
+            let operation_summary =
                 add_files_operation(&db_context, &operation_files, message.as_deref())?;
+            let commit_hash = DoltHistoryStore::new_with_config(
+                db_context.graph().conn(),
+                db_context.config().conn(),
+            )
+            .commit_all(&operation_summary.summary)?;
             println!("Files added in operation {commit_hash}");
             Ok(())
         }

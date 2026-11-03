@@ -29,7 +29,7 @@ use pyo3::{
 };
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
-use super::{PyRepository, run_context_operation_write, run_context_staged_write};
+use super::{PyRepository, run_context_operation_write, run_context_savepoint_write};
 use crate::python_api::{
     block_group::PySequenceGraph,
     hash_id::PyHashId,
@@ -239,7 +239,7 @@ impl PyRepository {
         let filename = absolute_path_string(filename)?;
         let index = index.map(absolute_path_string).transpose()?;
         let commit_immediately = self.context.graph().conn().is_autocommit();
-        let operation_hash = run_context_staged_write(&self.context, || {
+        let operation_hash = run_context_savepoint_write(&self.context, || {
             let operation_summary = add_annotation_file(
                 &self.context,
                 &filename,

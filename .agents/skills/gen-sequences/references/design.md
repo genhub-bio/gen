@@ -37,8 +37,8 @@ live view: its list accessors query current membership, and a new iteration sees
 the handle was created. Replace/delete targets are region strings, loci, or annotations. These methods
 edit the graph's existing sample, not a new sample, so copy first when the original matters.
 Replace and insert return the new sequence's `Locus`; delete returns `None`. Each edit
-records an operation by default, using `message` when supplied. Inside `repo.edit_session()` or an
-open SQL transaction, edits are deferred and can be undone individually or committed together; see
+records an operation by default, using `message` when supplied. Inside `repo.transaction()` or an
+open SQL transaction, edits join the transaction and can be undone individually or committed together; see
 `version-control.md`.
 Replacement/insertion require nonempty
 sequence; use delete to remove sequence.

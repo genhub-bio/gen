@@ -10,7 +10,6 @@ __all__ = [
     "Annotation",
     "Asset",
     "Branch",
-    "EditSession",
     "HashId",
     "Locus",
     "Node",
@@ -23,6 +22,7 @@ __all__ = [
     "Sequence",
     "SequenceGraph",
     "SuperPosition",
+    "Transaction",
     "clone",
 ]
 
@@ -176,39 +176,6 @@ class Branch:
         """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
-
-@typing.final
-class EditSession:
-    r"""
-    A context manager backed by an SQLite savepoint for staging repository mutations.
-    """
-    def __enter__(self) -> EditSession:
-        r"""
-        Begins using the session as a context manager.
-        """
-    def __exit__(
-        self,
-        _exception_type: typing.Optional[typing.Any],
-        _exception: typing.Optional[typing.Any],
-        _traceback: typing.Optional[typing.Any],
-    ) -> builtins.bool:
-        r"""
-        Rolls back an uncommitted session when its context exits.
-        """
-    def rollback(self) -> None:
-        r"""
-        Rolls back this SQL savepoint, preserving work in its parent transaction.
-        """
-    def undo(self) -> builtins.bool:
-        r"""
-        Undoes the newest operation savepoint on the SQLite connection, if one exists.
-        """
-    def commit(self, message: builtins.str) -> typing.Optional[Operation]:
-        r"""
-        Releases an inner savepoint or commits an outermost edit session as one history operation.
-
-        Inner sessions return `None`; an empty outermost session also returns `None`.
-        """
 
 @typing.final
 class HashId:
@@ -529,9 +496,9 @@ class Repository:
                 new_region="construct",
             )
         """
-    def edit_session(self) -> EditSession:
+    def transaction(self) -> Transaction:
         r"""
-        Creates an edit-session context manager backed by a SQLite savepoint.
+        Creates a transaction context manager backed by a SQLite transaction and nested savepoints.
 
         Enter the returned object with `with`. Nested commits release into their parent; only the
         outermost `commit()` creates a Dolt history operation.
@@ -1625,6 +1592,39 @@ class SuperPosition:
     def __eq__(self, other: typing.Any) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Transaction:
+    r"""
+    A context manager backed by an SQLite transaction with nested savepoints.
+    """
+    def __enter__(self) -> Transaction:
+        r"""
+        Begins using the transaction as a context manager.
+        """
+    def __exit__(
+        self,
+        _exception_type: typing.Optional[typing.Any],
+        _exception: typing.Optional[typing.Any],
+        _traceback: typing.Optional[typing.Any],
+    ) -> builtins.bool:
+        r"""
+        Rolls back an uncommitted transaction when its context exits.
+        """
+    def rollback(self) -> None:
+        r"""
+        Rolls back this transaction or nested savepoint, preserving work in its parent.
+        """
+    def undo(self) -> builtins.bool:
+        r"""
+        Undoes the newest operation savepoint on the SQLite connection, if one exists.
+        """
+    def commit(self, message: builtins.str) -> typing.Optional[Operation]:
+        r"""
+        Releases an inner savepoint or commits an outermost transaction as one history operation.
+
+        Inner transactions return `None`; an empty outermost transaction also returns `None`.
+        """
 
 def clone(
     url: builtins.str,
