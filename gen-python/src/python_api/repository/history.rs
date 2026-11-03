@@ -12,7 +12,7 @@ use gen_models::{
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
         HistoryEntry, HistoryStore,
-        dolt::{DoltBranchRow, DoltHistoryStore, branch_rows},
+        dolt::{DoltBranchRow, DoltHistoryStore, branch_exists, branch_rows, get_branch},
     },
     operations::{OperationFile, RemoteBranch, add_files_operation},
 };
@@ -314,6 +314,24 @@ fn operation_ref(value: &Bound<'_, PyAny>) -> PyResult<String> {
     }
 }
 
+fn resolve_existing_operation(
+    history_store: &impl HistoryStore,
+    reference: &str,
+) -> PyResult<DoltHashId> {
+    let commit_hash = history_store
+        .resolve_operation_hash(&CommitRef(reference.to_string()))
+        .map_err(history_err_to_pyerr)?;
+    if !history_store
+        .commit_exists(&commit_hash)
+        .map_err(history_err_to_pyerr)?
+    {
+        return Err(PyValueError::new_err(format!(
+            "operation '{reference}' not found"
+        )));
+    }
+    Ok(commit_hash)
+}
+
 impl PyRepository {
     fn branch_from_row(&self, row: DoltBranchRow, current_branch: Option<&BranchName>) -> PyBranch {
         let remote = if row.remote.is_empty() {
@@ -325,10 +343,13 @@ impl PyRepository {
     }
 
     fn find_branch(&self, name: &str) -> PyResult<PyBranch> {
-        self.get_branches()?
-            .into_iter()
-            .find(|branch| branch.name == name)
-            .ok_or_else(|| PyRuntimeError::new_err(format!("branch '{name}' not found")))
+        let row = get_branch(self.context.graph().conn(), name)
+            .map_err(history_err_to_pyerr)?
+            .ok_or_else(|| PyRuntimeError::new_err(format!("branch '{name}' not found")))?;
+        let current_branch = DoltHistoryStore::new(self.context.graph().conn())
+            .current_branch()
+            .map_err(history_err_to_pyerr)?;
+        Ok(self.branch_from_row(row, current_branch.as_ref()))
     }
 
     fn head_operation(&self) -> PyResult<PyOperation> {
@@ -401,10 +422,11 @@ impl PyRepository {
 
     /// Checks out a branch by name or Branch object and returns its updated metadata.
     ///
-    /// Set `create=True` to create a new branch at HEAD before checking it out. Creating an
-    /// existing branch is an error unless `exist_ok=True`, which switches to it instead; use that
-    /// in notebook cells that may be run more than once.
-    #[pyo3(signature = (branch, *, create=false, exist_ok=false))]
+    /// Set `create=True` to create a new branch at HEAD before checking it out. Pass `start` with
+    /// `create=True` to start that branch at an earlier operation. Creating an existing branch is
+    /// an error unless `exist_ok=True`, which switches to it instead; `start` cannot be combined
+    /// with an existing branch.
+    #[pyo3(signature = (branch, *, create=false, exist_ok=false, start=None))]
     fn checkout(
         &self,
         #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<
@@ -413,9 +435,30 @@ impl PyRepository {
         >,
         create: bool,
         exist_ok: bool,
+        #[gen_stub(override_type(type_repr = "str | HashId | Operation | None", imports = ()))]
+        start: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyBranch> {
         let name = branch_name(branch)?;
-        let already_exists = self.find_branch(&name).is_ok();
+        let already_exists =
+            branch_exists(self.context.graph().conn(), &name).map_err(history_err_to_pyerr)?;
+        let start_hash = match start {
+            Some(_) if !create => {
+                return Err(PyValueError::new_err(
+                    "start can only be used when create=True",
+                ));
+            }
+            Some(_) if already_exists => {
+                return Err(PyValueError::new_err(format!(
+                    "branch '{name}' already exists; start can only be used for a new branch"
+                )));
+            }
+            Some(start) => {
+                let reference = operation_ref(start)?;
+                let history_store = DoltHistoryStore::new(self.context.graph().conn());
+                Some(resolve_existing_operation(&history_store, &reference)?)
+            }
+            None => None,
+        };
         if create && already_exists && !exist_ok {
             return Err(PyRuntimeError::new_err(format!(
                 "branch '{name}' already exists; use checkout('{name}') to switch to it, or pass exist_ok=True"
@@ -425,7 +468,10 @@ impl PyRepository {
             let history_store = DoltHistoryStore::new(self.context.graph().conn());
             r#gen::history::ensure_clean_working_set(&history_store, "checkout")
                 .map_err(history_err_to_pyerr)?;
-            self.create_branch(&name, None)?;
+            let start_ref = start_hash.as_ref().map(|hash| CommitRef(hash.to_string()));
+            history_store
+                .create_branch(&BranchName(name.clone()), start_ref.as_ref())
+                .map_err(history_err_to_pyerr)?;
         }
         r#gen::commands::checkout::execute(
             self.context.graph().conn(),
@@ -564,9 +610,7 @@ impl PyRepository {
         r#gen::history::ensure_clean_working_set(&history_store, "apply")
             .map_err(history_err_to_pyerr)?;
         let reference = operation_ref(operation)?;
-        let commit_hash = history_store
-            .resolve_operation_hash(&CommitRef(reference))
-            .map_err(history_err_to_pyerr)?;
+        let commit_hash = resolve_existing_operation(&history_store, &reference)?;
         history_store
             .cherry_pick(&commit_hash)
             .map_err(|error| r#gen::history::history_action_error("Apply", &error))
@@ -575,16 +619,24 @@ impl PyRepository {
     }
 
     /// Hard-resets the current branch to an operation and returns the resulting HEAD.
+    ///
+    /// By default, reset requires a clean working set. Pass `force=True` to discard uncommitted
+    /// changes along with later operations.
+    #[pyo3(signature = (operation, *, force=false))]
     fn reset(
         &self,
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
+        force: bool,
     ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        r#gen::history::ensure_clean_working_set(&history_store, "reset")
-            .map_err(history_err_to_pyerr)?;
+        if !force {
+            r#gen::history::ensure_clean_working_set(&history_store, "reset")
+                .map_err(history_err_to_pyerr)?;
+        }
         let reference = operation_ref(operation)?;
+        let target = resolve_existing_operation(&history_store, &reference)?;
         history_store
-            .reset_hard(&CommitRef(reference))
+            .reset_hard(&CommitRef(target.to_string()))
             .map_err(|error| history_err_to_pyerr(format!("Operation reset failed: {error}")))?;
         self.head_operation()
     }
@@ -629,7 +681,7 @@ mod tests {
             assert!(!feature.is_current, "new branch should not be current");
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             let checked_out = repository
-                .checkout(feature_object.bind(python).as_any(), false, false)
+                .checkout(feature_object.bind(python).as_any(), false, false, None)
                 .expect("should checkout Branch object");
             assert!(
                 checked_out.is_current,
@@ -653,7 +705,7 @@ mod tests {
                 .into_pyobject(python)
                 .expect("should create Python branch name");
             repository
-                .checkout(main.as_any(), false, false)
+                .checkout(main.as_any(), false, false, None)
                 .expect("should checkout branch name");
             assert!(
                 Collection::all(repository.context.graph().conn())
@@ -678,7 +730,7 @@ mod tests {
             let base_operation_object =
                 Py::new(python, base_operation).expect("should create Python operation");
             let reset = repository
-                .reset(base_operation_object.bind(python).as_any())
+                .reset(base_operation_object.bind(python).as_any(), false)
                 .expect("should reset to Operation object");
             assert_eq!(
                 reset.message, "base operation",

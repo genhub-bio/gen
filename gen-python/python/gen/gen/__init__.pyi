@@ -516,13 +516,15 @@ class Repository:
         *,
         create: builtins.bool = False,
         exist_ok: builtins.bool = False,
+        start: str | HashId | Operation | None = None,
     ) -> Branch:
         r"""
         Checks out a branch by name or Branch object and returns its updated metadata.
 
-        Set `create=True` to create a new branch at HEAD before checking it out. Creating an
-        existing branch is an error unless `exist_ok=True`, which switches to it instead; use that
-        in notebook cells that may be run more than once.
+        Set `create=True` to create a new branch at HEAD before checking it out. Pass `start` with
+        `create=True` to start that branch at an earlier operation. Creating an existing branch is
+        an error unless `exist_ok=True`, which switches to it instead; `start` cannot be combined
+        with an existing branch.
         """
     def get_operations(
         self,
@@ -560,9 +562,14 @@ class Repository:
         r"""
         Applies one operation to the current branch and returns the new HEAD operation.
         """
-    def reset(self, operation: str | HashId | Operation) -> Operation:
+    def reset(
+        self, operation: str | HashId | Operation, *, force: builtins.bool = False
+    ) -> Operation:
         r"""
         Hard-resets the current branch to an operation and returns the resulting HEAD.
+
+        By default, reset requires a clean working set. Pass `force=True` to discard uncommitted
+        changes along with later operations.
         """
     def import_annotations(
         self,

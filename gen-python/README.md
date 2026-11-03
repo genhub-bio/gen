@@ -82,8 +82,26 @@ operations are recorded as `gen`.
 
 `checkout(branch)` accepts a branch name or a `Branch` object. Use
 `checkout("experiment", create=True)` to create a branch at the current HEAD and
-switch to it in one call; it raises an error if that branch already exists.
-To create a branch without switching, use `create_branch(name, start=None)`.
+switch to it in one call; it raises an error if that branch already exists. To
+start at an earlier operation, pass it as `start`:
+
+```python
+base = repo.get_operations()[-1]
+repo.checkout("recovered", create=True, start=base)
+```
+
+`start` accepts an `Operation`, its `HashId`, or a string ref. It requires
+`create=True` and a new branch name. To create a branch without switching, use
+`create_branch(name, start=None)`. Checkout switches branches; detached checkout
+by operation hash is not supported. After a branch change or reset, query samples
+and sequence graphs again so handles reflect the selected state.
+
+`merge(branch)` adopts the branch into the current branch. `apply(operation)`
+cherry-picks one operation onto it. Both return the new HEAD `Operation` and
+require a clean working set. `reset(operation)` hard-resets the current branch
+to an `Operation`, `HashId`, or string ref and returns the resulting HEAD. It
+also requires a clean working set unless you explicitly pass
+`reset(operation, force=True)` to discard uncommitted changes.
 
 Push, pull, and fetch use the same remote selection, authentication, retries,
 asset transfer, and conflict behavior as the command-line client:
