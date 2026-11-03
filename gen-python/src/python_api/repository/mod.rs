@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
-use gen_core::{HashId, config::Workspace};
+use gen_core::{DoltHashId, HashId, config::Workspace};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
@@ -162,20 +162,45 @@ where
     Ok(value)
 }
 
-/// Runs one metadata or asset mutation in its own savepoint.
-pub(crate) fn run_context_savepoint_write<F, T>(context: &DbContext, operation: F) -> PyResult<T>
+/// Runs one metadata or asset mutation in a savepoint.
+pub(crate) fn run_context_savepoint_write<F, T>(
+    context: &DbContext,
+    operation: F,
+) -> PyResult<(T, Option<DoltHashId>)>
 where
-    F: FnOnce() -> PyResult<T>,
+    F: FnOnce() -> PyResult<(T, OperationSummary)>,
 {
+    let graph = context.graph().conn();
+    let was_autocommit = graph.is_autocommit();
     context.begin_savepoint().map_err(sqlite_err_to_pyerr)?;
-    let changes_before = context.graph().conn().total_changes();
+    let changes_before = graph.total_changes();
     match operation() {
-        Ok(value) => {
-            if context.graph().conn().total_changes() == changes_before {
+        Ok((value, operation_summary)) => {
+            if graph.total_changes() == changes_before {
                 context.rollback_savepoint().map_err(sqlite_err_to_pyerr)?;
-                return Ok(value);
+                return Ok((value, None));
             }
-            Ok(value)
+
+            if was_autocommit {
+                match DoltHistoryStore::new_with_config(graph, context.config().conn())
+                    .commit_all(&operation_summary.summary)
+                {
+                    Ok(commit_hash) => Ok((value, Some(commit_hash))),
+                    Err(error) => {
+                        let error = sqlite_err_to_pyerr(error);
+                        if !graph.is_autocommit() {
+                            context.rollback_savepoint().map_err(|rollback_error| {
+                                PyRuntimeError::new_err(format!(
+                                    "{error}; additionally failed to roll back the edit: {rollback_error}"
+                                ))
+                            })?;
+                        }
+                        Err(error)
+                    }
+                }
+            } else {
+                Ok((value, None))
+            }
         }
         Err(error) => {
             context.rollback_savepoint().map_err(|rollback_error| {
@@ -501,15 +526,24 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
-    use std::fs;
+    use std::{
+        ffi::{CStr, c_char, c_int, c_void},
+        fs, ptr,
+    };
 
     use r#gen::test_helpers::{TestContext, setup_gen_on_disk};
-    use pyo3::{PyTypeInfo, prelude::*, py_run};
+    use gen_models::{
+        collection::Collection,
+        db::DbContext,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        operations::{OperationInfo, OperationSummary},
+    };
+    use pyo3::{PyTypeInfo, exceptions::PyRuntimeError, prelude::*, py_run};
     use tempfile::tempdir;
 
-    use crate::python_api::repository::PyRepository;
     #[cfg(unix)]
     use crate::python_api::repository::clone_repository;
+    use crate::python_api::repository::{PyRepository, run_context_operation_write};
 
     fn make_repo(py: Python<'_>) -> (TestContext, Py<PyRepository>) {
         let ctx = setup_gen_on_disk();
@@ -532,6 +566,124 @@ mod python_tests {
         let path = dir.path().join(name);
         fs::write(&path, format!(">{seq_name}\n{sequence}\n")).unwrap();
         path
+    }
+
+    fn write_collection(context: &DbContext, name: &str, message: &str) -> PyResult<()> {
+        run_context_operation_write(
+            context,
+            |context| {
+                Collection::create(context.graph().conn(), name)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                Ok((
+                    (),
+                    OperationSummary::new(
+                        OperationInfo {
+                            files: vec![],
+                            description: "test write".to_string(),
+                        },
+                        message.to_string(),
+                    ),
+                ))
+            },
+            |error| PyRuntimeError::new_err(error.to_string()),
+        )
+    }
+
+    unsafe extern "C" fn deny_dolt_commit(
+        _user_data: *mut c_void,
+        action: c_int,
+        _first_argument: *const c_char,
+        second_argument: *const c_char,
+        _database: *const c_char,
+        _trigger: *const c_char,
+    ) -> c_int {
+        let is_dolt_commit = action == rusqlite::ffi::SQLITE_FUNCTION
+            && !second_argument.is_null()
+            && unsafe { CStr::from_ptr(second_argument) }.to_bytes() == b"dolt_commit";
+        if is_dolt_commit {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
+
+    #[test]
+    fn test_failed_commit_rolls_back_write_and_reuses_connection() {
+        Python::initialize();
+        Python::attach(|python| {
+            let (_test_context, py_repository) = make_repo(python);
+            let repository = py_repository.borrow(python);
+            let context = &repository.context;
+            let graph = context.graph().conn();
+            let head_before = DoltHistoryStore::new(graph)
+                .current_head()
+                .expect("should read HEAD before the test write");
+            let authorizer_result = unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(
+                    graph.handle(),
+                    Some(deny_dolt_commit),
+                    ptr::null_mut(),
+                )
+            };
+            assert_eq!(
+                authorizer_result,
+                rusqlite::ffi::SQLITE_OK,
+                "the authorizer should reject only Dolt commits"
+            );
+
+            let rejected_write = write_collection(context, "rejected-collection", "rejected write");
+
+            let authorizer_result = unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(graph.handle(), None, ptr::null_mut())
+            };
+            assert_eq!(
+                authorizer_result,
+                rusqlite::ffi::SQLITE_OK,
+                "the authorizer should be removed"
+            );
+            let error = rejected_write.expect_err("should reject the Dolt commit");
+            assert!(
+                error.to_string().contains("not authorized"),
+                "the write should return the commit failure: {error}"
+            );
+            assert!(
+                graph.is_autocommit(),
+                "the failed write should close its transaction"
+            );
+            assert_eq!(
+                Collection::all(graph)
+                    .expect("should read collections after the failed write")
+                    .iter()
+                    .filter(|collection| collection.name == "rejected-collection")
+                    .count(),
+                0,
+                "the failed commit should roll back the collection"
+            );
+            assert_eq!(
+                DoltHistoryStore::new(graph)
+                    .current_head()
+                    .expect("should read HEAD after the failed write"),
+                head_before,
+                "a rejected commit should leave HEAD unchanged"
+            );
+
+            write_collection(context, "recovered-collection", "recovered write")
+                .expect("should reuse the connection for the next write");
+            assert!(
+                Collection::all(graph)
+                    .expect("should read collections after the next write")
+                    .iter()
+                    .any(|collection| collection.name == "recovered-collection"),
+                "the next write should commit successfully"
+            );
+            assert_ne!(
+                DoltHistoryStore::new(graph)
+                    .current_head()
+                    .expect("should read HEAD after the successful write"),
+                head_before,
+                "the next write should advance HEAD"
+            );
+        });
     }
 
     #[test]

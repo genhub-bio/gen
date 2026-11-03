@@ -245,10 +245,7 @@ pub fn commit_operation_summary(
         .map_err(OperationError::from)
 }
 
-/// Records the semantic operation and its assets without advancing Dolt history.
-///
-/// A transaction keeps this metadata in its working set so several trial edits can be undone
-/// individually or committed together.
+/// Records operation metadata and links its prepared assets.
 pub fn record_operation_summary(
     context: &DbContext,
     operation_summary: &OperationSummary,
@@ -336,11 +333,10 @@ pub(crate) fn track_asset_refs(
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, files, message))
 )]
-/// Records file metadata and assets without advancing Dolt history.
+/// Records files used by an operation, retaining local content and preserving remote URIs.
 ///
-/// Checksum overrides are propagated from callers that already streamed remote content, avoiding
-/// a credentials-dependent read whose only purpose would be hashing. The returned summary carries
-/// the exact prepared asset references and commit message for the caller's history boundary.
+/// Checksum overrides let callers reuse checksums calculated while streaming remote content, avoiding
+/// a credentials-dependent read whose only purpose would be hashing.
 pub fn add_files_operation(
     context: &DbContext,
     files: &[OperationFile],

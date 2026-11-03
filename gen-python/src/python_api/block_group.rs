@@ -1214,10 +1214,8 @@ impl PySequenceGraph {
     ///
     /// The target may be a region string, a ``Locus`` from ``search()``, or an
     /// ``Annotation`` from ``annotations``. On a reverse-strand target the
-    /// sequence is read on that strand. The edit is recorded as its own operation,
-    /// using ``message`` as the operation's commit message when given, or a
-    /// generated description otherwise. Returns the ``Locus`` of the replacement
-    /// sequence.
+    /// sequence is read on that strand. ``message`` optionally labels the edit.
+    /// Returns the ``Locus`` of the replacement sequence.
     ///
     /// Parameters
     /// stack : bool, optional
@@ -1253,9 +1251,7 @@ impl PySequenceGraph {
     /// Delete the sequence covered by ``target``.
     ///
     /// The target may be a region string, a ``Locus`` from ``search()``, or an
-    /// ``Annotation`` from ``annotations``. The edit is recorded as its own
-    /// operation, using ``message`` as the operation's commit message when given,
-    /// or a generated description otherwise::
+    /// ``Annotation`` from ``annotations``. ``message`` optionally labels the edit::
     ///
     ///     for annotation in sg.annotations:
     ///         sg.delete(annotation.locus)
@@ -1327,7 +1323,7 @@ impl PySequenceGraph {
     ///     Add the insertion alongside the existing routes instead of retiring the connections
     ///     it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
     /// message : str, optional
-    ///     Commit message for the recorded operation.
+    ///     Description associated with the insertion.
     #[pyo3(signature = (sequence, *, before=None, after=None, message=None, stack=false))]
     fn insert(
         &self,

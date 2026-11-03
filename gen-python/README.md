@@ -138,12 +138,7 @@ for a complete walkthrough.
 ## Repository transactions
 
 Edits and imports commit automatically by default when the graph connection is in SQLite
-autocommit mode. Use `repo.transaction()` to try several operations against the live graph, undo
-recent operations, and keep the result in one history entry. Existing `Sample` and `SequenceGraph`
-handles from the repository see the trial state. `get_operations()` continues to show committed
-history while changes remain in the Dolt working set. Raw SQL transactions have the same effect:
-typed mutations join an open transaction, and SQLite decides when that work is committed or rolled
-back.
+autocommit mode. Use `repo.transaction()` to manually manage the transaction and commits.
 
 ```python
 graph = repo.get_sequence_graphs(sample="design")[0]
@@ -158,7 +153,7 @@ with repo.transaction() as transaction:
 An outer transaction opens a SQLite transaction; nested transactions create savepoints. Nested
 transaction contexts close in reverse order, following SQLite's savepoint stack. Leaving the `with`
 block without `transaction.commit(message)` rolls back that transaction or nested savepoint,
-including when the block raises. Transactions can nest inside an already-open SQLite transaction.
+including when the block raises an error. Transactions can nest inside an already-open SQLite transaction.
 An inner `commit()` releases its savepoint into the parent and returns `None`;
 only an outermost `commit()` creates a Dolt history operation and returns its `Operation`. An empty
 outermost transaction returns `None`. `transaction.undo()` rolls back to the newest successful operation
@@ -172,11 +167,10 @@ transaction open, so later writes remain in that parent. Branch changes, reset/m
 remote operations or configuration changes require SQLite autocommit mode. Raw `execute()` and
 `query()` follow SQLite behavior and are available while a transaction is open.
 
-Annotation-file imports return `None` while a SQLite transaction is open because their operation
-hash is not known until the outermost Dolt commit. By default, `get_assets()` includes assets from
-the current working set even after a raw SQL commit; passing a branch explicitly reads that
-branch's committed assets. Content-addressed file blobs may remain in `.gen` as unreferenced cache
-files after a rollback; graph rows and asset metadata are rolled back.
+Some operations such as file imports return `None` while a SQLite transaction is open because their operation
+hash is not known until the outermost Dolt commit. `get_working_assets()` can be used to fetch working-set
+additions and replacements on the committed view. Content-addressed file blobs may remain in `.gen` as
+unreferenced cache files after a rollback; graph rows and asset metadata are rolled back.
 
 ## Sequence editing
 
@@ -266,7 +260,7 @@ for left in (a.end(), c.end()):
 ```
 
 Each call records one operation when SQLite is in autocommit mode. Inside an
-open SQL transaction or `repo.transaction()`, edits stay in the Dolt working
+open SQL transaction or `repo.transaction()`, edits stay in the working
 set until the outermost commit. Failed calls roll back their own changes and
 operation record. Use `repo.transaction()` to group a series of edits into one
 history entry; see [Repository transactions](#repository-transactions). Every

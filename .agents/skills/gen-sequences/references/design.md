@@ -15,7 +15,7 @@ to avoid.
 2. `sample.copy("design")` so the parent stays intact, then take the graph: `design[0]`.
 3. Find the target: `graph.region("vector:4-8")`, `graph.search("GAATTC")`, or an annotation.
 4. Edit with `replace`, `insert`, `delete`. Keep the returned `Locus` as the target for the
-next edit; do not recompute coordinates by hand.
+   next edit; do not recompute coordinates by hand.
 5. Read back as strings (`locus.sequence`, `graph.region(...).sequence`,
    `graph.all_sequences()`) and check the result before exporting.
 
@@ -39,9 +39,7 @@ edit the graph's existing sample, not a new sample, so copy first when the origi
 Replace and insert return the new sequence's `Locus`; delete returns `None`. Each edit
 records an operation by default, using `message` when supplied. Inside `repo.transaction()` or an
 open SQL transaction, edits join the transaction and can be undone individually or committed together; see
-`version-control.md`.
-Replacement/insertion require nonempty
-sequence; use delete to remove sequence.
+`version-control.md`. Replacement/insertion require nonempty sequence; use delete to remove sequence.
 
 ```python
 source = next(sample for sample in repo.samples if sample.name == "parent")

@@ -299,14 +299,14 @@ impl PyTransaction {
     }
 }
 
-/// A file kept in the repository without being imported as sequence, such as a README, a FASTA or
-/// GenBank file that was imported, or an annotation file.
+/// A file kept in the repository, such as a README, a FASTA or GenBank file that was imported, or
+/// an annotation file.
 ///
-/// Add one with `Repository.add_file()` and list them with `Repository.get_assets()`. The
-/// content is stored once under a hashed filename inside `.gen`, and text files such as FASTA or
-/// README notes are kept compressed. `.name` is the file's original name, `.path` locates the
-/// stored copy, which may be compressed, and `.save_as()` writes the original, readable file under
-/// any name you choose. Treat the stored copy as read-only.
+/// Add one with `Repository.add_file()` and list it with `Repository.get_assets()` or
+/// `Repository.get_working_assets()`. The content is stored once under a hashed filename inside
+/// `.gen`, and text files such as FASTA or README notes are kept compressed. `.name` is the file's
+/// original name, `.path` locates the stored copy, which may be compressed, and `.save_as()` writes
+/// the original, readable file under any name you choose. Treat the stored copy as read-only.
 #[gen_stub_pyclass]
 #[pyclass(name = "Asset", unsendable, from_py_object)]
 #[derive(Clone)]
@@ -660,7 +660,7 @@ impl PyRepository {
         Ok(entries.into_iter().map(PyOperation::from).collect())
     }
 
-    /// Returns current working assets, or committed assets from an explicitly named branch.
+    /// Returns committed assets from the current branch or a named branch.
     #[pyo3(signature = (branch=None))]
     fn get_assets(
         &self,
@@ -668,7 +668,6 @@ impl PyRepository {
             &Bound<'_, PyAny>,
         >,
     ) -> PyResult<Vec<PyAsset>> {
-        let include_working_assets = branch.is_none();
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let name = match branch {
             Some(branch) => branch_name(branch)?,
@@ -680,26 +679,39 @@ impl PyRepository {
                     .0
             }
         };
-        let mut assets = Assets::get_branch_assets(self.context.graph().conn(), &name)
+        let assets = Assets::get_branch_assets(self.context.graph().conn(), &name)
             .map_err(history_err_to_pyerr)?;
-        if include_working_assets {
-            let mut pending_assets = Assets::get_added_working_assets(self.context.graph().conn())
-                .map_err(history_err_to_pyerr)?;
-            // Match the committed materialized view's timestamp and ID tie-breaking order.
-            pending_assets.sort_by(|left, right| {
-                left.created_on
-                    .cmp(&right.created_on)
-                    .then_with(|| right.id.cmp(&left.id))
-            });
-            for asset in pending_assets {
-                if !asset.uri.starts_with("file://") {
-                    continue;
-                }
-                if let Some(logical_path) = asset.logical_path.as_ref() {
-                    assets.retain(|_, current| current.logical_path.as_ref() != Some(logical_path));
-                }
-                assets.insert(asset.id, asset);
+        Ok(assets
+            .into_values()
+            .map(|asset| PyAsset::new(asset, &self.context))
+            .collect())
+    }
+
+    /// Returns committed assets overlaid with additions and replacements in the current working set.
+    fn get_working_assets(&self) -> PyResult<Vec<PyAsset>> {
+        let history_store = DoltHistoryStore::new(self.context.graph().conn());
+        let branch = history_store
+            .current_branch()
+            .map_err(history_err_to_pyerr)?
+            .ok_or_else(|| PyRuntimeError::new_err("repository has no current branch"))?;
+        let mut assets = Assets::get_branch_assets(self.context.graph().conn(), &branch.0)
+            .map_err(history_err_to_pyerr)?;
+        let mut pending_assets = Assets::get_added_working_assets(self.context.graph().conn())
+            .map_err(history_err_to_pyerr)?;
+        // Match the committed materialized view's timestamp and ID tie-breaking order.
+        pending_assets.sort_by(|left, right| {
+            left.created_on
+                .cmp(&right.created_on)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        for asset in pending_assets {
+            if !asset.uri.starts_with("file://") {
+                continue;
             }
+            if let Some(logical_path) = asset.logical_path.as_ref() {
+                assets.retain(|_, current| current.logical_path.as_ref() != Some(logical_path));
+            }
+            assets.insert(asset.id, asset);
         }
         Ok(assets
             .into_values()
@@ -707,14 +719,12 @@ impl PyRepository {
             .collect())
     }
 
-    /// Keep a file in the repository without importing it as sequence, for example a README or a
-    /// protocol, and return its `Asset`.
+    /// Stores a file as a repository asset and returns its `Asset`.
     ///
-    /// The content is stored once, inside `.gen`, and recorded as its own operation (with
-    /// `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-    /// stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-    /// the path of the file to store; a relative path is resolved against the current working
-    /// directory.
+    /// The content is stored once, inside `.gen`; `message` labels the addition. Adding the same
+    /// file again fails. Use `asset.path` to locate the stored copy or `asset.save_as(name)` to
+    /// write a copy under a name you choose. `filename` is the path of the file to store; a
+    /// relative path is resolved against the current working directory.
     #[pyo3(signature = (filename, message=None))]
     fn add_file(
         &self,
@@ -731,29 +741,22 @@ impl PyRepository {
         }
         let file = OperationFile::new(path);
         let asset_name = file.filename.clone();
-        let should_commit = self.context.graph().conn().is_autocommit();
-        let asset_ref = run_context_savepoint_write(&self.context, || {
+        let (asset_ref, _) = run_context_savepoint_write(&self.context, || {
             let operation_summary = add_files_operation(&self.context, &[file], message)
                 .map_err(|error| add_files_err_to_pyerr(path, error))?;
             let asset_ref = operation_summary
                 .prepared_asset_refs
+                .as_ref()
                 .ok_or_else(|| {
                     PyRuntimeError::new_err("the added file was not recorded as an asset")
                 })?
-                .into_iter()
+                .iter()
                 .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                .cloned()
                 .ok_or_else(|| {
                     PyRuntimeError::new_err("the added file was not recorded as an asset")
                 })?;
-            if should_commit {
-                DoltHistoryStore::new_with_config(
-                    self.context.graph().conn(),
-                    self.context.config().conn(),
-                )
-                .commit_all(&operation_summary.summary)
-                .map_err(history_err_to_pyerr)?;
-            }
-            Ok(asset_ref)
+            Ok((asset_ref, operation_summary))
         })?;
         Ok(PyAsset::new(asset_ref, &self.context))
     }

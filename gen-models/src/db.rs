@@ -743,6 +743,14 @@ mod tests {
                 .expect("should report no remaining SQLite savepoint"),
             "undo should stop when SQLite reports the fixed savepoint is absent"
         );
+        let collections =
+            Collection::all(graph_conn).expect("should read collections after second undo");
+        assert!(
+            collections
+                .iter()
+                .all(|collection| collection.name != "first-pending-collection"),
+            "the second undo should remove the first collection before transaction rollback"
+        );
         context
             .rollback_transaction(is_outermost)
             .expect("should roll back transaction");

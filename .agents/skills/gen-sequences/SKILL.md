@@ -81,7 +81,7 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
   those points; insert inside it or at the alternative's ends.
 - Graph-level exports cover the **whole sample**, not only that graph.
 - Mutating calls record operations automatically in SQLite autocommit mode. Use
-  `repo.transaction()` to try and undo a series of edits, imports or updates, then commit them as
+  `repo.transaction()` for finer control over edits, imports or updates, then commit them as
   one history entry; nested transactions use SQLite savepoints, and leaving a context without
   `transaction.commit(message)` rolls back that savepoint. See
   [references/version-control.md](references/version-control.md). `repo.get_operations()` is the

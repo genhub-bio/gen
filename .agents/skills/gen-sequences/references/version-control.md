@@ -59,12 +59,16 @@ switching and accepts an `Operation`, its `HashId` or a string commit ref for `s
 ```python
 repo.get_operations(branch=None, limit=None)
 repo.get_assets(branch=None)
+repo.get_working_assets()
 ```
 
 `get_operations()` returns newest-first `Operation` objects, so `get_operations(limit=1)[0]`
 is the latest. `Operation` fields: `id` (`HashId`), `parent_id`, `committer`, `email`, `date`,
-`message`, `is_head`. In SQLite autocommit mode, each mutating call records one operation. Pass
-`message=` where an edit method accepts it so the history reads as a design log.
+`message`, `is_head`. `get_assets()` returns committed assets for the current branch by default or
+for the requested branch. `get_working_assets()` returns that committed materialized view with
+pending working-set additions and latest logical-path replacements overlaid. In SQLite autocommit
+mode, each mutating call records one operation. Pass `message=` where an edit method accepts it so
+the history reads as a design log.
 
 ## Repository transactions
 
@@ -86,8 +90,7 @@ savepoint. Nested transaction contexts close in reverse order, following SQLite'
 Transactions can nest inside an already-open SQL transaction, including one with
 existing working changes. Each successful write
 can be undone with `transaction.undo()`, which rolls back the newest successful operation savepoint on the
-connection and returns whether it found one. Undo follows SQLite savepoint order rather than
-maintaining a per-transaction stack. A failed write rolls back only that write. Leaving a transaction
+connection and returns whether it found one. A failed write rolls back only that write. Leaving a transaction
 without `commit(message)` rolls back the outer transaction or current nested savepoint, including on
 exceptions. Committing an inner transaction releases it into its parent and returns `None`; committing
 an outermost transaction creates one Dolt history entry and returns its `Operation`, or returns `None`
@@ -100,8 +103,8 @@ Once the outermost transaction commits or rolls back, later writes commit normal
 Python `with` block has not exited. An inner commit leaves its parent transaction open. Branch
 changes, reset/merge/apply, remote operations and remote configuration changes require SQLite
 autocommit mode. Raw SQL through `execute()` and `query()` follows SQLite behavior and is available
-inside a transaction. `get_assets()` without a branch includes current working-set assets; an explicit
-branch reads committed assets only.
+inside a transaction. `get_assets()` always reads committed assets, including when the current
+branch is requested explicitly. Use `get_working_assets()` for the current working view.
 
 ## Merge, apply and reset
 

@@ -66,6 +66,10 @@ class TransactionTests(RepositoryTestCase):
         self.assertEqual(asset.name, "raw-transaction-notes.txt")
         self.assertIn(
             "raw-transaction-notes.txt",
+            {item.name for item in self.repository.get_working_assets()},
+        )
+        self.assertNotIn(
+            "raw-transaction-notes.txt",
             {item.name for item in self.repository.get_assets()},
         )
         self.assertNotIn(
@@ -83,8 +87,13 @@ class TransactionTests(RepositoryTestCase):
         self.assertEqual(len(self.repository.get_operations()), operation_count)
         self.assertIn(
             "raw-transaction-notes.txt",
+            {item.name for item in self.repository.get_working_assets()},
+            "working asset reads should include Dolt's current working set",
+        )
+        self.assertNotIn(
+            "raw-transaction-notes.txt",
             {item.name for item in self.repository.get_assets()},
-            "default asset reads should include Dolt's current working set",
+            "default asset reads should show committed assets",
         )
         self.assertNotIn(
             "raw-transaction-notes.txt",
@@ -101,6 +110,11 @@ class TransactionTests(RepositoryTestCase):
         self.assertEqual(len(self.repository.get_operations()), operation_count + 1)
         self.assertEqual(
             self.repository.get_operations()[0].message, "commit working set"
+        )
+        self.assertIn(
+            "raw-transaction-notes.txt",
+            {item.name for item in self.repository.get_assets()},
+            "the next Dolt commit should make the file visible in committed assets",
         )
 
     def test_transaction_inside_raw_transaction_releases_into_parent(self):
@@ -241,7 +255,7 @@ class TransactionTests(RepositoryTestCase):
         fasta = self.root / "partial-import.fa"
         fasta.write_bytes(b">temporary\nGATTACA\n>\xff\nTTTT\n")
         assets_before = {
-            (asset.name, asset.id) for asset in self.repository.get_assets()
+            (asset.name, asset.id) for asset in self.repository.get_working_assets()
         }
 
         with self.repository.transaction() as transaction:
@@ -255,7 +269,10 @@ class TransactionTests(RepositoryTestCase):
                 [],
             )
             self.assertEqual(
-                {(asset.name, asset.id) for asset in self.repository.get_assets()},
+                {
+                    (asset.name, asset.id)
+                    for asset in self.repository.get_working_assets()
+                },
                 assets_before,
             )
             self.assertEqual(
@@ -389,7 +406,7 @@ class TransactionTests(RepositoryTestCase):
 
             self.assertIsNone(annotation_result)
             self.assertEqual(asset.name, "notes.txt")
-            asset_names = {item.name for item in self.repository.get_assets()}
+            asset_names = {item.name for item in self.repository.get_working_assets()}
             self.assertIn("notes.txt", asset_names)
             self.assertIn("trial-genes", asset_names)
             self.assertIn("foobar", {item.name for item in graph.annotations})
@@ -399,10 +416,10 @@ class TransactionTests(RepositoryTestCase):
         self.assertEqual(len(self.repository.get_operations()), operation_count)
         self.assertEqual(self.repository.current_branch.head, head)
         self.assertNotIn(
-            "notes.txt", {item.name for item in self.repository.get_assets()}
+            "notes.txt", {item.name for item in self.repository.get_working_assets()}
         )
         self.assertNotIn(
-            "trial-genes", {item.name for item in self.repository.get_assets()}
+            "trial-genes", {item.name for item in self.repository.get_working_assets()}
         )
         self.assertNotIn("foobar", {item.name for item in graph.annotations})
 
@@ -471,7 +488,7 @@ class TransactionTests(RepositoryTestCase):
 
             [preview_asset] = [
                 asset
-                for asset in self.repository.get_assets()
+                for asset in self.repository.get_working_assets()
                 if asset.name == "notes.txt"
             ]
             preview = preview_asset.save_as(self.root / "preview-notes.txt")
@@ -484,6 +501,134 @@ class TransactionTests(RepositoryTestCase):
         ]
         saved = committed_asset.save_as(self.root / "committed-notes.txt")
         self.assertEqual(saved.read_text(), "first trial\n")
+
+    def test_working_assets_overlay_pending_replacements_without_advancing_history(
+        self,
+    ):
+        notes = self.root / "repository" / "notes.txt"
+        notes.write_text("committed notes\n")
+        committed_asset = self.repository.add_file(notes, message="commit notes")
+        other_branch = self.repository.create_branch("asset-snapshot")
+        current_branch = self.repository.current_branch
+        head = current_branch.head
+        operations = [
+            (operation.id, operation.message)
+            for operation in self.repository.get_operations()
+        ]
+
+        with self.repository.transaction() as transaction:
+            notes.write_text("second trial\n")
+            self.repository.add_file(notes)
+            [working_asset] = [
+                asset
+                for asset in self.repository.get_working_assets()
+                if asset.name == "notes.txt"
+            ]
+            preview = working_asset.save_as(self.root / "initial-notes.txt")
+            self.assertEqual(preview.read_text(), "second trial\n")
+
+            notes.write_text("first trial\n")
+            self.repository.add_file(notes)
+
+            [working_asset] = [
+                asset
+                for asset in self.repository.get_working_assets()
+                if asset.name == "notes.txt"
+            ]
+            preview = working_asset.save_as(self.root / "working-notes.txt")
+            self.assertEqual(preview.read_text(), "first trial\n")
+            for branch in (
+                None,
+                current_branch.name,
+                current_branch,
+                other_branch.name,
+                other_branch,
+            ):
+                [branch_asset] = [
+                    asset
+                    for asset in self.repository.get_assets(branch=branch)
+                    if asset.name == "notes.txt"
+                ]
+                self.assertEqual(branch_asset.id, committed_asset.id)
+            self.assertEqual(self.repository.current_branch.head, head)
+            self.assertEqual(
+                [
+                    (operation.id, operation.message)
+                    for operation in self.repository.get_operations()
+                ],
+                operations,
+                "reading working assets should not advance history",
+            )
+
+            self.assertTrue(transaction.undo())
+            [working_asset] = [
+                asset
+                for asset in self.repository.get_working_assets()
+                if asset.name == "notes.txt"
+            ]
+            preview = working_asset.save_as(self.root / "previous-notes.txt")
+            self.assertEqual(preview.read_text(), "second trial\n")
+            [branch_asset] = [
+                asset
+                for asset in self.repository.get_assets()
+                if asset.name == "notes.txt"
+            ]
+            self.assertEqual(branch_asset.id, committed_asset.id)
+            self.assertEqual(self.repository.current_branch.head, head)
+            self.assertEqual(
+                [
+                    (operation.id, operation.message)
+                    for operation in self.repository.get_operations()
+                ],
+                operations,
+            )
+
+            self.assertTrue(transaction.undo())
+            [working_asset] = [
+                asset
+                for asset in self.repository.get_working_assets()
+                if asset.name == "notes.txt"
+            ]
+            self.assertEqual(working_asset.id, committed_asset.id)
+            preview = working_asset.save_as(self.root / "committed-notes.txt")
+            self.assertEqual(preview.read_text(), "committed notes\n")
+            self.assertFalse(transaction.undo())
+            self.assertEqual(self.repository.current_branch.head, head)
+            self.assertEqual(
+                [
+                    (operation.id, operation.message)
+                    for operation in self.repository.get_operations()
+                ],
+                operations,
+            )
+
+        [working_asset] = [
+            asset
+            for asset in self.repository.get_working_assets()
+            if asset.name == "notes.txt"
+        ]
+        self.assertEqual(working_asset.id, committed_asset.id)
+        for branch in (
+            None,
+            current_branch.name,
+            current_branch,
+            other_branch.name,
+            other_branch,
+        ):
+            [branch_asset] = [
+                asset
+                for asset in self.repository.get_assets(branch=branch)
+                if asset.name == "notes.txt"
+            ]
+            self.assertEqual(branch_asset.id, committed_asset.id)
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(
+            [
+                (operation.id, operation.message)
+                for operation in self.repository.get_operations()
+            ],
+            operations,
+        )
 
     def test_history_and_remote_changes_follow_open_sql_transaction(self):
         self.repository.create_branch("feature")

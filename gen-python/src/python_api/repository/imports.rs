@@ -19,7 +19,6 @@ use gen_models::{
     db::GraphConnection,
     edge::Edge,
     errors::OperationError,
-    history::{HistoryStore, dolt::DoltHistoryStore},
     path::Path,
     sample::{NewSample, Sample},
 };
@@ -216,17 +215,13 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Record an annotation file in the repository and return the `HashId` of the operation that
-    /// recorded it.
+    /// Imports an annotation file and makes its indexed features available on matching sequence graphs.
     ///
     /// The format is inferred from the filename unless provided. A neighboring tabix index is
     /// discovered unless an index path is provided. The file's features then appear in
     /// `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-    /// display and track name; `message` is the operation's commit message. While a SQLite
-    /// transaction is open this returns `None` because the operation has no history id until the
-    /// outermost transaction is committed to Dolt.
-    /// `filename` and `index` are path strings; a relative path is resolved against the current
-    /// working directory.
+    /// display and track name; `message` labels the import. `filename` and `index` are path strings;
+    /// a relative path is resolved against the current working directory.
     #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
     fn import_annotations(
         &self,
@@ -238,8 +233,7 @@ impl PyRepository {
     ) -> PyResult<Option<PyHashId>> {
         let filename = absolute_path_string(filename)?;
         let index = index.map(absolute_path_string).transpose()?;
-        let commit_immediately = self.context.graph().conn().is_autocommit();
-        let operation_hash = run_context_savepoint_write(&self.context, || {
+        let (_, operation_hash) = run_context_savepoint_write(&self.context, || {
             let operation_summary = add_annotation_file(
                 &self.context,
                 &filename,
@@ -252,19 +246,7 @@ impl PyRepository {
             .map_err(|error| {
                 PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}"))
             })?;
-            if commit_immediately {
-                DoltHistoryStore::new_with_config(
-                    self.context.graph().conn(),
-                    self.context.config().conn(),
-                )
-                .commit_all(&operation_summary.summary)
-                .map(Some)
-                .map_err(|error| {
-                    PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}"))
-                })
-            } else {
-                Ok(None)
-            }
+            Ok(((), operation_summary))
         })?;
         Ok(operation_hash.map(PyHashId::from_dolt))
     }
@@ -388,7 +370,7 @@ impl PyRepository {
     /// supplies its own `name` (its id) unless one is given. `sample` is a name or a `Sample`, and
     /// defaults to the default sample, "reference"; call it repeatedly with the same `sample` to
     /// build up a sample from several sequences. With `circular=True` the sequence is stored as a
-    /// circular graph. Each call is its own operation, so use `import_fasta` for large files.
+    /// circular graph. For importing many sequences, use `import_fasta`.
     ///
     /// `collection` defaults to the default collection. A graph with this name must not already
     /// exist in the sample; with `exist_ok=True`, one holding exactly this sequence is returned

@@ -1006,13 +1006,11 @@ fn prepare_local_sorted_annotation(
     ))
 }
 
-/// Records annotation assets and returns the prepared operation summary for caller finalization.
+/// Prepares and records an annotation file and its indexes.
 ///
-/// Annotation metadata and its operation-log row are already recorded in the working set. Callers
-/// must commit the returned `summary` message through Dolt; recording the full summary again would
-/// duplicate the semantic operation. Callers pass checksums only when the corresponding remote
-/// streams were already consumed for annotation work, so local annotation files can be sorted,
-/// retained, and hashed without another remote read.
+/// Callers pass checksums only when the corresponding remote streams were already consumed for
+/// annotation work. This keeps operation creation independent of remote credentials while local
+/// annotation files are sorted, retained, and hashed during preparation.
 pub fn add_annotation_file(
     context: &DbContext,
     path: &str,
@@ -1037,10 +1035,6 @@ pub fn add_annotation_file(
 }
 
 /// Records annotation assets and reports local GFF3/BED preparation stages when requested.
-///
-/// The returned summary contains the exact prepared asset references and the operation message.
-/// Annotation metadata and its operation-log row are already recorded, so callers commit the
-/// returned `summary` message through Dolt instead of recording the full summary again.
 pub fn add_annotation_file_with_progress(
     context: &DbContext,
     path: &str,
