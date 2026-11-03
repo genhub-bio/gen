@@ -12,7 +12,7 @@ use gen_models::{
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
         HistoryEntry, HistoryStore,
-        dolt::{DoltBranchRow, DoltHistoryStore, branch_rows},
+        dolt::{DoltBranchRow, DoltHistoryStore, branch_exists, branch_rows, get_branch},
     },
     operations::{OperationFile, RemoteBranch, add_files_operation},
 };
@@ -343,10 +343,13 @@ impl PyRepository {
     }
 
     fn find_branch(&self, name: &str) -> PyResult<PyBranch> {
-        self.get_branches()?
-            .into_iter()
-            .find(|branch| branch.name == name)
-            .ok_or_else(|| PyRuntimeError::new_err(format!("branch '{name}' not found")))
+        let row = get_branch(self.context.graph().conn(), name)
+            .map_err(history_err_to_pyerr)?
+            .ok_or_else(|| PyRuntimeError::new_err(format!("branch '{name}' not found")))?;
+        let current_branch = DoltHistoryStore::new(self.context.graph().conn())
+            .current_branch()
+            .map_err(history_err_to_pyerr)?;
+        Ok(self.branch_from_row(row, current_branch.as_ref()))
     }
 
     fn head_operation(&self) -> PyResult<PyOperation> {
@@ -436,8 +439,8 @@ impl PyRepository {
         start: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyBranch> {
         let name = branch_name(branch)?;
-        let existing_branches = self.get_branches()?;
-        let already_exists = existing_branches.iter().any(|branch| branch.name == name);
+        let already_exists =
+            branch_exists(self.context.graph().conn(), &name).map_err(history_err_to_pyerr)?;
         let start_hash = match start {
             Some(_) if !create => {
                 return Err(PyValueError::new_err(

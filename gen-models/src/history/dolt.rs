@@ -69,6 +69,32 @@ pub struct DoltBranchRow {
     pub dirty: bool,
 }
 
+const DOLT_BRANCH_ROW_SELECT: &str = "SELECT name, hash, \
+         CASE WHEN hash = '0000000000000000000000000000000000000000' \
+              THEN '' ELSE latest_committer END, \
+         CASE WHEN hash = '0000000000000000000000000000000000000000' \
+              THEN '' ELSE latest_committer_email END, \
+         CASE WHEN hash = '0000000000000000000000000000000000000000' \
+              THEN '' ELSE latest_commit_date END, \
+         CASE WHEN hash = '0000000000000000000000000000000000000000' \
+              THEN '' ELSE latest_commit_message END, \
+         remote, branch, dirty \
+         FROM dolt_branches";
+
+fn read_branch_row(row: &rusqlite::Row<'_>) -> SqlResult<DoltBranchRow> {
+    Ok(DoltBranchRow {
+        name: row.get(0)?,
+        hash: row.get(1)?,
+        latest_committer: row.get(2)?,
+        latest_committer_email: row.get(3)?,
+        latest_commit_date: row.get(4)?,
+        latest_commit_message: row.get(5)?,
+        remote: row.get(6)?,
+        branch: row.get(7)?,
+        dirty: row.get(8)?,
+    })
+}
+
 /// Remote configuration read from `dolt_remotes` for remote-transfer workflows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoltRemoteRow {
@@ -625,33 +651,18 @@ pub fn branch_rows(conn: &GraphConnection) -> SqlResult<Vec<DoltBranchRow>> {
     // DoltLite exposes an all-zero hash for an uninitialized branch, but its
     // latest_commit_* columns currently try to load that hash as a commit.
     // CASE is lazy in DoltLite and keeps those placeholder rows readable.
-    let mut statement = conn.prepare(
-        "SELECT name, hash, \
-         CASE WHEN hash = '0000000000000000000000000000000000000000' \
-              THEN '' ELSE latest_committer END, \
-         CASE WHEN hash = '0000000000000000000000000000000000000000' \
-              THEN '' ELSE latest_committer_email END, \
-         CASE WHEN hash = '0000000000000000000000000000000000000000' \
-              THEN '' ELSE latest_commit_date END, \
-         CASE WHEN hash = '0000000000000000000000000000000000000000' \
-              THEN '' ELSE latest_commit_message END, \
-         remote, branch, dirty \
-         FROM dolt_branches ORDER BY name",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(DoltBranchRow {
-            name: row.get(0)?,
-            hash: row.get(1)?,
-            latest_committer: row.get(2)?,
-            latest_committer_email: row.get(3)?,
-            latest_commit_date: row.get(4)?,
-            latest_commit_message: row.get(5)?,
-            remote: row.get(6)?,
-            branch: row.get(7)?,
-            dirty: row.get(8)?,
-        })
-    })?;
+    let query = format!("{DOLT_BRANCH_ROW_SELECT} ORDER BY name");
+    let mut statement = conn.prepare(&query)?;
+    let rows = statement.query_map([], read_branch_row)?;
     rows.collect()
+}
+
+/// Reads metadata for an exact branch name, returning `None` when it is absent.
+pub fn get_branch(conn: &GraphConnection, branch_name: &str) -> SqlResult<Option<DoltBranchRow>> {
+    // Keep the same lazy guards and metadata projection as branch_rows while filtering in SQL.
+    let query = format!("{DOLT_BRANCH_ROW_SELECT} WHERE name = ?1");
+    conn.query_row(&query, [branch_name], read_branch_row)
+        .optional()
 }
 
 /// Searches materialized branch names, ranking exact and prefix matches first.
@@ -1126,10 +1137,11 @@ mod tests {
     use super::{
         DoltHistoryStore, active_branch, add_remote, branch_exists, branch_hash, branch_rows,
         branches_exist, checkout, commit_all, commit_exists, commit_parents, commit_staged_all,
-        conflict_rows, connect_branch, create_branch, delete_branch_force, diff_row_count, hash_of,
-        is_ancestor, is_current_branch_dirty, log_entries, log_entries_for_hashes,
-        log_entries_for_revision, merge, merge_base, remote_rows, remove_remote, reset_hard,
-        search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
+        conflict_rows, connect_branch, create_branch, delete_branch_force, diff_row_count,
+        get_branch, hash_of, is_ancestor, is_current_branch_dirty, log_entries,
+        log_entries_for_hashes, log_entries_for_revision, merge, merge_base, remote_rows,
+        remove_remote, reset_hard, search_branch_names, set_commit_author_email,
+        set_commit_author_name, status_rows,
     };
     use crate::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
@@ -1211,6 +1223,37 @@ mod tests {
         assert_eq!(
             branch_hash(&conn, "missing").expect("missing branch should be optional"),
             None
+        );
+    }
+
+    #[test]
+    fn test_get_branch_looks_up_exact_name_and_preserves_metadata() {
+        let conn = get_connection(None).expect("should create graph database");
+        let quoted_branch_name = "feature'quote";
+        create_branch(&conn, "feature").expect("should create feature branch");
+        create_branch(&conn, quoted_branch_name).expect("should create quoted branch");
+        let branches = branch_rows(&conn).expect("should list branches");
+
+        for name in ["feature", quoted_branch_name] {
+            let found = get_branch(&conn, name)
+                .expect("should query named branch")
+                .expect("should find the branch");
+            assert_eq!(found.name, name);
+            assert_eq!(
+                Some(found),
+                branches.iter().find(|branch| branch.name == name).cloned(),
+                "named lookup should preserve the full branch metadata row"
+            );
+        }
+        assert_eq!(
+            get_branch(&conn, "Feature").expect("should query exact branch name"),
+            None,
+            "branch lookup should not match a different case"
+        );
+        assert_eq!(
+            get_branch(&conn, "missing").expect("should query missing branch"),
+            None,
+            "missing branch should be optional"
         );
     }
 
