@@ -137,21 +137,49 @@ class TransactionTests(RepositoryTestCase):
         self.assertEqual(self.repository.current_branch.head, head)
         self.assertEqual(len(self.repository.get_operations()), operation_count)
 
-    def test_transaction_factory_does_not_start_a_sql_savepoint(self):
+    def test_repository_transaction_factory_starts_immediately(self):
+        head = self.repository.current_branch.head
+        operation_count = len(self.repository.get_operations())
         transaction = self.repository.transaction()
-        self.graph.replace("vector:1-3", "TT", message="outside entered context")
+        self.graph.replace("vector:1-3", "TT")
 
         self.assertEqual(self.sequence(), "ATTCGG")
-        self.assertEqual(
-            len(self.repository.get_operations()), self.base_operation_count + 1
-        )
-        del transaction
-        gc.collect()
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+
+        committed = transaction.commit("manual repository transaction")
+
+        self.assertEqual(committed.message, "manual repository transaction")
+        self.assertEqual(len(self.repository.get_operations()), operation_count + 1)
+
+        head = self.repository.current_branch.head
+        transaction = self.repository.transaction()
+        self.graph.replace("vector:4-6", "AA")
+
+        self.assertEqual(self.sequence(), "ATTCAA")
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count + 1)
+
+        transaction.rollback()
 
         self.assertEqual(self.sequence(), "ATTCGG")
-        self.assertEqual(
-            self.repository.get_operations()[0].message, "outside entered context"
-        )
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count + 1)
+
+    def test_sequence_graph_transaction_starts_immediately(self):
+        head = self.repository.current_branch.head
+        operation_count = len(self.repository.get_operations())
+        transaction = self.graph.transaction()
+        self.graph.replace("vector:1-3", "TT")
+
+        self.assertEqual(self.sequence(), "ATTCGG")
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+
+        committed = transaction.commit("manual graph transaction")
+
+        self.assertEqual(committed.message, "manual graph transaction")
+        self.assertEqual(len(self.repository.get_operations()), operation_count + 1)
 
     def test_raw_sql_transactions_control_writes_and_asset_reads(self):
         notes = self.root / "raw-transaction-notes.txt"
@@ -936,7 +964,6 @@ class TransactionTests(RepositoryTestCase):
 
     def test_open_transaction_drop_rolls_back_its_trial_edits(self):
         transaction = self.repository.transaction()
-        transaction.__enter__()
         self.graph.replace("vector:1-3", "TT")
         self.assertEqual(self.sequence(), "ATTCGG")
 
@@ -948,12 +975,10 @@ class TransactionTests(RepositoryTestCase):
 
     def test_stale_transaction_drop_cannot_roll_back_a_later_transaction(self):
         stale_transaction = self.repository.transaction()
-        stale_transaction.__enter__()
         self.graph.replace("vector:1-3", "TT")
         stale_transaction.rollback()
 
         current_transaction = self.repository.transaction()
-        current_transaction.__enter__()
         self.graph.replace("vector:4-6", "AA")
         del stale_transaction
         gc.collect()
@@ -966,7 +991,6 @@ class TransactionTests(RepositoryTestCase):
         head = self.repository.current_branch.head
         operation_count = len(self.repository.get_operations())
         transaction = self.repository.transaction()
-        transaction.__enter__()
         self.graph.replace("vector:1-3", "TT")
         self.repository.execute("ROLLBACK")
 
@@ -979,12 +1003,10 @@ class TransactionTests(RepositoryTestCase):
 
     def test_stale_context_exit_cannot_clear_a_later_transaction(self):
         stale_transaction = self.repository.transaction()
-        stale_transaction.__enter__()
         self.graph.replace("vector:1-3", "TT")
         stale_transaction.rollback()
 
         current_transaction = self.repository.transaction()
-        current_transaction.__enter__()
         stale_transaction.__exit__(None, None, None)
         self.graph.replace("vector:4-6", "AA")
         committed = current_transaction.commit("keep later edit")

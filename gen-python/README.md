@@ -140,6 +140,17 @@ autocommit mode. Use `repo.transaction(message=None)` or
 `graph.transaction(message=None)` to group changes; the graph form applies to its owning
 repository.
 
+Calling `transaction()` opens the transaction immediately, even without a `with` block. Commit or
+roll it back explicitly when managing it manually:
+
+```python
+graph = repo.get_sequence_graphs(sample="design")[0]
+transaction = repo.transaction()
+graph.replace("vector:4-8", "GGGG", message="try a new motif")
+operation = transaction.commit("update design sequences")
+# Call transaction.rollback() instead to discard the trial edits.
+```
+
 ```python
 graph = repo.get_sequence_graphs(sample="design")[0]
 with repo.transaction() as transaction:

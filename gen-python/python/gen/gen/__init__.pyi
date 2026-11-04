@@ -497,7 +497,7 @@ class Repository:
         """
     def transaction(self, message: typing.Optional[builtins.str] = None) -> Transaction:
         r"""
-        Creates a transaction context manager; successful exit commits pending changes.
+        Starts a repository-wide transaction; successful context exit commits pending changes.
         """
     def get_branches(self) -> builtins.list[Branch]:
         r"""
@@ -1142,7 +1142,7 @@ class SequenceGraph:
         """
     def transaction(self, message: typing.Optional[builtins.str] = None) -> Transaction:
         r"""
-        Creates a repository-wide transaction; successful exit commits pending changes.
+        Starts a repository-wide transaction; successful context exit commits pending changes.
         """
     def __repr__(self) -> builtins.str: ...
     def __hash__(self) -> builtins.int: ...
@@ -1583,11 +1583,11 @@ class SuperPosition:
 @typing.final
 class Transaction:
     r"""
-    A context manager backed by an SQLite transaction with nested savepoints.
+    An eagerly opened SQLite transaction or nested savepoint with context-manager support.
     """
     def __enter__(self) -> Transaction:
         r"""
-        Begins using the transaction as a context manager.
+        Returns this transaction for use as a context manager.
         """
     def __exit__(
         self,
