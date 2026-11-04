@@ -19,9 +19,12 @@ repo.get_sequence_graphs(name=None, sample=None, collection=None)   # sample: na
 repo.get_sequence_graph(graph.id)
 ```
 
-`Repository(path=None, committer=None, email=None)` opens or initializes a workspace; `path`
-can be the workspace or its `.gen` directory. Omitted path discovers the workspace from the
-current directory. Set `committer` and `email` so operations are attributed.
+`Repository(path=None, committer=None, email=None)` treats `path` as the project directory.
+If it does not exist, it is created. If it has no `.gen/` directory, a new Gen repository is
+initialized at `path/.gen/`; otherwise the existing repository is opened. With no `path`, the
+current working directory is the project directory. Set `committer` and `email` so operations
+are attributed. Ordinary files stay beside `.gen/` and are tracked by Gen only when imported or
+explicitly added as assets; `.git/` can coexist there for code history.
 
 `repo.samples` is a list of `Sample` objects. A sample is iterable and indexable (including
 negative indices), with `.name`, `.collection`, and `.sequence_graphs`. Graphs expose `.id`
