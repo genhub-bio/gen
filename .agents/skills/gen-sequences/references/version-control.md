@@ -86,25 +86,27 @@ with repo.transaction() as transaction:
 ```
 
 An outer transaction opens a SQLite transaction; each nested transaction creates a SQLite
-savepoint. Nested transaction contexts close in reverse order, following SQLite's savepoint stack.
-Transactions can nest inside an already-open SQL transaction, including one with
-existing working changes. Each successful write
-can be undone with `transaction.undo()`, which rolls back the newest successful operation savepoint on the
-connection and returns whether it found one. A failed write rolls back only that write. Leaving a transaction
-without `commit(message)` rolls back the outer transaction or current nested savepoint, including on
-exceptions. Committing an inner transaction releases it into its parent and returns `None`; committing
-an outermost transaction creates one Dolt history entry and returns its `Operation`, or returns `None`
-when empty. Annotation imports return
-`None` while a SQL transaction is open because their history id is assigned by the outermost commit.
+savepoint. Nested contexts close in reverse order, following SQLite's savepoint stack. Transactions
+can nest inside an already-open SQL transaction, including one with existing working changes. Each
+successful write can be undone with `transaction.undo()`, which rolls back the newest successful
+operation savepoint on the connection and returns whether it found one. A failed write rolls back only
+that write. Successful context exit commits remaining changes; exceptions and `transaction.rollback()`
+roll back the active scope. The commit message comes from `commit(message)`, the context's optional
+message, or the remaining operation messages joined in creation order. Raw SQL-only changes use
+`Update repository`. An inner commit releases its savepoint and returns `None`; an outermost commit
+creates one Dolt history entry and returns its `Operation`, or returns `None` when empty. Annotation
+imports return `None` while a SQL transaction is open because their history id is assigned by the
+outermost commit.
 File blobs are content-addressed cache files; after rollback, newly stored bytes can remain without
 graph asset metadata.
 
 Once the outermost transaction commits or rolls back, later writes commit normally even if the
-Python `with` block has not exited. An inner commit leaves its parent transaction open. Branch
-changes, reset/merge/apply, remote operations and remote configuration changes require SQLite
-autocommit mode. Raw SQL through `execute()` and `query()` follows SQLite behavior and is available
-inside a transaction. `get_assets()` always reads committed assets, including when the current
-branch is requested explicitly. Use `get_working_assets()` for the current working view.
+Python `with` block has not exited. An inner commit leaves its parent transaction open. Remote
+synchronization refreshes the graph connection and should run outside an open transaction; the shared context refuses to
+replace a connection with an active SQL transaction. Remote configuration is stored in a separate
+database and remains changed if a graph transaction rolls back. Raw SQL through `execute()` and
+`query()` is available inside a transaction. `get_assets()` always reads committed assets, including when
+the current branch is requested explicitly. Use `get_working_assets()` for the current working view.
 
 ## Merge, apply and reset
 
@@ -117,9 +119,8 @@ repo.reset(operation)
 `merge()`, `apply()`, and `reset()` return the resulting HEAD `Operation`; apply/reset accept
 an `Operation`, its `HashId` or a string ref. `merge()` adopts another branch's operations
 into the current one, `apply()` applies a given operation to the current branch, and `reset()` hard-resets the current
-branch. History actions require a clean working set (`Branch.dirty` is false); do not discard
-dirty state to bypass an error. Reset discards later operations on the branch, so confirm with
-the user first. Re-query graphs and samples after history changes instead of reusing handles
+branch. Reset discards later operations on the branch, so confirm with the user first. Re-query
+graphs and samples after history changes instead of reusing handles
 from another state.
 
 ## Remotes

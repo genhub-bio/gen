@@ -11,11 +11,8 @@ use gen_models::{
     operations::Defaults,
 };
 
-use crate::{
-    commands::remote::operations::{
-        DownloadAssetOutcome, materialize_versioned_asset, warn_asset_conflict,
-    },
-    history::ensure_clean_working_set,
+use crate::commands::remote::operations::{
+    DownloadAssetOutcome, materialize_versioned_asset, warn_asset_conflict,
 };
 
 /// Restores assets present at the requested commit from `.gen/assets` into the workspace
@@ -62,7 +59,6 @@ pub fn execute(
         connect_branch(graph, &current_branch)?;
     }
     let history_store = DoltHistoryStore::new(graph);
-    ensure_clean_working_set(&history_store, "checkout")?;
     let previous_assets = AssetRef::get_cumulative_assets_at(graph, None, None)?
         .into_iter()
         .map(|asset| (asset.id, asset))

@@ -53,7 +53,7 @@ use super::{
     jupyter_widget::{PyGraphController, build_widget},
     locus::GraphLocusExt as _,
     position::{PyPosition, positions_of},
-    repository::run_context_operation_write,
+    repository::{history::PyTransaction, run_context_operation_write},
     sample::PySample,
     sequence::PySequence,
     subgraph::derive_subgraph_between,
@@ -220,6 +220,13 @@ impl PySequenceGraph {
             self.sample_name.clone(),
             context.clone(),
         ))
+    }
+
+    /// Creates a repository-wide transaction; successful exit commits pending changes.
+    #[pyo3(signature = (message=None))]
+    fn transaction(&self, message: Option<String>) -> PyResult<PyTransaction> {
+        let context = self.require_context("transaction()")?;
+        Ok(PyTransaction::new(context.clone(), message))
     }
 
     fn __repr__(&self) -> PyResult<String> {

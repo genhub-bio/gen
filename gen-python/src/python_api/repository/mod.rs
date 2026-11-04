@@ -264,7 +264,9 @@ impl PyRepository {
                     ))
                 },
             )?;
-        self.context.set_graph(graph_connection);
+        self.context
+            .set_graph(graph_connection)
+            .map_err(sqlite_err_to_pyerr)?;
         Ok(())
     }
 
@@ -385,7 +387,7 @@ impl PyRepository {
     // Raw database access
 
     /// Run raw SQL against the graph database. Low-level: prefer the editing and import APIs, which
-    /// record operations. Transactions and savepoints follow SQLite behavior.
+    /// record operations.
     #[gen_stub(skip)]
     fn execute(&self, query: &str) -> PyResult<()> {
         self.context

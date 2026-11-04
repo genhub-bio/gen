@@ -211,6 +211,13 @@ current branch to one; each accepts an operation, `HashId`, or hash string. `Bra
 name, tracked remote, current/dirty flags, and head hash. `Operation` exposes committer, email, date,
 message, head status, id, and parent id.
 
+Use `repo.transaction(message=None)` or `graph.transaction(message=None)` to group edits for a
+repository. A successful context exit commits once. Its message comes from an explicit
+`transaction.commit(message)`, the context message, or the remaining operation messages joined in
+creation order; raw SQL-only changes use `Update repository`. `transaction.rollback()` and exceptions
+roll back the scope. Nested contexts use SQLite savepoints, and only the outermost commit creates a
+history entry.
+
 A remote is another repository that you can fetch changes from or push changes to. Configure
 remotes with `add_remote(name, url)`, `remove_remote(remote)`, `set_default_remote(remote=None)`,
 and `set_branch_remote(remote=None)`. `repo.remotes` and `repo.default_remote` inspect the setup.

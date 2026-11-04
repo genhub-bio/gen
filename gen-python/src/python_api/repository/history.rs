@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     fs::{self, File},
     io::copy,
     path::PathBuf,
@@ -8,7 +7,7 @@ use std::{
 use flate2::read::MultiGzDecoder;
 use gen_core::{BranchName, CommitRef, DoltHashId};
 use gen_models::{
-    assets::{AssetRef, Assets},
+    assets::{AssetRef, Assets, OperationLog},
     db::DbContext,
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
@@ -134,30 +133,24 @@ pub struct PyOperation {
 #[pyclass(name = "Transaction", unsendable)]
 pub struct PyTransaction {
     context: DbContext,
-    entered: Cell<bool>,
-    closed: Cell<bool>,
-    outermost: Cell<bool>,
+    outermost: Option<bool>,
+    message: Option<String>,
 }
 
 impl PyTransaction {
-    fn ensure_open(&self) -> PyResult<()> {
-        if self.closed.get() || !self.entered.get() || self.context.graph().conn().is_autocommit() {
-            return Err(PyRuntimeError::new_err("transaction is closed or stale"));
+    pub(crate) fn new(context: DbContext, message: Option<String>) -> Self {
+        Self {
+            context,
+            outermost: None,
+            message,
         }
-        Ok(())
-    }
-
-    fn close_after_action(&self) {
-        self.closed.set(true);
     }
 }
 
 impl Drop for PyTransaction {
     fn drop(&mut self) {
-        if self.entered.get() && !self.closed.get() {
-            let _ = self.context.rollback_transaction(self.outermost.get());
-            self.closed.set(true);
-            self.entered.set(false);
+        if let Some(is_outermost) = self.outermost.take() {
+            let _ = self.context.rollback_transaction(is_outermost);
         }
     }
 }
@@ -218,74 +211,83 @@ impl PyOperation {
 #[pymethods]
 impl PyTransaction {
     /// Begins using the transaction as a context manager.
-    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
-        if slf.closed.get() || slf.entered.get() {
-            return Err(PyRuntimeError::new_err(
-                "transaction is already entered or closed",
-            ));
+    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        if slf.outermost.is_some() {
+            return Err(PyRuntimeError::new_err("transaction is already entered"));
         }
         let outermost = slf
             .context
             .begin_transaction()
             .map_err(history_err_to_pyerr)?;
-        slf.outermost.set(outermost);
-        slf.entered.set(true);
+        slf.outermost = Some(outermost);
         Ok(slf)
     }
 
-    /// Rolls back an uncommitted transaction when its context exits.
+    /// Commits a successful context or rolls it back when an exception exits the block.
     fn __exit__(
         &mut self,
-        _exception_type: Option<&Bound<'_, PyAny>>,
+        exception_type: Option<&Bound<'_, PyAny>>,
         _exception: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        if self.entered.get() && !self.closed.get() {
-            self.context
-                .rollback_transaction(self.outermost.get())
-                .map_err(history_err_to_pyerr)?;
-            self.closed.set(true);
+        if let Some(is_outermost) = self.outermost {
+            if exception_type.is_none() {
+                self.commit(None)?;
+            } else {
+                self.outermost.take();
+                self.context
+                    .rollback_transaction(is_outermost)
+                    .map_err(history_err_to_pyerr)?;
+            }
         }
-        self.entered.set(false);
         Ok(false)
     }
 
     /// Rolls back this transaction or nested savepoint, preserving work in its parent.
     fn rollback(&mut self) -> PyResult<()> {
-        self.ensure_open()?;
+        let is_outermost = self
+            .outermost
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("transaction is not active"))?;
         self.context
-            .rollback_transaction(self.outermost.get())
+            .rollback_transaction(is_outermost)
             .map_err(history_err_to_pyerr)?;
-        self.close_after_action();
         Ok(())
     }
 
     /// Undoes the newest operation savepoint on the SQLite connection, if one exists.
     fn undo(&self) -> PyResult<bool> {
-        self.ensure_open()?;
         self.context.undo_savepoint().map_err(history_err_to_pyerr)
     }
 
     /// Releases an inner savepoint or commits an outermost transaction as one history operation.
     ///
     /// Inner transactions return `None`; an empty outermost transaction also returns `None`.
-    fn commit(&mut self, message: &str) -> PyResult<Option<PyOperation>> {
-        self.ensure_open()?;
+    #[pyo3(signature = (message=None))]
+    fn commit(&mut self, message: Option<&str>) -> PyResult<Option<PyOperation>> {
+        let is_outermost = self
+            .outermost
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("transaction is not active"))?;
         let history_store = DoltHistoryStore::new_with_config(
             self.context.graph().conn(),
             self.context.config().conn(),
         );
-        let operation_hash = match self
+        let operation_hash = self
             .context
-            .commit_transaction(self.outermost.get(), || history_store.commit_all(message))
-        {
-            Ok(operation_hash) => operation_hash,
-            Err(error) => {
-                self.close_after_action();
-                return Err(history_err_to_pyerr(error));
-            }
-        };
-        self.close_after_action();
+            .commit_transaction(is_outermost, || match message.or(self.message.as_deref()) {
+                Some(message) => history_store.commit_all(message),
+                None => {
+                    let messages = OperationLog::get_working_messages(self.context.graph().conn())?;
+                    let default_message = if messages.is_empty() {
+                        "Update repository".to_string()
+                    } else {
+                        messages.join("\n")
+                    };
+                    history_store.commit_all(&default_message)
+                }
+            })
+            .map_err(history_err_to_pyerr)?;
         match operation_hash {
             Some(_) => history_store
                 .log(Some(1))
@@ -493,31 +495,15 @@ impl PyRepository {
             .map(PyOperation::from)
             .ok_or_else(|| PyRuntimeError::new_err("repository has no operations"))
     }
-
-    pub(super) fn ensure_no_active_transaction(&self, action: &str) -> PyResult<()> {
-        if !self.context.graph().conn().is_autocommit() {
-            return Err(PyRuntimeError::new_err(format!(
-                "cannot {action} while a SQLite transaction is active"
-            )));
-        }
-        Ok(())
-    }
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Creates a transaction context manager backed by a SQLite transaction and nested savepoints.
-    ///
-    /// Enter the returned object with `with`. Nested commits release into their parent; only the
-    /// outermost `commit()` creates a Dolt history operation.
-    fn transaction(&self) -> PyResult<PyTransaction> {
-        Ok(PyTransaction {
-            context: self.context.clone(),
-            entered: Cell::new(false),
-            closed: Cell::new(false),
-            outermost: Cell::new(false),
-        })
+    /// Creates a transaction context manager; successful exit commits pending changes.
+    #[pyo3(signature = (message=None))]
+    fn transaction(&self, message: Option<String>) -> PyResult<PyTransaction> {
+        Ok(PyTransaction::new(self.context.clone(), message))
     }
 
     /// Returns every branch, ordered by name.
@@ -551,7 +537,6 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | HashId | Operation | None", imports = ()))]
         start: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyBranch> {
-        self.ensure_no_active_transaction("create a branch")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let start_ref = start.map(operation_ref).transpose()?.map(CommitRef);
         history_store
@@ -568,7 +553,6 @@ impl PyRepository {
             PyAny,
         >,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("delete a branch")?;
         let name = branch_name(branch)?;
         DoltHistoryStore::new(self.context.graph().conn())
             .delete_branch(&BranchName(name))
@@ -593,7 +577,6 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | HashId | Operation | None", imports = ()))]
         start: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyBranch> {
-        self.ensure_no_active_transaction("check out a branch")?;
         let name = branch_name(branch)?;
         let already_exists =
             branch_exists(self.context.graph().conn(), &name).map_err(history_err_to_pyerr)?;
@@ -622,8 +605,6 @@ impl PyRepository {
         }
         if create && !already_exists {
             let history_store = DoltHistoryStore::new(self.context.graph().conn());
-            r#gen::history::ensure_clean_working_set(&history_store, "checkout")
-                .map_err(history_err_to_pyerr)?;
             let start_ref = start_hash.as_ref().map(|hash| CommitRef(hash.to_string()));
             history_store
                 .create_branch(&BranchName(name.clone()), start_ref.as_ref())
@@ -769,10 +750,7 @@ impl PyRepository {
             PyAny,
         >,
     ) -> PyResult<PyOperation> {
-        self.ensure_no_active_transaction("merge branches")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        r#gen::history::ensure_clean_working_set(&history_store, "merge")
-            .map_err(history_err_to_pyerr)?;
         let name = branch_name(branch)?;
         self.context
             .graph()
@@ -788,10 +766,7 @@ impl PyRepository {
         &self,
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
     ) -> PyResult<PyOperation> {
-        self.ensure_no_active_transaction("apply an operation")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        r#gen::history::ensure_clean_working_set(&history_store, "apply")
-            .map_err(history_err_to_pyerr)?;
         let reference = operation_ref(operation)?;
         let commit_hash = resolve_existing_operation(&history_store, &reference)?;
         history_store
@@ -802,21 +777,11 @@ impl PyRepository {
     }
 
     /// Hard-resets the current branch to an operation and returns the resulting HEAD.
-    ///
-    /// By default, reset requires a clean working set. Pass `force=True` to discard uncommitted
-    /// changes along with later operations.
-    #[pyo3(signature = (operation, *, force=false))]
     fn reset(
         &self,
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
-        force: bool,
     ) -> PyResult<PyOperation> {
-        self.ensure_no_active_transaction("reset history")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        if !force {
-            r#gen::history::ensure_clean_working_set(&history_store, "reset")
-                .map_err(history_err_to_pyerr)?;
-        }
         let reference = operation_ref(operation)?;
         let target = resolve_existing_operation(&history_store, &reference)?;
         history_store
@@ -914,7 +879,7 @@ mod tests {
             let base_operation_object =
                 Py::new(python, base_operation).expect("should create Python operation");
             let reset = repository
-                .reset(base_operation_object.bind(python).as_any(), false)
+                .reset(base_operation_object.bind(python).as_any())
                 .expect("should reset to Operation object");
             assert_eq!(
                 reset.message, "base operation",

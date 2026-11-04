@@ -160,6 +160,27 @@ fn is_missing_savepoint(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// Provides shared access to a repository's graph and configuration connections.
+///
+/// [`begin_transaction`](Self::begin_transaction) starts a SQLite transaction when none is open
+/// and otherwise creates a nested transaction savepoint. It returns True if the transaction is the
+/// outermose transaction in the stack, which is useful for passing to
+/// [`commit_transaction`](Self::commit_transaction) or
+/// [`rollback_transaction`](Self::rollback_transaction) for simple commits/rollbacks. Nested scopes
+/// close in reverse order: an inner commit releases its savepoint into its parent and returns `None`;
+/// an inner rollback removes only that scope's changes. The outermost commit returns `None` for a clean
+/// working set. For a dirty set, it calls the supplied callback and returns `Some(value)`. That callback
+/// typically creates a Dolt history entry; SQLite's `COMMIT` closes the SQL transaction if the
+/// callback did not already do so. Errors roll back any still-open outer transaction.
+///
+/// [`begin_savepoint`](Self::begin_savepoint) can be used inside a transaction or by itself; SQLite
+/// treats a standalone savepoint as a transaction. Each call pushes a savepoint with the same name
+/// onto SQLite's connection-wide stack; it does not replace an earlier one. Both
+/// [`rollback_savepoint`](Self::rollback_savepoint) and [`undo_savepoint`](Self::undo_savepoint)
+/// run `ROLLBACK TO` and `RELEASE` on the newest matching savepoint, so repeated calls unwind older
+/// checkpoints in order. Undo returns `false` when no matching savepoint remains. Cloned contexts
+/// share both graph and configuration connections. The graph and configuration connections point
+/// to separate databases, and transaction/savepoint state belongs to the shared graph connection.
 #[derive(Clone)]
 pub struct DbContext {
     workspace: Arc<Workspace>,
@@ -229,8 +250,18 @@ impl DbContext {
         Self::build(workspace, graph_conn, config_conn)
     }
 
-    pub fn set_graph(&mut self, graph_conn: GraphConnection) {
+    /// Replaces the graph connection after its current SQLite transaction has ended.
+    pub fn set_graph(&mut self, graph_conn: GraphConnection) -> rusqlite::Result<()> {
+        if !self.graph.conn().is_autocommit() {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(
+                    "cannot replace graph connection while an SQLite transaction is active".into(),
+                ),
+            ));
+        }
         self.graph = DbHandle::new(self.workspace.clone(), graph_conn.into());
+        Ok(())
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -521,6 +552,78 @@ mod tests {
     }
 
     #[test]
+    fn test_set_graph_rejects_replacement_during_transaction() {
+        let temp_dir = tempdir().expect("should create temporary workspace");
+        let workspace = Workspace::new(temp_dir.path());
+        let gen_dir = workspace.ensure_gen_dir();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should open graph database");
+        let config_conn = get_config_connection(&config_path).expect("should open config database");
+        let mut context = DbContext::new_raw(workspace, graph_conn, config_conn);
+
+        let replacement_path = gen_dir.join("replacement.db");
+        let replacement =
+            get_connection(&replacement_path).expect("should open replacement graph database");
+        Collection::create(&replacement, "replacement-collection")
+            .expect("should create replacement database collection");
+        context
+            .set_graph(replacement)
+            .expect("should replace graph connection outside a transaction");
+        assert!(
+            Collection::all(context.graph().conn())
+                .expect("should query replacement graph")
+                .iter()
+                .any(|collection| collection.name == "replacement-collection"),
+            "inactive graph connection should be replaced"
+        );
+
+        assert!(
+            context
+                .begin_transaction()
+                .expect("should begin transaction"),
+            "transaction should be outermost"
+        );
+        Collection::create(context.graph().conn(), "pending-collection")
+            .expect("should create pending collection");
+        let blocked_replacement = get_connection(gen_dir.join("blocked.db"))
+            .expect("should open blocked replacement database");
+        let error = context
+            .set_graph(blocked_replacement)
+            .expect_err("should refuse to detach an active transaction");
+        assert!(
+            matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(code, Some(message))
+                    if code.code == rusqlite::ErrorCode::ApiMisuse
+                        && message == "cannot replace graph connection while an SQLite transaction is active"
+            ),
+            "connection replacement should return a clear SQLite misuse error: {error}"
+        );
+        assert!(
+            Collection::all(context.graph().conn())
+                .expect("should query active graph connection")
+                .iter()
+                .any(|collection| collection.name == "pending-collection"),
+            "rejected replacement should leave pending transaction data on its connection"
+        );
+        context
+            .rollback_transaction(true)
+            .expect("should roll back original transaction");
+        assert!(
+            !Collection::all(context.graph().conn())
+                .expect("should query graph after rollback")
+                .iter()
+                .any(|collection| collection.name == "pending-collection"),
+            "rollback should still remove the pending transaction data"
+        );
+    }
+
+    #[test]
     fn test_with_transaction_rolls_back_sql_error() {
         let conn = test_graph_connection(None).expect("should create graph database");
         conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
@@ -677,7 +780,7 @@ mod tests {
 
     #[test]
     fn test_undo_savepoint_uses_nested_sqlite_savepoints() {
-        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -754,13 +857,11 @@ mod tests {
         context
             .rollback_transaction(is_outermost)
             .expect("should roll back transaction");
-        drop(context);
-        drop(temp_dir);
     }
 
     #[test]
     fn test_undo_savepoint_propagates_unrelated_sqlite_errors() {
-        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -812,13 +913,11 @@ mod tests {
         context
             .rollback_transaction(is_outermost)
             .expect("should roll back transaction");
-        drop(context);
-        drop(temp_dir);
     }
 
     #[test]
     fn test_failed_transaction_commit_rolls_back_and_closes_transaction() {
-        let (workspace, temp_dir) = setup_branch_restore_repo();
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
         let graph_path = workspace
             .graph_db_path()
             .expect("should resolve graph database path");
@@ -885,7 +984,5 @@ mod tests {
         context
             .rollback_transaction(fresh_is_outermost)
             .expect("should roll back the fresh transaction");
-        drop(context);
-        drop(temp_dir);
     }
 }

@@ -30,6 +30,113 @@ class TransactionTests(RepositoryTestCase):
         )
         self.assertEqual(self.repository.get_operations()[0].message, "replace motif")
 
+    def test_repository_transaction_accepts_positional_and_keyword_messages(self):
+        with self.repository.transaction("positional message"):
+            self.graph.replace("vector:1-3", "TT")
+        with self.repository.transaction(message="keyword message"):
+            self.graph.replace("vector:4-6", "AA")
+
+        self.assertEqual(
+            [operation.message for operation in self.repository.get_operations()[:2]],
+            ["keyword message", "positional message"],
+        )
+
+    def test_empty_transaction_message_uses_dolt_error_and_rolls_back(self):
+        operation_count = len(self.repository.get_operations())
+
+        with self.assertRaisesRegex(RuntimeError, "dolt_commit requires a message"):
+            with self.repository.transaction(""):
+                self.graph.replace("vector:1-3", "TT")
+
+        self.assertEqual(self.sequence(), "AACCGG")
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+
+        committed_head = self.repository.current_branch.head
+        committed_count = len(self.repository.get_operations())
+        with self.repository.transaction("empty successful context"):
+            pass
+
+        self.assertEqual(self.repository.current_branch.head, committed_head)
+        self.assertEqual(len(self.repository.get_operations()), committed_count)
+
+    def test_message_context_rolls_back_when_body_raises(self):
+        head = self.repository.current_branch.head
+        operation_count = len(self.repository.get_operations())
+
+        with self.assertRaisesRegex(ValueError, "abort transaction"):
+            with self.repository.transaction("message on failed transaction"):
+                self.graph.replace("vector:1-3", "TT")
+                raise ValueError("abort transaction")
+
+        self.assertEqual(self.sequence(), "AACCGG")
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+
+    def test_explicit_commit_message_precedence_and_explicit_rollback(self):
+        with self.repository.transaction("configured message") as transaction:
+            self.graph.replace("vector:1-3", "TT")
+            committed = transaction.commit("explicit message")
+
+        self.assertEqual(committed.message, "explicit message")
+        self.assertEqual(
+            self.repository.get_operations()[0].message, "explicit message"
+        )
+
+        with self.repository.transaction("configured default") as transaction:
+            self.graph.replace("vector:4-6", "AA")
+            committed = transaction.commit()
+
+        self.assertEqual(committed.message, "configured default")
+        self.assertEqual(
+            self.repository.get_operations()[0].message, "configured default"
+        )
+
+        with self.repository.transaction() as transaction:
+            self.graph.replace("vector:1-3", "CC", message="recorded operation")
+            committed = transaction.commit()
+
+        self.assertEqual(committed.message, "recorded operation")
+
+        head = self.repository.current_branch.head
+        operation_count = len(self.repository.get_operations())
+        sequence_before = self.sequence()
+        with self.repository.transaction("ignored after rollback") as transaction:
+            self.graph.replace("vector:1-3", "CC")
+            transaction.rollback()
+
+        self.assertEqual(self.sequence(), sequence_before)
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+
+    def test_nested_message_contexts_commit_once_and_inner_message_can_be_rolled_back(
+        self,
+    ):
+        operation_count = len(self.repository.get_operations())
+
+        with self.repository.transaction("outer commit message"):
+            self.graph.replace("vector:1-3", "TT", message="first edit")
+            with self.repository.transaction("inner commit message"):
+                self.graph.replace("vector:4-6", "AA", message="second edit")
+            self.assertEqual(len(self.repository.get_operations()), operation_count)
+
+        self.assertEqual(len(self.repository.get_operations()), operation_count + 1)
+        self.assertEqual(
+            self.repository.get_operations()[0].message, "outer commit message"
+        )
+        self.assertEqual(self.sequence(), "ATTCAA")
+
+        head = self.repository.current_branch.head
+        operation_count = len(self.repository.get_operations())
+        sequence_before = self.sequence()
+        with self.repository.transaction() as outer_transaction:
+            with self.repository.transaction("inner message only"):
+                self.graph.replace("vector:1-3", "CC")
+            outer_transaction.rollback()
+
+        self.assertEqual(self.sequence(), sequence_before)
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+
     def test_transaction_factory_does_not_start_a_sql_savepoint(self):
         transaction = self.repository.transaction()
         self.graph.replace("vector:1-3", "TT", message="outside entered context")
@@ -228,15 +335,20 @@ class TransactionTests(RepositoryTestCase):
 
         self.assertEqual(self.sequence(), sequence_a)
 
-    def test_normal_context_exit_rolls_back_uncommitted_edits(self):
-        with self.repository.transaction():
-            self.graph.replace("vector:1-3", "TT")
-            self.assertEqual(self.sequence(), "ATTCGG")
+    def test_normal_context_exit_commits_accumulated_operation_messages(self):
+        with self.repository.transaction() as transaction:
+            self.graph.replace("vector:1-3", "TT", message="first retained edit")
+            self.graph.replace("vector:4-6", "AA", message="undone edit")
+            self.assertTrue(transaction.undo())
+            self.graph.replace("vector:4-6", "CC", message="last retained edit")
 
-        self.assertEqual(self.sequence(), "AACCGG")
-        self.assertEqual(self.repository.current_branch.head, self.base_operation.id)
+        self.assertEqual(self.sequence(), "ATTCCC")
         self.assertEqual(
-            len(self.repository.get_operations()), self.base_operation_count
+            len(self.repository.get_operations()), self.base_operation_count + 1
+        )
+        self.assertEqual(
+            self.repository.get_operations()[0].message,
+            "first retained edit\nlast retained edit",
         )
 
     def test_exception_context_exit_rolls_back_uncommitted_edits(self):
@@ -398,7 +510,7 @@ class TransactionTests(RepositoryTestCase):
         operation_count = len(self.repository.get_operations())
         head = self.repository.current_branch.head
 
-        with self.repository.transaction():
+        with self.repository.transaction() as transaction:
             asset = self.repository.add_file(notes)
             annotation_result = self.repository.import_annotations(
                 str(FIXTURES / "simple.gff"), name="trial-genes"
@@ -412,6 +524,7 @@ class TransactionTests(RepositoryTestCase):
             self.assertIn("foobar", {item.name for item in graph.annotations})
             self.assertEqual(len(self.repository.get_operations()), operation_count)
             self.assertEqual(self.repository.current_branch.head, head)
+            transaction.rollback()
 
         self.assertEqual(len(self.repository.get_operations()), operation_count)
         self.assertEqual(self.repository.current_branch.head, head)
@@ -582,7 +695,6 @@ class TransactionTests(RepositoryTestCase):
                 ],
                 operations,
             )
-
             self.assertTrue(transaction.undo())
             [working_asset] = [
                 asset
@@ -630,37 +742,22 @@ class TransactionTests(RepositoryTestCase):
             operations,
         )
 
-    def test_history_and_remote_changes_follow_open_sql_transaction(self):
+    def test_remote_config_and_raw_sql_rollback_with_graph_transaction(self):
         self.repository.create_branch("feature")
         branch_names = {branch.name for branch in self.repository.get_branches()}
         operation_count = len(self.repository.get_operations())
         remote_names = {remote.name for remote in self.repository.remotes}
+        head = self.repository.current_branch.head
 
-        with self.repository.transaction():
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.create_branch("blocked")
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.checkout("blocked", create=True)
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.delete_branch("feature")
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.merge("feature")
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.reset(self.base_operation)
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.apply(self.base_operation)
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.add_remote("origin", "file:///tmp/origin")
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.set_default_remote()
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.set_branch_remote()
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.push()
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.pull()
-            with self.assertRaisesRegex(RuntimeError, "SQLite transaction"):
-                self.repository.fetch()
+        with self.repository.transaction() as transaction:
+            self.graph.replace("vector:1-3", "TT")
+            self.assertEqual(self.sequence(), "ATTCGG")
+
+            remote = self.repository.add_remote("origin", "file:///tmp/origin")
+            self.repository.set_default_remote(remote)
+            self.repository.set_branch_remote(remote)
+            self.assertEqual(self.repository.default_remote.name, "origin")
+            self.assertEqual(self.repository.current_branch.remote, "origin")
             self.assertEqual(self.repository.query("SELECT 1"), [[1]])
             self.repository.execute("CREATE TABLE raw_transaction_table (value TEXT)")
             self.assertEqual(
@@ -669,7 +766,7 @@ class TransactionTests(RepositoryTestCase):
                 ),
                 [["raw_transaction_table"]],
             )
-
+            transaction.rollback()
         self.assertEqual(
             self.repository.query(
                 "SELECT name FROM sqlite_master WHERE name = 'raw_transaction_table'"
@@ -682,7 +779,39 @@ class TransactionTests(RepositoryTestCase):
         )
         self.assertEqual(len(self.repository.get_operations()), operation_count)
         self.assertEqual(
-            {remote.name for remote in self.repository.remotes}, remote_names
+            {remote.name for remote in self.repository.remotes},
+            remote_names | {"origin"},
+        )
+        self.assertEqual(self.repository.default_remote.name, "origin")
+        self.assertEqual(self.repository.current_branch.remote, "origin")
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(self.sequence(), "AACCGG")
+
+    def test_failed_remote_refresh_keeps_repository_on_open_transaction(self):
+        head = self.repository.current_branch.head
+        operation_count = len(self.repository.get_operations())
+
+        with self.repository.transaction() as transaction:
+            with self.assertRaisesRegex(RuntimeError, "missing"):
+                self.repository.fetch("missing")
+
+            imported_graph = self.repository.import_sequence(
+                "TTGCAA", name="after-fetch", sample="after-fetch"
+            )
+            self.assertEqual(str(imported_graph.all_sequences()[0]), "TTGCAA")
+            self.assertEqual(self.repository.current_branch.head, head)
+            self.assertEqual(len(self.repository.get_operations()), operation_count)
+            transaction.rollback()
+
+        self.assertEqual(self.sequence(), "AACCGG")
+        self.assertEqual(self.repository.current_branch.head, head)
+        self.assertEqual(len(self.repository.get_operations()), operation_count)
+        self.assertEqual(
+            self.repository.query(
+                "SELECT COUNT(*) FROM samples WHERE name = 'after-fetch'"
+            ),
+            [[0]],
+            "outer rollback should remove writes made after failed remote refresh",
         )
 
     def test_inner_transaction_commit_is_adopted_by_outer_commit(self):
@@ -732,8 +861,9 @@ class TransactionTests(RepositoryTestCase):
             self.graph.replace("vector:1-3", "TT")
             with self.repository.transaction() as middle_transaction:
                 self.graph.replace("vector:4-6", "AA")
-                with self.repository.transaction():
+                with self.repository.transaction() as inner_transaction:
                     self.graph.replace("vector:1-3", "CC")
+                    inner_transaction.rollback()
                 self.assertEqual(self.sequence(), "ATTCAA")
                 self.assertIsNone(middle_transaction.commit("middle transaction"))
             committed = outer_transaction.commit("three-level transaction")
@@ -791,8 +921,7 @@ class TransactionTests(RepositoryTestCase):
             self.graph.replace("vector:1-3", "TT")
             transaction.rollback()
 
-            with self.assertRaises(RuntimeError):
-                transaction.undo()
+            self.assertFalse(transaction.undo())
             self.graph.replace("vector:4-6", "AA", message="write after rollback")
             self.repository.create_branch("after-rollback")
             self.repository.add_remote("after-rollback", "file:///tmp/after-rollback")
@@ -821,7 +950,7 @@ class TransactionTests(RepositoryTestCase):
         stale_transaction = self.repository.transaction()
         stale_transaction.__enter__()
         self.graph.replace("vector:1-3", "TT")
-        stale_transaction.__exit__(None, None, None)
+        stale_transaction.rollback()
 
         current_transaction = self.repository.transaction()
         current_transaction.__enter__()
@@ -830,10 +959,10 @@ class TransactionTests(RepositoryTestCase):
         gc.collect()
 
         self.assertEqual(self.sequence(), "AACCAA")
-        current_transaction.__exit__(None, None, None)
+        current_transaction.rollback()
         self.assertEqual(self.sequence(), "AACCGG")
 
-    def test_transaction_commit_after_raw_rollback_reports_closed(self):
+    def test_transaction_commit_after_raw_rollback_reports_sqlite_error(self):
         head = self.repository.current_branch.head
         operation_count = len(self.repository.get_operations())
         transaction = self.repository.transaction()
@@ -841,7 +970,7 @@ class TransactionTests(RepositoryTestCase):
         self.graph.replace("vector:1-3", "TT")
         self.repository.execute("ROLLBACK")
 
-        with self.assertRaisesRegex(RuntimeError, "closed or stale"):
+        with self.assertRaisesRegex(RuntimeError, "no transaction is active"):
             transaction.commit("must not commit after raw rollback")
 
         self.assertEqual(self.sequence(), "AACCGG")
@@ -850,14 +979,16 @@ class TransactionTests(RepositoryTestCase):
 
     def test_stale_context_exit_cannot_clear_a_later_transaction(self):
         stale_transaction = self.repository.transaction()
-        with stale_transaction:
-            self.graph.replace("vector:1-3", "TT")
+        stale_transaction.__enter__()
+        self.graph.replace("vector:1-3", "TT")
+        stale_transaction.rollback()
 
         current_transaction = self.repository.transaction()
+        current_transaction.__enter__()
         stale_transaction.__exit__(None, None, None)
-        with current_transaction as transaction:
-            self.graph.replace("vector:4-6", "AA")
-            committed = transaction.commit("keep later edit")
+        self.graph.replace("vector:4-6", "AA")
+        committed = current_transaction.commit("keep later edit")
+        current_transaction.__exit__(None, None, None)
 
         self.assertEqual(self.sequence(), "AACCAA")
         self.assertEqual(committed.message, "keep later edit")

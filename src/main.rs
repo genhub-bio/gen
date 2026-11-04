@@ -23,7 +23,7 @@ use r#gen::{
     diffs::gfa::gfa_sample_diff,
     get_config_connection, get_connection_for_branch, get_raw_connection, get_time_elapsed_bar,
     graphs::graph_search::{GenGraphMatcher, SeedIndex},
-    history::{ensure_clean_working_set, history_action_error, operations_history_entries},
+    history::{history_action_error, operations_history_entries},
     patch,
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
@@ -519,7 +519,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or("Must provide a branch name to delete.")?,
                 ))?;
             } else if checkout {
-                ensure_clean_working_set(&history_store, "checkout")?;
                 let branch_name = branch_name
                     .clone()
                     .ok_or("Must provide a branch name to checkout.")?;
@@ -587,7 +586,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Merge { branch_name }) => {
             let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
             let history_store = DoltHistoryStore::new(graph_conn);
-            ensure_clean_working_set(&history_store, "merge")?;
             match graph_conn.with_transaction(|| history_store.merge(&CommitRef(branch_name))) {
                 Ok(_) => {
                     println!("Merge successful");
@@ -598,7 +596,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Apply { hash }) => {
             let history_store = DoltHistoryStore::new(graph_conn);
-            ensure_clean_working_set(&history_store, "apply")?;
             let commit_hash = history_store.resolve_operation_hash(&CommitRef(hash))?;
             match history_store.cherry_pick(&commit_hash) {
                 Ok(_) => {
@@ -613,7 +610,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Reset { hash }) => {
             let history_store = DoltHistoryStore::new(graph_conn);
-            ensure_clean_working_set(&history_store, "reset")?;
             match history_store.reset_hard(&CommitRef(hash)) {
                 Ok(_) => {
                     println!("Operation reset");

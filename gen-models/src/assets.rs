@@ -818,6 +818,17 @@ impl Assets {
 }
 
 impl OperationLog {
+    /// Returns uncommitted operation messages in creation order.
+    pub fn get_working_messages(conn: &GraphConnection) -> rusqlite::Result<Vec<String>> {
+        let mut statement = conn.prepare(
+            "SELECT to_command FROM dolt_diff_gen_operation_log('HEAD', 'WORKING') \
+             WHERE diff_type = 'added' ORDER BY to_created_on, to_id",
+        )?;
+        statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    }
+
     pub fn id_hash(operation_kind: &OperationKind, command: &str, created_on: i64) -> HashId {
         HashId(calculate_hash(&format!(
             "{operation_kind}:{command}:{created_on}"

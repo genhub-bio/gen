@@ -495,12 +495,9 @@ class Repository:
                 new_region="construct",
             )
         """
-    def transaction(self) -> Transaction:
+    def transaction(self, message: typing.Optional[builtins.str] = None) -> Transaction:
         r"""
-        Creates a transaction context manager backed by a SQLite transaction and nested savepoints.
-
-        Enter the returned object with `with`. Nested commits release into their parent; only the
-        outermost `commit()` creates a Dolt history operation.
+        Creates a transaction context manager; successful exit commits pending changes.
         """
     def get_branches(self) -> builtins.list[Branch]:
         r"""
@@ -571,14 +568,9 @@ class Repository:
         r"""
         Applies one operation to the current branch and returns the new HEAD operation.
         """
-    def reset(
-        self, operation: str | HashId | Operation, *, force: builtins.bool = False
-    ) -> Operation:
+    def reset(self, operation: str | HashId | Operation) -> Operation:
         r"""
         Hard-resets the current branch to an operation and returns the resulting HEAD.
-
-        By default, reset requires a clean working set. Pass `force=True` to discard uncommitted
-        changes along with later operations.
         """
     def import_annotations(
         self,
@@ -1148,6 +1140,10 @@ class SequenceGraph:
         Returns
         list[Annotation]
         """
+    def transaction(self, message: typing.Optional[builtins.str] = None) -> Transaction:
+        r"""
+        Creates a repository-wide transaction; successful exit commits pending changes.
+        """
     def __repr__(self) -> builtins.str: ...
     def __hash__(self) -> builtins.int: ...
     def __eq__(self, other: typing.Any) -> builtins.bool: ...
@@ -1595,12 +1591,12 @@ class Transaction:
         """
     def __exit__(
         self,
-        _exception_type: typing.Optional[typing.Any],
+        exception_type: typing.Optional[typing.Any],
         _exception: typing.Optional[typing.Any],
         _traceback: typing.Optional[typing.Any],
     ) -> builtins.bool:
         r"""
-        Rolls back an uncommitted transaction when its context exits.
+        Commits a successful context or rolls it back when an exception exits the block.
         """
     def rollback(self) -> None:
         r"""
@@ -1610,7 +1606,9 @@ class Transaction:
         r"""
         Undoes the newest operation savepoint on the SQLite connection, if one exists.
         """
-    def commit(self, message: builtins.str) -> typing.Optional[Operation]:
+    def commit(
+        self, message: typing.Optional[builtins.str] = None
+    ) -> typing.Optional[Operation]:
         r"""
         Releases an inner savepoint or commits an outermost transaction as one history operation.
 

@@ -102,7 +102,6 @@ impl PyRepository {
     /// Adds a named repository remote. `name` is how you refer to it afterwards (for example
     /// `origin`) and `url` is where it lives.
     fn add_remote(&self, name: &str, url: &str) -> PyResult<PyRemote> {
-        self.ensure_no_active_transaction("change repository remotes")?;
         ModelRemote::create(self.context.config().conn(), name, url)
             .map(PyRemote::from)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -116,7 +115,6 @@ impl PyRepository {
             PyAny,
         >,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("change repository remotes")?;
         let name = remote_name(remote)?;
         r#gen::commands::remote::remove_remote(self.context.config().conn(), &name)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -130,7 +128,6 @@ impl PyRepository {
             &Bound<'_, PyAny>,
         >,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("change repository remotes")?;
         let remote = optional_remote_name(remote)?;
         Defaults::set_default_remote(self.context.config().conn(), remote.as_deref())
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -144,7 +141,6 @@ impl PyRepository {
             &Bound<'_, PyAny>,
         >,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("change repository remotes")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let branch = history_store
             .current_branch()
@@ -175,7 +171,6 @@ impl PyRepository {
         >,
         force: bool,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("push to a remote")?;
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
@@ -203,7 +198,6 @@ impl PyRepository {
             &Bound<'_, PyAny>,
         >,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("pull from a remote")?;
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
@@ -230,7 +224,6 @@ impl PyRepository {
             &Bound<'_, PyAny>,
         >,
     ) -> PyResult<()> {
-        self.ensure_no_active_transaction("fetch from a remote")?;
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();

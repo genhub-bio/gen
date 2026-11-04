@@ -97,11 +97,9 @@ by operation hash is not supported. After a branch change or reset, query sample
 and sequence graphs again so handles reflect the selected state.
 
 `merge(branch)` adopts the branch into the current branch. `apply(operation)`
-cherry-picks one operation onto it. Both return the new HEAD `Operation` and
-require a clean working set. `reset(operation)` hard-resets the current branch
-to an `Operation`, `HashId`, or string ref and returns the resulting HEAD. It
-also requires a clean working set unless you explicitly pass
-`reset(operation, force=True)` to discard uncommitted changes.
+cherry-picks one operation onto it. Both return the new HEAD `Operation`.
+`reset(operation)` hard-resets the current branch to an `Operation`, `HashId`,
+or string ref and returns the resulting HEAD.
 
 Push, pull, and fetch use the same remote selection, authentication, retries,
 asset transfer, and conflict behavior as the command-line client:
@@ -138,7 +136,9 @@ for a complete walkthrough.
 ## Repository transactions
 
 Edits and imports commit automatically by default when the graph connection is in SQLite
-autocommit mode. Use `repo.transaction()` to manually manage the transaction and commits.
+autocommit mode. Use `repo.transaction(message=None)` or
+`graph.transaction(message=None)` to group changes; the graph form applies to its owning
+repository.
 
 ```python
 graph = repo.get_sequence_graphs(sample="design")[0]
@@ -150,22 +150,28 @@ with repo.transaction() as transaction:
     operation = transaction.commit("update design sequences")
 ```
 
-An outer transaction opens a SQLite transaction; nested transactions create savepoints. Nested
-transaction contexts close in reverse order, following SQLite's savepoint stack. Leaving the `with`
-block without `transaction.commit(message)` rolls back that transaction or nested savepoint,
-including when the block raises an error. Transactions can nest inside an already-open SQLite transaction.
-An inner `commit()` releases its savepoint into the parent and returns `None`;
-only an outermost `commit()` creates a Dolt history operation and returns its `Operation`. An empty
-outermost transaction returns `None`. `transaction.undo()` rolls back to the newest successful operation
-savepoint on the SQLite connection and returns whether it found one; it follows connection savepoint
-order, so nested contexts do not form separate undo stacks. A failed operation rolls back only its
-own changes.
+Successful context exit commits the remaining changes. The commit message is the message supplied
+to `commit(message)`, otherwise the message supplied to `transaction(message)`, otherwise the
+remaining operation messages joined by newlines in creation order. `undo()` removes undone messages
+from that list. A raw SQL-only transaction uses `Update repository` when no operation messages exist.
+An exception or `transaction.rollback()` rolls back the active scope. Explicit `commit()` finalizes
+the scope immediately; context exit will not commit it again.
+
+An outer transaction opens a SQLite transaction; nested transactions create savepoints and close in
+reverse order, following SQLite's savepoint stack. Transactions can nest inside an already-open SQL
+transaction. An inner successful exit or `commit()` releases its savepoint into the parent and
+returns `None`; only a dirty outermost commit creates one Dolt history operation and returns its
+`Operation`. An empty outermost transaction returns `None`. `transaction.undo()` rolls back to the
+newest successful operation savepoint on the SQLite connection and returns whether it found one; it
+follows connection savepoint order, so nested contexts do not form separate undo stacks. A failed
+operation rolls back only its own changes.
 
 Once an outermost transaction commits or rolls back, SQLite returns to autocommit mode and later writes
 inside the still-open Python `with` block commit normally. Closing an inner transaction leaves its parent
-transaction open, so later writes remain in that parent. Branch changes, reset/merge/apply, and
-remote operations or configuration changes require SQLite autocommit mode. Raw `execute()` and
-`query()` follow SQLite behavior and are available while a transaction is open.
+transaction open, so later writes remain in that parent. Remote synchronization refreshes the graph
+connection and should run outside an open transaction; the shared context refuses to replace a connection with an
+active SQL transaction. Remote configuration is stored in a separate database and remains changed if a
+graph transaction rolls back. Raw `execute()` and `query()` are available while a transaction is open.
 
 Some operations such as file imports return `None` while a SQLite transaction is open because their operation
 hash is not known until the outermost Dolt commit. `get_working_assets()` can be used to fetch working-set
