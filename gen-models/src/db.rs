@@ -347,9 +347,7 @@ impl DbContext {
                 if !graph.is_autocommit()
                     && let Err(error) = graph.execute_batch("COMMIT")
                 {
-                    if !graph.is_autocommit() {
-                        let _ = graph.execute_batch("ROLLBACK");
-                    }
+                    let _ = graph.execute_batch("ROLLBACK");
                     return Err(error);
                 }
                 Ok(Some(value))
@@ -400,6 +398,7 @@ mod tests {
         test_helpers::get_connection as test_graph_connection,
     };
 
+    // This is here to manufacture some errors for testing conditions
     unsafe extern "C" fn deny_savepoint_actions(
         _user_data: *mut c_void,
         action: c_int,

@@ -1165,6 +1165,7 @@ pub fn add_annotation_file_with_progress(
         ));
     }
 
+    // We track changes to know whether or not anything has happened and to return the NoChanges condition.
     let changes_before = graph_conn.total_changes();
     track_asset_refs(
         graph_conn,

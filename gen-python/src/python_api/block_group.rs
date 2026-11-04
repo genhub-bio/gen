@@ -222,11 +222,11 @@ impl PySequenceGraph {
         ))
     }
 
-    /// Creates a repository-wide transaction; successful exit commits pending changes.
+    /// Starts a repository-wide transaction; successful context exit commits pending changes.
     #[pyo3(signature = (message=None))]
     fn transaction(&self, message: Option<String>) -> PyResult<PyTransaction> {
         let context = self.require_context("transaction()")?;
-        Ok(PyTransaction::new(context.clone(), message))
+        PyTransaction::new(context.clone(), message)
     }
 
     fn __repr__(&self) -> PyResult<String> {

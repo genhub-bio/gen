@@ -128,7 +128,7 @@ pub struct PyOperation {
     pub is_head: bool,
 }
 
-/// A context manager backed by an SQLite transaction with nested savepoints.
+/// An eagerly opened SQLite transaction or nested savepoint with context-manager support.
 #[gen_stub_pyclass]
 #[pyclass(name = "Transaction", unsendable)]
 pub struct PyTransaction {
@@ -138,12 +138,13 @@ pub struct PyTransaction {
 }
 
 impl PyTransaction {
-    pub(crate) fn new(context: DbContext, message: Option<String>) -> Self {
-        Self {
+    pub(crate) fn new(context: DbContext, message: Option<String>) -> PyResult<Self> {
+        let outermost = context.begin_transaction().map_err(history_err_to_pyerr)?;
+        Ok(Self {
             context,
-            outermost: None,
+            outermost: Some(outermost),
             message,
-        }
+        })
     }
 }
 
@@ -210,17 +211,9 @@ impl PyOperation {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyTransaction {
-    /// Begins using the transaction as a context manager.
-    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
-        if slf.outermost.is_some() {
-            return Err(PyRuntimeError::new_err("transaction is already entered"));
-        }
-        let outermost = slf
-            .context
-            .begin_transaction()
-            .map_err(history_err_to_pyerr)?;
-        slf.outermost = Some(outermost);
-        Ok(slf)
+    /// Returns this transaction for use as a context manager.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
     }
 
     /// Commits a successful context or rolls it back when an exception exits the block.
@@ -500,10 +493,10 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Creates a transaction context manager; successful exit commits pending changes.
+    /// Starts a repository-wide transaction; successful context exit commits pending changes.
     #[pyo3(signature = (message=None))]
     fn transaction(&self, message: Option<String>) -> PyResult<PyTransaction> {
-        Ok(PyTransaction::new(self.context.clone(), message))
+        PyTransaction::new(self.context.clone(), message)
     }
 
     /// Returns every branch, ordered by name.
