@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gen Genetic Engineering"
+  short_description: "Use gen for sequence engineering workflows"
+  default_prompt: "Use $gen-genetic-engineering to import a reference genome, plan edits, inspect diffs, and export synthesis-ready sequences."
