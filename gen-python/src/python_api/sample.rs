@@ -163,11 +163,9 @@ impl PySample {
 
     /// Copy this sample into a new sample with the same sequence graphs.
     ///
-    /// The destination name must not already exist. The returned sample is
-    /// ready for explicit in-place edits on its sequence graphs. `new_name` is the name of the
-    /// copy. The copy is
-    /// recorded as its own operation, using ``message`` as the operation's
-    /// commit message when given, or a generated description otherwise.
+    /// The destination name must not already exist. The returned sample is ready for explicit
+    /// in-place edits on its sequence graphs. `new_name` names the copy, and `message` optionally
+    /// labels it.
     #[pyo3(signature = (new_name, message=None))]
     fn copy(&self, new_name: String, message: Option<&str>) -> PyResult<PySample> {
         let context = &self.context;

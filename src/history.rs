@@ -23,21 +23,6 @@ pub fn operations_history_entries(
     Ok((selected_branch_name, history_entries))
 }
 
-pub fn ensure_clean_working_set(
-    history_store: &impl HistoryStore,
-    action: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let status_rows = history_store.status()?;
-    if status_rows.is_empty() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "Cannot {action}: the working set has uncommitted changes. Commit or reset them first."
-    )
-    .into())
-}
-
 pub fn history_action_error(
     action: &str,
     error: &dyn std::error::Error,

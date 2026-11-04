@@ -992,7 +992,9 @@ mod tests {
             .expect("should reopen graph database after reset");
         gen_models::history::dolt::connect_branch(&reopened_graph, "main")
             .expect("should reconnect the main branch");
-        context.set_graph(reopened_graph);
+        context
+            .set_graph(reopened_graph)
+            .expect("should replace graph connection after reset");
         let target_block_group =
             create_linear_block_group(&context, "c", "s", "feature", "feature", "GGGGG");
         let target_hash = commit_operation(&context, "feature op");
@@ -2073,7 +2075,9 @@ mod tests {
             gen_models::db::get_connection(&graph_db_path).expect("should reopen graph db");
         gen_models::history::dolt::connect_branch(&reopened_graph, "main")
             .expect("should reconnect reopened main branch");
-        context.set_graph(reopened_graph);
+        context
+            .set_graph(reopened_graph)
+            .expect("should replace graph connection after reset");
         let replacement_block_group =
             create_linear_block_group(&context, "c", "s", "replacement", "three", "TTTTT");
         let replacement_commit = commit_operation(&context, "replacement");

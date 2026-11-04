@@ -7,7 +7,7 @@ use std::{
 use flate2::read::MultiGzDecoder;
 use gen_core::{BranchName, CommitRef, DoltHashId};
 use gen_models::{
-    assets::{AssetRef, Assets},
+    assets::{AssetRef, Assets, OperationLog},
     db::DbContext,
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
@@ -23,7 +23,7 @@ use pyo3::{
 };
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use super::PyRepository;
+use super::{PyRepository, run_context_savepoint_write};
 use crate::python_api::{
     hash_id::PyHashId,
     utils::{absolute_path, path_to_py_path},
@@ -31,6 +31,18 @@ use crate::python_api::{
 
 fn history_err_to_pyerr(error: impl ToString) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
+}
+
+fn add_files_err_to_pyerr(path: &str, error: AddFilesOperationError) -> PyErr {
+    match error {
+        AddFilesOperationError::OperationError(OperationError::NoChanges) => {
+            PyRuntimeError::new_err(format!("'{path}': this file is already in the repository"))
+        }
+        AddFilesOperationError::FileAdditionError(FileAdditionError::FileNotFound(missing)) => {
+            PyFileNotFoundError::new_err(missing)
+        }
+        other => PyRuntimeError::new_err(format!("Failed to add '{path}': {other}")),
+    }
 }
 
 /// A repository branch and its current head operation.
@@ -116,6 +128,34 @@ pub struct PyOperation {
     pub is_head: bool,
 }
 
+/// An eagerly opened SQLite transaction or nested savepoint with context-manager support.
+#[gen_stub_pyclass]
+#[pyclass(name = "Transaction", unsendable)]
+pub struct PyTransaction {
+    context: DbContext,
+    outermost: Option<bool>,
+    message: Option<String>,
+}
+
+impl PyTransaction {
+    pub(crate) fn new(context: DbContext, message: Option<String>) -> PyResult<Self> {
+        let outermost = context.begin_transaction().map_err(history_err_to_pyerr)?;
+        Ok(Self {
+            context,
+            outermost: Some(outermost),
+            message,
+        })
+    }
+}
+
+impl Drop for PyTransaction {
+    fn drop(&mut self) {
+        if let Some(is_outermost) = self.outermost.take() {
+            let _ = self.context.rollback_transaction(is_outermost);
+        }
+    }
+}
+
 impl From<HistoryEntry> for PyOperation {
     fn from(entry: HistoryEntry) -> Self {
         Self {
@@ -168,14 +208,100 @@ impl PyOperation {
     }
 }
 
-/// A file kept in the repository without being imported as sequence, such as a README, a FASTA or
-/// GenBank file that was imported, or an annotation file.
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTransaction {
+    /// Returns this transaction for use as a context manager.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Commits a successful context or rolls it back when an exception exits the block.
+    fn __exit__(
+        &mut self,
+        exception_type: Option<&Bound<'_, PyAny>>,
+        _exception: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        if let Some(is_outermost) = self.outermost {
+            if exception_type.is_none() {
+                self.commit(None)?;
+            } else {
+                self.outermost.take();
+                self.context
+                    .rollback_transaction(is_outermost)
+                    .map_err(history_err_to_pyerr)?;
+            }
+        }
+        Ok(false)
+    }
+
+    /// Rolls back this transaction or nested savepoint, preserving work in its parent.
+    fn rollback(&mut self) -> PyResult<()> {
+        let is_outermost = self
+            .outermost
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("transaction is not active"))?;
+        self.context
+            .rollback_transaction(is_outermost)
+            .map_err(history_err_to_pyerr)?;
+        Ok(())
+    }
+
+    /// Undoes the newest operation savepoint on the SQLite connection, if one exists.
+    fn undo(&self) -> PyResult<bool> {
+        self.context.undo_savepoint().map_err(history_err_to_pyerr)
+    }
+
+    /// Releases an inner savepoint or commits an outermost transaction as one history operation.
+    ///
+    /// Inner transactions return `None`; an empty outermost transaction also returns `None`.
+    #[pyo3(signature = (message=None))]
+    fn commit(&mut self, message: Option<&str>) -> PyResult<Option<PyOperation>> {
+        let is_outermost = self
+            .outermost
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("transaction is not active"))?;
+        let history_store = DoltHistoryStore::new_with_config(
+            self.context.graph().conn(),
+            self.context.config().conn(),
+        );
+        let operation_hash = self
+            .context
+            .commit_transaction(is_outermost, || match message.or(self.message.as_deref()) {
+                Some(message) => history_store.commit_all(message),
+                None => {
+                    let messages = OperationLog::get_working_messages(self.context.graph().conn())?;
+                    let default_message = if messages.is_empty() {
+                        "Update repository".to_string()
+                    } else {
+                        messages.join("\n")
+                    };
+                    history_store.commit_all(&default_message)
+                }
+            })
+            .map_err(history_err_to_pyerr)?;
+        match operation_hash {
+            Some(_) => history_store
+                .log(Some(1))
+                .map_err(history_err_to_pyerr)?
+                .into_iter()
+                .next()
+                .map(|entry| Some(PyOperation::from(entry)))
+                .ok_or_else(|| PyRuntimeError::new_err("committed operation was not found")),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A file kept in the repository, such as a README, a FASTA or GenBank file that was imported, or
+/// an annotation file.
 ///
-/// Add one with `Repository.add_file()` and list them with `Repository.get_assets()`. The
-/// content is stored once under a hashed filename inside `.gen`, and text files such as FASTA or
-/// README notes are kept compressed. `.name` is the file's original name, `.path` locates the
-/// stored copy, which may be compressed, and `.save_as()` writes the original, readable file under
-/// any name you choose. Treat the stored copy as read-only.
+/// Add one with `Repository.add_file()` and list it with `Repository.get_assets()` or
+/// `Repository.get_working_assets()`. The content is stored once under a hashed filename inside
+/// `.gen`, and text files such as FASTA or README notes are kept compressed. `.name` is the file's
+/// original name, `.path` locates the stored copy, which may be compressed, and `.save_as()` writes
+/// the original, readable file under any name you choose. Treat the stored copy as read-only.
 #[gen_stub_pyclass]
 #[pyclass(name = "Asset", unsendable, from_py_object)]
 #[derive(Clone)]
@@ -367,6 +493,12 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Starts a repository-wide transaction; successful context exit commits pending changes.
+    #[pyo3(signature = (message=None))]
+    fn transaction(&self, message: Option<String>) -> PyResult<PyTransaction> {
+        PyTransaction::new(self.context.clone(), message)
+    }
+
     /// Returns every branch, ordered by name.
     fn get_branches(&self) -> PyResult<Vec<PyBranch>> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
@@ -466,8 +598,6 @@ impl PyRepository {
         }
         if create && !already_exists {
             let history_store = DoltHistoryStore::new(self.context.graph().conn());
-            r#gen::history::ensure_clean_working_set(&history_store, "checkout")
-                .map_err(history_err_to_pyerr)?;
             let start_ref = start_hash.as_ref().map(|hash| CommitRef(hash.to_string()));
             history_store
                 .create_branch(&BranchName(name.clone()), start_ref.as_ref())
@@ -504,7 +634,7 @@ impl PyRepository {
         Ok(entries.into_iter().map(PyOperation::from).collect())
     }
 
-    /// Returns the assets reachable from the current branch or a named branch.
+    /// Returns committed assets from the current branch or a named branch.
     #[pyo3(signature = (branch=None))]
     fn get_assets(
         &self,
@@ -523,24 +653,52 @@ impl PyRepository {
                     .0
             }
         };
-        Assets::get_branch_assets(self.context.graph().conn(), &name)
-            .map_err(history_err_to_pyerr)
-            .map(|assets| {
-                assets
-                    .into_values()
-                    .map(|asset| PyAsset::new(asset, &self.context))
-                    .collect()
-            })
+        let assets = Assets::get_branch_assets(self.context.graph().conn(), &name)
+            .map_err(history_err_to_pyerr)?;
+        Ok(assets
+            .into_values()
+            .map(|asset| PyAsset::new(asset, &self.context))
+            .collect())
     }
 
-    /// Keep a file in the repository without importing it as sequence, for example a README or a
-    /// protocol, and return its `Asset`.
+    /// Returns committed assets overlaid with additions and replacements in the current working set.
+    fn get_working_assets(&self) -> PyResult<Vec<PyAsset>> {
+        let history_store = DoltHistoryStore::new(self.context.graph().conn());
+        let branch = history_store
+            .current_branch()
+            .map_err(history_err_to_pyerr)?
+            .ok_or_else(|| PyRuntimeError::new_err("repository has no current branch"))?;
+        let mut assets = Assets::get_branch_assets(self.context.graph().conn(), &branch.0)
+            .map_err(history_err_to_pyerr)?;
+        let mut pending_assets = Assets::get_added_working_assets(self.context.graph().conn())
+            .map_err(history_err_to_pyerr)?;
+        // Match the committed materialized view's timestamp and ID tie-breaking order.
+        pending_assets.sort_by(|left, right| {
+            left.created_on
+                .cmp(&right.created_on)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        for asset in pending_assets {
+            if !asset.uri.starts_with("file://") {
+                continue;
+            }
+            if let Some(logical_path) = asset.logical_path.as_ref() {
+                assets.retain(|_, current| current.logical_path.as_ref() != Some(logical_path));
+            }
+            assets.insert(asset.id, asset);
+        }
+        Ok(assets
+            .into_values()
+            .map(|asset| PyAsset::new(asset, &self.context))
+            .collect())
+    }
+
+    /// Stores a file as a repository asset and returns its `Asset`.
     ///
-    /// The content is stored once, inside `.gen`, and recorded as its own operation (with
-    /// `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-    /// stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-    /// the path of the file to store; a relative path is resolved against the current working
-    /// directory.
+    /// The content is stored once, inside `.gen`; `message` labels the addition. Adding the same
+    /// file again fails. Use `asset.path` to locate the stored copy or `asset.save_as(name)` to
+    /// write a copy under a name you choose. `filename` is the path of the file to store; a
+    /// relative path is resolved against the current working directory.
     #[pyo3(signature = (filename, message=None))]
     fn add_file(
         &self,
@@ -557,27 +715,24 @@ impl PyRepository {
         }
         let file = OperationFile::new(path);
         let asset_name = file.filename.clone();
-        add_files_operation(&self.context, &[file], message).map_err(|error| match error {
-            AddFilesOperationError::OperationError(OperationError::NoChanges) => {
-                PyRuntimeError::new_err(format!("'{path}': this file is already in the repository"))
-            }
-            AddFilesOperationError::FileAdditionError(FileAdditionError::FileNotFound(missing)) => {
-                PyFileNotFoundError::new_err(missing)
-            }
-            other => PyRuntimeError::new_err(format!("Failed to add '{path}': {other}")),
+        let (asset_ref, _) = run_context_savepoint_write(&self.context, || {
+            let operation_summary = add_files_operation(&self.context, &[file], message)
+                .map_err(|error| add_files_err_to_pyerr(path, error))?;
+            let asset_ref = operation_summary
+                .prepared_asset_refs
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("the added file was not recorded as an asset")
+                })?
+                .iter()
+                .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                .cloned()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("the added file was not recorded as an asset")
+                })?;
+            Ok((asset_ref, operation_summary))
         })?;
-        let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        let branch = history_store
-            .current_branch()
-            .map_err(history_err_to_pyerr)?
-            .ok_or_else(|| PyRuntimeError::new_err("repository has no current branch"))?;
-        Assets::get_branch_assets(self.context.graph().conn(), &branch.0)
-            .map_err(history_err_to_pyerr)?
-            .into_values()
-            .filter(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
-            .max_by_key(|asset| asset.created_on)
-            .map(|asset| PyAsset::new(asset, &self.context))
-            .ok_or_else(|| PyRuntimeError::new_err("the added file was not recorded as an asset"))
+        Ok(PyAsset::new(asset_ref, &self.context))
     }
 
     /// Merges a branch into the current branch and returns the new HEAD operation.
@@ -589,8 +744,6 @@ impl PyRepository {
         >,
     ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        r#gen::history::ensure_clean_working_set(&history_store, "merge")
-            .map_err(history_err_to_pyerr)?;
         let name = branch_name(branch)?;
         self.context
             .graph()
@@ -607,8 +760,6 @@ impl PyRepository {
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
     ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        r#gen::history::ensure_clean_working_set(&history_store, "apply")
-            .map_err(history_err_to_pyerr)?;
         let reference = operation_ref(operation)?;
         let commit_hash = resolve_existing_operation(&history_store, &reference)?;
         history_store
@@ -619,20 +770,11 @@ impl PyRepository {
     }
 
     /// Hard-resets the current branch to an operation and returns the resulting HEAD.
-    ///
-    /// By default, reset requires a clean working set. Pass `force=True` to discard uncommitted
-    /// changes along with later operations.
-    #[pyo3(signature = (operation, *, force=false))]
     fn reset(
         &self,
         #[gen_stub(override_type(type_repr = "str | HashId | Operation", imports = ()))] operation: &Bound<'_, PyAny>,
-        force: bool,
     ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
-        if !force {
-            r#gen::history::ensure_clean_working_set(&history_store, "reset")
-                .map_err(history_err_to_pyerr)?;
-        }
         let reference = operation_ref(operation)?;
         let target = resolve_existing_operation(&history_store, &reference)?;
         history_store
@@ -730,7 +872,7 @@ mod tests {
             let base_operation_object =
                 Py::new(python, base_operation).expect("should create Python operation");
             let reset = repository
-                .reset(base_operation_object.bind(python).as_any(), false)
+                .reset(base_operation_object.bind(python).as_any())
                 .expect("should reset to Operation object");
             assert_eq!(
                 reset.message, "base operation",

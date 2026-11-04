@@ -31,7 +31,7 @@ use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
     locus::GraphLocus,
-    operations::{OperationInfo, OperationSummary, commit_operation_summary},
+    operations::{OperationInfo, OperationSummary},
     sample::Sample,
 };
 use pyo3::{
@@ -53,7 +53,7 @@ use super::{
     jupyter_widget::{PyGraphController, build_widget},
     locus::GraphLocusExt as _,
     position::{PyPosition, positions_of},
-    repository::run_context_operation_write,
+    repository::{history::PyTransaction, run_context_operation_write},
     sample::PySample,
     sequence::PySequence,
     subgraph::derive_subgraph_between,
@@ -81,37 +81,25 @@ fn run_translation_operation<F>(
 where
     F: FnOnce() -> Result<BlockGroup, TranslationError>,
 {
-    let graph_conn = context.graph().conn();
-    graph_conn
-        .execute("BEGIN TRANSACTION", [])
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
-    let protein_bg = match translate() {
-        Ok(block_group) => block_group,
-        Err(err) => {
-            graph_conn.execute("ROLLBACK", []).ok();
-            return Err(PyRuntimeError::new_err(err.to_string()));
-        }
-    };
-
-    graph_conn
-        .execute("END TRANSACTION", [])
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
-    let operation_summary = OperationSummary::new(
-        OperationInfo {
-            files: vec![],
-            description: "translate annotation".to_string(),
+    run_context_operation_write(
+        context,
+        |_| {
+            let protein_block_group =
+                translate().map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let operation_summary = OperationSummary::new(
+                OperationInfo {
+                    files: vec![],
+                    description: "translate annotation".to_string(),
+                },
+                format!(
+                    " {}: protein sequence graph derived from {label}",
+                    protein_block_group.name
+                ),
+            );
+            Ok((protein_block_group, operation_summary))
         },
-        format!(
-            " {}: protein sequence graph derived from {label}",
-            protein_bg.name
-        ),
-    );
-    commit_operation_summary(context, &operation_summary)
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
-    Ok(protein_bg)
+        |error| PyRuntimeError::new_err(error.to_string()),
+    )
 }
 
 /// A sequence graph returned by a ``Repository``.
@@ -232,6 +220,13 @@ impl PySequenceGraph {
             self.sample_name.clone(),
             context.clone(),
         ))
+    }
+
+    /// Starts a repository-wide transaction; successful context exit commits pending changes.
+    #[pyo3(signature = (message=None))]
+    fn transaction(&self, message: Option<String>) -> PyResult<PyTransaction> {
+        let context = self.require_context("transaction()")?;
+        PyTransaction::new(context.clone(), message)
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -1226,10 +1221,8 @@ impl PySequenceGraph {
     ///
     /// The target may be a region string, a ``Locus`` from ``search()``, or an
     /// ``Annotation`` from ``annotations``. On a reverse-strand target the
-    /// sequence is read on that strand. The edit is recorded as its own operation,
-    /// using ``message`` as the operation's commit message when given, or a
-    /// generated description otherwise. Returns the ``Locus`` of the replacement
-    /// sequence.
+    /// sequence is read on that strand. ``message`` optionally labels the edit.
+    /// Returns the ``Locus`` of the replacement sequence.
     ///
     /// Parameters
     /// stack : bool, optional
@@ -1265,9 +1258,7 @@ impl PySequenceGraph {
     /// Delete the sequence covered by ``target``.
     ///
     /// The target may be a region string, a ``Locus`` from ``search()``, or an
-    /// ``Annotation`` from ``annotations``. The edit is recorded as its own
-    /// operation, using ``message`` as the operation's commit message when given,
-    /// or a generated description otherwise::
+    /// ``Annotation`` from ``annotations``. ``message`` optionally labels the edit::
     ///
     ///     for annotation in sg.annotations:
     ///         sg.delete(annotation.locus)
@@ -1339,7 +1330,7 @@ impl PySequenceGraph {
     ///     Add the insertion alongside the existing routes instead of retiring the connections
     ///     it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
     /// message : str, optional
-    ///     Commit message for the recorded operation.
+    ///     Description associated with the insertion.
     #[pyo3(signature = (sequence, *, before=None, after=None, message=None, stack=false))]
     fn insert(
         &self,

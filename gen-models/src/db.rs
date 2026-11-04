@@ -4,7 +4,7 @@ use gen_core::{config::Workspace, errors::ConfigError};
 use rusqlite::{Connection, limits::Limit};
 
 use crate::{
-    history::dolt::{active_branch, checkout, connect_branch},
+    history::dolt::{active_branch, checkout, connect_branch, is_current_branch_dirty},
     migrations::{run_config_migrations, run_migrations},
     operations::Defaults,
 };
@@ -147,6 +147,40 @@ impl<C> DbHandle<C> {
 pub type GraphHandle = DbHandle<GraphConnection>;
 pub type ConfigHandle = DbHandle<ConfigConnection>;
 
+const SAVEPOINT_NAME: &str = "gen_savepoint";
+const MISSING_SAVEPOINT: &str = "no such savepoint: gen_savepoint";
+const TRANSACTION_SAVEPOINT: &str = "gen_transaction";
+
+fn is_missing_savepoint(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, Some(message))
+            if code.code == rusqlite::ErrorCode::Unknown
+                && message == MISSING_SAVEPOINT
+    )
+}
+
+/// Provides shared access to a repository's graph and configuration connections.
+///
+/// [`begin_transaction`](Self::begin_transaction) starts a SQLite transaction when none is open
+/// and otherwise creates a nested transaction savepoint. It returns True if the transaction is the
+/// outermose transaction in the stack, which is useful for passing to
+/// [`commit_transaction`](Self::commit_transaction) or
+/// [`rollback_transaction`](Self::rollback_transaction) for simple commits/rollbacks. Nested scopes
+/// close in reverse order: an inner commit releases its savepoint into its parent and returns `None`;
+/// an inner rollback removes only that scope's changes. The outermost commit returns `None` for a clean
+/// working set. For a dirty set, it calls the supplied callback and returns `Some(value)`. That callback
+/// typically creates a Dolt history entry; SQLite's `COMMIT` closes the SQL transaction if the
+/// callback did not already do so. Errors roll back any still-open outer transaction.
+///
+/// [`begin_savepoint`](Self::begin_savepoint) can be used inside a transaction or by itself; SQLite
+/// treats a standalone savepoint as a transaction. Each call pushes a savepoint with the same name
+/// onto SQLite's connection-wide stack; it does not replace an earlier one. Both
+/// [`rollback_savepoint`](Self::rollback_savepoint) and [`undo_savepoint`](Self::undo_savepoint)
+/// run `ROLLBACK TO` and `RELEASE` on the newest matching savepoint, so repeated calls unwind older
+/// checkpoints in order. Undo returns `false` when no matching savepoint remains. Cloned contexts
+/// share both graph and configuration connections. The graph and configuration connections point
+/// to separate databases, and transaction/savepoint state belongs to the shared graph connection.
 #[derive(Clone)]
 pub struct DbContext {
     workspace: Arc<Workspace>,
@@ -216,8 +250,18 @@ impl DbContext {
         Self::build(workspace, graph_conn, config_conn)
     }
 
-    pub fn set_graph(&mut self, graph_conn: GraphConnection) {
+    /// Replaces the graph connection after its current SQLite transaction has ended.
+    pub fn set_graph(&mut self, graph_conn: GraphConnection) -> rusqlite::Result<()> {
+        if !self.graph.conn().is_autocommit() {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some(
+                    "cannot replace graph connection while an SQLite transaction is active".into(),
+                ),
+            ));
+        }
         self.graph = DbHandle::new(self.workspace.clone(), graph_conn.into());
+        Ok(())
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -232,6 +276,105 @@ impl DbContext {
         &self.config
     }
 
+    /// Starts a SQLite transaction or opens a nested transaction savepoint.
+    pub fn begin_transaction(&self) -> rusqlite::Result<bool> {
+        let graph = self.graph.conn();
+        let is_outermost = graph.is_autocommit();
+        if is_outermost {
+            graph.execute_batch("BEGIN TRANSACTION")?;
+        } else {
+            graph.execute_batch(&format!("SAVEPOINT {TRANSACTION_SAVEPOINT}"))?;
+        }
+        Ok(is_outermost)
+    }
+
+    /// Creates a SQLite savepoint.
+    pub fn begin_savepoint(&self) -> rusqlite::Result<()> {
+        self.graph
+            .conn()
+            .execute_batch(&format!("SAVEPOINT {SAVEPOINT_NAME}"))
+    }
+
+    /// Rolls back and releases the newest matching savepoint.
+    pub fn rollback_savepoint(&self) -> rusqlite::Result<()> {
+        let graph = self.graph.conn();
+        graph.execute_batch(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT_NAME}"))?;
+        graph.execute_batch(&format!("RELEASE SAVEPOINT {SAVEPOINT_NAME}"))?;
+        Ok(())
+    }
+
+    /// Undoes the newest savepoint on the SQLite connection, if one exists.
+    pub fn undo_savepoint(&self) -> rusqlite::Result<bool> {
+        let graph = self.graph.conn();
+        if let Err(error) = graph.execute_batch(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT_NAME}"))
+        {
+            if is_missing_savepoint(&error) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        graph.execute_batch(&format!("RELEASE SAVEPOINT {SAVEPOINT_NAME}"))?;
+        Ok(true)
+    }
+
+    /// Commits the outermost transaction or releases an inner transaction into its parent.
+    pub fn commit_transaction<T>(
+        &self,
+        is_outermost: bool,
+        commit: impl FnOnce() -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Option<T>> {
+        let graph = self.graph.conn();
+        if !is_outermost {
+            graph.execute_batch(&format!("RELEASE SAVEPOINT {TRANSACTION_SAVEPOINT}"))?;
+            return Ok(None);
+        }
+        let is_dirty = match is_current_branch_dirty(graph) {
+            Ok(is_dirty) => is_dirty,
+            Err(error) => {
+                if !graph.is_autocommit() {
+                    let _ = graph.execute_batch("ROLLBACK");
+                }
+                return Err(error);
+            }
+        };
+        if !is_dirty {
+            graph.execute_batch("ROLLBACK")?;
+            return Ok(None);
+        }
+
+        match commit() {
+            Ok(value) => {
+                if !graph.is_autocommit()
+                    && let Err(error) = graph.execute_batch("COMMIT")
+                {
+                    if !graph.is_autocommit() {
+                        let _ = graph.execute_batch("ROLLBACK");
+                    }
+                    return Err(error);
+                }
+                Ok(Some(value))
+            }
+            Err(error) => {
+                if !graph.is_autocommit() {
+                    let _ = graph.execute_batch("ROLLBACK");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Rolls back the outer transaction or the newest nested transaction savepoint.
+    pub fn rollback_transaction(&self, is_outermost: bool) -> rusqlite::Result<()> {
+        let graph = self.graph.conn();
+        if is_outermost {
+            graph.execute_batch("ROLLBACK")?;
+        } else {
+            graph.execute_batch(&format!("ROLLBACK TO SAVEPOINT {TRANSACTION_SAVEPOINT}"))?;
+            graph.execute_batch(&format!("RELEASE SAVEPOINT {TRANSACTION_SAVEPOINT}"))?;
+        }
+        Ok(())
+    }
+
     pub fn repo_root(&self) -> Result<std::path::PathBuf, ConfigError> {
         self.workspace.repo_root()
     }
@@ -243,6 +386,8 @@ impl DbContext {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{c_char, c_int, c_void};
+
     use gen_core::config::Workspace;
     use tempfile::tempdir;
 
@@ -254,6 +399,21 @@ mod tests {
         sample::{NewSample, Sample},
         test_helpers::get_connection as test_graph_connection,
     };
+
+    unsafe extern "C" fn deny_savepoint_actions(
+        _user_data: *mut c_void,
+        action: c_int,
+        _first_argument: *const c_char,
+        _second_argument: *const c_char,
+        _database: *const c_char,
+        _trigger: *const c_char,
+    ) -> c_int {
+        if action == rusqlite::ffi::SQLITE_SAVEPOINT {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
 
     fn branch_has_sample(context: &DbContext, sample_name: &str) -> bool {
         context
@@ -388,6 +548,78 @@ mod tests {
                 .expect("should query committed transaction row"),
             "committed",
             "successful transaction should commit its inserted row"
+        );
+    }
+
+    #[test]
+    fn test_set_graph_rejects_replacement_during_transaction() {
+        let temp_dir = tempdir().expect("should create temporary workspace");
+        let workspace = Workspace::new(temp_dir.path());
+        let gen_dir = workspace.ensure_gen_dir();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should open graph database");
+        let config_conn = get_config_connection(&config_path).expect("should open config database");
+        let mut context = DbContext::new_raw(workspace, graph_conn, config_conn);
+
+        let replacement_path = gen_dir.join("replacement.db");
+        let replacement =
+            get_connection(&replacement_path).expect("should open replacement graph database");
+        Collection::create(&replacement, "replacement-collection")
+            .expect("should create replacement database collection");
+        context
+            .set_graph(replacement)
+            .expect("should replace graph connection outside a transaction");
+        assert!(
+            Collection::all(context.graph().conn())
+                .expect("should query replacement graph")
+                .iter()
+                .any(|collection| collection.name == "replacement-collection"),
+            "inactive graph connection should be replaced"
+        );
+
+        assert!(
+            context
+                .begin_transaction()
+                .expect("should begin transaction"),
+            "transaction should be outermost"
+        );
+        Collection::create(context.graph().conn(), "pending-collection")
+            .expect("should create pending collection");
+        let blocked_replacement = get_connection(gen_dir.join("blocked.db"))
+            .expect("should open blocked replacement database");
+        let error = context
+            .set_graph(blocked_replacement)
+            .expect_err("should refuse to detach an active transaction");
+        assert!(
+            matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(code, Some(message))
+                    if code.code == rusqlite::ErrorCode::ApiMisuse
+                        && message == "cannot replace graph connection while an SQLite transaction is active"
+            ),
+            "connection replacement should return a clear SQLite misuse error: {error}"
+        );
+        assert!(
+            Collection::all(context.graph().conn())
+                .expect("should query active graph connection")
+                .iter()
+                .any(|collection| collection.name == "pending-collection"),
+            "rejected replacement should leave pending transaction data on its connection"
+        );
+        context
+            .rollback_transaction(true)
+            .expect("should roll back original transaction");
+        assert!(
+            !Collection::all(context.graph().conn())
+                .expect("should query graph after rollback")
+                .iter()
+                .any(|collection| collection.name == "pending-collection"),
+            "rollback should still remove the pending transaction data"
         );
     }
 
@@ -544,5 +776,213 @@ mod tests {
             commit_hash,
             "end_transaction should preserve a Dolt commit that sealed its transaction"
         );
+    }
+
+    #[test]
+    fn test_undo_savepoint_uses_nested_sqlite_savepoints() {
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should reopen graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should reopen config connection");
+        let context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should create repository context");
+        let graph_conn = context.graph().conn();
+        let is_outermost = context
+            .begin_transaction()
+            .expect("should begin transaction");
+        assert!(is_outermost, "the test transaction should be outermost");
+
+        assert!(
+            !context
+                .undo_savepoint()
+                .expect("should report an empty undo stack from SQLite"),
+            "an absent savepoint should report nothing to undo"
+        );
+
+        context
+            .begin_savepoint()
+            .expect("should begin first edit savepoint");
+        Collection::create(graph_conn, "first-pending-collection")
+            .expect("should write first pending collection");
+        context
+            .begin_savepoint()
+            .expect("should begin a nested edit savepoint with the same name");
+        Collection::create(graph_conn, "second-pending-collection")
+            .expect("should write second pending collection");
+
+        assert!(
+            context
+                .undo_savepoint()
+                .expect("should undo the newest nested savepoint")
+        );
+        let collections = Collection::all(graph_conn).expect("should read collections");
+        assert!(
+            collections
+                .iter()
+                .any(|collection| collection.name == "first-pending-collection"),
+            "undo should retain the earlier edit"
+        );
+        assert!(
+            collections
+                .iter()
+                .all(|collection| collection.name != "second-pending-collection"),
+            "undo should remove only the newest edit"
+        );
+
+        assert!(
+            context
+                .undo_savepoint()
+                .expect("should undo the remaining savepoint")
+        );
+        assert!(
+            !context
+                .undo_savepoint()
+                .expect("should report no remaining SQLite savepoint"),
+            "undo should stop when SQLite reports the fixed savepoint is absent"
+        );
+        let collections =
+            Collection::all(graph_conn).expect("should read collections after second undo");
+        assert!(
+            collections
+                .iter()
+                .all(|collection| collection.name != "first-pending-collection"),
+            "the second undo should remove the first collection before transaction rollback"
+        );
+        context
+            .rollback_transaction(is_outermost)
+            .expect("should roll back transaction");
+    }
+
+    #[test]
+    fn test_undo_savepoint_propagates_unrelated_sqlite_errors() {
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should reopen graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should reopen config connection");
+        let context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should create repository context");
+        let graph_conn = context.graph().conn();
+        let is_outermost = context
+            .begin_transaction()
+            .expect("should begin transaction");
+        assert!(is_outermost, "the test transaction should be outermost");
+        context
+            .begin_savepoint()
+            .expect("should begin edit savepoint");
+
+        let authorizer_result = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(
+                graph_conn.handle(),
+                Some(deny_savepoint_actions),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            authorizer_result,
+            rusqlite::ffi::SQLITE_OK,
+            "the authorizer should be installed"
+        );
+        let error = context
+            .undo_savepoint()
+            .expect_err("should propagate an unrelated SQLite authorization failure");
+        let authorizer_result = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(graph_conn.handle(), None, std::ptr::null_mut())
+        };
+        assert_eq!(
+            authorizer_result,
+            rusqlite::ffi::SQLITE_OK,
+            "the authorizer should be removed"
+        );
+        assert!(
+            error.to_string().contains("not authorized"),
+            "undo should return the unrelated SQLite error: {error}"
+        );
+
+        context
+            .rollback_transaction(is_outermost)
+            .expect("should roll back transaction");
+    }
+
+    #[test]
+    fn test_failed_transaction_commit_rolls_back_and_closes_transaction() {
+        let (workspace, _temp_dir) = setup_branch_restore_repo();
+        let graph_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph database path");
+        let config_path = workspace
+            .gen_db_path()
+            .expect("should resolve config database path");
+        let graph_conn = get_connection(&graph_path).expect("should reopen graph connection");
+        let config_conn =
+            get_config_connection(&config_path).expect("should reopen config connection");
+        let context = DbContext::new(workspace, graph_conn, config_conn)
+            .expect("should create repository context");
+        let graph_conn = context.graph().conn();
+        let head_before = graph_conn
+            .query_row("SELECT dolt_hashof('HEAD')", [], |row| {
+                row.get::<_, gen_core::DoltHashId>(0)
+            })
+            .expect("should read current HEAD");
+        let is_outermost = context
+            .begin_transaction()
+            .expect("should begin transaction");
+        assert!(is_outermost, "the test transaction should be outermost");
+        context
+            .begin_savepoint()
+            .expect("should begin edit savepoint");
+        Collection::create(graph_conn, "pending-collection")
+            .expect("should write pending graph data");
+
+        let error = context
+            .commit_transaction(is_outermost, || {
+                Err::<(), _>(rusqlite::Error::InvalidParameterName(
+                    "expected commit callback failure".to_string(),
+                ))
+            })
+            .expect_err("should return a commit callback failure");
+        assert!(
+            error
+                .to_string()
+                .contains("expected commit callback failure"),
+            "the original commit error should be returned: {error}"
+        );
+        assert!(
+            graph_conn.is_autocommit(),
+            "failed finalization should leave no open transaction"
+        );
+        assert!(
+            Collection::all(graph_conn)
+                .expect("should read rolled-back collections")
+                .iter()
+                .all(|collection| collection.name != "pending-collection"),
+            "failed finalization should roll back staged graph data"
+        );
+        assert_eq!(
+            graph_conn
+                .query_row("SELECT dolt_hashof('HEAD')", [], |row| {
+                    row.get::<_, gen_core::DoltHashId>(0)
+                })
+                .expect("should read HEAD after failed finalization"),
+            head_before,
+            "failed finalization should preserve history HEAD"
+        );
+        let fresh_is_outermost = context
+            .begin_transaction()
+            .expect("should start a fresh transaction after failed commit cleanup");
+        context
+            .rollback_transaction(fresh_is_outermost)
+            .expect("should roll back the fresh transaction");
     }
 }

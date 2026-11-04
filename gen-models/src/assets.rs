@@ -21,7 +21,7 @@ use url::{Position, Url};
 use crate::{
     Direction, ModelSelect,
     db::GraphConnection,
-    errors::{FileAdditionError, FileStoreError, QueryError},
+    errors::{FileAdditionError, FileStoreError, ModelSelectError, QueryError},
     file_types::FileTypes,
     history::dolt::hash_of,
     operations::FileAddition,
@@ -459,7 +459,8 @@ impl AssetRef {
             AssetView::Materialized => (
                 "",
                 ", /* Keep only assets present at the upper bound, then rank each logical path by \
-                      its introduction order in first-parent history. Null paths remain \
+                      its introduction order in first-parent history and prefer newer assets \
+                      when several versions are introduced by one commit. Null paths remain \
                       independent because they are partitioned by asset ID. */ \
                  materialized_assets AS ( \
                      SELECT asset_versions.*, \
@@ -470,6 +471,7 @@ impl AssetRef {
                                                  THEN asset_versions.id \
                                                  END \
                                 ORDER BY asset_versions.introduction_depth, \
+                                         asset_versions.created_on DESC, \
                                          asset_versions.id \
                             ) AS materialized_rank \
                      FROM asset_versions \
@@ -646,6 +648,21 @@ impl AssetRef {
 }
 
 impl Assets {
+    /// Returns asset references added to the working set since HEAD.
+    pub fn get_added_working_assets(
+        conn: &GraphConnection,
+    ) -> Result<Vec<AssetRef>, ModelSelectError> {
+        let mut statement =
+            conn.prepare("SELECT to_id FROM dolt_diff_gen_asset_refs('HEAD', 'WORKING') WHERE diff_type = 'added' AND to_id IS NOT NULL")?;
+        let identifiers = statement
+            .query_map([], |row| row.get::<_, HashId>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        identifiers
+            .into_iter()
+            .filter_map(|identifier| AssetRef::select(conn).get_by_id(identifier).transpose())
+            .collect()
+    }
+
     /// Returns the materialized asset view at the commit currently named by a branch or ref.
     ///
     /// Resolving the ref before querying gives [`AssetRef::get_materialized_assets_at`] a stable
@@ -801,6 +818,17 @@ impl Assets {
 }
 
 impl OperationLog {
+    /// Returns uncommitted operation messages in creation order.
+    pub fn get_working_messages(conn: &GraphConnection) -> rusqlite::Result<Vec<String>> {
+        let mut statement = conn.prepare(
+            "SELECT to_command FROM dolt_diff_gen_operation_log('HEAD', 'WORKING') \
+             WHERE diff_type = 'added' ORDER BY to_created_on, to_id",
+        )?;
+        statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    }
+
     pub fn id_hash(operation_kind: &OperationKind, command: &str, created_on: i64) -> HashId {
         HashId(calculate_hash(&format!(
             "{operation_kind}:{command}:{created_on}"

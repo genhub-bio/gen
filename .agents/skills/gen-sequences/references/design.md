@@ -37,8 +37,9 @@ live view: its list accessors query current membership, and a new iteration sees
 the handle was created. Replace/delete targets are region strings, loci, or annotations. These methods
 edit the graph's existing sample, not a new sample, so copy first when the original matters.
 Replace and insert return the new sequence's `Locus`; delete returns `None`. Each edit
-records an operation, using `message` when supplied. Replacement/insertion require nonempty
-sequence; use delete to remove sequence.
+records an operation by default, using `message` when supplied. Inside `repo.transaction()` or an
+open SQL transaction, edits join the transaction and can be undone individually or committed together; see
+`version-control.md`. Replacement/insertion require nonempty sequence; use delete to remove sequence.
 
 ```python
 source = next(sample for sample in repo.samples if sample.name == "parent")

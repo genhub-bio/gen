@@ -237,9 +237,21 @@ pub fn commit_operation_summary(
     context: &DbContext,
     operation_summary: &OperationSummary,
 ) -> Result<DoltHashId, OperationError> {
-    let workspace = context.workspace();
+    record_operation_summary(context, operation_summary)?;
     let graph_conn = context.graph().conn();
     let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
+    history_store
+        .commit_all(&operation_summary.summary)
+        .map_err(OperationError::from)
+}
+
+/// Records operation metadata and links its prepared assets.
+pub fn record_operation_summary(
+    context: &DbContext,
+    operation_summary: &OperationSummary,
+) -> Result<(), OperationError> {
+    let workspace = context.workspace();
+    let graph_conn = context.graph().conn();
     let operation_info = &operation_summary.operation_info;
 
     if !is_current_branch_dirty(graph_conn)? {
@@ -272,8 +284,7 @@ pub fn commit_operation_summary(
         &prepared_assets,
     )?;
 
-    let commit_result = history_store.commit_all(&operation_summary.summary);
-    commit_result.map_err(OperationError::from)
+    Ok(())
 }
 
 #[cfg_attr(
@@ -324,13 +335,13 @@ pub(crate) fn track_asset_refs(
 )]
 /// Records files used by an operation, retaining local content and preserving remote URIs.
 ///
-/// Checksum overrides are propagated from callers that already streamed remote content, avoiding
+/// Checksum overrides let callers reuse checksums calculated while streaming remote content, avoiding
 /// a credentials-dependent read whose only purpose would be hashing.
 pub fn add_files_operation(
     context: &DbContext,
     files: &[OperationFile],
     message: Option<&str>,
-) -> Result<DoltHashId, AddFilesOperationError> {
+) -> Result<OperationSummary, AddFilesOperationError> {
     let workspace = context.workspace();
     let graph_conn = context.graph().conn();
 
@@ -396,6 +407,7 @@ pub fn add_files_operation(
             )
         })
         .collect::<Vec<_>>();
+    let changes_before = graph_conn.total_changes();
     track_asset_refs(
         graph_conn,
         Some(&log_id),
@@ -403,16 +415,20 @@ pub fn add_files_operation(
         &summary,
         &asset_refs,
     )?;
-    let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
-    if history_store.status()?.is_empty() {
+    if graph_conn.total_changes() == changes_before {
         return Err(AddFilesOperationError::OperationError(
             OperationError::NoChanges,
         ));
     }
 
-    history_store
-        .commit_all(&summary)
-        .map_err(AddFilesOperationError::from)
+    Ok(OperationSummary::new(
+        OperationInfo {
+            files: files.to_vec(),
+            description: OperationKind::AddFile.as_str().to_string(),
+        },
+        summary,
+    )
+    .with_prepared_asset_refs(asset_refs))
 }
 
 pub fn calculate_file_checksum<P: AsRef<Path>>(file_path: P) -> Result<Sha256Hash, std::io::Error> {
@@ -1221,6 +1237,7 @@ mod tests {
     use super::*;
     use crate::{
         assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
+        collection::Collection,
         file_types::FileTypes,
         history::{HistoryStore, dolt::DoltHistoryStore},
         test_helpers::setup_gen,
@@ -2607,7 +2624,7 @@ mod tests {
         let asset_uri = "http://127.0.0.1:1/asset.fa".to_string();
         let operation_file = OperationFile::new(&asset_uri);
 
-        add_files_operation(
+        let _operation_summary = add_files_operation(
             &context,
             from_ref(&operation_file),
             Some("track remote reference"),
@@ -2628,7 +2645,7 @@ mod tests {
         let checksum = Sha256Hash::convert_str("known remote contents");
         let operation_file = OperationFile::new(asset_uri).set_checksum_override(checksum);
 
-        add_files_operation(
+        let _operation_summary = add_files_operation(
             &context,
             from_ref(&operation_file),
             Some("track checksummed remote reference"),
@@ -2652,10 +2669,13 @@ mod tests {
         fs::write(repo_root.join("shared.txt"), "shared contents").unwrap();
         fs::write(repo_root.join("unique.txt"), "unique contents").unwrap();
 
-        let _operation_1_hash =
+        let first_summary =
             add_files_operation(&context, &[OperationFile::new("shared.txt")], Some("first"))
                 .unwrap();
-        let _operation_2_hash = add_files_operation(
+        DoltHistoryStore::new_with_config(graph_conn, context.config().conn())
+            .commit_all(&first_summary.summary)
+            .expect("should commit first file operation");
+        let second_summary = add_files_operation(
             &context,
             &[
                 OperationFile::new("shared.txt"),
@@ -2664,6 +2684,9 @@ mod tests {
             Some("second"),
         )
         .unwrap();
+        DoltHistoryStore::new_with_config(graph_conn, context.config().conn())
+            .commit_all(&second_summary.summary)
+            .expect("should commit second file operation");
 
         let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
@@ -2756,7 +2779,7 @@ mod tests {
         fs::write(repo_root.join("alpha.fa"), "AAAA").unwrap();
         fs::write(repo_root.join("beta.fa"), "BBBB").unwrap();
 
-        let _operation_hash = add_files_operation(
+        let _operation_summary = add_files_operation(
             &context,
             &[
                 OperationFile::new("alpha.fa"),
@@ -2797,22 +2820,130 @@ mod tests {
     }
 
     #[test]
+    fn test_add_files_operation_returns_summary_for_caller_commit() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let history_store = DoltHistoryStore::new(graph_conn);
+        let head_before = history_store.current_head().unwrap();
+        let repo_root = context.workspace().repo_root().unwrap();
+        fs::write(repo_root.join("trial.fa"), ">trial\nACGT\n").unwrap();
+
+        let operation_summary = add_files_operation(
+            &context,
+            &[OperationFile::new("trial.fa")],
+            Some("stage trial file"),
+        )
+        .expect("should record asset refs without advancing history");
+        let asset_refs = operation_summary
+            .prepared_asset_refs
+            .as_ref()
+            .expect("should return the prepared asset refs");
+
+        assert_eq!(operation_summary.summary, "stage trial file");
+        assert_eq!(
+            operation_summary.operation_info.description,
+            OperationKind::AddFile.as_str()
+        );
+        assert_eq!(asset_refs.len(), 1);
+        assert_eq!(asset_refs[0].name.as_deref(), Some("trial.fa"));
+        assert_eq!(
+            AssetRef::all(graph_conn).unwrap().len(),
+            1,
+            "asset metadata should be visible in the working set"
+        );
+        assert_eq!(
+            OperationLog::all(graph_conn).unwrap().len(),
+            1,
+            "semantic operation metadata should be visible in the working set"
+        );
+        assert_eq!(
+            history_store.current_head().unwrap(),
+            head_before,
+            "recording asset refs should not advance Dolt history"
+        );
+        let committed = history_store
+            .commit_all(&operation_summary.summary)
+            .expect("should let the caller commit the prepared summary");
+        assert_eq!(history_store.current_head().unwrap(), Some(committed));
+    }
+
+    #[test]
+    fn test_add_files_operation_rejects_duplicate_with_prior_working_changes() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let repo_root = context.workspace().repo_root().unwrap();
+        fs::write(repo_root.join("trial.txt"), "same contents").unwrap();
+        let first_summary = add_files_operation(
+            &context,
+            &[OperationFile::new("trial.txt")],
+            Some("add trial file"),
+        )
+        .expect("should record initial file operation");
+        let first_commit = DoltHistoryStore::new_with_config(graph_conn, context.config().conn())
+            .commit_all(&first_summary.summary)
+            .expect("should commit initial file operation");
+        Collection::create(graph_conn, "earlier-trial-edit")
+            .expect("should create an unrelated pending edit");
+
+        let error = add_files_operation(
+            &context,
+            &[OperationFile::new("trial.txt")],
+            Some("duplicate file operation"),
+        )
+        .expect_err("should treat a duplicate file operation as a no-op when the branch is dirty");
+
+        assert!(
+            matches!(
+                error,
+                AddFilesOperationError::OperationError(OperationError::NoChanges)
+            ),
+            "duplicate file should return NoChanges, got {error}"
+        );
+        assert_eq!(
+            DoltHistoryStore::new(graph_conn).current_head().unwrap(),
+            Some(first_commit),
+            "rejecting the duplicate should not advance history"
+        );
+        assert_eq!(
+            OperationLog::all(graph_conn).unwrap().len(),
+            1,
+            "rejecting the duplicate should not add an operation log"
+        );
+        assert!(
+            Collection::all(graph_conn)
+                .unwrap()
+                .iter()
+                .any(|collection| collection.name == "earlier-trial-edit"),
+            "rejecting the duplicate should preserve earlier pending graph changes"
+        );
+    }
+
+    #[test]
     fn test_add_files_operation_records_history_without_config_db_rows() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
         let config_conn = context.config().conn();
+        let history_store = DoltHistoryStore::new(graph_conn);
+        let head_before = history_store.current_head().unwrap();
 
         let repo_root = context.workspace().repo_root().unwrap();
         fs::write(repo_root.join("alpha.fa"), "AAAA").unwrap();
 
-        let operation_hash = add_files_operation(
+        let operation_summary = add_files_operation(
             &context,
             &[OperationFile::new("alpha.fa")],
             Some("import reference"),
         )
         .unwrap();
 
-        let history_store = DoltHistoryStore::new(graph_conn);
+        assert_eq!(
+            history_store.current_head().unwrap(),
+            head_before,
+            "recording the file should not advance Dolt history before the caller commits"
+        );
+        let operation_hash = history_store
+            .commit_all(&operation_summary.summary)
+            .expect("should commit the prepared add-file summary");
         assert_eq!(
             history_store.current_head().unwrap(),
             Some(operation_hash),
