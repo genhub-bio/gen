@@ -1,0 +1,12 @@
+##fileformat=VCFv4.5
+##contig=<ID=chr1,length=1000>
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Length of structural variant">
+##ALT=<ID=CNV,Description="Copy number variable region">
+##ALT=<ID=DUP:TANDEM,Description="Tandem Duplication">
+##ALT=<ID=DEL,Description="Deletion">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sample
+chr1	100	cnv	T	<CNV>	.	.	SVLEN=30	GT	1/1
+chr1	100	tandem	T	<DUP:TANDEM>	.	.	SVLEN=3	GT	1/1
+chr1	2	del_sequence	TGC	T	.	.	.	GT	0/1
+chr1	2	del_symbolic	T	<DEL>	.	.	SVLEN=2	GT	0/1
