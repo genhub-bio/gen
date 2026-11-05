@@ -44,6 +44,7 @@ use crate::{
         graph_dimming::GraphDimming,
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership},
         inline_label_placement::draw_label_near_pos,
+        mirror_edges::collapse_mirror_edges,
     },
 };
 
@@ -1609,7 +1610,8 @@ fn build_gen_graph_engine<R>(
     levels: Vec<(VisualDetail, R, GapPolicy)>,
 ) -> GraphEngineSetup<R> {
     let projection = crate::views::junction_projection::project_junctions(&graph);
-    let graph = projection.graph;
+    let mut graph = projection.graph;
+    collapse_mirror_edges(&mut graph, Some(&projection.surviving_routes));
     let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
     let mut view_state = GraphViewState::default();
     // The graph never grows, so one sync decides all of its dimming.

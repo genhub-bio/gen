@@ -22,6 +22,7 @@ mod input_coalescing;
 pub(crate) mod junction_projection;
 pub mod lazy_graph_source;
 pub mod messages;
+pub(crate) mod mirror_edges;
 pub mod operations;
 pub mod panels;
 pub mod patch;

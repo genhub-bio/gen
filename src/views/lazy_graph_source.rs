@@ -21,7 +21,10 @@ use petgraph::Direction;
 
 use crate::{
     get_connection_for_branch,
-    views::{junction_projection::project_junctions, port_graph_source::PortGraphSource},
+    views::{
+        junction_projection::project_junctions, mirror_edges::collapse_mirror_edges,
+        port_graph_source::PortGraphSource,
+    },
 };
 
 /// Prepare the complete projected window before the layout engine claims any of its nodes.
@@ -257,6 +260,7 @@ impl ProjectedGraphSource {
         }
         self.surviving_routes = projection.surviving_routes;
         *graph = projection.graph;
+        collapse_mirror_edges(graph, Some(&self.surviving_routes));
     }
 
     fn resolve_junction_frontier(&mut self) -> Result<(), String> {
