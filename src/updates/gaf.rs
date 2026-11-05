@@ -8,6 +8,7 @@ use std::{
 
 use csv::Error as CsvError;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_graph::{GraphNode, GraphNodeSlice};
 use gen_models::{
     ModelSelectError,
     block_group::BlockGroup,
@@ -52,12 +53,162 @@ pub enum GafUpdateError {
     ParseInt(#[from] ParseIntError),
     #[error("Line did not match expected GAF format: {0}")]
     InvalidGafLine(String),
+    #[error("GAF path segment is not a Gen segment id (node.start.end): {0}")]
+    InvalidGafSegment(String),
     #[error("Node creation error: {0}")]
     NodeError(#[from] NodeError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
     #[error("Selector error: {0}")]
     ModelSelect(#[from] ModelSelectError),
+}
+
+/// One GAF row: the twelve mandatory columns plus the optional `tag:type:value` fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GafAlignment {
+    pub query_name: String,
+    pub query_length: i64,
+    pub query_start: i64,
+    pub query_end: i64,
+    /// `Strand::Unknown` for the `*` of an unmapped row.
+    pub strand: Strand,
+    /// The path column as written, such as `>a.0.5<b.3.9`, or `*` for an unmapped row.
+    pub path: String,
+    pub path_length: i64,
+    pub path_start: i64,
+    pub path_end: i64,
+    pub residue_match: i64,
+    pub align_block_len: i64,
+    pub mapq: i64,
+    tags: HashMap<String, String>,
+}
+
+impl GafAlignment {
+    /// The value of a tag such as `dv` or `cg`, without its type letter.
+    pub fn tag(&self, name: &str) -> Option<&str> {
+        self.tags.get(name).map(String::as_str)
+    }
+
+    pub fn cigar(&self) -> Option<&str> {
+        self.tag("cg")
+    }
+
+    /// Minigraph marks the chosen alignment `tp:A:P`; rows without the tag count as primary.
+    pub fn is_primary(&self) -> bool {
+        self.tag("tp").is_none_or(|kind| kind == "P")
+    }
+}
+
+/// Parse one GAF row. The cigar is optional so unmapped and cigar-less rows parse; callers that
+/// need a cigar check [`GafAlignment::cigar`].
+pub fn parse_gaf_line(line: &str) -> Result<GafAlignment, GafUpdateError> {
+    let invalid = || GafUpdateError::InvalidGafLine(line.to_string());
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 12 || fields[..12].iter().any(|field| field.is_empty()) {
+        return Err(invalid());
+    }
+    let number = |index: usize| fields[index].parse::<i64>().map_err(|_| invalid());
+    let strand = match fields[4] {
+        "+" => Strand::Forward,
+        "-" => Strand::Reverse,
+        "*" => Strand::Unknown,
+        _ => return Err(invalid()),
+    };
+    let tags = fields[12..]
+        .iter()
+        .filter_map(|field| {
+            let mut parts = field.splitn(3, ':');
+            let name = parts.next()?;
+            parts.next()?;
+            Some((name.to_string(), parts.next()?.to_string()))
+        })
+        .collect();
+    Ok(GafAlignment {
+        query_name: fields[0].to_string(),
+        query_length: number(1)?,
+        query_start: number(2)?,
+        query_end: number(3)?,
+        strand,
+        path: fields[5].to_string(),
+        path_length: number(6)?,
+        path_start: number(7)?,
+        path_end: number(8)?,
+        residue_match: number(9)?,
+        align_block_len: number(10)?,
+        mapq: number(11)?,
+        tags,
+    })
+}
+
+/// Split a GAF path column into ordered `(strand, segment name)` visits: `>` reads a segment
+/// forward and `<` reverse. A path without orientation marks is a single stable id, read forward.
+pub fn parse_gaf_path(path: &str) -> Vec<(Strand, String)> {
+    let orient_id_re = Regex::new(r"(?x)(?P<orient>[><])(?P<node>[^><]+(:\d+-\d+)?)").unwrap();
+    if path.starts_with(['>', '<']) {
+        orient_id_re
+            .captures_iter(path)
+            .map(|sub_match| {
+                let orientation = if &sub_match["orient"] == ">" {
+                    Strand::Forward
+                } else {
+                    Strand::Reverse
+                };
+                (orientation, sub_match["node"].to_string())
+            })
+            .collect()
+    } else {
+        vec![(Strand::Forward, path.to_string())]
+    }
+}
+
+/// Parse the GFA export's `<node hash>.<start>.<end>` segment id into the graph node it names,
+/// splitting from the right on the last two dots.
+pub fn parse_gaf_segment(segment: &str) -> Option<GraphNode> {
+    let mut parts = segment.rsplitn(3, '.');
+    let sequence_end = parts.next()?.parse::<i64>().ok()?;
+    let sequence_start = parts.next()?.parse::<i64>().ok()?;
+    let node_id = HashId::try_from(parts.next()?).ok()?;
+    (sequence_start <= sequence_end).then_some(GraphNode {
+        node_id,
+        sequence_start,
+        sequence_end,
+    })
+}
+
+/// The walk an alignment follows, clipped to its aligned interval `[path_start, path_end)`.
+///
+/// The path interval counts bases in walk order, so a reverse visit covers the mirrored range of
+/// its segment. Each slice carries the whole segment as its block and the clipped range as local
+/// offsets, matching the loci a sequence search returns; visits the interval does not reach are
+/// dropped. An unmapped row (`*` path) has no walk.
+pub fn clip_gaf_walk(alignment: &GafAlignment) -> Result<Vec<GraphNodeSlice>, GafUpdateError> {
+    if alignment.path == "*" {
+        return Ok(vec![]);
+    }
+    let mut cursor = 0;
+    let mut slices = vec![];
+    for (strand, name) in parse_gaf_path(&alignment.path) {
+        let segment = parse_gaf_segment(&name)
+            .ok_or_else(|| GafUpdateError::InvalidGafSegment(name.clone()))?;
+        let length = segment.sequence_end - segment.sequence_start;
+        let low = alignment.path_start.max(cursor);
+        let high = alignment.path_end.min(cursor + length);
+        if low < high {
+            let (start, end) = if strand == Strand::Reverse {
+                (length - (high - cursor), length - (low - cursor))
+            } else {
+                (low - cursor, high - cursor)
+            };
+            slices.push(GraphNodeSlice {
+                block: segment,
+                start: start as usize,
+                end: end as usize,
+                strand,
+            });
+        }
+        cursor += length;
+    }
+    Ok(slices)
 }
 
 pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W) -> Result<(), GafUpdateError>
@@ -119,49 +270,19 @@ where
             return Some(*node_info);
         }
 
-        let node_info: Vec<&str> = node_id.rsplitn(2, '.').collect();
-        let node_id = *node_info.last().unwrap();
-        let id = HashId::try_from(node_id).ok()?;
+        // Current exports name segments node.start.end; older ones node.start.
+        let node_id = match parse_gaf_segment(node_id) {
+            Some(graph_node) => graph_node.node_id.to_string(),
+            None => node_id.rsplitn(2, '.').last().unwrap().to_string(),
+        };
+        let id = HashId::try_from(node_id.as_str()).ok()?;
         let length = Node::query_nodes_length(conn, &[id])
             .ok()?
             .get(&id)
             .copied()?;
-        node_lengths.insert(node_id.to_string(), (id, length));
+        node_lengths.insert(node_id, (id, length));
         Some((id, length))
     };
-
-    // our GFA export encodes segments like node_id.sequence_start
-    let re = Regex::new(
-        r"(?x)
-        ^
-        (?P<query_name>[^\t]+)
-        \t
-        (?P<query_length>\d+)
-        \t
-        (?P<query_start>\d+)
-        \t
-        (?P<query_end>\d+)
-        \t
-        (?P<strand>[+-])
-        \t
-        (?P<path>[^\t]+)
-        \t
-        (?P<path_length>\d+)
-        \t
-        (?P<path_start>\d+)
-        \t
-        (?P<path_end>\d+)
-        \t
-        (?P<residue_match>\d+)
-        \t
-        (?P<align_block_len>\d+)
-        \t
-        (?P<mapq>\d+)
-        .+
-        cg:Z:(?P<cigar>[^\t]+)
-        ",
-    )
-    .unwrap();
 
     let query_re = Regex::new(
         r"(?x)
@@ -169,8 +290,6 @@ where
         ",
     )
     .unwrap();
-
-    let orient_id_re = Regex::new(r"(?x)(?P<orient>[><])(?P<node>[^><]+(:\d+-\d+)?)").unwrap();
 
     let csv_file = File::open(csv_path).map_err(GafUpdateError::Io)?;
     let csv_bufreader = BufReader::new(csv_file);
@@ -201,30 +320,15 @@ where
     let lines = read_lines(gaf_path.as_ref()).map_err(GafUpdateError::Io)?;
     for line in lines {
         let line = line.map_err(GafUpdateError::Io)?;
-        let entry = re
-            .captures(&line)
-            .ok_or_else(|| GafUpdateError::InvalidGafLine(line.clone()))?;
-        let aln_path = &entry["path"];
-        let mut node_start: i64 = entry["path_start"]
-            .parse::<i64>()
-            .map_err(GafUpdateError::ParseInt)?;
-        let mut segments = vec![];
-        if [">", "<"].iter().any(|s| aln_path.starts_with(*s)) {
-            // orient id
-            for sub_match in orient_id_re.captures_iter(aln_path) {
-                let orientation = if &sub_match["orient"] == ">" {
-                    Strand::Forward
-                } else {
-                    Strand::Reverse
-                };
-                let node = sub_match["node"].to_string();
-                segments.push((orientation, node));
-            }
-        } else {
-            // we're a stable id
-            segments.push((Strand::Forward, aln_path.to_string()));
+        let entry = parse_gaf_line(&line)?;
+        // This update locates its insertion by walking alignments, which only rows with a
+        // cigar provide.
+        if entry.cigar().is_none() {
+            return Err(GafUpdateError::InvalidGafLine(line.clone()));
         }
-        let query = entry["query_name"].to_string();
+        let mut node_start = entry.path_start;
+        let segments = parse_gaf_path(&entry.path);
+        let query = entry.query_name.clone();
         if let Some(id_re) = query_re.captures(&query) {
             let query_id = id_re["query_id"].to_string();
             if change_spec.contains_key(&query_id) {
@@ -233,9 +337,7 @@ where
                 let query_key;
                 if query.ends_with("left") {
                     query_key = "left";
-                    let mut matches = entry["residue_match"]
-                        .parse::<i64>()
-                        .map_err(GafUpdateError::ParseInt)?;
+                    let mut matches = entry.residue_match;
                     for (segment_strand, segment_id) in segments.iter() {
                         let Some((segment_node_id, node_length)) = get_node_info(segment_id) else {
                             continue;
@@ -612,5 +714,155 @@ mod tests {
 
         // This checks that we have an outgoing edge from the end of the old graph to our insert
         assert_eq!(edges[1].1.node_id, insert_node_id);
+    }
+
+    mod test_parser {
+        use super::*;
+
+        fn segment(label: &str, start: i64, end: i64) -> String {
+            format!("{}.{start}.{end}", HashId::convert_str(label))
+        }
+
+        fn row(path: &str, path_start: i64, path_end: i64, tags: &str) -> String {
+            format!("read\t30\t0\t30\t+\t{path}\t30\t{path_start}\t{path_end}\t30\t30\t60\t{tags}")
+        }
+
+        fn slice(
+            label: &str,
+            start: i64,
+            end: i64,
+            local: (usize, usize),
+            strand: Strand,
+        ) -> GraphNodeSlice {
+            GraphNodeSlice {
+                block: parse_gaf_segment(&segment(label, start, end)).unwrap(),
+                start: local.0,
+                end: local.1,
+                strand,
+            }
+        }
+
+        #[test]
+        fn test_segment_splits_from_the_right_on_two_dots() {
+            let node = parse_gaf_segment(&segment("a", 3, 9)).unwrap();
+            assert_eq!(node.node_id, HashId::convert_str("a"));
+            assert_eq!((node.sequence_start, node.sequence_end), (3, 9));
+        }
+
+        #[test]
+        fn test_bad_segment_names_do_not_parse() {
+            assert!(parse_gaf_segment("12.0").is_none());
+            assert!(parse_gaf_segment("notahash.0.5").is_none());
+            assert!(parse_gaf_segment(&format!("{}.x.5", HashId::convert_str("a"))).is_none());
+            assert!(parse_gaf_segment(&segment("a", 9, 3)).is_none());
+        }
+
+        #[test]
+        fn test_line_parses_without_cigar_and_reads_tags() {
+            let alignment = parse_gaf_line(&row(">x", 0, 5, "tp:A:S\tdv:f:0.05")).unwrap();
+            assert_eq!(alignment.cigar(), None);
+            assert_eq!(alignment.tag("dv"), Some("0.05"));
+            assert!(!alignment.is_primary());
+            let alignment = parse_gaf_line(&row(">x", 0, 5, "cg:Z:5=\tds:Z::5")).unwrap();
+            assert_eq!(alignment.cigar(), Some("5="));
+            assert!(alignment.is_primary());
+        }
+
+        #[test]
+        fn test_unmapped_row_parses_with_no_walk() {
+            let alignment = parse_gaf_line("read\t30\t0\t30\t*\t*\t0\t0\t0\t0\t0\t0").unwrap();
+            assert_eq!(alignment.strand, Strand::Unknown);
+            assert!(clip_gaf_walk(&alignment).unwrap().is_empty());
+        }
+
+        #[test]
+        fn test_short_or_nonnumeric_line_is_invalid() {
+            assert!(matches!(
+                parse_gaf_line("read\t30\t0"),
+                Err(GafUpdateError::InvalidGafLine(_))
+            ));
+            assert!(matches!(
+                parse_gaf_line("read\tx\t0\t30\t+\t>a\t30\t0\t30\t30\t30\t60"),
+                Err(GafUpdateError::InvalidGafLine(_))
+            ));
+        }
+
+        #[test]
+        fn test_path_visits_keep_orientation_and_order() {
+            assert_eq!(
+                parse_gaf_path(">a<b>c"),
+                vec![
+                    (Strand::Forward, "a".to_string()),
+                    (Strand::Reverse, "b".to_string()),
+                    (Strand::Forward, "c".to_string()),
+                ]
+            );
+            assert_eq!(
+                parse_gaf_path("stable"),
+                vec![(Strand::Forward, "stable".to_string())]
+            );
+        }
+
+        #[test]
+        fn test_forward_walk_clips_both_ends() {
+            let path = format!(
+                ">{}>{}>{}",
+                segment("a", 0, 10),
+                segment("b", 0, 10),
+                segment("c", 4, 14)
+            );
+            let alignment = parse_gaf_line(&row(&path, 3, 25, "")).unwrap();
+            assert_eq!(
+                clip_gaf_walk(&alignment).unwrap(),
+                vec![
+                    slice("a", 0, 10, (3, 10), Strand::Forward),
+                    slice("b", 0, 10, (0, 10), Strand::Forward),
+                    slice("c", 4, 14, (0, 5), Strand::Forward),
+                ]
+            );
+        }
+
+        #[test]
+        fn test_reverse_first_and_last_visits_mirror_the_clip() {
+            let path = format!(
+                "<{}>{}<{}",
+                segment("a", 0, 10),
+                segment("b", 0, 10),
+                segment("c", 4, 14)
+            );
+            let alignment = parse_gaf_line(&row(&path, 3, 25, "")).unwrap();
+            assert_eq!(
+                clip_gaf_walk(&alignment).unwrap(),
+                vec![
+                    slice("a", 0, 10, (0, 7), Strand::Reverse),
+                    slice("b", 0, 10, (0, 10), Strand::Forward),
+                    slice("c", 4, 14, (5, 10), Strand::Reverse),
+                ]
+            );
+        }
+
+        #[test]
+        fn test_visits_outside_the_interval_are_dropped() {
+            let path = format!(
+                ">{}>{}>{}",
+                segment("a", 0, 10),
+                segment("b", 0, 10),
+                segment("c", 0, 10)
+            );
+            let alignment = parse_gaf_line(&row(&path, 10, 20, "")).unwrap();
+            assert_eq!(
+                clip_gaf_walk(&alignment).unwrap(),
+                vec![slice("b", 0, 10, (0, 10), Strand::Forward)]
+            );
+        }
+
+        #[test]
+        fn test_walk_with_a_bad_segment_is_an_error() {
+            let alignment = parse_gaf_line(&row(">oops.0.5", 0, 5, "")).unwrap();
+            assert!(matches!(
+                clip_gaf_walk(&alignment),
+                Err(GafUpdateError::InvalidGafSegment(_))
+            ));
+        }
     }
 }
