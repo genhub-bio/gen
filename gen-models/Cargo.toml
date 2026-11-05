@@ -12,9 +12,6 @@ include = ["src", "migrations"]
 benchmark = []
 profiling = ["dep:tracing"]
 
-[dev-dependencies]
-rand = "0.10.1"
-
 [dependencies]
 gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.5.1" }
 gen-core = { path = "../gen-core", version = "0.5.1" }
@@ -32,6 +29,7 @@ itertools = "0.14.0"
 noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }
 opendal = { version = "0.59.4", features = ["blocking", "services-fs", "services-http", "services-s3", "services-gcs", "services-azblob"] }
 petgraph = "0.6.5"
+rand = "0.10.1"
 rusqlite = { package = "rusqdoltlite", version = "0.41.1", features = ["bundled", "array", "limits", "fallible_uint", "backup", "uuid"] }
 rusqlite_migration = { package = "rusqdoltlite_migration", version = "2.7.0", features = ["from-directory"] }
 serde = { version = "1.0.219", features = ["derive"] }

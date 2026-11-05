@@ -20,6 +20,7 @@ use gen_graph::{
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
 use petgraph::visit::NodeIndexable as _;
+use rand::{SeedableRng, rngs::StdRng, seq::IndexedRandom as _};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -37,10 +38,56 @@ use crate::{
         SequenceError,
     },
     gen_models_capnp::block_group,
-    path::{Path, PathSelect},
+    path::{Path, PathSelect, revcomp},
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::{Sample, SampleSelect},
 };
+
+/// The sequences read by random walks over a block group; see `BlockGroup::random_sequences`.
+///
+/// Every outgoing edge is equally likely at each step, so a sequence's chance is set by the
+/// branching along its route, not by how many routes spell it. A walk that reaches a node with no
+/// way on is discarded and another begins.
+pub struct RandomSequences {
+    graph: GenGraph,
+    start_nodes: Vec<GraphNode>,
+    sequences: HashMap<GraphNode, String>,
+    random: StdRng,
+}
+
+impl RandomSequences {
+    /// Walks that dead end in a row before the graph is taken to have no sequence to read.
+    const MAX_DEAD_ENDS: usize = 1000;
+
+    fn walk(&mut self) -> Option<String> {
+        let mut node = *self.start_nodes.choose(&mut self.random)?;
+        let mut reading = String::new();
+        while !is_end_node(node.node_id) {
+            let choices = self
+                .graph
+                .edges(node)
+                .flat_map(|(_, target, edges)| edges.iter().map(move |edge| (target, edge)))
+                .collect::<Vec<_>>();
+            let (target, edge) = choices.choose(&mut self.random).copied()?;
+            let block_sequence = self.sequences.get(&target)?;
+            if edge.target_strand == Strand::Reverse {
+                reading.push_str(&revcomp(block_sequence));
+            } else {
+                reading.push_str(block_sequence);
+            }
+            node = target;
+        }
+        Some(reading)
+    }
+}
+
+impl Iterator for RandomSequences {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        (0..Self::MAX_DEAD_ENDS).find_map(|_| self.walk())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq, ModelSelect)]
 #[model_select(table = "block_groups")]
@@ -698,19 +745,91 @@ impl BlockGroup {
                     }
                 } else {
                     for path in all_simple_paths(&graph, start_node, *end_node) {
-                        let mut current_sequence = "".to_string();
+                        // Parallel edges between two blocks can differ in strand, such as a stacked
+                        // inversion beside the original, and each reads as its own sequence.
+                        let mut readings = vec![String::new()];
+                        let mut previous = None;
                         for node in path {
-                            let block = blocks_by_node.get(&node).unwrap();
-                            let block_sequence = block.sequence();
-                            current_sequence.push_str(&block_sequence);
+                            let block_sequence = blocks_by_node.get(&node).unwrap().sequence();
+                            let strands = previous
+                                .and_then(|source| graph.edge_weight(source, node))
+                                .map(|edges| {
+                                    edges
+                                        .iter()
+                                        .map(|edge| edge.target_strand == Strand::Reverse)
+                                        .collect::<HashSet<_>>()
+                                })
+                                .unwrap_or_default();
+                            let forward = !strands.contains(&true) || strands.contains(&false);
+                            let reverse = strands.contains(&true);
+                            let reversed = revcomp(&block_sequence);
+                            let mut extended = vec![];
+                            for reading in &readings {
+                                if forward {
+                                    extended.push(format!("{reading}{block_sequence}"));
+                                }
+                                if reverse {
+                                    extended.push(format!("{reading}{reversed}"));
+                                }
+                            }
+                            readings = extended;
+                            previous = Some(node);
                         }
-                        sequences.insert(current_sequence);
+                        sequences.extend(readings);
                     }
                 }
             }
         }
 
         Ok(sequences)
+    }
+
+    /// A stream of sequences, each read by walking from a start node to an end node and picking
+    /// one outgoing edge at each step. It never ends, so a graph with many paths or with cycles is
+    /// sampled without being enumerated, as a Monte Carlo simulation would.
+    pub fn random_sequences(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        block_group_id: &HashId,
+        seed: Option<u64>,
+    ) -> Result<RandomSequences, BlockGroupError> {
+        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+            .into_iter()
+            .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+            .collect::<Vec<_>>();
+        let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges, None)?;
+
+        let (mut graph, _) = Edge::build_graph(&edges, &blocks);
+        BlockGroup::prune_graph(&mut graph);
+
+        let start_nodes = graph
+            .nodes()
+            .filter(|node| is_start_node(node.node_id))
+            .collect::<Vec<_>>();
+        let sequences = blocks
+            .iter()
+            .map(|block| {
+                (
+                    GraphNode {
+                        node_id: block.node_id,
+                        sequence_start: block.start,
+                        sequence_end: block.end,
+                    },
+                    block.sequence(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let random = match seed {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_rng(&mut rand::rng()),
+        };
+
+        Ok(RandomSequences {
+            graph,
+            start_nodes,
+            sequences,
+            random,
+        })
     }
 
     pub fn add_accession(
