@@ -24,7 +24,11 @@ use petgraph::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod packed;
+pub mod source;
 pub mod traits;
+pub use packed::{PackedEdgeId, PackedEdgeRef, PackedGraphMap};
+pub use source::{EagerSource, GraphSource};
 pub use traits::MergeGraph;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
@@ -76,6 +80,9 @@ impl GraphNodeSlice {
 }
 
 pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
+/// `GenGraph` with one petgraph edge per `GraphEdge`, so parallel edges between a node pair stay
+/// distinguishable; this is the graph type the viewer draws.
+pub type PackedGenGraph = PackedGraphMap<GraphNode, GraphEdge>;
 pub type OperationGraph = DiGraphMap<HashId, ()>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]

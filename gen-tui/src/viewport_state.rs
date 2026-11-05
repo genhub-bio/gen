@@ -1,31 +1,14 @@
-use std::time::Duration;
-
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    animation::Animation,
-    geometry::{ViewportPos, WorldPos, WorldRect},
-};
+use crate::geometry::{ViewportPos, WorldPos, WorldRect};
 
-/// Controller for the Graph widget, managing camera and cursor positions, animations, and zones.
+/// Controller for the Graph widget, managing camera and viewport bounds.
 #[derive(Clone)]
 pub struct ViewportState {
-    /// Hard Zone as number of cells from the viewport edge
-    /// Camera snaps immediately when cursor enters this zone (in # terminal cells from the sides, half cells on top and bottom)
-    pub hard_zone: u16,
-
-    /// Soft Zone as number of cells from the viewport edge
-    /// Must be > hard_zone (further from edge). Camera follows smoothly in this zone
-    /// (hard_zone to soft_zone from edge). Dead zone is implicit (center area).
-    pub soft_zone: u16,
-
-    /// Optional world boundaries: camera_current is clamped to this rect if present.
-    pub world_bounds: Option<WorldRect>,
-
-    /// Camera's current and target world offsets.
+    /// Camera's current world offset (viewport center in world coordinates).
     pub camera_current: WorldPos,
-    pub camera_target: WorldPos,
-    pub camera_anim: Option<Animation>,
 
     /// Viewport bounds in screen coordinates
     pub viewport_bounds: Rect,
@@ -40,59 +23,13 @@ impl Default for ViewportState {
     }
 }
 
-/// Helper function to clamp coordinates within world bounds if present
-fn clamp_to_bounds(pos: WorldPos, bounds: Option<WorldRect>) -> WorldPos {
-    if let Some(rect) = bounds {
-        WorldPos::new(
-            pos.x.clamp(rect.min.x, rect.max.x),
-            pos.y.clamp(rect.min.y, rect.max.y),
-        )
-    } else {
-        pos
-    }
-}
-
 impl ViewportState {
     pub fn new() -> Self {
         ViewportState {
-            hard_zone: 2, // Hard zone is 0-2 cells from edge
-            soft_zone: 4, // Soft zone is 2-4 cells from edge, dead zone is 4+ cells
-            world_bounds: None,
             camera_current: WorldPos::ZERO,
-            camera_target: WorldPos::ZERO,
-            camera_anim: None,
             has_focus: true, // Enable focus by default for keyboard input
             viewport_bounds: Rect::new(0, 0, 0, 0), // Will be set during rendering
         }
-    }
-
-    /// Move the camera to a new world-space offset over `duration` (smoothly).
-    /// Clamps the final target to `world_bounds` if present.
-    pub fn move_camera_to(&mut self, target: WorldPos, duration: Duration) {
-        let start = self.camera_current;
-        let end = clamp_to_bounds(target, self.world_bounds);
-        self.camera_target = end;
-        self.camera_anim = Some(Animation::new(
-            start,
-            end,
-            duration,
-            tachyonfx::Interpolation::CubicOut,
-        ));
-    }
-
-    /// Handle a scroll event. `dx`/`dy` are deltas in world units.
-    pub fn handle_mouse_scroll(&mut self, dx: i64, dy: i64, duration: Duration) {
-        if !self.has_focus {
-            return;
-        }
-        let new_target = WorldPos::new(self.camera_target.x + dx, self.camera_target.y + dy);
-        self.move_camera_to(new_target, duration);
-    }
-
-    /// Check if a world position is currently visible in the viewport
-    pub fn is_visible(&self, world_pos: WorldPos) -> bool {
-        let camera_rect = self.camera_rect();
-        camera_rect.contains(world_pos)
     }
 
     /// Convert a world-space position to viewport coordinates (cell indices).
@@ -126,10 +63,7 @@ impl ViewportState {
 
     /// Convert a world position to terminal buffer coordinates.
     /// Returns `Some((x, y))` if the position is visible in the terminal, otherwise `None`.
-    /// Handles viewport offset and Y-axis flipping (world Y+ is up, terminal Y+ is down).
-    ///
-    /// This version properly handles large coordinates by computing intersection with viewport
-    /// instead of silently dropping coordinates that exceed u16::MAX.
+    /// Handles viewport offset, large coordinates, and Y-axis flipping.
     pub fn world_to_terminal(&self, world_pos: WorldPos) -> Option<(u16, u16)> {
         // Handle uninitialized viewport bounds
         if self.viewport_bounds.width == 0 || self.viewport_bounds.height == 0 {
@@ -165,34 +99,16 @@ impl ViewportState {
         }
     }
 
-    /// Convert terminal buffer coordinates to world position.
-    /// Inverse of `world_to_terminal`. Handles viewport offset and Y-axis flipping.
-    pub fn terminal_to_world(&self, terminal_x: u16, terminal_y: u16) -> Option<WorldPos> {
-        // Handle uninitialized viewport bounds
-        if self.viewport_bounds.width == 0 || self.viewport_bounds.height == 0 {
-            return None;
-        }
-
-        // Check if terminal coordinates are within our viewport bounds
-        if terminal_x >= self.viewport_bounds.x
-            && terminal_x < self.viewport_bounds.x + self.viewport_bounds.width
-            && terminal_y >= self.viewport_bounds.y
-            && terminal_y < self.viewport_bounds.y + self.viewport_bounds.height
-        {
-            // Convert to viewport coordinates (remove offset and flip Y-axis)
-            let viewport_x = terminal_x - self.viewport_bounds.x;
-            let viewport_y = self
-                .viewport_bounds
-                .height
-                .saturating_sub(1)
-                .saturating_sub(terminal_y - self.viewport_bounds.y);
-
-            // Convert to world coordinates
-            let viewport_pos = ViewportPos::new(viewport_x, viewport_y);
-            Some(self.viewport_to_world(viewport_pos))
-        } else {
-            None
-        }
+    /// Convert a continuous world coordinate to continuous buffer coordinates (x right, y down,
+    /// cell `(column, row)` spanning `[column, column + 1) x [row, row + 1)`), without clipping
+    /// to the viewport.
+    pub fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
+        let origin = self.camera_rect().min;
+        (
+            f64::from(self.viewport_bounds.x) + world.0 - origin.x as f64,
+            f64::from(self.viewport_bounds.y) + f64::from(self.viewport_bounds.height)
+                - (world.1 - origin.y as f64),
+        )
     }
 
     /// Returns the area the camera sees, i.e. the viewport in world coordinates
@@ -211,21 +127,9 @@ impl ViewportState {
     }
 
     /// Remove input focus. Scroll events are ignored.
-    pub fn blur(&mut self) {
+    #[cfg(test)]
+    pub(crate) fn blur(&mut self) {
         self.has_focus = false;
-    }
-
-    /// Set the hard zone as number of cells from the viewport edge.
-    /// Camera snaps immediately when cursor enters this outer zone.
-    pub fn set_hard_zone_edge_cells(&mut self, cells: u16) {
-        self.hard_zone = cells;
-    }
-
-    /// Set the soft zone as number of cells from the viewport edge.
-    /// Camera follows smoothly when cursor is in this zone (between hard zone and dead zone).
-    /// Must be greater than hard_zone_edge_cells (further from edge).
-    pub fn set_soft_zone_edge_cells(&mut self, cells: u16) {
-        self.soft_zone = cells;
     }
 }
 
@@ -245,26 +149,14 @@ impl<'a> WorldBuffer<'a> {
         }
     }
 
-    /// Get the viewport size from the state
-    pub fn get_viewport_size(&self) -> (u16, u16) {
-        (
-            self.viewport_state.viewport_bounds.width,
-            self.viewport_state.viewport_bounds.height,
-        )
-    }
-
-    /// Get the viewport area from the state
-    pub fn viewport_area(&self) -> Rect {
-        self.viewport_state.viewport_bounds
-    }
-
     /// Get the currently visible world rectangle.
     pub fn visible_world_area(&self) -> WorldRect {
         self.viewport_state.camera_rect()
     }
 
     /// Intersect a world-space region with the current visible viewport area.
-    pub fn calculate_visible_area(&self, world_area: WorldRect) -> Option<WorldRect> {
+    #[cfg(test)]
+    pub(crate) fn calculate_visible_area(&self, world_area: WorldRect) -> Option<WorldRect> {
         self.visible_world_area().intersection(&world_area)
     }
 
@@ -276,6 +168,11 @@ impl<'a> WorldBuffer<'a> {
     /// Convert a viewport position to world coordinates
     pub fn viewport_to_world(&self, screen: ViewportPos) -> WorldPos {
         self.viewport_state.viewport_to_world(screen)
+    }
+
+    /// See [`ViewportState::world_to_terminal_continuous`].
+    pub fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
+        self.viewport_state.world_to_terminal_continuous(world)
     }
 
     /// Set a single character at the specified world position.
@@ -296,7 +193,7 @@ impl<'a> WorldBuffer<'a> {
     }
 
     /// Set a string starting at the specified world position, advancing horizontally.
-    pub fn set_string(&mut self, world_pos: WorldPos, text: &str) {
+    pub(crate) fn set_string(&mut self, world_pos: WorldPos, text: &str) {
         self.set_string_styled(world_pos, text, Style::default())
     }
 
@@ -308,16 +205,23 @@ impl<'a> WorldBuffer<'a> {
         }
     }
 
-    /// Set a string vertically starting at the specified world position, advancing downward.
-    pub fn set_string_vertical(&mut self, world_pos: WorldPos, text: &str) {
-        self.set_string_vertical_styled(world_pos, text, Style::default())
-    }
-
-    /// Set a string vertically with style starting at the specified world position, advancing downward.
-    pub fn set_string_vertical_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) {
-        for (i, ch) in text.chars().enumerate() {
-            let char_world_pos = WorldPos::new(world_pos.x, world_pos.y - i as i64);
-            self.set_char_styled(char_world_pos, ch, style);
+    /// Draw terminal graphemes at their cell widths, including wide and combining characters.
+    pub fn set_graphemes_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) {
+        let mut column = world_pos.x;
+        for grapheme in text.graphemes(true) {
+            let width = grapheme.width() as i64;
+            if let Some((buffer_x, buffer_y)) = self
+                .viewport_state
+                .world_to_terminal(WorldPos::new(column, world_pos.y))
+                && let Some(cell) = self.buffer.cell_mut((buffer_x, buffer_y))
+            {
+                cell.set_symbol(grapheme);
+                cell.set_style(style);
+            }
+            for offset in 1..width {
+                self.set_char_styled(WorldPos::new(column + offset, world_pos.y), ' ', style);
+            }
+            column += width;
         }
     }
 
@@ -333,37 +237,6 @@ impl<'a> WorldBuffer<'a> {
                 self.set_char_styled(WorldPos::new(x, y), ch, style);
             }
         }
-    }
-
-    /// Clear a single cell back to default (space character, default style).
-    pub fn clear_cell(&mut self, world_pos: WorldPos) {
-        self.set_char_styled(world_pos, ' ', Style::default())
-    }
-
-    /// Clear a rectangular region back to default (space characters, default style).
-    pub fn clear_rect(&mut self, world_rect: WorldRect) {
-        self.fill_rect_styled(world_rect, ' ', Style::default())
-    }
-
-    /// Clear the entire visible viewport area back to default.
-    pub fn clear_visible(&mut self) {
-        let target_area = self.viewport_state.camera_rect();
-        self.clear_rect(target_area)
-    }
-
-    /// Get the viewport size in cells
-    pub fn viewport_size(&self) -> (u16, u16) {
-        self.get_viewport_size()
-    }
-
-    /// Get the current camera position in world coordinates
-    pub fn camera_position(&self) -> WorldPos {
-        self.viewport_state.camera_current
-    }
-
-    /// Get current camera position (alias for camera_position for consistency)
-    pub fn get_camera_position(&self) -> WorldPos {
-        self.camera_position()
     }
 
     /// Get a single character at the specified world position.
@@ -383,34 +256,25 @@ impl<'a> WorldBuffer<'a> {
         Some((ch, cell.style()))
     }
 
-    /// Get a horizontal string starting at the specified world position.
-    /// Returns the string up to the specified length or until an out-of-bounds position is encountered.
-    pub fn get_string(&self, world_pos: WorldPos, max_length: usize) -> String {
-        let mut result = String::new();
-        for i in 0..max_length {
-            let char_world_pos = WorldPos::new(world_pos.x + i as i64, world_pos.y);
-            if let Some(ch) = self.get_char(char_world_pos) {
-                result.push(ch);
-            } else {
-                break;
-            }
-        }
-        result
+    /// Read a cell using terminal buffer coordinates, as used by braille edge paths.
+    pub(crate) fn get_terminal_char_styled(&self, position: WorldPos) -> Option<(char, Style)> {
+        let (column, row) = (
+            u16::try_from(position.x).ok()?,
+            u16::try_from(position.y).ok()?,
+        );
+        let cell = self.buffer.cell((column, row))?;
+        Some((cell.symbol().chars().next().unwrap_or(' '), cell.style()))
     }
 
-    /// Get a vertical string starting at the specified world position.
-    /// Returns the string up to the specified length or until an out-of-bounds position is encountered.
-    pub fn get_string_vertical(&self, world_pos: WorldPos, max_length: usize) -> String {
-        let mut result = String::new();
-        for i in 0..max_length {
-            let char_world_pos = WorldPos::new(world_pos.x, world_pos.y - i as i64);
-            if let Some(ch) = self.get_char(char_world_pos) {
-                result.push(ch);
-            } else {
-                break;
-            }
+    /// Write a cell using terminal buffer coordinates.
+    pub(crate) fn set_terminal_char_styled(&mut self, position: WorldPos, ch: char, style: Style) {
+        let (Ok(column), Ok(row)) = (u16::try_from(position.x), u16::try_from(position.y)) else {
+            return;
+        };
+        if let Some(cell) = self.buffer.cell_mut((column, row)) {
+            cell.set_char(ch);
+            cell.set_style(style);
         }
-        result
     }
 }
 
@@ -455,7 +319,6 @@ mod tests {
         let mut state = ViewportState::new();
         state.viewport_bounds = Rect::new(0, 0, 80, 20);
         state.camera_current = WorldPos::new(40_000, 0);
-        state.camera_target = state.camera_current;
 
         // This point is far outside the visible range but would wrap into range with a u16 cast.
         // With viewport width 80 and camera origin ~39961, adding 131_082 makes relative_x = 131_121,
@@ -480,23 +343,6 @@ mod tests {
 
         state.focus();
         assert!(state.has_focus);
-    }
-
-    #[test]
-    fn test_panning_behavior() {
-        let mut state = ViewportState::new();
-        // Set zone cells to enable multizone logic
-        state.set_hard_zone_edge_cells(2);
-        state.set_soft_zone_edge_cells(4);
-
-        // Simulate scroll event
-        state.handle_mouse_scroll(5, 3, Duration::from_millis(100));
-
-        // Test that scroll is ignored when not focused
-        state.blur();
-        let old_target = state.camera_target;
-        state.handle_mouse_scroll(10, 10, Duration::from_millis(100));
-        assert_eq!(state.camera_target, old_target);
     }
 
     #[test]
@@ -537,6 +383,26 @@ mod tests {
         assert_eq!(writer.get_char(WorldPos::new(7, 3)), Some('l'));
         assert_eq!(writer.get_char(WorldPos::new(8, 3)), Some('l'));
         assert_eq!(writer.get_char(WorldPos::new(9, 3)), Some('o'));
+    }
+
+    #[test]
+    fn test_world_buffer_graphemes_keep_terminal_columns() {
+        let mut state = ViewportState::new();
+        state.viewport_bounds = Rect::new(0, 0, 20, 10);
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        writer.set_graphemes_styled(
+            WorldPos::new(0, 0),
+            "e\u{301}漢B",
+            ratatui::style::Style::default(),
+        );
+        assert_eq!(writer.get_char(WorldPos::new(0, 0)), Some('e'));
+        assert_eq!(writer.get_char(WorldPos::new(1, 0)), Some('漢'));
+        assert_eq!(writer.get_char(WorldPos::new(2, 0)), Some(' '));
+        assert_eq!(writer.get_char(WorldPos::new(3, 0)), Some('B'));
+        drop(writer);
+        let (column, row) = state.world_to_terminal(WorldPos::new(0, 0)).unwrap();
+        assert_eq!(buffer[(column, row)].symbol(), "e\u{301}");
     }
 
     #[test]

@@ -1,40 +1,40 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    hash::Hash,
+};
 
-use gen_sugiyama::{Config, Edge, Vertex, assign_coordinates, run_sugiyama_algorithm};
 use itertools::Itertools;
-use log::warn;
 use petgraph::{
     Undirected,
     graph::NodeIndex,
     stable_graph::{StableDiGraph, StableGraph},
-    visit::{EdgeRef, IntoEdgeReferences, NodeIndexable},
+    visit::EdgeRef,
 };
-use rstar::{AABB, RTree};
+use rust_sugiyama::{LayoutVertex, configure::Config, from_edges_with_dummies};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    distribute_nodes::{compress_dead_space, redistribute_horizontal_chains},
-    edge_router::route_graph::make_rectilinear,
-    geometry::{BigRect, LayoutObject, LayoutPos, LocalPos, PartitionIndex},
-    partition::{PartitionEdge, PartitionNode, StitchSide},
-    plotter::NodeSizer,
+    cross_coordinates::{align_layers, assign_cross_coordinates, orient_aligned_bubbles},
+    diagonal::EdgeStyle,
+    distribute_nodes::{
+        GapSizes, MINIMUM_ROUTING_GAP_Y, VerticalPlacement, base_step,
+        compact_layout_with_vertical_placement,
+    },
+    edge_ports::NodeSide,
+    edge_router::{layout_graph_process::prune_pin_stubs, route_graph::make_rectilinear},
+    geometry::{LocalPos, WorldPos, WorldRect},
+    loopback_pins::{
+        SidewaysNodes, drop_orphaned_routing_nodes, insert_sideways_nodes, reattach_loopback_pins,
+        tether_self_loops,
+    },
+    pinning::{PinnedEdge, hairpin_sides},
+    window_graph::{WindowEdge, WindowGraph, WindowNode},
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VisualDetail {
     Minimal,
     Full,
     Truncated,
-}
-
-impl VisualDetail {
-    /// Convert VisualDetail enum to array index for layout storage
-    pub fn as_index(self) -> usize {
-        match self {
-            VisualDetail::Minimal => 0,
-            VisualDetail::Full => 1,
-            VisualDetail::Truncated => 2,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -134,6 +134,9 @@ impl JunctionSymbol {
     }
 }
 
+/// The cells of a hair pin: wide enough for the turnaround and its two arrows, and two rows tall.
+pub const HAIR_PIN_SIZE: (u64, u64) = (3, 2);
+
 /// NodeRole represents the distinction between nodes that were in the input graph (Data)  
 /// and dummy nodes that were added to route the edges during layout (Routing).
 /// The Data variant stores the original domain graph NodeIndex.
@@ -141,7 +144,62 @@ impl JunctionSymbol {
 pub enum NodeRole {
     Data(NodeIndex),
     Routing, // No stored data - glyph computed on-the-fly from connectivity
-    Stitch(StitchSide),
+    /// Synthetic endpoint of a detour that carries an edge around the nodes it attaches to; the
+    /// side says which end of the layout the detour runs along.
+    Pin(PinSide),
+    /// The turnaround beside one side of a node whose edge leaves that side and returns to it.
+    /// Unlike the other synthetic nodes it is drawn as a glyph of its own, of
+    /// [`HAIR_PIN_SIZE`], with its top row on the row its bus meets.
+    HairPin(NodeSide),
+    /// Ranked boundary door whose payload is its off-window navigation target.
+    Wormhole(NodeIndex),
+}
+
+/// Where a pin sits relative to the nodes it serves. A left pin is reached from the west side of
+/// its nodes and a right pin from the east side; both carry a loop around the nodes. An up or
+/// down pin sits between two nodes and gives one of two otherwise overlapping edges a bend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PinSide {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl PinSide {
+    /// Whether the pin turns an edge around the end of the layout, as opposed to bending it
+    /// between two neighbouring layers.
+    pub const fn is_loopback(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+}
+
+/// The row used for vertical alignment and edge attachment. World Y increases upward.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerticalAnchor {
+    /// Center the node around its connection row (the historical layout).
+    #[default]
+    Center,
+    /// Place the top row on the connection row, with all remaining rows below it.
+    Top,
+}
+
+impl VerticalAnchor {
+    /// Offset from the connection row to the discrete rectangle center.
+    pub fn center_offset(self, height: u64) -> i64 {
+        match self {
+            Self::Center => 0,
+            Self::Top => -(height as i64 / 2),
+        }
+    }
+
+    /// The occupied rectangle around an attachment point; X remains centered.
+    pub fn rect(self, position: WorldPos, size: (u64, u64)) -> WorldRect {
+        WorldRect::from_center_and_size(
+            WorldPos::new(position.x, position.y + self.center_offset(size.1)),
+            size,
+        )
+    }
 }
 
 /// Layout graphs contain two types of nodes: nodes that represent the input nodes,
@@ -150,19 +208,59 @@ pub enum NodeRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutNode {
     pub role: NodeRole,
+    /// Edge attachment point: horizontal center and the selected vertical anchor.
     pub pos: LocalPos,
+    /// The row positioned at `pos.y`; remaining rows follow this anchor.
+    #[serde(default)]
+    pub vertical_anchor: VerticalAnchor,
     pub size: (u64, u64),
     /// Layer information from Sugiyama algorithm. Only valid for Data nodes.
     pub layer: Option<i32>,
+    /// Fixed horizontal offset of a diagonal side port from its layer's center column.
+    #[serde(default)]
+    pub(crate) padding_offset: i64,
+    /// Data node whose row and column this side port follows during compaction.
+    #[serde(default)]
+    pub(crate) padding_anchor: Option<NodeIndex<u32>>,
+    /// Sides with curved self-edges, used to reserve room beyond the visible node border.
+    #[serde(default)]
+    pub(crate) hairpin_west: bool,
+    #[serde(default)]
+    pub(crate) hairpin_east: bool,
+    /// A node this one stays a fixed number of rows from during vertical compaction, and that
+    /// number of rows (negative above it).
+    #[serde(default)]
+    pub(crate) row_tether: Option<(NodeIndex<u32>, i64)>,
 }
 
 impl LayoutNode {
+    /// The occupied rectangle, translated by a world offset.
+    pub fn rect(&self, offset: WorldPos) -> WorldRect {
+        self.vertical_anchor.rect(
+            WorldPos::new(self.pos.x + offset.x, self.pos.y + offset.y),
+            self.size,
+        )
+    }
+
+    /// Minimum distance to the next node in increasing world Y, before any blank rows.
+    pub(crate) fn vertical_separation(&self, next: &Self) -> i64 {
+        base_step(self.size.1 as i64, next.size.1 as i64)
+            + self.vertical_anchor.center_offset(self.size.1)
+            - next.vertical_anchor.center_offset(next.size.1)
+    }
+
     pub fn new(role: NodeRole, pos: LocalPos, size: (u64, u64), layer: Option<i32>) -> Self {
         Self {
             role,
+            vertical_anchor: VerticalAnchor::Center,
             pos,
             size,
             layer,
+            padding_offset: 0,
+            padding_anchor: None,
+            hairpin_west: false,
+            hairpin_east: false,
+            row_tether: None,
         }
     }
 
@@ -178,15 +276,6 @@ impl LayoutNode {
     pub fn routing(pos: LocalPos, size: (u64, u64)) -> Self {
         Self::new(NodeRole::Routing, pos, size, None)
     }
-
-    pub fn stitch(side: StitchSide, pos: LocalPos, size: (u64, u64)) -> Self {
-        Self::new(NodeRole::Stitch(side), pos, size, None)
-    }
-
-    /// Get the partition index for this node
-    pub fn partition_idx(&self) -> PartitionIndex {
-        self.pos.partition_idx
-    }
 }
 
 /// LayoutEdge represents a bundle of edges as a vector of node index pairs.
@@ -195,23 +284,22 @@ impl LayoutNode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LayoutEdge {
     pub bundle: Vec<(NodeIndex, NodeIndex)>,
+    /// Whether this is the reversed main span of a backward-edge loop.
+    pub is_pin_span: bool,
 }
 
 impl LayoutEdge {
     pub fn new(source: NodeIndex, target: NodeIndex) -> Self {
         Self {
             bundle: vec![(source, target)],
+            is_pin_span: false,
         }
     }
 
     pub fn empty() -> Self {
-        Self { bundle: Vec::new() }
-    }
-
-    pub fn append(&mut self, source: NodeIndex, target: NodeIndex) {
-        let pair = (source, target);
-        if !self.bundle.contains(&pair) {
-            self.bundle.push(pair);
+        Self {
+            bundle: Vec::new(),
+            is_pin_span: false,
         }
     }
 }
@@ -222,85 +310,541 @@ impl Default for LayoutEdge {
     }
 }
 
-/// A single coordinate layout for a specific zoom level,
-/// has its own graph (undirected to allow for bidirectional edge routing),
-/// coordinates mapped to nodes, and a spatial index for all objects.
+/// Final geometry for one assembled neighbourhood window at a specific zoom level.
+///
+/// The graph is undirected to allow bidirectional edge routing, with final coordinates mapped
+/// to its nodes.
 #[derive(Clone, Serialize)]
-pub struct PartitionLayout {
+pub struct WindowGeometry {
     pub graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    /// Single spatial index that holds both domain and layout indices
-    #[serde(skip)]
-    pub spatial_index: RTree<LayoutObject>,
     pub width: i64,
     pub height: i64,
+    /// Each invisible domain node and the routing node it became (see [`Self::new`]).
+    pub(crate) junctions: Vec<(NodeIndex, NodeIndex<u32>)>,
 }
 
-impl PartitionLayout {
-    /// Create a PartitionLayout for a regular partition (section)
-    pub fn for_section(
-        mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-        vertex_spacing: f64,
-    ) -> Self {
-        log::trace!(
-            "for_section: input layout_graph has {} nodes, {} edges",
-            layout_graph.node_count(),
-            layout_graph.edge_count()
-        );
-
-        if let Err(e) = make_rectilinear(&mut layout_graph, vertex_spacing) {
-            log::warn!("Edge routing failed: {:?}", e);
-        }
-
-        // Remove dead space left behind by the Brandes-Köpf averaging step and
-        // by raw routing channel positions. This must happen before
-        // redistribution: once nodes are re-centered along their chains they
-        // straddle inter-column gaps and block compression.
-        compress_dead_space(&mut layout_graph, vertex_spacing);
-
-        // Redistribute nodes along horizontal chains after edge routing
-        redistribute_horizontal_chains(&mut layout_graph, vertex_spacing);
-
-        // Compress again: redistribution can vacate bands (e.g. a wide node
-        // moving out of an inflated column), reopening dead space.
-        compress_dead_space(&mut layout_graph, vertex_spacing);
-
-        let (dx, dy) = align_partition_to_origin(&mut layout_graph);
-
-        let spatial_index = Self::build_spatial_index(&layout_graph);
-
-        log::trace!(
-            "for_section: final layout_graph has {} nodes, {} edges, width: {}, height: {}",
-            layout_graph.node_count(),
-            layout_graph.edge_count(),
-            dx,
-            dy
-        );
-
-        Self {
-            graph: layout_graph,
-            spatial_index,
-            width: dx,
-            height: dy,
+/// Dense layers need compact rows even if the routed coordinates spread their alternatives out.
+/// Count visible data before routing, so routing nodes and display buffer size do not affect it.
+fn vertical_placement_for_window(
+    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    junctions: &HashSet<NodeIndex>,
+) -> VerticalPlacement {
+    const MAX_BALANCED_LAYER_MEMBERS: usize = 8;
+    let mut members_by_layer = HashMap::<i32, usize>::new();
+    for node in graph.node_weights() {
+        if let NodeRole::Data(domain_index) = node.role
+            && !junctions.contains(&domain_index)
+            && let Some(layer) = node.layer
+        {
+            let members = members_by_layer.entry(layer).or_default();
+            *members += 1;
+            if *members > MAX_BALANCED_LAYER_MEMBERS {
+                return VerticalPlacement::Tight;
+            }
         }
     }
+    VerticalPlacement::Balanced
+}
 
-    /// Create a PartitionLayout for an inter-partition space (bridge)
-    pub fn for_bridge(
-        mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-        vertex_spacing: f64,
-    ) -> Self {
-        log::trace!("for_bridge: entering function");
-        log::trace!(
-            "for_bridge: input layout_graph has {} nodes, {} edges",
-            layout_graph.node_count(),
-            layout_graph.edge_count()
+/// Give every data node and every dummy a straight departure on either side of its layer before a
+/// diagonal connection may bend. A dummy is a bypass for a long edge; padding it like a data node
+/// keeps its slopes in the gutters instead of cutting across the layer's data nodes. All
+/// departures in a layer use the widest node's clearance columns.
+fn pad_diagonal_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+    let mut layer_widths = BTreeMap::<i64, (i64, i64)>::new();
+    for node in graph.node_weights() {
+        let extents = layer_widths.entry(node.pos.x).or_insert((0, 0));
+        if matches!(node.role, NodeRole::Data(_) | NodeRole::Routing) {
+            let halves = crate::distribute_nodes::halves(node.size.0 as i64);
+            extents.0 = extents.0.max(halves.lo + 1);
+            extents.1 = extents.1.max(halves.hi + 2);
+        }
+    }
+    if layer_widths.is_empty() {
+        return;
+    }
+
+    // Distinct starting columns are essential: diagonal compaction moves every node that
+    // starts at the same x as one rigid group.
+    let mut columns = HashMap::new();
+    let mut offsets_by_center = HashMap::new();
+    let mut previous_right = None;
+    for (&original_x, &(left, right)) in &layer_widths {
+        let center = previous_right.map_or(0, |end| end + left + 2);
+        columns.insert(original_x, center);
+        offsets_by_center.insert(center, (left, right));
+        previous_right = Some(center + right);
+    }
+    for node in graph.node_weights_mut() {
+        node.pos.x = columns[&node.pos.x];
+    }
+
+    // Padding runs before any port exists, so every routing node here is a dummy.
+    let padded_nodes: Vec<_> = graph
+        .node_indices()
+        .filter(|&index| matches!(graph[index].role, NodeRole::Data(_) | NodeRole::Routing))
+        .collect();
+    let mut ports = HashMap::new();
+    for index in padded_nodes {
+        let node = &graph[index];
+        let (x, y, layer) = (node.pos.x, node.pos.y, node.layer);
+        let (left, right) = offsets_by_center[&x];
+        let mut left_node = LayoutNode::new(
+            NodeRole::Routing,
+            LocalPos::new_xy(x - left, y),
+            (1, 1),
+            layer,
         );
+        left_node.padding_offset = -left;
+        left_node.padding_anchor = Some(index);
+        let left_port = graph.add_node(left_node);
+        let mut right_node = LayoutNode::new(
+            NodeRole::Routing,
+            LocalPos::new_xy(x + right, y),
+            (1, 1),
+            layer,
+        );
+        right_node.padding_offset = right;
+        right_node.padding_anchor = Some(index);
+        let right_port = graph.add_node(right_node);
+        ports.insert(index, (left_port, right_port));
+    }
 
-        if let Err(e) = make_rectilinear(&mut layout_graph, vertex_spacing) {
-            log::warn!("Edge routing failed: {:?}", e);
+    let edges: Vec<_> = graph
+        .edge_indices()
+        .filter_map(|edge| {
+            let (source, target) = graph.edge_endpoints(edge)?;
+            Some((edge, source, target, graph[edge].clone()))
+        })
+        .collect();
+    for (edge, source, target, bundle) in edges {
+        let loopback_pin = [source, target]
+            .into_iter()
+            .any(|index| matches!(graph[index].role, NodeRole::Pin(side) if side.is_loopback()));
+        if loopback_pin {
+            continue;
+        }
+        let source_port = ports.get(&source).and_then(|&(left, right)| {
+            (graph[source].pos.x < graph[target].pos.x)
+                .then_some(right)
+                .or_else(|| (graph[source].pos.x > graph[target].pos.x).then_some(left))
+        });
+        let target_port = ports.get(&target).and_then(|&(left, right)| {
+            (graph[target].pos.x < graph[source].pos.x)
+                .then_some(right)
+                .or_else(|| (graph[target].pos.x > graph[source].pos.x).then_some(left))
+        });
+        if source_port.is_none() && target_port.is_none() {
+            continue;
+        }
+        graph.remove_edge(edge);
+        graph.add_edge(
+            source_port.unwrap_or(source),
+            target_port.unwrap_or(target),
+            bundle.clone(),
+        );
+        if let Some(port) = source_port {
+            graph.add_edge(source, port, bundle.clone());
+        }
+        if let Some(port) = target_port {
+            graph.add_edge(port, target, bundle);
+        }
+    }
+}
+
+/// Keep each curved hairpin as a self-edge on its data node. Its pinned edge retains the side.
+fn add_hairpin_edges(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    hairpins: &HashSet<(NodeIndex, NodeSide)>,
+) {
+    let anchors: Vec<_> = graph
+        .node_indices()
+        .filter_map(|anchor| {
+            let NodeRole::Data(domain_index) = graph[anchor].role else {
+                return None;
+            };
+            let west = hairpins.contains(&(domain_index, NodeSide::West));
+            let east = hairpins.contains(&(domain_index, NodeSide::East));
+            (west || east).then_some((anchor, domain_index, west, east))
+        })
+        .collect();
+    for (anchor, domain_index, west, east) in anchors {
+        graph[anchor].hairpin_west = west;
+        graph[anchor].hairpin_east = east;
+        graph.add_edge(anchor, anchor, LayoutEdge::new(domain_index, domain_index));
+    }
+}
+
+/// Align each hair pin to the side of the layer the layout placed it in, so the loop starts at the
+/// column where the layer's nodes start and does not drift across the layer. A pin on the east side
+/// of its node has its attachment column on the left edge of the widest data node in its layer, and
+/// a pin on the west side has it on the right edge. A layer with no data node leaves its pin where
+/// compaction put it.
+fn scoot_hair_pins(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+    let origin = WorldPos::new(0, 0);
+    let pins: Vec<_> = graph
+        .node_indices()
+        .filter(|&index| matches!(graph[index].role, NodeRole::HairPin(_)))
+        .collect();
+    for pin in pins {
+        let NodeRole::HairPin(side) = graph[pin].role else {
+            continue;
+        };
+        let Some(layer) = graph[pin].layer else {
+            continue;
+        };
+        let widest = graph
+            .node_indices()
+            .filter(|&index| {
+                graph[index].layer == Some(layer) && matches!(graph[index].role, NodeRole::Data(_))
+            })
+            .max_by_key(|&index| graph[index].size.0);
+        let Some(widest) = widest else {
+            continue;
+        };
+        let (pin_rect, widest_rect) = (graph[pin].rect(origin), graph[widest].rect(origin));
+        graph[pin].pos.x += match side {
+            NodeSide::East => widest_rect.min.x - pin_rect.min.x,
+            NodeSide::West => widest_rect.max.x - pin_rect.max.x,
+        };
+    }
+}
+
+/// Replace each hair pin with routing nodes that make its loop, so the shape is drawn by the
+/// ordinary rules for routes and no mode draws a node of its own. The loop is two rows tall: the
+/// route leaves the neighbour on the top row, which is the row of the bus, runs across the pin and
+/// down at the far end, and comes back along the bottom row. The bus keeps its single edge to an
+/// entry on the pin's near side. In the terminal the return rises to that entry; in the curve and
+/// line modes it is an S-curve back to that neighbour, and the far end is a bend that starts and
+/// ends flat.
+fn expand_hair_pins(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    edge_style: EdgeStyle,
+) {
+    let pins: Vec<_> = graph
+        .node_indices()
+        .filter(|&index| matches!(graph[index].role, NodeRole::HairPin(_)))
+        .collect();
+    for pin in pins {
+        let NodeRole::HairPin(side) = graph[pin].role else {
+            continue;
+        };
+        let neighbor_edge = graph.edges(pin).next().map(|edge| {
+            let neighbor = if edge.source() == pin {
+                edge.target()
+            } else {
+                edge.source()
+            };
+            (neighbor, edge.weight().clone())
+        });
+        let Some((neighbor, weight)) = neighbor_edge else {
+            continue;
+        };
+        let rect = graph[pin].rect(WorldPos::new(0, 0));
+        let row = graph[pin].pos.y;
+        let (near_x, far_x) = match side {
+            NodeSide::East => (rect.min.x, rect.max.x),
+            NodeSide::West => (rect.max.x, rect.min.x),
+        };
+        let mut routing_node = |x: i64, y: i64| {
+            graph.add_node(LayoutNode::new(
+                NodeRole::Routing,
+                LocalPos::new_xy(x, y),
+                (1, 1),
+                None,
+            ))
+        };
+        let entry = routing_node(near_x, row);
+        let far_top = routing_node(far_x, row);
+        let far_bottom = routing_node(far_x, row - 1);
+        let near_bottom = routing_node(near_x, row - 1);
+        // The curve modes return to the neighbour the bus reached, so the S-curve ends where the
+        // hair pin was joined to the layout. The terminal's router needs the return to end on the
+        // bus at the entry.
+        let return_end = if edge_style.is_diagonal() {
+            neighbor
+        } else {
+            entry
+        };
+        let edges = vec![
+            (neighbor, entry),
+            (entry, far_top),
+            (far_top, far_bottom),
+            (far_bottom, near_bottom),
+            (near_bottom, return_end),
+        ];
+        for (first, second) in edges {
+            graph.add_edge(first, second, weight.clone());
+        }
+        graph.remove_node(pin);
+    }
+}
+
+/// Shorten only a closed self-link route with one left pin, one right pin, and one exclusive
+/// dummy between them. The domain index identifies a complete graph vertex, not a sequence node
+/// ID shared by distinct slices. Other routing nodes keep their compaction coordinates.
+fn shorten_self_link_detours(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+    let anchors: Vec<_> = graph
+        .node_indices()
+        .filter(|&index| matches!(graph[index].role, NodeRole::Data(_)))
+        .collect();
+    for anchor in anchors {
+        let NodeRole::Data(domain_index) = graph[anchor].role else {
+            continue;
+        };
+        let self_edge = |edge: &LayoutEdge| {
+            !edge.bundle.is_empty()
+                && edge
+                    .bundle
+                    .iter()
+                    .all(|pair| *pair == (domain_index, domain_index))
+        };
+        let self_neighbors: Vec<_> = graph
+            .edges(anchor)
+            .filter(|edge| self_edge(edge.weight()))
+            .map(|edge| {
+                if edge.source() == anchor {
+                    edge.target()
+                } else {
+                    edge.source()
+                }
+            })
+            .filter(|&neighbor| neighbor != anchor)
+            .collect();
+        let [first, second] = self_neighbors.as_slice() else {
+            continue;
+        };
+        let (first, second) = (*first, *second);
+        let (left, right) = match (&graph[first].role, &graph[second].role) {
+            (NodeRole::Pin(PinSide::Left), NodeRole::Pin(PinSide::Right)) => (first, second),
+            (NodeRole::Pin(PinSide::Right), NodeRole::Pin(PinSide::Left)) => (second, first),
+            _ => continue,
+        };
+        let pin_other = |pin| {
+            let neighbors: Vec<_> = graph.neighbors(pin).collect();
+            if neighbors.len() != 2 || !neighbors.contains(&anchor) {
+                return None;
+            }
+            graph
+                .edges(pin)
+                .all(|edge| self_edge(edge.weight()))
+                .then(|| {
+                    neighbors
+                        .into_iter()
+                        .find(|&neighbor| neighbor != anchor)
+                        .expect("should have the pin's other neighbor")
+                })
+        };
+        let (Some(left_other), Some(right_other)) = (pin_other(left), pin_other(right)) else {
+            continue;
+        };
+        if left_other != right_other
+            || graph[left_other].role != NodeRole::Routing
+            || graph.neighbors(left_other).collect::<HashSet<_>>() != HashSet::from([left, right])
+            || graph.edges(left_other).count() != 2
+            || graph
+                .edges(left_other)
+                .any(|edge| !self_edge(edge.weight()))
+        {
+            continue;
+        }
+        let middle = left_other;
+        let ports: Vec<_> = graph
+            .node_indices()
+            .filter(|&index| graph[index].padding_anchor == Some(middle))
+            .collect();
+        if ports
+            .iter()
+            .any(|&index| graph.edges(index).next().is_some())
+        {
+            continue;
         }
 
-        let spatial_index = Self::build_spatial_index(&layout_graph);
+        let anchor_position = graph[anchor].pos;
+        let side = if graph[middle].pos.y < anchor_position.y {
+            -1
+        } else {
+            1
+        };
+        let clearance = graph[anchor].size.1.div_ceil(2) as i64 + 2;
+        let reach = graph[anchor].size.0.div_ceil(2) as i64 + 6;
+        let near = |index: NodeIndex<u32>| {
+            LocalPos::new_xy(
+                anchor_position.x + (graph[index].pos.x - anchor_position.x).clamp(-reach, reach),
+                anchor_position.y + side * clearance,
+            )
+        };
+        let (left_position, right_position) = (near(left), near(right));
+        let candidates = [(left, left_position), (right, right_position)];
+        let collides = candidates.iter().any(|&(pin, position)| {
+            let mut moved = graph[pin].clone();
+            moved.pos = position;
+            graph.node_indices().any(|other| {
+                other != pin
+                    && other != left
+                    && other != right
+                    && other != middle
+                    && !ports.contains(&other)
+                    && moved
+                        .rect(WorldPos::ZERO)
+                        .intersects(&graph[other].rect(WorldPos::ZERO))
+            })
+        });
+        if collides {
+            continue;
+        }
+
+        for port in ports {
+            graph.remove_node(port);
+        }
+        graph.remove_node(middle);
+        graph.add_edge(
+            left,
+            right,
+            LayoutEdge {
+                bundle: vec![(domain_index, domain_index)],
+                is_pin_span: true,
+            },
+        );
+        graph[left].pos = left_position;
+        graph[right].pos = right_position;
+    }
+}
+
+/// Padding creates both side ports before it knows which edges will use them. Drop ports with no
+/// incident edge after compaction so the final geometry and DOT export contain only real routes.
+fn prune_unused_padding_ports(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+    let unused: Vec<_> = graph
+        .node_indices()
+        .filter(|&index| {
+            graph[index].padding_anchor.is_some() && graph.edges(index).next().is_none()
+        })
+        .collect();
+    for index in unused {
+        graph.remove_node(index);
+    }
+}
+
+impl WindowGeometry {
+    /// Route and compact an assembled window whose nodes already have their rendered sizes.
+    ///
+    /// The Data nodes for `junctions` (domain nodes the renderer doesn't draw) are laid out and
+    /// routed like any other node, so every edge still meets at them and keeps its domain-edge
+    /// bundle, then become routing nodes before compaction: they are drawn as the junction of
+    /// their edges and are never placed as selectable nodes.
+    ///
+    /// `centered` names the domain nodes aligned before routing (see
+    /// [`crate::cross_coordinates::align_layers`]). The first surviving aligned node is
+    /// returned to y = 0 after compaction; other nodes may drift if routing breaks the line.
+    ///
+    /// `pinned_edges` tell a curved layout which edge ends attach on the side their edge does not
+    /// leave toward and need a loop beside their node.
+    ///
+    /// With a diagonal `edge_style` the router is skipped: every layer-to-layer segment, dummy
+    /// chains and loopback pins included, stays a straight edge, and compaction keeps layers in
+    /// columns far enough apart for those edges to slope gently.
+    pub fn new(
+        mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+        gaps: &GapSizes,
+        junctions: &HashSet<NodeIndex>,
+        centered: &HashSet<NodeIndex>,
+        pinned_edges: &[PinnedEdge],
+        edge_style: EdgeStyle,
+    ) -> Self {
+        let vertical_placement = vertical_placement_for_window(&layout_graph, junctions);
+        // Assembly places rows at their size-independent within-layer ordinals. The edge router
+        // reacts only to y, so assign real-size-aware cross coordinates before routing. This pass
+        // only needs a small structural gap, not the caller's actual zoom target: compaction below
+        // is the sole place either target gap is enforced.
+        // A curved drawing has no loopback pins in its layered layout: the ends that need one get a
+        // routing node beside their node instead, and the pin returns once compaction is done.
+        let sideways = if edge_style.is_diagonal() {
+            drop_orphaned_routing_nodes(&mut layout_graph);
+            insert_sideways_nodes(&mut layout_graph, pinned_edges)
+        } else {
+            SidewaysNodes::default()
+        };
+        orient_aligned_bubbles(&mut layout_graph, centered);
+        assign_cross_coordinates(&mut layout_graph, 1);
+        align_layers(&mut layout_graph, centered);
+        tether_self_loops(&mut layout_graph, &sideways);
+
+        if edge_style.is_diagonal() {
+            pad_diagonal_data_nodes(&mut layout_graph);
+        }
+        // A Bezier drawing turns a hairpin into an arc beside its node. The layered layout cannot
+        // carry a loop on one node, so the loop joins the node's side port to itself once the
+        // ports exist, which lets compaction, drawing and highlighting treat it as an edge.
+        if matches!(edge_style, EdgeStyle::Bezier(_)) {
+            add_hairpin_edges(&mut layout_graph, &hairpin_sides(pinned_edges));
+        }
+
+        if !edge_style.is_diagonal()
+            && let Err(error) = make_rectilinear(&mut layout_graph)
+        {
+            log::warn!("Edge routing failed: {:?}", error);
+        }
+
+        // The router replaces layout-node indices, so identify the first aligned domain node
+        // after routing. A final translation restores its absolute row without bending edges.
+        let center_anchor = layout_graph
+            .node_indices()
+            .filter(|&node_index| {
+                matches!(layout_graph[node_index].role, NodeRole::Data(domain_index) if centered.contains(&domain_index))
+            })
+            .min_by_key(|&node_index| {
+                (layout_graph[node_index].pos.x, node_index.index())
+            });
+
+        // Routing has already merged straight runs and labelled every segment, so a junction
+        // swapped only now keeps both the edges into it and the edges out of it.
+        let mut junction_nodes = Vec::new();
+        for layout_index in layout_graph.node_indices().collect::<Vec<_>>() {
+            let node = &mut layout_graph[layout_index];
+            if let NodeRole::Data(domain_index) = node.role
+                && junctions.contains(&domain_index)
+            {
+                node.role = NodeRole::Routing;
+                node.layer = None;
+                junction_nodes.push((domain_index, layout_index));
+            }
+        }
+
+        // Curved edges keep the minimal zoom level's routing gaps at every level.
+        let curved_gaps = GapSizes {
+            routing_routing_y: MINIMUM_ROUTING_GAP_Y,
+            data_routing_y: |_| 1,
+            ..*gaps
+        };
+        let gaps = if edge_style.is_diagonal() {
+            &curved_gaps
+        } else {
+            gaps
+        };
+        compact_layout_with_vertical_placement(
+            &mut layout_graph,
+            gaps,
+            vertical_placement,
+            center_anchor,
+            edge_style,
+        );
+        reattach_loopback_pins(&mut layout_graph, sideways.pins);
+        scoot_hair_pins(&mut layout_graph);
+        expand_hair_pins(&mut layout_graph, edge_style);
+        if edge_style.is_diagonal() {
+            shorten_self_link_detours(&mut layout_graph);
+            prune_unused_padding_ports(&mut layout_graph);
+        }
+        if let Some(anchor) = center_anchor {
+            let offset = layout_graph[anchor].pos.y;
+            for node in layout_graph.node_weights_mut() {
+                node.pos.y -= offset;
+            }
+        }
+        // A diagonal pin is an ordinary vertex of its loop's polyline, not a router stub.
+        if !edge_style.is_diagonal() {
+            prune_pin_stubs(&mut layout_graph);
+        }
 
         let (min_x, max_x) = layout_graph
             .node_weights()
@@ -308,138 +852,41 @@ impl PartitionLayout {
             .minmax()
             .into_option()
             .unwrap_or((0, 0));
-
-        log::trace!(
-            "for_bridge: final layout_graph has {} nodes, {} edges, width: {}, height: {}",
-            layout_graph.node_count(),
-            layout_graph.edge_count(),
-            max_x - min_x,
-            0
-        );
+        let (min_y, max_y) = layout_graph
+            .node_weights()
+            .map(|node| node.pos.y)
+            .minmax()
+            .into_option()
+            .unwrap_or((0, 0));
 
         Self {
             graph: layout_graph,
-            spatial_index,
             width: max_x - min_x,
-            height: 0,
+            height: max_y - min_y,
+            junctions: junction_nodes,
         }
     }
 
-    pub fn build_spatial_index(
-        graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    ) -> RTree<LayoutObject> {
-        log::debug!(
-            "build_spatial_index: layout_graph has {} nodes",
-            graph.node_count()
-        );
-
-        // Debug: Check for duplicate domain nodes in the layout graph
-        let mut domain_node_counts = std::collections::HashMap::new();
-        for node_idx in graph.node_indices() {
-            if let Some(node_data) = graph.node_weight(node_idx)
-                && let NodeRole::Data(domain_idx) = &node_data.role
-            {
-                *domain_node_counts.entry(*domain_idx).or_insert(0) += 1;
-                log::debug!(
-                    "build_spatial_index: found domain node {:?} at layout_pos({}, {}) layout_idx={:?}",
-                    domain_idx,
-                    node_data.pos.x,
-                    node_data.pos.y,
-                    node_idx
-                );
-            }
-        }
-
-        // Report duplicates
-        for (domain_idx, count) in &domain_node_counts {
-            if *count > 1 {
-                log::debug!(
-                    "build_spatial_index: WARNING - domain node {:?} appears {} times in layout graph!",
-                    domain_idx,
-                    count
-                );
-            }
-        }
-        let node_index_mapping: HashMap<NodeIndex<u32>, NodeIndex<u32>> = graph
-            .node_indices()
-            .map(|node_idx| (node_idx, node_idx))
-            .collect();
-
-        let mut objects = graph
-            .node_indices()
-            .map(|local_node_idx| {
-                let node_data = graph
-                    .node_weight(local_node_idx)
-                    .expect("Node data not found");
-                let new_idx = node_index_mapping
-                    .get(&local_node_idx)
-                    .expect("Provided mapping not complete");
-                match &node_data.role {
-                    NodeRole::Data(original_node_idx) => LayoutObject::node(
-                        LayoutPos::new(node_data.pos.x, node_data.pos.y),
-                        node_data.size,
-                        *new_idx,
-                        *original_node_idx,
-                    ),
-                    NodeRole::Routing => LayoutObject::routing_node(
-                        LayoutPos::new(node_data.pos.x, node_data.pos.y),
-                        *new_idx,
-                    ),
-                    NodeRole::Stitch(stitch_side) => LayoutObject::stitch_node(
-                        LayoutPos::new(node_data.pos.x, node_data.pos.y),
-                        *new_idx,
-                        *stitch_side,
-                    ),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        objects.extend(graph.edge_references().map(|edge_ref| {
-            let source_id = edge_ref.source();
-            let source_node = graph.node_weight(source_id).expect("Source node not found");
-            let target_id = edge_ref.target();
-            let target_node = graph.node_weight(target_id).expect("Target node not found");
-
-            LayoutObject::line(
-                LayoutPos::new(source_node.pos.x, source_node.pos.y),
-                LayoutPos::new(target_node.pos.x, target_node.pos.y),
-                source_id,
-                target_id,
-            )
-        }));
-
-        RTree::bulk_load(objects)
+    /// The routing node an invisible domain node became, if it is in this window. A
+    /// `prune_pin_stubs` splice can remove one lying on a backward-edge loop's stub, in which
+    /// case there is none.
+    pub fn junction_node(&self, domain_index: NodeIndex) -> Option<&LayoutNode> {
+        self.junctions
+            .iter()
+            .find(|(junction, _)| *junction == domain_index)
+            .and_then(|(_, layout_index)| self.graph.node_weight(*layout_index))
+            .filter(|node| matches!(node.role, NodeRole::Routing))
     }
 
-    /// Find all nodes that overlap a Rect given in local coordinates
-    pub fn find_nodes_in_rect(&self, rect: BigRect<i64>) -> Vec<LayoutObject> {
-        let envelope = AABB::from_corners(rect.min.into(), rect.max.into());
-        self.spatial_index
-            .locate_in_envelope_intersecting(&envelope)
-            .filter(|rect| rect.is_node())
-            .cloned()
-            .collect()
+    /// The invisible domain nodes still present in this window as routing nodes.
+    pub fn junctions(&self) -> impl Iterator<Item = (NodeIndex, &LayoutNode)> + '_ {
+        self.junctions.iter().filter_map(|&(domain_index, _)| {
+            self.junction_node(domain_index)
+                .map(|node| (domain_index, node))
+        })
     }
 
-    /// Find all edges overlapping a viewport rectangle
-    pub fn find_edges_in_rect(&self, viewport: BigRect<i64>) -> Vec<LayoutObject> {
-        let envelope = AABB::from_corners(viewport.min.into(), viewport.max.into());
-
-        let all_objects: Vec<_> = self
-            .spatial_index
-            .locate_in_envelope_intersecting(&envelope)
-            .cloned()
-            .collect();
-
-        let edge_objects: Vec<_> = all_objects
-            .into_iter()
-            .filter(|rect| rect.is_edge())
-            .collect();
-
-        edge_objects
-    }
-
-    /// Check if the layout and/or flower is empty (no nodes)
+    /// Check if the layout graph is empty (no nodes)
     pub fn is_empty(&self) -> bool {
         self.graph.node_count() == 0
     }
@@ -454,83 +901,15 @@ impl PartitionLayout {
         self.graph.node_weight(node_idx).map(|node| node.pos)
     }
 
-    /// Set the position of a node and update the spatial index
-    pub fn set_node_position(&mut self, node_idx: NodeIndex<u32>, pos: LocalPos) -> bool {
-        if let Some(node) = self.graph.node_weight_mut(node_idx) {
-            node.pos = pos;
-
-            // Update the spatial index by removing and re-adding the object
-            // First, find and remove the old object
-            let objects_to_remove: Vec<_> = self
-                .spatial_index
-                .iter()
-                .filter(|obj| obj.primary_node.layout == node_idx)
-                .cloned()
-                .collect();
-
-            for old_obj in objects_to_remove {
-                self.spatial_index.remove(&old_obj);
-
-                // Create new object with updated position
-                let new_obj = match old_obj.object_type {
-                    crate::geometry::SpatialObjectType::DataNode(original_idx) => {
-                        crate::geometry::LayoutObject::node(
-                            pos.pos(),
-                            node.size,
-                            node_idx,
-                            original_idx,
-                        )
-                    }
-                    crate::geometry::SpatialObjectType::RoutingNode(node_idx) => {
-                        crate::geometry::LayoutObject::routing_node(pos.pos(), node_idx)
-                    }
-                    crate::geometry::SpatialObjectType::StitchNode(side) => {
-                        crate::geometry::LayoutObject::stitch_node(pos.pos(), node_idx, side)
-                    }
-                    _ => continue, // Skip edges
-                };
-
-                self.spatial_index.insert(new_obj);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
     /// Get the size of a node
     pub fn get_node_size(&self, node_idx: NodeIndex<u32>) -> Option<(u64, u64)> {
         self.graph.node_weight(node_idx).map(|node| node.size)
     }
-
-    /// Get all node positions as an iterator
-    pub fn get_all_positions(&self) -> impl Iterator<Item = (NodeIndex<u32>, LocalPos)> + '_ {
-        self.graph
-            .node_indices()
-            .filter_map(move |idx| self.graph.node_weight(idx).map(|node| (idx, node.pos)))
-    }
-
-    /// Find the left and right stitch nodes in the layout, if they exist.
-    /// Returns a tuple of (left_stitch, right_stitch) where each element is an Option<NodeIndex>.
-    pub fn find_stitch_nodes(&self) -> (Option<NodeIndex>, Option<NodeIndex>) {
-        let left_stitch = self.graph.node_indices().find(|&idx| {
-            self.graph
-                .node_weight(idx)
-                .is_some_and(|node| matches!(node.role, NodeRole::Stitch(StitchSide::Left)))
-        });
-
-        let right_stitch = self.graph.node_indices().find(|&idx| {
-            self.graph
-                .node_weight(idx)
-                .is_some_and(|node| matches!(node.role, NodeRole::Stitch(StitchSide::Right)))
-        });
-        (left_stitch, right_stitch)
-    }
 }
 
-impl std::fmt::Debug for PartitionLayout {
+impl std::fmt::Debug for WindowGeometry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug_struct = f.debug_struct("PartitionLayout");
+        let mut debug_struct = f.debug_struct("WindowGeometry");
 
         debug_struct
             .field("width", &self.width)
@@ -562,162 +941,146 @@ impl std::fmt::Debug for PartitionLayout {
     }
 }
 
-/// A builder for creating a PartitionLayout from a StableDiGraph<PartitionNode, PartitionEdge, u32>.
-/// Generate multiple PartitionLayouts (e.g. zoom levels) on a common layer framework,
-/// by reusing intermediate data from the Sugiyama algorithm. This ensures
-/// that the relative orientation of nodes now and later is preserved.
+/// Which window-graph node this vertex stands for. `None` marks a routing dummy: every dummy
+/// vertex here comes straight from `rust_sugiyama::from_edges_with_dummies`'s own
+/// crossing-minimized placement, not something gen-tui synthesizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Vertex {
+    pub input_node_idx: Option<NodeIndex<u32>>,
+}
+
+/// Which window-graph edge (if any) this hop belongs to, so a dummy chain traces back to the
+/// domain edge it routes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Edge {
+    pub input_node_idx_pair: Option<(NodeIndex<u32>, NodeIndex<u32>)>,
+}
+
+/// Cached, size-independent Sugiyama layers and routing vertices for one window.
+#[derive(Debug, Clone)]
+pub struct WindowStructure {
+    /// Post-layering vertex graph. Dummy routing vertices are present; each data vertex
+    /// carries the window-graph node index it stands for in `Vertex::input_node_idx`.
+    pub vertex_graph: StableDiGraph<Vertex, Edge, u32>,
+    /// Per-layer vertex ordering from crossing minimization. The outer index is the layer;
+    /// the inner order is the within-layer ordering. Entries index `vertex_graph`.
+    pub vertex_layers: Vec<Vec<NodeIndex<u32>>>,
+    /// Which `vertex_graph` edges render a backward edge's `left_pin -> right_pin` main span
+    /// (see `WindowGraph::pin_span_edges`), keyed by each edge's `(source, target)`
+    /// endpoints. Resolved once in `WindowStructureBuilder::build_structure` by walking
+    /// `WindowGraph::pin_span_edges` through any dummy-vertex chain Sugiyama inserted for
+    /// that edge, so `assemble_window` can carry the flag straight into `LayoutEdge` without
+    /// re-deriving it later. Empty for a graph with no backward edges.
+    pub pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
+}
+
+impl WindowStructure {
+    /// Locate the window-graph node `window_node` in the layered structure, returning its
+    /// `(layer index, within-layer order)`. Both are indices into `vertex_layers`. Returns
+    /// `None` when no vertex carries that window-graph node (for example a dummy routing
+    /// vertex, which has no `input_node_idx`).
+    pub fn locate(&self, window_node: NodeIndex<u32>) -> Option<(usize, usize)> {
+        self.vertex_layers
+            .iter()
+            .enumerate()
+            .find_map(|(layer_index, layer)| {
+                layer
+                    .iter()
+                    .position(|&vertex_idx| {
+                        self.vertex_graph
+                            .node_weight(vertex_idx)
+                            .and_then(|vertex| vertex.input_node_idx)
+                            == Some(window_node)
+                    })
+                    .map(|order| (layer_index, order))
+            })
+    }
+}
+
+/// A builder for the size-independent Sugiyama structure of a crawled window's layout graph.
+///
+/// The cached layer framework is reused across zoom levels so the relative orientation of nodes
+/// remains stable while the widget computes window geometry at the current detail.
 #[derive(Debug)]
-pub struct LayoutEngine<'a> {
-    partition_graph: &'a StableDiGraph<PartitionNode, PartitionEdge, u32>,
-    partition_idx: PartitionIndex,
+pub struct WindowStructureBuilder<'a> {
+    window_graph: &'a StableDiGraph<WindowNode, WindowEdge, u32>,
+    /// Pairs of data nodes that Sugiyama must rank in order. See `with_ordering_edges`.
+    ordering_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
     vertex_graph: StableDiGraph<Vertex, Edge, u32>,
     vertex_layers: Option<Vec<Vec<NodeIndex<u32>>>>,
     config: Config,
+    /// Copied from `WindowGraph::pin_span_edges` at construction. See
+    /// `WindowStructure::pin_span_edges`.
+    pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
+    /// Resolved by `build_structure` once dummy vertices are inserted. See
+    /// `WindowStructure::pin_span_edges`.
+    resolved_pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
 }
 
-impl<'a> LayoutEngine<'a> {
-    /// Create a new LayoutEngine for the given partition graph.
-    pub fn new(
-        partition_graph: &'a StableDiGraph<PartitionNode, PartitionEdge, u32>,
-        partition_idx: PartitionIndex,
-    ) -> Self {
-        // Make a vertex graph for the sugiyama algorithm
-        let mut vertex_graph = StableDiGraph::<Vertex, Edge, u32>::with_capacity(
-            partition_graph.node_count(),
-            partition_graph.edge_count(),
-        );
+/// One slot in a recovered layer: a real window-graph node, or a routing dummy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LayerEntry {
+    Real(NodeIndex<u32>),
+    Dummy(u32),
+}
 
-        // Add all nodes and store mapping from partition indices to vertex indices
-        let node_map: HashMap<NodeIndex<u32>, NodeIndex<u32>> = partition_graph
-            .node_indices()
-            .map(|partition_idx| {
-                let mut vertex = Vertex::new(partition_idx);
-                let sort_bias = match &partition_graph[partition_idx] {
-                    PartitionNode::Data(domain_idx) => {
-                        let d: i32 = i32::try_from(domain_idx.index()).unwrap_or(i32::MAX);
-                        i32::MAX.saturating_sub(d)
-                    }
-                    PartitionNode::Stitch(_) => 0,
-                };
-                vertex.set_sort_bias(sort_bias);
-                let new_vertex_idx = vertex_graph.add_node(vertex);
-                (partition_idx, new_vertex_idx)
-            })
-            .collect();
+/// Per-rank slot ordering: outer index is the rank, inner is `(layer entry, x)` sorted by x.
+type RankedLayers = Vec<Vec<(LayerEntry, f64)>>;
+/// Each multi-rank window-graph edge's routing-dummy chain, as returned by
+/// `from_edges_with_dummies`, keyed by the edge's position among the window graph's edges so that
+/// parallel edges between the same two nodes keep chains of their own.
+type DummyChains = HashMap<usize, Vec<u32>>;
+/// One dense edge fed to `from_edges_with_dummies`, paired with the window-graph endpoints it
+/// came from so a returned `LayoutVertex::Dummy(edge_id)` can be traced back to them.
+type DenseEdgeWithEndpoints = ((u32, u32), (NodeIndex<u32>, NodeIndex<u32>));
+/// Raw per-vertex output from `from_edges_with_dummies`, grouped by rank before dummy ids are
+/// minted (see `WindowStructureBuilder::build_ranks`).
+type RawRankGroups = HashMap<u64, Vec<(LayoutVertex<usize, usize>, f64)>>;
 
-        // Add all edges using the map
-        for edge_idx in partition_graph.edge_indices() {
-            if let Some((src_partition_idx, dst_partition_idx)) =
-                partition_graph.edge_endpoints(edge_idx)
-            {
-                let src_vertex_idx = node_map[&src_partition_idx];
-                let dst_vertex_idx = node_map[&dst_partition_idx];
-
-                // Get the edge weight to determine if this edge should have a label
-                let partition_edge = partition_graph
-                    .edge_weight(edge_idx)
-                    .expect("Edge weight not found for edge");
-
-                // Use the edge weight to determine Edge construction
-                let edge = match partition_edge {
-                    Some((src_domain_idx, dst_domain_idx)) => {
-                        // Edge has domain node information, use it as label
-                        Edge::default().with_label((*src_domain_idx, *dst_domain_idx))
-                    }
-                    None => {
-                        // Edge has no domain information (e.g., the initial stitch edges at the
-                        // beginning and end of the graph (TODO: think about omitting those
-                        // entirely)
-                        Edge::default()
-                    }
-                };
-
-                vertex_graph.add_edge(src_vertex_idx, dst_vertex_idx, edge);
-            }
-        }
-
+impl<'a> WindowStructureBuilder<'a> {
+    /// Create a new WindowStructureBuilder for the given window graph.
+    pub fn new(window: &'a WindowGraph) -> Self {
         Self {
-            partition_graph,
-            partition_idx,
-            vertex_graph,
+            window_graph: &window.graph,
+            ordering_edges: Vec::new(),
+            vertex_graph: StableDiGraph::new(),
             vertex_layers: None,
             config: Config::default(),
+            pin_span_edges: window.pin_span_edges.clone(),
+            resolved_pin_span_edges: HashSet::new(),
         }
     }
 
-    pub fn set_sugiyama_config(&mut self, config: Config) {
-        self.config = config;
+    /// Supply pairs of data nodes whose layers must stay in the given order while Sugiyama runs.
+    /// Pinned routes use them to keep their endpoints' ranks fixed; the pairs add no edge to the
+    /// structure, and the dummies Sugiyama routes along them are dropped from the layers.
+    pub fn with_ordering_edges(
+        mut self,
+        ordering_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
+    ) -> Self {
+        self.ordering_edges = ordering_edges;
+        self
     }
 
-    /// Set the vertex spacing for this layout engine
-    pub fn set_vertex_spacing(&mut self, spacing: f64) {
-        self.config.vertex_spacing = spacing;
-    }
-
-    /// Get the current vertex spacing
-    pub fn get_vertex_spacing(&self) -> f64 {
-        self.config.vertex_spacing
-    }
-
-    pub fn compute_layout<S>(
-        &mut self,
-        node_sizer: &S,
-        detail_level: VisualDetail,
-    ) -> Result<PartitionLayout, String>
-    where
-        S: for<'g> NodeSizer<&'g StableDiGraph<PartitionNode, PartitionEdge, u32>>,
-    {
-        // Check for empty graph
-        if self.partition_graph.node_count() == 0 {
+    /// Establish the detail-independent structure of the window: validate the graph, then rank
+    /// and order every vertex - real and dummy alike - via
+    /// `rust_sugiyama::from_edges_with_dummies` (see `Vertex`). A window with a backward-edge
+    /// bypass loop is mirrored to a consistent orientation in `build_ranks`; every other window
+    /// keeps the crate's own placement untouched. Idempotent; a single-node window needs no
+    /// layering.
+    pub fn build_structure(&mut self) -> Result<(), String> {
+        if self.window_graph.node_count() == 0 {
             return Err("Cannot compute layout for empty graph".to_string());
         }
 
-        // Special case: Single node graph
-        // Bypass Sugiyama algorithm and edge routing entirely
-        if self.partition_graph.node_count() == 1 {
-            let node_idx = self.partition_graph.node_indices().next().unwrap();
-            let partition_node = &self.partition_graph[node_idx];
-
-            // Calculate size
-            let size = if let PartitionNode::Data(_domain_idx) = partition_node {
-                // For Data nodes, use the node sizer
-                node_sizer.get_node_size(&node_idx, detail_level)
-            } else {
-                // For Stitch nodes, use dummy size
-                node_sizer.get_dummy_size()
-            };
-
-            let (width, height) = (
-                (size.0 as f64 + self.config.vertex_spacing).round() as u64,
-                (size.1 as f64 + self.config.vertex_spacing).round() as u64,
-            );
-
-            // Create LayoutNode at (0,0)
-            let pos = LocalPos::new(self.partition_idx, LayoutPos::ZERO);
-            let role = match partition_node {
-                PartitionNode::Data(d) => NodeRole::Data(*d),
-                PartitionNode::Stitch(s) => NodeRole::Stitch(*s),
-            };
-            let layout_node = LayoutNode::new(role, pos, (width, height), Some(0));
-
-            let mut layout_graph = StableGraph::default();
-            layout_graph.add_node(layout_node);
-
-            let spatial_index = PartitionLayout::build_spatial_index(&layout_graph);
-
-            return Ok(PartitionLayout {
-                graph: layout_graph,
-                spatial_index,
-                width: width as i64,
-                height: height as i64,
-            });
+        // Single node graph: bypasses Sugiyama and edge routing entirely, so there is no
+        // structure to build.
+        if self.window_graph.node_count() == 1 {
+            return Ok(());
         }
 
-        // Check for disconnected graph (multiple components)
-        // A graph with multiple nodes must be connected to be laid out
-        // The sugiyama algorithm (phase 1: ranking) will panic if the graph is disconnected
-        // because it expects to be able to build a spanning tree.
-        let components = count_connected_components(&self.vertex_graph);
+        // Sugiyama ranking requires a connected graph.
+        let components = count_connected_components(self.window_graph);
         if components > 1 {
             return Err(format!(
                 "Graph is disconnected ({} components). Layout requires a connected graph.",
@@ -725,140 +1088,295 @@ impl<'a> LayoutEngine<'a> {
             ));
         }
 
-        // Phases 1 & 2 of the Sugiyama algorithm organize the nodes into layers
-        // and add dummy nodes to the graph. We do this only once and store the result
-        // in the LayoutEngine.
-        if self.vertex_layers.is_none() {
-            self.vertex_layers = Some(run_sugiyama_algorithm(&mut self.vertex_graph, &self.config));
+        if self.vertex_layers.is_some() {
+            return Ok(());
         }
 
-        // Make a fresh copy for this specific layout computation
-        // (if memory ends up being an issue, we can probably figure out
-        // which variables to reset instead)
-        let mut working_layers = self.vertex_layers.clone().expect("Could not derive layers");
-        let mut working_graph = self.vertex_graph.clone();
+        // Dense id map: window-graph `NodeIndex` -> contiguous u32 id fed to `from_edges`.
+        // Dummy nodes get fresh ids past the end of this range (see below).
+        let window_ids: Vec<NodeIndex<u32>> = self.window_graph.node_indices().collect();
+        let dense_id: HashMap<NodeIndex<u32>, u32> = window_ids
+            .iter()
+            .enumerate()
+            .map(|(dense, &window_idx)| (window_idx, dense as u32))
+            .collect();
 
-        for vertex_idx in working_graph.node_indices().collect::<Vec<_>>() {
-            let size = if let Some(partition_idx) = working_graph[vertex_idx].input_node_idx {
-                // Use partition index to get node size from partition graph
-                let partition_node_id = self.partition_graph.from_index(partition_idx.index());
-                node_sizer.get_node_size(&partition_node_id, detail_level)
-            } else {
-                node_sizer.get_dummy_size()
+        let (ranks_full, dummy_chains): (RankedLayers, DummyChains) =
+            self.build_ranks(&window_ids, &dense_id);
+
+        // Build `vertex_graph`: one vertex per real/dummy layer entry, then wire each
+        // window-graph edge through its dummy chain (if any).
+        let mut vertex_graph = StableDiGraph::<Vertex, Edge, u32>::new();
+        let mut window_to_vertex: HashMap<NodeIndex<u32>, NodeIndex<u32>> = HashMap::new();
+        let mut dummy_to_vertex: HashMap<u32, NodeIndex<u32>> = HashMap::new();
+        let mut vertex_layers: Vec<Vec<NodeIndex<u32>>> = Vec::with_capacity(ranks_full.len());
+        for layer in &ranks_full {
+            let mut vertex_layer = Vec::with_capacity(layer.len());
+            for &(entry, _) in layer {
+                let vertex_idx = match entry {
+                    LayerEntry::Real(window_idx) => {
+                        let v = vertex_graph.add_node(Vertex {
+                            input_node_idx: Some(window_idx),
+                        });
+                        window_to_vertex.insert(window_idx, v);
+                        v
+                    }
+                    LayerEntry::Dummy(dummy_id) => {
+                        let v = vertex_graph.add_node(Vertex {
+                            input_node_idx: None,
+                        });
+                        dummy_to_vertex.insert(dummy_id, v);
+                        v
+                    }
+                };
+                vertex_layer.push(vertex_idx);
+            }
+            vertex_layers.push(vertex_layer);
+        }
+
+        for (edge_position, edge_idx) in self.window_graph.edge_indices().enumerate() {
+            let Some((tail_w, head_w)) = self.window_graph.edge_endpoints(edge_idx) else {
+                continue;
             };
-            working_graph[vertex_idx].set_size(size, self.config.vertex_spacing);
+            let window_edge: WindowEdge = *self
+                .window_graph
+                .edge_weight(edge_idx)
+                .expect("should find an edge weight");
+
+            let mut tail_vertex = window_to_vertex[&tail_w];
+            if let Some(chain) = dummy_chains.get(&edge_position) {
+                for &dummy_id in chain {
+                    let dummy_vertex = dummy_to_vertex[&dummy_id];
+                    vertex_graph.add_edge(
+                        tail_vertex,
+                        dummy_vertex,
+                        Edge {
+                            input_node_idx_pair: window_edge,
+                        },
+                    );
+                    tail_vertex = dummy_vertex;
+                }
+            }
+            let head_vertex = window_to_vertex[&head_w];
+            vertex_graph.add_edge(
+                tail_vertex,
+                head_vertex,
+                Edge {
+                    input_node_idx_pair: window_edge,
+                },
+            );
         }
 
-        // Phase 3 of the algorithm assigns provisional coordinates to each node,
-        // based on how much space each label will take up once rendered.
-        // If no dimensions are provided, 1x1 dimensions are assumed and a standard marker
-        // is used as label instead.
-        let vertex_coords_map = assign_coordinates(&mut working_layers, &mut working_graph)
-            .into_iter()
-            .collect::<HashMap<NodeIndex<u32>, (i64, i64)>>();
+        self.vertex_graph = vertex_graph;
+        self.vertex_layers = Some(vertex_layers);
+        self.resolve_edge_legs(&window_to_vertex);
 
-        let layout_graph = self.build_layout_graph(&working_graph, vertex_coords_map);
-
-        // Save the layout and associated data using the section constructor
-        // todo: move more of this logic into partitionlayout constructor
-        let layout = PartitionLayout::for_section(layout_graph, self.config.vertex_spacing);
-
-        Ok(layout)
+        Ok(())
     }
 
-    /// Converts output of Sugiyama algorithm into a layout graph that holds:
-    /// - layoutnodes which refer to the original input node or dummy nodes
-    ///   to route edges around other nodes and each other.
-    /// - node positions in LocalPos format (referenced to the partition)
-    /// - node sizes
-    ///
-    ///   Layout graphs are undirected because in rectilinear routing one vertical edge
-    ///   may carry signals in both directions.
-    pub fn build_layout_graph(
-        &mut self,
-        sugiyama_graph: &StableDiGraph<Vertex, Edge, u32>,
-        vertex_coords_map: HashMap<NodeIndex<u32>, (i64, i64)>,
-    ) -> StableGraph<LayoutNode, LayoutEdge, Undirected, u32> {
-        let mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
-            StableGraph::with_capacity(sugiyama_graph.node_count(), sugiyama_graph.edge_count());
+    /// Call `from_edges_with_dummies` once, which ranks and orders every vertex - real and
+    /// dummy alike - via full-graph crossing minimization. Every multi-rank edge's dummy chain,
+    /// backward-edge bypass loops included, comes straight from that single call; nothing is
+    /// reconstructed or moved. The ordering edges (see `with_ordering_edges`) take part in the
+    /// ranking and crossing minimization, then their dummies are dropped, so they leave no trace
+    /// in the layers. The only other override is a whole-window mirror: crossing counts are
+    /// invariant under reversing every rank's order together (it's a reflection, not a
+    /// reordering relative to anything else), so if a window's bypass loop came out bulging the
+    /// "wrong" way, every rank gets reversed once to make it consistent - see the mirror step at
+    /// the end of this function.
+    fn build_ranks(
+        &self,
+        window_ids: &[NodeIndex<u32>],
+        dense_id: &HashMap<NodeIndex<u32>, u32>,
+    ) -> (RankedLayers, DummyChains) {
+        // Build the dense edge list `from_edges_with_dummies` needs alongside a parallel list of
+        // window-graph endpoints, in lockstep, so `edge_endpoints[edge_id]` always names the
+        // input edge a returned `LayoutVertex::Dummy(edge_id)` subdivides.
+        let dense_edges_with_endpoints: Vec<DenseEdgeWithEndpoints> = self
+            .window_graph
+            .edge_indices()
+            .filter_map(|edge_idx| self.window_graph.edge_endpoints(edge_idx))
+            .map(|(tail_w, head_w)| ((dense_id[&tail_w], dense_id[&head_w]), (tail_w, head_w)))
+            .collect();
+        let mut dense_edges: Vec<(u32, u32)> =
+            dense_edges_with_endpoints.iter().map(|&(e, _)| e).collect();
+        let real_edges: HashSet<_> = dense_edges.iter().copied().collect();
+        let mut edge_endpoints: Vec<(NodeIndex<u32>, NodeIndex<u32>)> =
+            dense_edges_with_endpoints.iter().map(|&(_, w)| w).collect();
+        // A pair already joined by a real edge is ordered by that edge and needs no extra one.
+        let first_ordering_edge = dense_edges.len();
+        let mut added_ordering_edges = Vec::new();
+        for &(earlier, later) in &self.ordering_edges {
+            let pair = (dense_id[&earlier], dense_id[&later]);
+            if !real_edges.contains(&pair) && !added_ordering_edges.contains(&(earlier, later)) {
+                dense_edges.push(pair);
+                edge_endpoints.push((earlier, later));
+                added_ordering_edges.push((earlier, later));
+            }
+        }
 
-        log::debug!(
-            "build_layout_graph: starting with working_graph {} nodes, {} edges",
-            sugiyama_graph.node_count(),
-            sugiyama_graph.edge_count()
+        let mut layouts = from_edges_with_dummies(&dense_edges, &self.config);
+        let (positions, _width, _height) = layouts
+            .pop()
+            .expect("a connected, non-empty graph produces exactly one subgraph layout");
+        debug_assert!(
+            layouts.is_empty(),
+            "window graph connectivity is validated above"
         );
 
-        // Map node indices from working graph to layout graph.
-        let mut node_map = HashMap::new();
+        // Group by rank (y), keeping each vertex's raw `LayoutVertex` for now - the crate's
+        // output order has no relationship to rank order, so dummy ids can only be minted once
+        // ranks are sorted low to high below; minting them here would scramble each edge's
+        // chain into an arbitrary order instead of tail-to-head.
+        let mut groups: RawRankGroups = HashMap::new();
+        for (vertex, (x, y)) in positions {
+            groups.entry(y.to_bits()).or_default().push((vertex, x));
+        }
+        let mut rank_ys: Vec<f64> = groups.keys().map(|&bits| f64::from_bits(bits)).collect();
+        rank_ys.sort_by(f64::total_cmp);
 
-        for node_idx in sugiyama_graph.node_indices() {
-            if let Some(node) = sugiyama_graph.node_weight(node_idx) {
-                let layout_pos = vertex_coords_map
-                    .get(&node_idx)
-                    .map(|&(x, y)| LayoutPos::new(x, y))
-                    .unwrap_or_else(|| {
-                        warn!(
-                            "Could not find coordinates for vertex {:?}, using (0,0)",
-                            node_idx
-                        );
-                        LayoutPos::ZERO
-                    });
-                let pos = LocalPos::new(self.partition_idx, layout_pos);
-                let (width, height) = node.get_size(self.config.vertex_spacing);
-                let layer = Some(node.get_rank());
-
-                // If the Vertex was labeled with the input node index,
-                // we obtain its role from the partition graph. If it wasn't
-                // labeled, we know it's a routing node added by the sugiyama algorithm.
-                let role = if let Some(pidx) = node.input_node_idx {
-                    match &self.partition_graph[pidx] {
-                        PartitionNode::Data(domain_idx) => NodeRole::Data(*domain_idx),
-                        PartitionNode::Stitch(side) => NodeRole::Stitch(*side),
-                    }
-                } else {
-                    NodeRole::Routing
-                };
-
-                let layout_node = LayoutNode::new(role, pos, (width, height), layer);
-                let new_idx = layout_graph.add_node(layout_node);
-                node_map.insert(node_idx, new_idx);
+        // Now walk ranks low to high, sorting each by x, minting a fresh globally-unique id for
+        // each dummy vertex and appending it to its edge's chain accumulator - both in true rank
+        // order, since that's the order this loop visits them in.
+        let mut ranks_full: RankedLayers = Vec::with_capacity(rank_ys.len());
+        let mut rank_of: HashMap<NodeIndex<u32>, usize> = HashMap::new();
+        let mut chains_by_edge: HashMap<usize, Vec<u32>> = HashMap::new();
+        let mut next_id: u32 = 0;
+        for (rank_index, y) in rank_ys.iter().enumerate() {
+            let mut layer = groups.remove(&y.to_bits()).unwrap();
+            layer.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let layer: Vec<(LayerEntry, f64)> = layer
+                .into_iter()
+                .filter_map(|(vertex, x)| {
+                    let entry = match vertex {
+                        LayoutVertex::Node(dense) => LayerEntry::Real(window_ids[dense]),
+                        LayoutVertex::Dummy(edge_id) if edge_id >= first_ordering_edge => {
+                            return None;
+                        }
+                        LayoutVertex::Dummy(edge_id) => {
+                            let id = next_id;
+                            next_id += 1;
+                            chains_by_edge.entry(edge_id).or_default().push(id);
+                            LayerEntry::Dummy(id)
+                        }
+                    };
+                    Some((entry, x))
+                })
+                .collect();
+            for &(entry, _) in &layer {
+                if let LayerEntry::Real(node) = entry {
+                    rank_of.insert(node, rank_index);
+                }
+            }
+            if !layer.is_empty() {
+                ranks_full.push(layer);
             }
         }
 
-        // Collect and aggregate edges by their endpoints to combine bundles
-        #[allow(clippy::type_complexity)]
-        let mut edge_bundles: HashMap<
-            (NodeIndex<u32>, NodeIndex<u32>),
-            Vec<(NodeIndex, NodeIndex)>,
-        > = HashMap::new();
+        let dummy_chains: DummyChains = chains_by_edge.into_iter().collect();
 
-        for edge_ref in sugiyama_graph.edge_references() {
-            let vertex_source_idx = edge_ref.source();
-            let vertex_target_idx = edge_ref.target();
-            let layout_source_idx = node_map[&vertex_source_idx];
-            let layout_target_idx = node_map[&vertex_target_idx];
-
-            if let Some(edge_bundle) = edge_ref.weight().input_node_idx_pair {
-                edge_bundles
-                    .entry((layout_source_idx, layout_target_idx))
-                    .or_default()
-                    .push(edge_bundle);
-            } else {
-                // Ensure edges without bundles still get created
-                edge_bundles
-                    .entry((layout_source_idx, layout_target_idx))
-                    .or_default();
+        // Mirror the whole window if it has a bypass loop. `from_edges_with_dummies` reliably
+        // places dummy vertices - added to the graph after every real node, so tie-breaking
+        // consistently favors their higher index - at the far extreme of their rank, opposite
+        // this codebase's below-the-graph convention. Reversing every rank's order the once is a
+        // pure reflection: it changes no relative order and so no crossing count, and always
+        // corrects that bias in a single pass rather than checking for it per window.
+        //
+        // Scoped to windows with a backward-edge bypass, not every window: an unconditional flip
+        // was tried and produced 6 non-rectilinear edges in `subsetting_grid`'s partial-budget
+        // middle-anchor case (multiple boundary doors collapsing to the same off-window target).
+        // `order` isn't just bookkeeping - `assemble_window` writes it straight into
+        // `LayoutNode.pos` as a real row coordinate - and `edge_router::route_layer`'s
+        // `layout_layer` is not a pure function of that row order: it detects "backtracking" via
+        // a Y-range-vs-envelope heuristic and conditionally re-routes with reversed vertical
+        // order, tuned against whatever arrangement `build_ranks` handed it before. Flipping
+        // every window changes which windows trigger that fallback and how, so a wider flip
+        // needs `layout_layer` made robust to it first, not just more flipping here.
+        if !self.pin_span_edges.is_empty() {
+            for layer in &mut ranks_full {
+                layer.reverse();
             }
         }
-
-        // Create layout edges with aggregated bundles
-        for ((layout_source_idx, layout_target_idx), bundles) in edge_bundles {
-            let layout_edge = LayoutEdge { bundle: bundles };
-            layout_graph.add_edge(layout_source_idx, layout_target_idx, layout_edge);
-        }
-
-        layout_graph
+        (ranks_full, dummy_chains)
     }
+
+    /// Resolve `pin_span_edges` (window-graph node indices, set at window-build time)
+    /// into `resolved_pin_span_edges` (`vertex_graph` edge endpoints), walking through
+    /// any dummy-vertex chain Sugiyama inserted for that edge.
+    fn resolve_edge_legs(&mut self, window_to_vertex: &HashMap<NodeIndex<u32>, NodeIndex<u32>>) {
+        for &(from_window_idx, to_window_idx) in &self.pin_span_edges {
+            let (Some(&from_vertex), Some(&to_vertex)) = (
+                window_to_vertex.get(&from_window_idx),
+                window_to_vertex.get(&to_window_idx),
+            ) else {
+                continue;
+            };
+            let Some(bundle) = self
+                .window_graph
+                .find_edge(from_window_idx, to_window_idx)
+                .and_then(|edge_idx| *self.window_graph.edge_weight(edge_idx).unwrap())
+            else {
+                continue;
+            };
+            for hop in resolve_leg_chain(&self.vertex_graph, from_vertex, to_vertex, bundle) {
+                self.resolved_pin_span_edges.insert(hop);
+            }
+        }
+    }
+
+    /// Clone out the size-independent structure established by `build_structure`, or `None`
+    /// if no layering was built (an empty or single-node window). The caller caches this
+    /// on the window so later detail switches can reuse the layering without re-running
+    /// Sugiyama.
+    pub fn structure(&self) -> Option<WindowStructure> {
+        self.vertex_layers
+            .as_ref()
+            .map(|vertex_layers| WindowStructure {
+                vertex_graph: self.vertex_graph.clone(),
+                vertex_layers: vertex_layers.clone(),
+                pin_span_edges: self.resolved_pin_span_edges.clone(),
+            })
+    }
+}
+
+/// Walk from `from` to `to` in `vertex_graph`, following edges whose `input_node_idx_pair`
+/// matches `bundle`, to find the (possibly dummy-expanded) chain Sugiyama inserted for the
+/// single window-graph edge `(from, to)` originally represented. Returns every hop's
+/// `(source, target)` endpoints in walk order, or empty if no matching chain reaches `to`.
+///
+/// A direct edge `(from, to)` can coexist with unrelated dummy chains also leaving `from`
+/// for other edges sharing the same domain bundle - e.g. `left_pin` has two outgoing edges
+/// (to `right_pin`, and to the real target) sharing one bundle, so the walk cannot just
+/// follow the first matching edge out of `from`; it must confirm the chain actually
+/// terminates at `to`. Past the first hop it is unambiguous: a dummy vertex inserted for one
+/// edge belongs to no other chain, so it has exactly one qualifying successor.
+fn resolve_leg_chain(
+    vertex_graph: &StableDiGraph<Vertex, Edge, u32>,
+    from: NodeIndex<u32>,
+    to: NodeIndex<u32>,
+    bundle: (NodeIndex, NodeIndex),
+) -> Vec<(NodeIndex<u32>, NodeIndex<u32>)> {
+    for first_hop in vertex_graph.edges(from) {
+        if first_hop.weight().input_node_idx_pair != Some(bundle) {
+            continue;
+        }
+        let mut chain = vec![(from, first_hop.target())];
+        let mut current = first_hop.target();
+        while current != to {
+            let Some(next) = vertex_graph
+                .edges(current)
+                .find(|edge_ref| edge_ref.weight().input_node_idx_pair == Some(bundle))
+            else {
+                break;
+            };
+            chain.push((current, next.target()));
+            current = next.target();
+        }
+        if current == to {
+            return chain;
+        }
+    }
+    Vec::new()
 }
 
 /// Helper to count connected components in an undirected sense for a StableGraph
@@ -887,101 +1405,443 @@ fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
     components
 }
 
-fn mean_y_for_x(
-    layout_graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    x: i64,
-) -> i64 {
-    let layer_ys: Vec<i64> = layout_graph
-        .node_weights()
-        .filter(|node| node.pos.x == x)
-        .map(|node| node.pos.y)
-        .collect::<Vec<i64>>();
-
-    (layer_ys.iter().sum::<i64>() as f64 / layer_ys.len() as f64).round() as i64
-}
-
-/// Take the contents of a layout graph and translate the node coordinates
-/// so that the centers of all data nodes in the first layer are aligned to
-/// each other and the origin (they all share x=0). In the Y-direction the
-/// nodes are shifted so that the mean y=0.
-/// - Returns run and rise: the horizontal and vertical distance
-///   from the origin to the mean of the rightmost nodes
-fn align_partition_to_origin(
-    layout_graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-) -> (i64, i64) {
-    let (min_x, max_x) = layout_graph
-        .node_weights()
-        .filter(|node| !matches!(node.role, NodeRole::Stitch(_)))
-        .map(|node| node.pos.x)
-        .minmax()
-        .into_option()
-        .unwrap_or((0, 0));
-
-    let mean_y_left = mean_y_for_x(layout_graph, min_x);
-    let mean_y_right = mean_y_for_x(layout_graph, max_x);
-
-    // Apply normalization offsets
-    for node in layout_graph.node_weights_mut() {
-        node.pos.x -= min_x;
-        node.pos.y -= mean_y_left;
-    }
-
-    let run = max_x - min_x;
-    let rise = mean_y_right - mean_y_left;
-
-    (run, rise)
-}
-
 #[cfg(test)]
 mod tests {
-    use petgraph::graph::NodeIndex;
+    use std::collections::HashSet;
 
-    use super::*;
+    use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
+
+    use super::{
+        HAIR_PIN_SIZE, LayoutEdge, LayoutNode, NodeRole, PinSide, VerticalAnchor,
+        VerticalPlacement, add_hairpin_edges, expand_hair_pins, pad_diagonal_data_nodes,
+        prune_unused_padding_ports, scoot_hair_pins, shorten_self_link_detours,
+        vertical_placement_for_window,
+    };
+    use crate::{
+        diagonal::{DiagonalDrawing, EdgeStyle},
+        edge_ports::NodeSide,
+        geometry::{LocalPos, WorldPos, WorldRect},
+    };
 
     #[test]
-    fn test_interpartition_alignment_and_width() {
-        // Create an inter-partition space graph (no stitch nodes)
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::with_capacity(3, 0);
+    fn test_more_than_eight_visible_data_nodes_in_one_layer_select_tight() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let junctions = HashSet::new();
+        for index in 0..8 {
+            graph.add_node(LayoutNode::data(
+                NodeIndex::new(index),
+                LocalPos::new_xy(0, index as i64),
+                (1, 1),
+                Some(0),
+            ));
+        }
+        assert_eq!(
+            vertical_placement_for_window(&graph, &junctions),
+            VerticalPlacement::Balanced
+        );
 
-        // Add data nodes
-        let _n1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos::new_xy(0, 10, 5),
-            (4, 2),
-            Some(0),
-        ));
-        let _n2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos::new_xy(0, 10, -5),
-            (6, 2),
-            Some(0),
-        ));
-        let _n3 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos::new_xy(0, 30, 0),
-            (8, 3),
+        let ninth = graph.add_node(LayoutNode::data(
+            NodeIndex::new(8),
+            LocalPos::new_xy(0, 8),
+            (1, 1),
             Some(1),
         ));
+        assert_eq!(
+            vertical_placement_for_window(&graph, &junctions),
+            VerticalPlacement::Balanced
+        );
+        graph[ninth].layer = Some(0);
+        let mut junctions = HashSet::from([NodeIndex::new(8)]);
+        assert_eq!(
+            vertical_placement_for_window(&graph, &junctions),
+            VerticalPlacement::Balanced
+        );
+        junctions.clear();
+        assert_eq!(
+            vertical_placement_for_window(&graph, &junctions),
+            VerticalPlacement::Tight
+        );
+    }
 
-        // Apply alignment for inter-partition space
-        align_partition_to_origin(&mut graph);
+    #[test]
+    fn test_self_link_detour_stays_near_its_data_node() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let domain_index = NodeIndex::new(1);
+        let anchor = graph.add_node(LayoutNode::data(
+            domain_index,
+            LocalPos::new_xy(10, 0),
+            (5, 1),
+            Some(1),
+        ));
+        let left = graph.add_node(LayoutNode::new(
+            NodeRole::Pin(PinSide::Left),
+            LocalPos::new_xy(0, 22),
+            (1, 1),
+            Some(0),
+        ));
+        let middle = graph.add_node(LayoutNode::routing(LocalPos::new_xy(10, 24), (1, 1)));
+        let right = graph.add_node(LayoutNode::new(
+            NodeRole::Pin(PinSide::Right),
+            LocalPos::new_xy(20, 21),
+            (1, 1),
+            Some(2),
+        ));
+        for (from, to) in [
+            (anchor, left),
+            (left, middle),
+            (middle, right),
+            (right, anchor),
+        ] {
+            graph.add_edge(from, to, LayoutEdge::new(domain_index, domain_index));
+        }
 
-        // After alignment, the leftmost nodes (at x=10) should be at x=0
-        // n1 and n2 originally have center x=10, n3 has center x=30
-        // After normalizing by subtracting min_x (10):
-        // n1 and n2: x = 10 - 10 = 0
-        // n3: x = 30 - 10 = 20
+        shorten_self_link_detours(&mut graph);
 
-        let n1 = &graph[NodeIndex::new(0)];
-        let n2 = &graph[NodeIndex::new(1)];
-        let n3 = &graph[NodeIndex::new(2)];
+        assert_eq!(graph[anchor].pos.y, 0);
+        for index in [left, right] {
+            assert_eq!(
+                graph[index].pos.y, 3,
+                "the self-link should stay near its anchor"
+            );
+        }
+        assert_eq!(graph[left].pos.x, 1);
+        assert_eq!(graph[right].pos.x, 19);
+        assert!(graph.node_weight(middle).is_none());
+        assert!(graph.find_edge(left, right).is_some());
+    }
 
-        assert_eq!(n1.pos.x, 0, "Node 1 should be at x=0 after alignment");
-        assert_eq!(n2.pos.x, 0, "Node 2 should be at x=0 after alignment");
-        assert_eq!(n3.pos.x, 20, "Node 3 should be at x=20 after alignment");
+    #[test]
+    fn test_bridge_routing_node_keeps_its_compacted_position() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let first_domain = NodeIndex::new(1);
+        let second_domain = NodeIndex::new(2);
+        let first = graph.add_node(LayoutNode::data(
+            first_domain,
+            LocalPos::new_xy(0, 0),
+            (5, 1),
+            Some(0),
+        ));
+        let second = graph.add_node(LayoutNode::data(
+            second_domain,
+            LocalPos::new_xy(20, 0),
+            (5, 1),
+            Some(2),
+        ));
+        let bridge = graph.add_node(LayoutNode::routing(LocalPos::new_xy(10, 22), (1, 1)));
+        graph.add_edge(first, bridge, LayoutEdge::new(first_domain, second_domain));
+        graph.add_edge(bridge, second, LayoutEdge::new(first_domain, second_domain));
 
-        // Y coordinates should be unchanged
-        assert_eq!(n1.pos.y, 5, "Node 1 y should be unchanged");
-        assert_eq!(n2.pos.y, -5, "Node 2 y should be unchanged");
+        shorten_self_link_detours(&mut graph);
+
+        assert_eq!(graph[bridge].pos, LocalPos::new_xy(10, 22));
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_self_link_with_shared_bridge_keeps_the_bridge_and_pins() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let domain_index = NodeIndex::new(1);
+        let other_domain = NodeIndex::new(2);
+        let anchor = graph.add_node(LayoutNode::data(
+            domain_index,
+            LocalPos::new_xy(10, 0),
+            (5, 1),
+            Some(1),
+        ));
+        let other = graph.add_node(LayoutNode::data(
+            other_domain,
+            LocalPos::new_xy(30, 0),
+            (5, 1),
+            Some(3),
+        ));
+        let left = graph.add_node(LayoutNode::new(
+            NodeRole::Pin(PinSide::Left),
+            LocalPos::new_xy(0, 22),
+            (1, 1),
+            Some(0),
+        ));
+        let middle = graph.add_node(LayoutNode::routing(LocalPos::new_xy(10, 24), (1, 1)));
+        let right = graph.add_node(LayoutNode::new(
+            NodeRole::Pin(PinSide::Right),
+            LocalPos::new_xy(20, 21),
+            (1, 1),
+            Some(2),
+        ));
+        for (from, to) in [
+            (anchor, left),
+            (left, middle),
+            (middle, right),
+            (right, anchor),
+        ] {
+            graph.add_edge(from, to, LayoutEdge::new(domain_index, domain_index));
+        }
+        graph.add_edge(middle, other, LayoutEdge::new(domain_index, other_domain));
+
+        shorten_self_link_detours(&mut graph);
+
+        assert_eq!(graph[left].pos, LocalPos::new_xy(0, 22));
+        assert_eq!(graph[middle].pos, LocalPos::new_xy(10, 24));
+        assert_eq!(graph[right].pos, LocalPos::new_xy(20, 21));
+        assert_eq!(graph.edge_count(), 5);
+    }
+
+    #[test]
+    fn test_unused_padding_ports_do_not_leave_disconnected_routing_nodes() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let first_domain = NodeIndex::new(1);
+        let second_domain = NodeIndex::new(2);
+        let first = graph.add_node(LayoutNode::data(
+            first_domain,
+            LocalPos::new_xy(0, 0),
+            (5, 1),
+            Some(0),
+        ));
+        let second = graph.add_node(LayoutNode::data(
+            second_domain,
+            LocalPos::new_xy(2, 0),
+            (5, 1),
+            Some(2),
+        ));
+        let pin = graph.add_node(LayoutNode::new(
+            NodeRole::Pin(PinSide::Left),
+            LocalPos::new_xy(1, 3),
+            (1, 1),
+            Some(1),
+        ));
+        graph.add_edge(first, pin, LayoutEdge::new(first_domain, first_domain));
+        graph.add_edge(first, second, LayoutEdge::new(first_domain, second_domain));
+
+        pad_diagonal_data_nodes(&mut graph);
+        let pin_position = graph[pin].pos;
+        assert!(graph.find_edge(first, pin).is_some());
+        prune_unused_padding_ports(&mut graph);
+
+        assert_eq!(graph[pin].pos, pin_position);
+        assert!(graph.find_edge(first, pin).is_some());
+        assert!(graph.node_indices().all(|index| {
+            graph[index].padding_anchor.is_none() || graph.edges(index).next().is_some()
+        }));
+    }
+
+    #[test]
+    fn test_curved_hairpins_are_self_edges_on_the_data_node() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let domain_index = NodeIndex::new(0);
+        let anchor = graph.add_node(LayoutNode::data(
+            domain_index,
+            LocalPos::new_xy(0, 0),
+            (5, 1),
+            Some(0),
+        ));
+        pad_diagonal_data_nodes(&mut graph);
+        add_hairpin_edges(
+            &mut graph,
+            &HashSet::from([
+                (domain_index, NodeSide::West),
+                (domain_index, NodeSide::East),
+            ]),
+        );
+        prune_unused_padding_ports(&mut graph);
+
+        assert!(graph.find_edge(anchor, anchor).is_some());
+        assert!(graph[anchor].hairpin_west && graph[anchor].hairpin_east);
+        assert!(graph.node_indices().all(|index| {
+            graph[index].padding_anchor.is_none() || graph.edges(index).next().is_some()
+        }));
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    /// A node with a hair pin on `side`, joined by one edge carrying the node's self-edge, sized
+    /// and anchored as the geometry builder does.
+    fn node_with_hair_pin(
+        side: NodeSide,
+    ) -> (
+        StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+        NodeIndex<u32>,
+        WorldRect,
+    ) {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let node = graph.add_node(LayoutNode::new(
+            NodeRole::Data(NodeIndex::new(0)),
+            LocalPos::new_xy(0, 0),
+            (5, 3),
+            Some(0),
+        ));
+        let mut hair_pin = LayoutNode::new(
+            NodeRole::HairPin(side),
+            LocalPos::new_xy(12, 3),
+            HAIR_PIN_SIZE,
+            Some(1),
+        );
+        hair_pin.vertical_anchor = VerticalAnchor::Top;
+        let rect = hair_pin.rect(WorldPos::new(0, 0));
+        let pin = graph.add_node(hair_pin);
+        graph.add_edge(
+            node,
+            pin,
+            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(0)),
+        );
+        (graph, node, rect)
+    }
+
+    fn routing_positions(
+        graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    ) -> Vec<(i64, i64)> {
+        let mut positions: Vec<(i64, i64)> = graph
+            .node_weights()
+            .filter(|node| matches!(node.role, NodeRole::Routing))
+            .map(|node| (node.pos.x, node.pos.y))
+            .collect();
+        positions.sort_unstable();
+        positions
+    }
+
+    #[test]
+    fn test_expand_hair_pins_makes_a_two_row_box_in_the_terminal() {
+        for side in [NodeSide::East, NodeSide::West] {
+            let (mut graph, node, rect) = node_with_hair_pin(side);
+
+            expand_hair_pins(&mut graph, EdgeStyle::Rectilinear);
+
+            let (near_x, far_x) = match side {
+                NodeSide::East => (rect.min.x, rect.max.x),
+                NodeSide::West => (rect.max.x, rect.min.x),
+            };
+            let mut expected = vec![
+                (near_x, rect.max.y),
+                (near_x, rect.min.y),
+                (far_x, rect.max.y),
+                (far_x, rect.min.y),
+            ];
+            expected.sort_unstable();
+            assert_eq!(routing_positions(&graph), expected);
+            assert_eq!(rect.max.y - rect.min.y, 1, "two rows");
+            assert_eq!(graph.node_count(), 5, "the pin is gone");
+            assert_eq!(graph.edge_count(), 5);
+            assert_eq!(graph.edges(node).count(), 1, "the bus stays one edge");
+            assert!(
+                graph
+                    .edge_weights()
+                    .all(|edge| edge.bundle == [(NodeIndex::new(0), NodeIndex::new(0))])
+            );
+        }
+    }
+
+    #[test]
+    fn test_expand_hair_pins_returns_to_the_neighbor_in_the_curve_modes() {
+        let style = EdgeStyle::Bezier(DiagonalDrawing::Braille);
+        for side in [NodeSide::East, NodeSide::West] {
+            let (mut graph, node, rect) = node_with_hair_pin(side);
+
+            expand_hair_pins(&mut graph, style);
+
+            let (near_x, far_x) = match side {
+                NodeSide::East => (rect.min.x, rect.max.x),
+                NodeSide::West => (rect.max.x, rect.min.x),
+            };
+            let mut expected = vec![
+                (near_x, rect.max.y),
+                (near_x, rect.min.y),
+                (far_x, rect.max.y),
+                (far_x, rect.min.y),
+            ];
+            expected.sort_unstable();
+            assert_eq!(routing_positions(&graph), expected);
+            assert_eq!(rect.max.y - rect.min.y, 1, "two rows");
+            assert_eq!(graph.node_count(), 5, "the pin is gone");
+            assert_eq!(graph.edge_count(), 5);
+            assert_eq!(
+                graph.edges(node).count(),
+                2,
+                "the bus leaves the neighbor and the return comes back to it"
+            );
+        }
+    }
+
+    /// A layer of two data nodes, one narrow and one wide, with a hair pin of `side` in the same
+    /// layer, off to the side of both.
+    fn layer_with_hair_pin_beside_data_nodes(
+        side: NodeSide,
+        pin_x: i64,
+    ) -> (
+        StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+        NodeIndex<u32>,
+        NodeIndex<u32>,
+    ) {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        graph.add_node(LayoutNode::new(
+            NodeRole::Data(NodeIndex::new(0)),
+            LocalPos::new_xy(20, 0),
+            (5, 3),
+            Some(1),
+        ));
+        let wide = graph.add_node(LayoutNode::new(
+            NodeRole::Data(NodeIndex::new(1)),
+            LocalPos::new_xy(22, 5),
+            (9, 3),
+            Some(1),
+        ));
+        graph.add_node(LayoutNode::new(
+            NodeRole::Data(NodeIndex::new(2)),
+            LocalPos::new_xy(2, 0),
+            (15, 3),
+            Some(0),
+        ));
+        let mut hair_pin = LayoutNode::new(
+            NodeRole::HairPin(side),
+            LocalPos::new_xy(pin_x, 9),
+            HAIR_PIN_SIZE,
+            Some(1),
+        );
+        hair_pin.vertical_anchor = VerticalAnchor::Top;
+        let pin = graph.add_node(hair_pin);
+        (graph, wide, pin)
+    }
+
+    #[test]
+    fn test_scoot_aligns_an_east_hair_pin_to_the_left_of_the_widest_node_in_its_layer() {
+        for pin_x in [10, 22, 40] {
+            let (mut graph, wide, pin) =
+                layer_with_hair_pin_beside_data_nodes(NodeSide::East, pin_x);
+
+            scoot_hair_pins(&mut graph);
+
+            let origin = WorldPos::new(0, 0);
+            assert_eq!(
+                graph[pin].rect(origin).min.x,
+                graph[wide].rect(origin).min.x,
+                "pin started at {pin_x}"
+            );
+            assert_eq!(graph[pin].pos.y, 9, "only x moves");
+        }
+    }
+
+    #[test]
+    fn test_scoot_aligns_a_west_hair_pin_to_the_right_of_the_widest_node_in_its_layer() {
+        for pin_x in [10, 22, 40] {
+            let (mut graph, wide, pin) =
+                layer_with_hair_pin_beside_data_nodes(NodeSide::West, pin_x);
+
+            scoot_hair_pins(&mut graph);
+
+            let origin = WorldPos::new(0, 0);
+            assert_eq!(
+                graph[pin].rect(origin).max.x,
+                graph[wide].rect(origin).max.x,
+                "pin started at {pin_x}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scoot_leaves_a_hair_pin_in_a_layer_without_data_nodes() {
+        let (mut graph, _, pin) = layer_with_hair_pin_beside_data_nodes(NodeSide::East, 40);
+        graph[pin].layer = Some(7);
+
+        scoot_hair_pins(&mut graph);
+
+        assert_eq!(graph[pin].pos.x, 40);
     }
 }

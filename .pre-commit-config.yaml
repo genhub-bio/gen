@@ -9,6 +9,12 @@ repos:
         types_or: [ python, pyi ]
   - repo: local
     hooks:
+      - id: notebook-text-output
+        name: Rebuild example notebooks with text graphs
+        entry: .venv/bin/python gen-python/scripts/freeze_notebooks.py --if-graphical
+        language: system
+        stages: [pre-push]
+        files: ^gen-python/examples/.*\.ipynb$
       - id: rustfmt
         name: rustfmt
         description: Check if all files follow the rustfmt style

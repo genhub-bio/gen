@@ -341,7 +341,6 @@ fn is_owned_code(name: &str) -> bool {
             || n.starts_with("gen_diff::")
             || n.starts_with("gen_annotations::")
             || n.starts_with("gen_tui::")
-            || n.starts_with("gen_sugiyama::")
             || n.starts_with("gen_capnp_schemas::")
     )
 }

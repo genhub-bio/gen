@@ -21,7 +21,6 @@ COPY gen-diff ./gen-diff
 COPY gen-graph ./gen-graph
 COPY gen-models ./gen-models
 COPY gen-tui ./gen-tui
-COPY gen-sugiyama ./gen-sugiyama
 COPY gen-annotations ./gen-annotations
 COPY gen-capnp-schemas ./gen-capnp-schemas
 

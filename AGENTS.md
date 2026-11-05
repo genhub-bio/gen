@@ -27,7 +27,7 @@ The repository is a Cargo workspace. The root crate provides the `gen` CLI and c
 - `gen-diff/`: graph and operation diffing.
 - `gen-annotations/`: annotation parsing and related helpers.
 - `gen-capnp-schemas/`: Cap'n Proto schema definitions and generated Rust bindings.
-- `gen-tui/`, `gen-sugiyama/`: terminal UI and graph layout support.
+- `gen-tui/`: terminal UI and graph layout support. Layered layout comes from the `rust-sugiyama` git dependency (a fork) instead of an in-repo crate.
 - `gen-python/`: PyO3/maturin Python bindings and Jupyter widget assets.
 - `gen-r/`: R package and Rust bridge crate.
 - `fixtures/`: shared test data. Prefer adding small, focused fixtures.
