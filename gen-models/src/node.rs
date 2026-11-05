@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
+use cached::{Cached, SizedCache};
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
     Sha256Hash, Workspace, traits::Capnp,
 };
-use rusqlite::{params, types::Value};
+use rusqlite::{OptionalExtension, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -12,7 +16,7 @@ use crate::{
     ModelSelect,
     db::{GraphConnection, max_rows_per_batch},
     gen_models_capnp::node,
-    sequence::Sequence,
+    sequence::{Sequence, SequenceError, is_circular_sequence_type, stored_sequence_range},
 };
 
 #[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq, ModelSelect)]
@@ -152,6 +156,43 @@ impl Node {
             .collect::<HashMap<HashId, Sequence>>()
     }
 
+    /// Bases `start..end` of the sequence backing `node_id`, or `None` if the node doesn't
+    /// exist. A sequence stored in the database is read in cached chunks rather than whole, so a
+    /// viewer can show short slices of chromosome-length nodes cheaply.
+    pub fn get_sequence_range(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        node_id: HashId,
+        start: i64,
+        end: i64,
+    ) -> Result<Option<String>, SequenceError> {
+        let Some(NodeSequenceInfo {
+            hash,
+            sequence_type,
+            length,
+            asset_ref_id,
+        }) = node_sequence_info(conn, node_id)?
+        else {
+            return Ok(None);
+        };
+        if asset_ref_id.is_some() {
+            // External sequences already read only the requested region from their asset.
+            return Node::get_sequences_by_node_ids(conn, workspace, &[node_id], None)
+                .get(&node_id)
+                .map(|sequence| sequence.get_sequence(start, end))
+                .transpose();
+        }
+        stored_sequence_range(
+            conn,
+            &hash,
+            length,
+            is_circular_sequence_type(&sequence_type),
+            start,
+            end,
+        )
+        .map(Some)
+    }
+
     pub fn query_nodes_length(
         conn: &GraphConnection,
         node_ids: &[HashId],
@@ -204,11 +245,154 @@ impl Node {
         }
     }
 }
+/// What [`Node::get_sequence_range`] needs to know about a node's sequence, short of its text.
+#[derive(Clone, Debug)]
+struct NodeSequenceInfo {
+    hash: Sha256Hash,
+    sequence_type: String,
+    length: i64,
+    asset_ref_id: Option<HashId>,
+}
+
+/// How many nodes' [`NodeSequenceInfo`] [`node_sequence_info`] keeps.
+const NODE_SEQUENCE_INFO_CAPACITY: usize = 65_536;
+
+/// [`NodeSequenceInfo`] by `(database path, node id)`. A node's sequence never changes once
+/// stored, so an entry stays valid for as long as the database at that path exists.
+static NODE_SEQUENCE_INFO: LazyLock<Mutex<SizedCache<(String, HashId), NodeSequenceInfo>>> =
+    LazyLock::new(|| Mutex::new(SizedCache::with_size(NODE_SEQUENCE_INFO_CAPACITY)));
+
+/// Look up `node_id`'s [`NodeSequenceInfo`], cached per database file. `length` and
+/// `asset_ref_id` come after the sequence text in a `sequences` row, so reading them walks past
+/// the whole stored sequence; for a chromosome-length node that is most of what a viewer spends
+/// fetching a short slice. In-memory databases have no path to key on and are never cached.
+fn node_sequence_info(
+    conn: &GraphConnection,
+    node_id: HashId,
+) -> Result<Option<NodeSequenceInfo>, SequenceError> {
+    let cache_key = conn
+        .path()
+        .filter(|path| !path.is_empty() && *path != ":memory:")
+        .map(|path| (path.to_string(), node_id));
+    if let Some(key) = &cache_key {
+        let mut cache = NODE_SEQUENCE_INFO
+            .lock()
+            .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
+        if let Some(info) = cache.cache_get(key) {
+            return Ok(Some(info.clone()));
+        }
+    }
+    let info = conn
+        .query_row(
+            "SELECT sequences.hash, sequences.sequence_type, sequences.length,
+                    sequences.asset_ref_id
+             FROM nodes JOIN sequences ON sequences.hash = nodes.sequence_hash
+             WHERE nodes.id = ?1",
+            params![node_id],
+            |row| {
+                Ok(NodeSequenceInfo {
+                    hash: row.get(0)?,
+                    sequence_type: row.get(1)?,
+                    length: row.get(2)?,
+                    asset_ref_id: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    if let (Some(key), Some(info)) = (cache_key, &info) {
+        NODE_SEQUENCE_INFO
+            .lock()
+            .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?
+            .cache_set(key, info.clone());
+    }
+    Ok(info)
+}
+
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
+    use crate::test_helpers::{get_connection, test_workspace};
+
+    /// A node over a stored sequence long enough to span several read chunks, with no two
+    /// neighbouring chunks alike so a misplaced chunk shows up.
+    fn long_stored_node(conn: &GraphConnection, sequence_type: &str) -> (HashId, Sequence) {
+        let bases: String = (0..2_500)
+            .map(|index| ['A', 'C', 'G', 'T'][(index * 7 + index / 13) % 4])
+            .collect();
+        let sequence = Sequence::new()
+            .sequence_type(sequence_type)
+            .sequence(&bases)
+            .save(conn)
+            .expect("should save the long sequence");
+        let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str("long-node"))
+            .expect("should create the long node");
+        (node_id, sequence)
+    }
+
+    #[test]
+    fn test_get_sequence_range_matches_slicing_the_whole_sequence() {
+        let conn = &get_connection(None).unwrap();
+        let (node_id, sequence) = long_stored_node(conn, "DNA");
+        for (start, end) in [
+            (0, 0),
+            (0, 1_000),
+            (999, 1_001),
+            (1_234, 1_235),
+            (500, 2_500),
+            (2_000, 2_500),
+            (0, 2_500),
+        ] {
+            assert_eq!(
+                Node::get_sequence_range(conn, test_workspace(), node_id, start, end).unwrap(),
+                Some(sequence.get_sequence(start, end).unwrap()),
+                "range {start}..{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_sequence_range_wraps_circular_sequences() {
+        let conn = &get_connection(None).unwrap();
+        let (node_id, sequence) = long_stored_node(conn, "circular DNA");
+        assert_eq!(
+            Node::get_sequence_range(conn, test_workspace(), node_id, 2_400, 100).unwrap(),
+            Some(sequence.get_sequence(2_400, 100).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_get_sequence_range_rejects_bad_ranges_and_unknown_nodes() {
+        let conn = &get_connection(None).unwrap();
+        let (node_id, _) = long_stored_node(conn, "DNA");
+        assert_eq!(
+            Node::get_sequence_range(conn, test_workspace(), node_id, 2_400, 100),
+            Err(SequenceError::BoundsError {
+                start: 2_400,
+                end: 100,
+                length: 2_500,
+            })
+        );
+        assert_eq!(
+            Node::get_sequence_range(conn, test_workspace(), node_id, 0, 2_501),
+            Err(SequenceError::BoundsError {
+                start: 0,
+                end: 2_501,
+                length: 2_500,
+            })
+        );
+        assert_eq!(
+            Node::get_sequence_range(
+                conn,
+                test_workspace(),
+                HashId::convert_str("missing-node"),
+                0,
+                1
+            ),
+            Ok(None)
+        );
+    }
 
     #[test]
     fn test_capnp_serialization() {

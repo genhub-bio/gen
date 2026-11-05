@@ -189,7 +189,7 @@ where
                                 },
                                 chromosome_index: 1,
                                 phased: 0,
-                                preserve_edge: true,
+                                preserve_chromosome_index: Some(0),
                             }
                         }
                         EditType::Deletion => BlockGroupChange {
@@ -206,7 +206,7 @@ where
                             },
                             chromosome_index: 1,
                             phased: 0,
-                            preserve_edge: true,
+                            preserve_chromosome_index: Some(0),
                         },
                     };
                     BlockGroup::insert_change(conn, context.workspace(), &change).unwrap();

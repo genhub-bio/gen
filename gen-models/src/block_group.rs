@@ -182,7 +182,9 @@ pub struct BlockGroupChange {
     pub block: PathBlock,
     pub chromosome_index: i64,
     pub phased: i64,
-    pub preserve_edge: bool,
+    /// Chromosome index that keeps the reference allele across the edit site. `None` marks the
+    /// site with `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` so no copy claims the reference.
+    pub preserve_chromosome_index: Option<i64>,
 }
 
 pub type IntervalTreeCache =
@@ -917,7 +919,7 @@ impl BlockGroup {
             .map(|x| &x.value)
             .collect();
         assert_eq!(previous_start_blocks.len(), 1);
-        // For an optional deletion (`preserve_edge = true`) of the first `T` at path range `2..3`
+        // For an optional deletion (`preserve_chromosome_index = Some(0)`) of the first `T` at path range `2..3`
         // in `[AC] -> [TAAT]`, with the alternative incoming route `[AC] -> [GG] -> [TAAT]`,
         // `start_blocks[0] = [TAAT]` (path start `2`, local start `0`) and
         // `previous_start_blocks[0] = [AC]`. Using `[TAAT]` makes a same-node deletion `0 -> 1`;
@@ -971,6 +973,9 @@ impl BlockGroup {
         }
 
         let mut new_edges = vec![];
+        let marker_chromosome_index = change
+            .preserve_chromosome_index
+            .unwrap_or(PRESERVE_EDIT_SITE_CHROMOSOME_INDEX);
 
         if change.block.sequence_start == change.block.sequence_end {
             // Deletion
@@ -1021,11 +1026,7 @@ impl BlockGroup {
                             target_coordinate,
                             target_strand: Strand::Forward,
                         },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
+                        chromosome_index: marker_chromosome_index,
                         phased: 0,
                     });
                 }
@@ -1040,11 +1041,7 @@ impl BlockGroup {
                             target_coordinate: source_coordinate,
                             target_strand: Strand::Forward,
                         },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
+                        chromosome_index: marker_chromosome_index,
                         phased: 0,
                     });
                 };
@@ -1058,11 +1055,7 @@ impl BlockGroup {
                             target_coordinate,
                             target_strand: Strand::Forward,
                         },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
+                        chromosome_index: marker_chromosome_index,
                         phased: 0,
                     });
                 }
@@ -1129,11 +1122,7 @@ impl BlockGroup {
                         target_coordinate: insertion_start_coordinate,
                         target_strand: Strand::Forward,
                     },
-                    chromosome_index: if change.preserve_edge {
-                        0
-                    } else {
-                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    },
+                    chromosome_index: marker_chromosome_index,
                     phased: 0,
                 });
             }
@@ -1147,11 +1136,7 @@ impl BlockGroup {
                         target_coordinate: insertion_end_coordinate,
                         target_strand: Strand::Forward,
                     },
-                    chromosome_index: if change.preserve_edge {
-                        0
-                    } else {
-                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    },
+                    chromosome_index: marker_chromosome_index,
                     phased: 0,
                 });
             }
@@ -1409,7 +1394,7 @@ mod tests {
                 block,
                 chromosome_index: NO_CHROMOSOME_INDEX,
                 phased: 0,
-                preserve_edge: true,
+                preserve_chromosome_index: Some(0),
             };
             BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
         }
@@ -2417,7 +2402,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
@@ -2467,7 +2452,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
@@ -2509,7 +2494,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2547,7 +2532,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
         let all_sequences =
@@ -2590,7 +2575,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2632,7 +2617,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2674,7 +2659,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2716,7 +2701,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2758,7 +2743,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2800,7 +2785,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2842,7 +2827,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2884,7 +2869,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -2927,7 +2912,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         // take out an entire block
@@ -2970,7 +2955,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3023,7 +3008,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3065,7 +3050,7 @@ mod tests {
             block: insert,
             chromosome_index: 0,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3107,7 +3092,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3149,7 +3134,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3191,7 +3176,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3233,7 +3218,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3275,7 +3260,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3317,7 +3302,7 @@ mod tests {
             block: deletion.clone(),
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         let before_start_region = ResolvedGenRegion::from_path(&conn, &path, -300, 400).unwrap();
         let before_start_change = BlockGroupChange {
@@ -3326,7 +3311,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         let res = BlockGroup::insert_change(&conn, test_workspace(), &after_end_change);
         assert!(matches!(res, Err(BlockGroupError::ChangeOutOfBounds(_))));
@@ -3361,7 +3346,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3403,7 +3388,7 @@ mod tests {
             block: deletion,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
 
@@ -3477,7 +3462,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
 
@@ -3650,7 +3635,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: false,
+            preserve_chromosome_index: None,
         };
 
         // note we are making our change against the new blockgroup, and not the parent blockgroup
@@ -3714,7 +3699,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: false,
+            preserve_chromosome_index: None,
         };
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
         let all_sequences =
@@ -3782,7 +3767,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
         let all_sequences =
@@ -3859,7 +3844,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
         let all_sequences =
@@ -3934,7 +3919,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         // note we are making our change against the new blockgroup, and not the parent blockgroup
@@ -4009,7 +3994,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
     }
@@ -4739,7 +4724,7 @@ mod tests {
             block,
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
-            preserve_edge,
+            preserve_chromosome_index: preserve_edge.then_some(0),
         };
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
     }

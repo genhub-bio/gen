@@ -613,7 +613,7 @@ where
                                     },
                                     chromosome_index: 1,
                                     phased: 0,
-                                    preserve_edge: true,
+                                    preserve_chromosome_index: Some(0),
                                 },
                                 Some(change_node_id),
                             )
@@ -633,7 +633,7 @@ where
                                 },
                                 chromosome_index: 1,
                                 phased: 0,
-                                preserve_edge: true,
+                                preserve_chromosome_index: Some(0),
                             },
                             None,
                         ),

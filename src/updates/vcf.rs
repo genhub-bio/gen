@@ -371,7 +371,7 @@ fn prepare_change(
     block_sequence: String,
     sequence_length: i64,
     node_id: HashId,
-    preserve_edge: bool,
+    preserve_chromosome_index: Option<i64>,
 ) -> Result<BlockGroupChange, BlockGroupError> {
     let (start, end) = region
         .offset_range(ref_start, ref_end)
@@ -393,7 +393,7 @@ fn prepare_change(
         block: new_block,
         chromosome_index,
         phased,
-        preserve_edge,
+        preserve_chromosome_index,
     })
 }
 
@@ -428,7 +428,7 @@ fn prepare_vcf_entry(
     chromosome_index: i64,
     phased: i64,
     alt_seq: String,
-    has_ref: bool,
+    reference_chromosome_index: Option<i64>,
 ) -> Result<VcfEntry, VcfError> {
     let path_region = lookup_path_region(
         path_region_cache,
@@ -469,7 +469,7 @@ fn prepare_vcf_entry(
         sequence_string.clone(),
         sequence_string.len() as i64,
         node_id,
-        has_ref,
+        reference_chromosome_index,
     )?;
     Ok(VcfEntry {
         sample_name: sample_name.to_string(),
@@ -811,13 +811,12 @@ pub fn update_with_vcf_options(
                         ));
                 }
             }
-            let has_ref = genotype.iter().any(|gt| {
-                if let Some(gt) = gt {
-                    gt.allele == 0
-                } else {
-                    false
-                }
-            });
+            // The marker edge keeps the reference allele on the copy whose GT slot is 0, which
+            // is not necessarily the copy being edited (1|0 edits copy 0, reference is copy 1).
+            let reference_chromosome_index = genotype
+                .iter()
+                .position(|gt| gt.as_ref().is_some_and(|gt| gt.allele == 0))
+                .map(|index| index as i64);
             for (chromosome_index, genotype) in genotype.iter().enumerate() {
                 if let Some(gt) = genotype {
                     let allele_accession = accession_name
@@ -874,7 +873,7 @@ pub fn update_with_vcf_options(
                                 chromosome_index as i64,
                                 phased,
                                 alt_seq.clone(),
-                                has_ref,
+                                reference_chromosome_index,
                             )?;
                             vcf_entries.push(entry);
                         }
@@ -954,7 +953,10 @@ pub fn update_with_vcf_options(
                     // what needs to be done is when it is a cnv, we need to check that ref_start is the same for all variants
                     // and calculate is_ref for each variant at the same ref_start. So we need to have 2 end list of of variants
                     // here that is passed to vcf_entry that knows about ref_start.
-                    let has_ref = genotypes.iter().any(|gt| matches!(gt, Ok((Some(0), _))));
+                    let reference_chromosome_index = genotypes
+                        .iter()
+                        .position(|gt| matches!(gt, Ok((Some(0), _))))
+                        .map(|index| index as i64);
                     for (chromosome_index, gt) in genotypes.iter().enumerate() {
                         if let Ok((allele, phasing)) = gt {
                             let phased = match phasing {
@@ -1015,7 +1017,7 @@ pub fn update_with_vcf_options(
                                             chromosome_index as i64,
                                             phased,
                                             alt_seq.clone(),
-                                            has_ref,
+                                            reference_chromosome_index,
                                         )?;
                                         vcf_entries.push(entry);
                                     }
@@ -1138,7 +1140,7 @@ pub fn update_with_vcf_options(
                             block: change.block.clone(),
                             chromosome_index: change.chromosome_index,
                             phased: change.phased,
-                            preserve_edge: change.preserve_edge,
+                            preserve_chromosome_index: change.preserve_chromosome_index,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1422,7 +1424,7 @@ mod tests {
             },
             chromosome_index: 0,
             phased: 0,
-            preserve_edge: false,
+            preserve_chromosome_index: None,
         };
         let mut adjacent_change = change.clone();
         adjacent_change.region.start = 2;
@@ -3017,5 +3019,68 @@ mod tests {
             .map(|sequence| &sequence[sequence.len() - 30..])
             .collect::<Vec<_>>();
         assert!(sequences.contains(&expected), "{tails:?}");
+    }
+
+    fn heterozygous_snp_sequences(vcf_name: &str) -> HashSet<String> {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fixtures
+                .join("first_haplotype_variant.fa")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures.join(vcf_name).to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        BlockGroup::get_all_sequences(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, &collection, "S").id,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_heterozygous_snp_alt_on_second_copy_keeps_both_alleles() {
+        assert_eq!(
+            heterozygous_snp_sequences("second_haplotype_variant.vcf"),
+            HashSet::from_iter(["AAGAAAAAAA".to_string(), "AACAAAAAAA".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_heterozygous_snp_alt_on_first_copy_keeps_both_alleles() {
+        assert_eq!(
+            heterozygous_snp_sequences("first_haplotype_variant.vcf"),
+            HashSet::from_iter(["AAGAAAAAAA".to_string(), "AACAAAAAAA".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_heterozygous_snp_alt_on_third_copy_keeps_both_alleles() {
+        assert_eq!(
+            heterozygous_snp_sequences("third_haplotype_variant.vcf"),
+            HashSet::from_iter(["AAGAAAAAAA".to_string(), "AACAAAAAAA".to_string()])
+        );
     }
 }

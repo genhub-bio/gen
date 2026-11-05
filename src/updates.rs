@@ -91,7 +91,7 @@ pub(crate) fn insert_update_change(
         block: data.block,
         chromosome_index: data.chromosome_index,
         phased: data.phased,
-        preserve_edge: data.preserve_edge,
+        preserve_chromosome_index: data.preserve_edge.then_some(0),
     };
     BlockGroup::insert_change(conn, workspace, &change)
 }
