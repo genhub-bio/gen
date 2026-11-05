@@ -81,8 +81,11 @@ struct State {
     /// Index into the query: the next byte that must be matched.
     q_idx: usize,
     block: GraphNode,
-    /// Local byte offset within contained sequence slice.
+    /// Number of bytes already read from `block`, counted in the direction it is read.
     offset: usize,
+    /// Direction `block` is read in. `Reverse` reads the complement from the block's end, which
+    /// is how a walk continues after an edge that changes strand.
+    strand: Strand,
 }
 
 enum StepResult {
@@ -134,6 +137,55 @@ fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
         b'H' => matches!(graph_byte, b'A' | b'C' | b'T'),
         b'V' => matches!(graph_byte, b'A' | b'C' | b'G'),
         other => graph_byte == other,
+    }
+}
+
+/// Complement of a single base, preserving case. Bytes that are not bases are left unchanged.
+fn complement_byte(byte: u8) -> u8 {
+    match byte {
+        b'A' => b'T',
+        b'T' => b'A',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'U' => b'A',
+        b'R' => b'Y',
+        b'Y' => b'R',
+        b'K' => b'M',
+        b'M' => b'K',
+        b'B' => b'V',
+        b'V' => b'B',
+        b'D' => b'H',
+        b'H' => b'D',
+        b'a' => b't',
+        b't' => b'a',
+        b'c' => b'g',
+        b'g' => b'c',
+        b'u' => b'a',
+        b'r' => b'y',
+        b'y' => b'r',
+        b'k' => b'm',
+        b'm' => b'k',
+        b'b' => b'v',
+        b'v' => b'b',
+        b'd' => b'h',
+        b'h' => b'd',
+        other => other,
+    }
+}
+
+/// The byte a walk reads at `offset` of `text` when the block is read in `strand` direction.
+fn oriented_byte(text: &[u8], offset: usize, strand: Strand) -> u8 {
+    match strand {
+        Strand::Reverse => complement_byte(text[text.len() - 1 - offset]),
+        _ => text[offset],
+    }
+}
+
+/// Edges treat an unknown strand as forward, as the rest of the graph code does.
+fn read_direction(strand: Strand) -> Strand {
+    match strand {
+        Strand::Reverse => Strand::Reverse,
+        _ => Strand::Forward,
     }
 }
 
@@ -244,19 +296,30 @@ impl GenGraphMatcher {
         }
 
         let matcher = self.sequence_kind.matcher_for_query(query);
-        if self.contains_query_orientation(query, matcher) {
-            return true;
-        }
+        self.start_strands()
+            .iter()
+            .any(|&start_strand| self.contains_query_orientation(query, matcher, start_strand))
+    }
 
-        if self.sequence_kind == SequenceKind::Dna {
-            let rc = reverse_complement(query);
-            let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
-            if self.contains_query_orientation(&rc, rc_matcher) {
-                return true;
-            }
+    /// Directions a walk may begin reading in. Double-stranded DNA also begins on the reverse
+    /// strand, which finds the reverse complement of the query along every route, including the
+    /// ones that cross an edge changing strand.
+    fn start_strands(&self) -> &'static [Strand] {
+        match self.sequence_kind {
+            SequenceKind::Dna => &[Strand::Forward, Strand::Reverse],
+            _ => &[Strand::Forward],
         }
+    }
 
-        false
+    /// True when some edge enters or leaves a block on the reverse strand. A seed index records
+    /// forward start positions only, so it cannot find walks that begin on the reverse strand.
+    fn has_reverse_strand_edges(&self) -> bool {
+        self.graph.edge_references().any(|(_, _, edges)| {
+            edges.iter().any(|edge| {
+                read_direction(edge.source_strand) == Strand::Reverse
+                    || read_direction(edge.target_strand) == Strand::Reverse
+            })
+        })
     }
 
     /// Returns every match of `query` in the graph using this matcher's
@@ -272,16 +335,21 @@ impl GenGraphMatcher {
         }
 
         let matcher = self.sequence_kind.matcher_for_query(query);
+        let forward_tag = match self.sequence_kind {
+            SequenceKind::Dna => Strand::Forward,
+            _ => Strand::Unknown,
+        };
 
-        if self.sequence_kind == SequenceKind::Dna {
-            let mut out = self.find_all_query_orientation(query, matcher, Strand::Forward);
-            let rc = reverse_complement(query);
-            let rc_matcher = self.sequence_kind.matcher_for_query(&rc);
-            out.append(&mut self.find_all_query_orientation(&rc, rc_matcher, Strand::Reverse));
-            out
-        } else {
-            self.find_all_query_orientation(query, matcher, Strand::Unknown)
+        let mut out = Vec::new();
+        for &start_strand in self.start_strands() {
+            out.append(&mut self.find_all_query_orientation(
+                query,
+                matcher,
+                forward_tag,
+                start_strand,
+            ));
         }
+        out
     }
 
     /// Returns every match of `query` using a seed index to prune start positions.
@@ -301,6 +369,10 @@ impl GenGraphMatcher {
 
         if query.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if self.has_reverse_strand_edges() {
+            return Ok(self.find_all(query));
         }
 
         let matcher: fn(u8, u8) -> bool = if seed_index.normalized {
@@ -352,7 +424,7 @@ impl GenGraphMatcher {
         let mut out = Vec::new();
         for &pos in positions {
             if self.graph.contains_node(pos.block) {
-                self.collect_matches_from(pos, query, matcher, &mut out, strand);
+                self.collect_matches_from(pos, Strand::Forward, query, matcher, &mut out, strand);
             }
         }
         out
@@ -368,13 +440,18 @@ impl GenGraphMatcher {
             return Vec::new();
         }
 
-        self.find_all_query_orientation(query, matcher, strand)
+        self.find_all_query_orientation(query, matcher, strand, Strand::Forward)
     }
 
-    fn contains_query_orientation(&self, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
+    fn contains_query_orientation(
+        &self,
+        query: &[u8],
+        matcher: fn(u8, u8) -> bool,
+        start_strand: Strand,
+    ) -> bool {
         self.all_start_positions()
             .into_iter()
-            .any(|start| self.contains_from(start, query, matcher))
+            .any(|start| self.contains_from(start, start_strand, query, matcher))
     }
 
     fn find_all_query_orientation(
@@ -382,22 +459,30 @@ impl GenGraphMatcher {
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
         strand: Strand,
+        start_strand: Strand,
     ) -> Vec<GraphLocus> {
         let mut out = Vec::new();
 
         for start in self.all_start_positions() {
-            self.collect_matches_from(start, query, matcher, &mut out, strand);
+            self.collect_matches_from(start, start_strand, query, matcher, &mut out, strand);
         }
 
         out
     }
 
     /// DFS from a single start position; returns `true` on the first complete match.
-    fn contains_from(&self, start: GraphPos, query: &[u8], matcher: fn(u8, u8) -> bool) -> bool {
+    fn contains_from(
+        &self,
+        start: GraphPos,
+        start_strand: Strand,
+        query: &[u8],
+        matcher: fn(u8, u8) -> bool,
+    ) -> bool {
         let initial = State {
             q_idx: 0,
             block: start.block,
             offset: start.offset,
+            strand: start_strand,
         };
 
         let mut stack = vec![initial];
@@ -428,6 +513,7 @@ impl GenGraphMatcher {
     fn collect_matches_from(
         &self,
         start: GraphPos,
+        start_strand: Strand,
         query: &[u8],
         matcher: fn(u8, u8) -> bool,
         out: &mut Vec<GraphLocus>,
@@ -437,7 +523,8 @@ impl GenGraphMatcher {
         struct TraceState {
             state: State,
             start_offset: usize,
-            path: Vec<GraphNode>,
+            /// Blocks the walk has entered, with the direction each is read in.
+            path: Vec<(GraphNode, Strand)>,
         }
 
         let initial = TraceState {
@@ -445,9 +532,10 @@ impl GenGraphMatcher {
                 q_idx: 0,
                 block: start.block,
                 offset: start.offset,
+                strand: start_strand,
             },
             start_offset: start.offset,
-            path: vec![start.block],
+            path: vec![(start.block, start_strand)],
         };
 
         let mut stack = vec![initial];
@@ -455,21 +543,36 @@ impl GenGraphMatcher {
         while let Some(ts) = stack.pop() {
             if ts.state.q_idx == query.len() {
                 let n = ts.path.len();
-                let slices = ts
+                let mut slices: Vec<GraphNodeSlice> = ts
                     .path
                     .into_iter()
                     .enumerate()
-                    .map(|(i, node)| GraphNodeSlice {
-                        block: node,
-                        start: if i == 0 { ts.start_offset } else { 0 },
-                        end: if i == n - 1 {
-                            ts.state.offset
-                        } else {
-                            node.length() as usize
-                        },
-                        strand,
+                    .map(|(i, (node, read_strand))| {
+                        let length = node.length() as usize;
+                        let read_start = if i == 0 { ts.start_offset } else { 0 };
+                        let read_end = if i == n - 1 { ts.state.offset } else { length };
+                        match read_strand {
+                            // Offsets count from the block's end when it is read in reverse.
+                            Strand::Reverse => GraphNodeSlice {
+                                block: node,
+                                start: length - read_end,
+                                end: length - read_start,
+                                strand: Strand::Reverse,
+                            },
+                            _ => GraphNodeSlice {
+                                block: node,
+                                start: read_start,
+                                end: read_end,
+                                strand,
+                            },
+                        }
                     })
                     .collect();
+                // A walk read entirely on the reverse strand is reported along the forward
+                // strand of the graph, in graph order, tagged `Reverse`.
+                if slices.iter().all(|slice| slice.strand == Strand::Reverse) {
+                    slices.reverse();
+                }
                 out.push(GraphLocus { slices });
                 continue;
             }
@@ -478,8 +581,8 @@ impl GenGraphMatcher {
                 StepResult::Advance(next) => {
                     let mut next_ts = ts;
 
-                    if next.block != next_ts.state.block {
-                        next_ts.path.push(next.block);
+                    if next.offset == 0 {
+                        next_ts.path.push((next.block, next.strand));
                     }
 
                     next_ts.state = next;
@@ -489,8 +592,8 @@ impl GenGraphMatcher {
                     for next in nexts {
                         let mut next_ts = ts.clone();
 
-                        if next.block != next_ts.state.block {
-                            next_ts.path.push(next.block);
+                        if next.offset == 0 {
+                            next_ts.path.push((next.block, next.strand));
                         }
 
                         next_ts.state = next;
@@ -506,34 +609,90 @@ impl GenGraphMatcher {
         let text = self.graph_node_text(state.block);
 
         if state.offset < text.len() {
-            if matcher(query_byte, text[state.offset]) {
+            if matcher(query_byte, oriented_byte(text, state.offset, state.strand)) {
                 return StepResult::Advance(State {
                     q_idx: state.q_idx + 1,
-                    block: state.block,
                     offset: state.offset + 1,
+                    ..state
                 });
             }
 
             return StepResult::Dead;
         }
 
-        // At node boundary: traverse outgoing neighbors without consuming a
-        // query byte.
-        let nexts: Vec<State> = self
-            .graph
-            .neighbors_directed(state.block, Direction::Outgoing)
-            .map(|next_node| State {
-                q_idx: state.q_idx,
-                block: next_node,
-                offset: 0,
-            })
-            .collect();
+        // At node boundary: traverse edges without consuming a query byte.
+        let mut nexts = self.successor_states(state);
+        nexts.sort_unstable_by_key(|next| (next.block, next.strand));
+        nexts.dedup();
 
         match nexts.len() {
             0 => StepResult::Dead,
             1 => StepResult::Advance(nexts[0]),
             _ => StepResult::Branch(nexts),
         }
+    }
+
+    /// States reachable by leaving `state.block` in the direction it is read.
+    ///
+    /// An edge is stored once, from the end it leaves to the end it enters. A walk read on the
+    /// stored strands follows it as stored, and a walk read on the opposite strands follows its
+    /// reverse-complement twin backwards, so inversions can be crossed in either direction.
+    fn successor_states(&self, state: State) -> Vec<State> {
+        let mut nexts = Vec::new();
+
+        if self.sequence_kind == SequenceKind::Protein {
+            nexts.extend(
+                self.graph
+                    .neighbors_directed(state.block, Direction::Outgoing)
+                    .map(|next_node| State {
+                        q_idx: state.q_idx,
+                        block: next_node,
+                        offset: 0,
+                        strand: state.strand,
+                    }),
+            );
+            return nexts;
+        }
+
+        for target in self
+            .graph
+            .neighbors_directed(state.block, Direction::Outgoing)
+        {
+            let edges = self.graph.edge_weight(state.block, target);
+            nexts.extend(
+                edges
+                    .into_iter()
+                    .flatten()
+                    .filter(|edge| read_direction(edge.source_strand) == state.strand)
+                    .map(|edge| State {
+                        q_idx: state.q_idx,
+                        block: target,
+                        offset: 0,
+                        strand: read_direction(edge.target_strand),
+                    }),
+            );
+        }
+
+        for source in self
+            .graph
+            .neighbors_directed(state.block, Direction::Incoming)
+        {
+            let edges = self.graph.edge_weight(source, state.block);
+            nexts.extend(
+                edges
+                    .into_iter()
+                    .flatten()
+                    .filter(|edge| read_direction(edge.target_strand).complement() == state.strand)
+                    .map(|edge| State {
+                        q_idx: state.q_idx,
+                        block: source,
+                        offset: 0,
+                        strand: read_direction(edge.source_strand).complement(),
+                    }),
+            );
+        }
+
+        nexts
     }
 
     /// Enumerate every valid starting position: every byte offset inside every
@@ -802,6 +961,7 @@ fn validate_seed_index_header_version(header: &SeedIndexHeader) -> Result<(), Se
 mod tests {
     use std::path::PathBuf;
 
+    use gen_graph::GraphEdge;
     use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
 
     use super::*;
@@ -1397,5 +1557,255 @@ mod tests {
             .find_all_with_seed_index(&index, b"AAAAAAAAAA")
             .unwrap();
         assert!(!hits.is_empty());
+    }
+
+    // Three blocks joined by two edges that change strand, the shape SequenceGraph.connect gives
+    // an inverted block: left (fwd) -> middle (rev) -> right (fwd).
+    //   left = AAACCC, middle = GGATTT (read reversed: AAATCC), right = TTTGGG
+    fn inversion_matcher(sequence_kind: SequenceKind) -> (GenGraphMatcher, [GraphNode; 3]) {
+        let blocks = [1, 2, 3].map(|node_number| GraphNode {
+            node_id: HashId::pad_str(node_number),
+            sequence_start: 0,
+            sequence_end: 6,
+        });
+        let edge = |source_strand, target_strand| GraphEdge {
+            edge_id: HashId::pad_str(9),
+            source_strand,
+            target_strand,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            blocks[0],
+            blocks[1],
+            vec![edge(Strand::Forward, Strand::Reverse)],
+        );
+        graph.add_edge(
+            blocks[1],
+            blocks[2],
+            vec![edge(Strand::Reverse, Strand::Forward)],
+        );
+        let node_sequences = HashMap::from([
+            (blocks[0].node_id, b"AAACCC".to_vec()),
+            (blocks[1].node_id, b"GGATTT".to_vec()),
+            (blocks[2].node_id, b"TTTGGG".to_vec()),
+        ]);
+        let matcher = GenGraphMatcher {
+            graph,
+            sequence_kind,
+            latest_edge_created_on: 0,
+            node_sequences,
+        };
+        (matcher, blocks)
+    }
+
+    #[test]
+    fn test_search_crosses_strand_changing_edges() {
+        let (matcher, blocks) = inversion_matcher(SequenceKind::Dna);
+
+        // Left junction, the whole inverted middle block, and right junction.
+        for query in [&b"CCAAAT"[..], &b"CCCAAATCCTTT"[..], &b"TCCTTTGG"[..]] {
+            let hits = matcher.find_all(query);
+            assert_eq!(hits.len(), 1, "{}", String::from_utf8_lossy(query));
+        }
+
+        // Exact search starts on the forward strand only, but still follows the inversion.
+        let (exact_matcher, _) = inversion_matcher(SequenceKind::Exact);
+        assert_eq!(exact_matcher.find_all(b"AAACCCAAATCCTTTGGG").len(), 1);
+        assert!(exact_matcher.find_all(b"TCCTTTGG").is_empty());
+
+        let hits = matcher.find_all(b"CCAAAT");
+        let slices = &hits[0].slices;
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].block, blocks[0]);
+        assert_eq!((slices[0].start, slices[0].end), (4, 6));
+        assert_eq!(slices[1].block, blocks[1]);
+        assert_eq!(slices[1].strand, Strand::Reverse);
+        // Reading four bases from the end of the middle block, reversed, covers its last four.
+        assert_eq!((slices[1].start, slices[1].end), (2, 6));
+
+        // No edge joins the left block to the reverse complement of the right one.
+        assert!(matcher.find_all(b"CCCCCC").is_empty());
+    }
+
+    #[test]
+    fn test_search_dna_finds_reverse_complement_across_strand_changing_edges() {
+        let (matcher, _) = inversion_matcher(SequenceKind::Dna);
+        let query = reverse_complement(b"CCCAAATCCTTT");
+        assert!(matcher.contains(&query));
+        assert_eq!(matcher.find_all(&query).len(), 1);
+    }
+
+    // Cycles and parallel strand edges. Graphs are built directly so the expected walks come from a
+    // brute-force enumerator written independently of `successor_states`.
+    fn probe_block(node_number: u32, length: usize) -> GraphNode {
+        GraphNode {
+            node_id: HashId::pad_str(node_number),
+            sequence_start: 0,
+            sequence_end: length as i64,
+        }
+    }
+
+    fn probe_edge(source_strand: Strand, target_strand: Strand) -> GraphEdge {
+        GraphEdge {
+            edge_id: HashId::pad_str(9),
+            source_strand,
+            target_strand,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        }
+    }
+
+    // Every spelled walk of up to `max_blocks` blocks, revisits allowed. Edges are
+    // (source, target, source_strand, target_strand); the reverse-complement twin is implied.
+    fn enumerate_walks(
+        sequences: &[&str],
+        edges: &[(usize, usize, Strand, Strand)],
+        max_blocks: usize,
+    ) -> HashSet<String> {
+        let spell = |block: usize, strand: Strand| -> String {
+            match strand {
+                Strand::Reverse => reverse_complement(sequences[block].as_bytes())
+                    .into_iter()
+                    .map(char::from)
+                    .collect(),
+                _ => sequences[block].to_string(),
+            }
+        };
+        let flip = |strand: Strand| match strand {
+            Strand::Reverse => Strand::Forward,
+            _ => Strand::Reverse,
+        };
+        let mut steps: Vec<((usize, Strand), (usize, Strand))> = vec![];
+        for &(source, target, source_strand, target_strand) in edges {
+            steps.push(((source, source_strand), (target, target_strand)));
+            steps.push(((target, flip(target_strand)), (source, flip(source_strand))));
+        }
+        let mut found = HashSet::new();
+        let mut frontier: Vec<((usize, Strand), String)> = (0..sequences.len())
+            .map(|block| ((block, Strand::Forward), spell(block, Strand::Forward)))
+            .collect();
+        for _ in 0..max_blocks {
+            let mut next_frontier = vec![];
+            for (state, text) in frontier {
+                found.insert(text.clone());
+                for &(from, to) in &steps {
+                    if from == state {
+                        next_frontier.push((to, format!("{text}{}", spell(to.0, to.1))));
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+        found
+    }
+
+    fn probe_matcher(
+        sequences: &[&str],
+        edges: &[(usize, usize, Strand, Strand)],
+        sequence_kind: SequenceKind,
+    ) -> GenGraphMatcher {
+        let blocks: Vec<GraphNode> = sequences
+            .iter()
+            .enumerate()
+            .map(|(index, sequence)| probe_block(index as u32 + 1, sequence.len()))
+            .collect();
+        let mut graph = GenGraph::new();
+        for block in &blocks {
+            graph.add_node(*block);
+        }
+        for &(source, target, source_strand, target_strand) in edges {
+            if graph.edge_weight(blocks[source], blocks[target]).is_none() {
+                graph.add_edge(blocks[source], blocks[target], vec![]);
+            }
+            graph
+                .edge_weight_mut(blocks[source], blocks[target])
+                .expect("should have the edge bundle")
+                .push(probe_edge(source_strand, target_strand));
+        }
+        let node_sequences = blocks
+            .iter()
+            .zip(sequences)
+            .map(|(block, sequence)| (block.node_id, sequence.as_bytes().to_vec()))
+            .collect();
+        GenGraphMatcher {
+            graph,
+            sequence_kind,
+            latest_edge_created_on: 0,
+            node_sequences,
+        }
+    }
+
+    fn missed_walks(
+        sequences: &[&str],
+        edges: &[(usize, usize, Strand, Strand)],
+        sequence_kind: SequenceKind,
+    ) -> Vec<String> {
+        let matcher = probe_matcher(sequences, edges, sequence_kind);
+        let mut missed: Vec<String> = enumerate_walks(sequences, edges, 5)
+            .into_iter()
+            .filter(|walk| matcher.find_all(walk.as_bytes()).is_empty())
+            .collect();
+        missed.sort();
+        missed
+    }
+
+    const PROBE_A: &str = "ACGTTGCAAC";
+    const PROBE_B: &str = "GGATCCTTAG";
+
+    #[test]
+    fn test_search_follows_forward_cycle() {
+        let edges = [
+            (0, 1, Strand::Forward, Strand::Forward),
+            (1, 0, Strand::Forward, Strand::Forward),
+        ];
+        let missed = missed_walks(&[PROBE_A, PROBE_B], &edges, SequenceKind::Exact);
+        assert!(missed.is_empty(), "walks the matcher missed: {missed:?}");
+    }
+
+    #[test]
+    fn test_search_follows_self_loop() {
+        let edges = [(0, 0, Strand::Forward, Strand::Forward)];
+        let missed = missed_walks(&[PROBE_A], &edges, SequenceKind::Exact);
+        assert!(missed.is_empty(), "walks the matcher missed: {missed:?}");
+    }
+
+    #[test]
+    fn test_search_follows_cycle_through_inversion() {
+        let edges = [
+            (0, 1, Strand::Forward, Strand::Reverse),
+            (1, 0, Strand::Reverse, Strand::Forward),
+        ];
+        for kind in [SequenceKind::Exact, SequenceKind::Dna] {
+            let missed = missed_walks(&[PROBE_A, PROBE_B], &edges, kind);
+            assert!(missed.is_empty(), "walks the matcher missed: {missed:?}");
+        }
+    }
+
+    #[test]
+    fn test_search_follows_cycle_that_flips_strand_each_lap() {
+        let edges = [
+            (0, 1, Strand::Forward, Strand::Forward),
+            (1, 0, Strand::Forward, Strand::Reverse),
+        ];
+        let missed = missed_walks(&[PROBE_A, PROBE_B], &edges, SequenceKind::Exact);
+        assert!(missed.is_empty(), "walks the matcher missed: {missed:?}");
+    }
+
+    #[test]
+    fn test_search_follows_every_parallel_strand_edge() {
+        let edges = [
+            (0, 1, Strand::Forward, Strand::Forward),
+            (0, 1, Strand::Forward, Strand::Reverse),
+            (0, 1, Strand::Reverse, Strand::Forward),
+            (0, 1, Strand::Reverse, Strand::Reverse),
+        ];
+        for kind in [SequenceKind::Exact, SequenceKind::Dna] {
+            let missed = missed_walks(&[PROBE_A, PROBE_B], &edges, kind);
+            assert!(missed.is_empty(), "walks the matcher missed: {missed:?}");
+        }
     }
 }
