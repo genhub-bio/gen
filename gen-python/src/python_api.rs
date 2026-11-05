@@ -3,6 +3,7 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 pub mod annotation;
 pub mod block_group;
 pub mod editing;
+pub mod gaf_reads;
 pub mod graph_node;
 pub(crate) mod graph_read;
 pub mod graph_search;
@@ -19,12 +20,13 @@ pub mod utils;
 
 use crate::python_api::{
     annotation::PyAnnotation,
-    block_group::PySequenceGraph,
+    block_group::{PyRandomSequences, PySequenceGraph},
+    gaf_reads::PyGafReads,
     graph_node::PyGraphNode,
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
-    position::{PyPosition, PySuperPosition},
+    position::{PyPosition, PySuperPosition, SuperpositionError},
     repository::{
         PyRepository, clone_repository,
         history::{PyAsset, PyBranch, PyOperation},
@@ -51,11 +53,14 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphNode>()?;
     m.add_class::<PyPosition>()?;
     m.add_class::<PyGraphLocus>()?;
+    m.add_class::<PyGafReads>()?;
     m.add_class::<PySuperPosition>()?;
     m.add_class::<PySequence>()?;
     m.add_class::<PyGraphController>()?;
     m.add_class::<PySample>()?;
     m.add_class::<PySampleIter>()?;
+    m.add_class::<PyRandomSequences>()?;
+    m.add("SuperpositionError", m.py().get_type::<SuperpositionError>())?;
     m.add_function(wrap_pyfunction!(clone_repository, m)?)?;
 
     Ok(())

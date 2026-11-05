@@ -2,6 +2,7 @@
 # ruff: noqa: E501, F401, F403, F405
 
 import builtins
+from gen import sites
 import os
 import pathlib
 import typing
@@ -10,11 +11,13 @@ __all__ = [
     "Annotation",
     "Asset",
     "Branch",
+    "GafReads",
     "HashId",
     "Locus",
     "Node",
     "Operation",
     "Position",
+    "RandomSequences",
     "Remote",
     "Repository",
     "Sample",
@@ -177,6 +180,42 @@ class Branch:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class GafReads:
+    r"""
+    The reads of a GAF file that trace through one sequence graph, one `Locus` per read.
+
+    Returned by `SequenceGraph.load_gaf()`. It behaves like a read-only mapping from read name to
+    `Locus`: `len()`, `reads["name"]`, `"name" in reads` and iteration over names all work.
+    The reads that did not load are counted by why:
+
+    - `skipped`: reads aligned to segments this sequence graph does not contain, such as a read
+      from another locus when the GAF was made against a whole sample.
+    - `unmapped`: reads with no mapped alignment.
+    - `untraceable`: reads whose walk takes a step the graph has no stored edge for, with the
+      first such step described. These point at a disagreement between the GAF's graph and this
+      one, so they are never loaded.
+    """
+    @property
+    def skipped(self) -> builtins.int: ...
+    @property
+    def unmapped(self) -> builtins.int: ...
+    @property
+    def loci(self) -> dict[str, Locus]:
+        r"""
+        Read names mapped to the sequence graph's `Locus` for that read.
+        """
+    @property
+    def untraceable(self) -> builtins.dict[builtins.str, builtins.str]:
+        r"""
+        Untraceable read names mapped to a description of their first step without a stored edge.
+        """
+    def __len__(self) -> builtins.int: ...
+    def __contains__(self, name: builtins.str) -> builtins.bool: ...
+    def __getitem__(self, name: builtins.str) -> Locus: ...
+    def __iter__(self) -> typing.Iterator[str]: ...
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class HashId:
     r"""
     A content hash identifying a stored object, such as a sequence graph, annotation or operation.
@@ -203,6 +242,14 @@ class Locus:
     `len(locus)` is the number of bases it covers, `locus[i]` is the `Position` of base `i` and
     `locus[a:b]` a sub-locus.
     """
+    @property
+    def direction(self) -> builtins.str:
+        r"""
+        The direction the locus reads in: ``"+"`` for the oriented string as it was found or
+        given, and ``"-"`` for its reverse complement. It belongs to the string, so a locus that
+        crosses an inversion still has one, where ``strand`` reports ``"mixed"``. Reversing a locus
+        flips it. A site's cuts are counted along this direction.
+        """
     @property
     def strand(self) -> builtins.str:
         r"""
@@ -359,6 +406,11 @@ class Position:
 
         Raises ``ValueError`` if the position is not reachable in that sequence graph.
         """
+    def reverse_complement(self) -> Position:
+        r"""
+        The same base read on the opposite strand, for edits such as ``SequenceGraph.connect``
+        that name a point on a specific strand.
+        """
     def __add__(self, delta: builtins.int) -> typing.Any:
         r"""
         The position ``delta`` steps along this position's strand, backward for a negative
@@ -384,6 +436,14 @@ class Position:
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
     def __str__(self) -> builtins.str: ...
+
+@typing.final
+class RandomSequences:
+    r"""
+    The endless iterator returned by ``SequenceGraph.random_sequences()``.
+    """
+    def __iter__(self) -> RandomSequences: ...
+    def __next__(self) -> typing.Optional[Sequence]: ...
 
 @typing.final
 class Remote:
@@ -1263,6 +1323,24 @@ class SequenceGraph:
             ``"exact"`` performs case-sensitive raw-byte matching with no IUPAC
             expansion and no reverse complement.
         """
+    def load_gaf(
+        self, path: builtins.str, *, primary_only: builtins.bool = True
+    ) -> GafReads:
+        r"""
+        Load the reads of a minigraph GAF file as one `Locus` per read.
+
+        The GAF must have been aligned to a GFA exported from this repository, so each path step
+        names a segment as `<node hash>.<start>.<end>`. Each `Locus` spells the aligned part of its
+        read's walk, clipped to the alignment interval and oriented as the read travels, so
+        `locus.sequence` is the graph sequence under the read, `locus.strand` is `"mixed"` when the
+        walk crosses an inversion, and `widget.show(locus)` lights exactly the edges the read takes.
+
+        A read with several rows keeps the mapped row with the longest aligned block. With
+        `primary_only` (the default) only primary rows (`tp:A:P`, or no `tp` tag) are considered.
+        Reads that do not lie in this sequence graph are counted in the result's `skipped`, and a
+        read whose walk takes a step this graph stores no edge for is never loaded and is listed
+        in `untraceable`. Returns a `GafReads`, a read-only mapping from read name to `Locus`.
+        """
     def locus(self, start: builtins.int, end: builtins.int) -> Locus:
         r"""
         The `Locus` covering path coordinates `start` to `end` of this sequence graph: 0-based,
@@ -1286,6 +1364,16 @@ class SequenceGraph:
         Every distinct sequence a path through the graph spells, as a list of `Sequence` sorted by
         their bases; `str(sequence)` is its bases. Paths that spell the same bases appear once. The
         list is built in full, so a graph with very many paths takes time and memory.
+        """
+    def random_sequences(
+        self, seed: typing.Optional[builtins.int] = None
+    ) -> RandomSequences:
+        r"""
+        An endless iterator of sequences, each read by a random walk from the start of the graph to
+        its end that takes one outgoing edge, chosen uniformly, at every step. Nothing is
+        enumerated, so it suits a graph with very many paths or with cycles, and a Monte Carlo
+        simulation takes as many as it needs, for example with ``itertools.islice``. A cycle can be
+        walked any number of times. Pass ``seed`` to repeat the same sequences.
         """
     def build_index(
         self, sequence_kind: builtins.str = "dna", k: builtins.int = 16
@@ -1573,6 +1661,224 @@ class SequenceGraph:
         stack : bool, optional
             Add the insertion alongside the existing routes instead of retiring the connections
             it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
+        message : str, optional
+            Commit message for the recorded operation.
+        """
+    def cut(
+        self,
+        *,
+        after: Position | None = None,
+        before: Position | None = None,
+        message: typing.Optional[builtins.str] = None,
+    ) -> None:
+        r"""
+        Mark a cut in the sequence, just ``after`` one ``Position`` or just ``before`` it.
+
+        A cut is a block boundary for later joins to attach to, such as the end a restriction
+        enzyme leaves in a Golden Gate digest. It does not break the graph: the sequence reads
+        across it as before, so the graph stays a supergraph of the molecules before and after the
+        cut. It is recorded as one operation, read on the top strand and taken as blunt on both
+        strands, so the staggered overhang of an enzyme is not modelled yet. The cut must lie inside
+        a node, and cutting the same point twice raises ``ValueError``.
+
+        Parameters
+        message : str, optional
+            Commit message for the recorded operation.
+        """
+    def connect(
+        self,
+        *,
+        after: Position,
+        before: Position,
+        message: typing.Optional[builtins.str] = None,
+        stack: builtins.bool = False,
+        strict: builtins.bool = False,
+    ) -> None:
+        r"""
+        Add a raw edge that reads on from ``after`` into ``before``, without writing new sequence.
+
+        ``after`` and ``before`` are each one ``Position``, read on its own strand. The edge leaves
+        the point just after ``after`` and arrives at the point just before ``before``. On the
+        reverse strand "after" is toward the start of the node, so the edge between a forward and
+        a reverse position joins the forward strand to the reverse complement of the sequence
+        beyond it. This is the primitive for rearrangements that reconnect existing sequence, such
+        as Cre-loxP recombination. Within one molecule, an excision is two forward connections that
+        close the flanks and the excised segment separately, and an inversion is two connections
+        between a forward and a reverse position::
+
+            # excision of the segment between two direct-repeat sites, leaving a circle
+            sg.connect(after=left_cut - 1, before=right_cut)
+            sg.connect(after=right_cut - 1, before=left_cut)
+
+            # inversion of the segment between two inverted-repeat sites
+            sg.connect(after=left_cut - 1, before=(right_cut - 1).reverse_complement())
+            sg.connect(after=left_cut.reverse_complement(), before=right_cut)
+
+        A position attached to another sequence graph of the same sample, with ``position.on(other)``,
+        joins two molecules. ``other`` is folded into this sequence graph, which then holds both
+        molecules as components, and ``other`` no longer exists in the sample. Reciprocal crossover
+        between two linear molecules is two connections, each running a left flank into the other
+        molecule's right flank::
+
+            a.connect(after=a_left_last, before=b_right_first.on(b))
+            a.connect(after=b_left_last.on(b), before=a_right_first)
+
+        Both molecules attach to this graph's one start and end. Paths of ``other`` are not moved.
+        Annotations of ``other`` are copied onto this graph, except one already here over exactly the
+        same nodes and coordinates, which is the same feature.
+
+        An annotation name that this graph already uses for different spans takes primes, so joining
+        graphs that both name a different feature ``P`` keeps one ``P`` and moves the other as
+        ``P'``, then ``P''``, and so on until the name is free. Pass ``strict=True`` to raise
+        ``ValueError`` on a clash instead.
+
+        Everything stays in this one sequence graph, so a circle split off by an excision is a
+        component of the same graph. A node cut at either point stays cut there. Joining a point
+        back to the position that originally followed it restores the original continuity, which
+        reverses an earlier connection.
+
+        The current path is left as it was.
+
+        Parameters
+        stack : bool, optional
+            Keep the original continuity at both points as an alternative instead of retiring it
+            (default ``False``).
+        strict : bool, optional
+            Raise ``ValueError`` instead of renaming an annotation whose name is already
+            taken here (default ``False``).
+        message : str, optional
+            Commit message for the recorded operation.
+        """
+    def exchange(
+        self,
+        first: tuple[Position, Position],
+        second: tuple[Position, Position],
+        /,
+        *,
+        message: typing.Optional[builtins.str] = None,
+        stack: builtins.bool = False,
+        strict: builtins.bool = False,
+        split: builtins.bool = False,
+    ) -> builtins.list[SequenceGraph]:
+        r"""
+        Exchange the sequence across two breakpoints, as one operation.
+
+        Each breakpoint is a pair of nucleotides, read upstream to downstream on one strand, that the
+        graph joins: ``exchange((A, B), (C, D))``. The exchange joins ``A`` to ``D`` and ``C`` to ``B``,
+        the two products of a recombinase crossing over, and makes no other pairing. Naming both sides of
+        each cut pins it to one junction when a position has several continuations, such as the two
+        alleles of a variant, or a stacked library of events. A pair the graph does not join raises
+        ``ValueError``.
+
+        A ``SuperPosition`` in a pair raises ``SuperpositionError``, which is what a step next to a
+        fork gives. A step is fine anywhere else, so ``(pos, pos + 1)`` names a breakpoint, and so does
+        ``(hit.start(), hit.start() + 1)`` for a search hit. Whether two nucleotides are joined is
+        checked in the graph: inside a node on one strand they always are, and elsewhere it takes an
+        edge, which may cross strands.
+
+        The strands the pairs are written on are the orientation of their sites, and the sequence is
+        never read to decide it. Both pairs on the same strand line the sites up as direct repeats, and
+        one pair on each strand as inverted repeats.
+        Within one molecule direct repeats excise the segment between them as a
+        circle and inverted repeats turn it around. Between two linear molecules direct repeats cross the
+        arms over, and inverted repeats join each arm to the other's reverse complement. Between a circle
+        and a line direct repeats integrate the circle, and inverted repeats integrate it reverse
+        complemented. Writing both pairs on the other strand, ``(B.reverse_complement(),
+        A.reverse_complement())`` and ``(D.reverse_complement(), C.reverse_complement())``, describes the
+        same exchange.
+
+        A position attached to another sequence graph of the same sample, with
+        ``position.on(other)``, folds ``other`` into this sequence graph first, as in
+        ``connect``, and ``other`` no longer exists in the sample.
+
+        Unless stacked, the exchange is final: the original continuity at both breakpoints is
+        removed from the graph. By default every molecule it leaves stays in this one graph, so an
+        excised circle is a component beside the linear molecule, and ``plot(show_history=True,
+        align_path=False)`` draws the link between them as retired edges. A plot without
+        ``show_history`` and ``all_sequences()`` read only what is reachable from the start. A stacked
+        exchange keeps the originals as an alternative, so everything also stays in this graph.
+
+        With ``split=True`` an unstacked exchange gives each molecule it leaves its own sequence
+        graph. Two linear molecules give two graphs, an excision gives the molecule and a circle, and
+        an inversion or an integration gives one. The graph continuing this graph's start keeps this
+        graph, the one continuing the other graph's start gets that graph back under its name, and
+        any other, such as an excised circle, is named after this graph with a number. Paths are
+        dropped, and an annotation that spans a breakpoint is kept by every graph it touches.
+
+        Returns the resulting sequence graphs, this one first. Unless ``split`` gives it more, that
+        is this graph alone.
+
+        Parameters
+        first : tuple of Position
+            The first breakpoint, ``(A, B)``.
+        second : tuple of Position
+            The second breakpoint, ``(C, D)``.
+        stack : bool, optional
+            Keep the original continuity at both points as an alternative instead of removing it
+            (default ``False``).
+        strict : bool, optional
+            Raise ``ValueError`` instead of renaming an annotation whose name is already
+            taken here (default ``False``).
+        split : bool, optional
+            Give each molecule an unstacked exchange leaves its own sequence graph, instead of
+            keeping them all in this one (default ``False``).
+        message : str, optional
+            Commit message for the recorded operation.
+        """
+    def recombine(
+        self,
+        first: gen.sites.Site,
+        second: gen.sites.Site,
+        /,
+        *,
+        message: typing.Optional[builtins.str] = None,
+        stack: builtins.bool = False,
+        strict: builtins.bool = False,
+        split: builtins.bool = False,
+    ) -> builtins.list[SequenceGraph]:
+        r"""
+        Recombine two sites, as one strand exchange.
+
+        A site is a stretch of sequence a recombinase acts on, with the place each strand is cut, as a
+        ``Site`` gives it. ``recombine(site_a, site_b)`` exchanges the strands across the two sites, so
+        it makes the same junctions as ``exchange`` does at their top-strand cuts, and what the call does
+        follows from where the sites are: direct repeats in one molecule excise the segment between them
+        as a circle, inverted repeats turn it around, two linear molecules cross their arms over, and a
+        circle with a line integrates the circle.
+
+        The sites are aligned by the strings they are, so each locus is taken in its reading direction.
+        A site with a direction of its own, found by searching for its sequence, is aligned the way it was
+        found. A palindromic one, which reads the same on both strands, has no direction, so aligning it
+        the other way round takes ``site.reverse_complement()``.
+
+        Staggered sites are checked first: their overhangs must be the same length and the same bases,
+        because each product carries one strand's overhang from each parent, and different bases would
+        leave a bubble in the double strand. Raises ``ValueError`` when they differ. Blunt sites need no
+        check. The cut itself is made at the top strand, which the matching overhangs make equivalent to
+        the bottom one.
+
+        Inverted sites in two linear molecules are not supported yet, and raise ``ValueError``: one
+        product would run from the end of a molecule backwards and so have no start, and the other no
+        end. A circle with a line is fine, and so is one molecule.
+
+        Everything else is as in ``exchange``: ``stack`` keeps the originals as an alternative, a site
+        attached to another sequence graph with ``position.on(other)`` folds that graph in first, and the
+        resulting sequence graphs are returned, this one first.
+
+        Parameters
+        first : Site
+            The first site.
+        second : Site
+            The second site.
+        stack : bool, optional
+            Keep the original continuity at both sites as an alternative instead of removing it
+            (default ``False``).
+        strict : bool, optional
+            Raise ``ValueError`` instead of renaming an annotation whose name is already
+            taken here (default ``False``).
+        split : bool, optional
+            Give each molecule an unstacked recombination leaves its own sequence graph, instead of
+            keeping them all in this one (default ``False``).
         message : str, optional
             Commit message for the recorded operation.
         """

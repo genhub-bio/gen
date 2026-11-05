@@ -32,6 +32,11 @@ pub struct PyGraphLocus {
     // The sequence graph this locus came from, which the positions it hands out step through.
     // `None` for loci built without one, such as an `Annotation` made from a locus.
     sequence_graph: Option<PySequenceGraph>,
+    // The direction the locus reads in, which belongs to the oriented string it spells and not to
+    // its bases: a hit on the query as given reads forward, and one on its reverse complement
+    // reads in reverse, even when the graph walk crosses an inversion on the way. Reversing a
+    // locus flips it.
+    direction: Strand,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -61,12 +66,25 @@ impl PyGraphLocus {
                 strand: slice.strand,
             })
             .collect();
+        // A walk starts on the strand it begins reading on, which for a hit is the strand of the
+        // string it matched.
+        let direction = locus
+            .slices
+            .iter()
+            .find(|slice| slice.start < slice.end)
+            .map_or(Strand::Forward, |slice| slice.strand);
         Self {
             ranges,
             presentation: locus,
             context,
             sequence_graph: None,
+            direction,
         }
+    }
+
+    pub(crate) const fn with_direction(mut self, direction: Strand) -> Self {
+        self.direction = direction;
+        self
     }
 
     /// The database connection `.sequence` reads through, if this locus has one.
@@ -210,8 +228,13 @@ impl PyGraphLocus {
 
     /// The same positions read from the opposite strand.
     pub(crate) fn reverse_complement(&self) -> PyGraphLocus {
+        let flipped = match self.direction {
+            Strand::Reverse => Strand::Forward,
+            _ => Strand::Reverse,
+        };
         PyGraphLocus::with_context(self.presentation.reverse_complement(), self.context.clone())
             .attached_to(self.sequence_graph.clone())
+            .with_direction(flipped)
     }
 
     /// Sub-locus covering positions ``start:end`` in reading order.
@@ -223,6 +246,7 @@ impl PyGraphLocus {
             .map(|locus| {
                 PyGraphLocus::with_context(locus, self.context.clone())
                     .attached_to(self.sequence_graph.clone())
+                    .with_direction(self.direction)
             })
             .ok_or_else(|| {
                 PyIndexError::new_err(format!(
@@ -236,6 +260,18 @@ impl PyGraphLocus {
         other
             .extract::<PyRef<PyGraphLocus>>()
             .is_ok_and(|other| other.ranges == self.ranges)
+    }
+
+    /// The direction the locus reads in: ``"+"`` for the oriented string as it was found or
+    /// given, and ``"-"`` for its reverse complement. It belongs to the string, so a locus that
+    /// crosses an inversion still has one, where ``strand`` reports ``"mixed"``. Reversing a locus
+    /// flips it. A site's cuts are counted along this direction.
+    #[getter]
+    pub(crate) const fn direction(&self) -> &'static str {
+        match self.direction {
+            Strand::Reverse => "-",
+            _ => "+",
+        }
     }
 
     /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ,

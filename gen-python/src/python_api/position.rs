@@ -14,7 +14,7 @@ use gen_core::{HashId, Strand, is_start_node, is_terminal};
 use gen_graph::{GenGraph, GraphNode};
 use petgraph::Direction::{Incoming, Outgoing};
 use pyo3::{
-    Bound, Py, PyAny, PyRef, PyResult, Python,
+    Bound, Py, PyAny, PyRef, PyResult, Python, create_exception,
     exceptions::{PyIndexError, PyTypeError, PyValueError},
     pyclass, pymethods,
     types::{PyAnyMethods as _, PyTuple, PyTupleMethods as _},
@@ -26,6 +26,13 @@ use super::{
     graph_node::PyGraphNode,
     graph_read::{current_graph, forward_edge},
 };
+
+create_exception!(
+    r#gen,
+    SuperpositionError,
+    PyValueError,
+    "A SuperPosition was given where one Position is needed."
+);
 
 /// A point in a node's sequence: the node, an offset into its sequence, and the strand it is read
 /// on. Inside a superposition the offset names the sequence character at that offset.
@@ -367,6 +374,18 @@ impl PyPosition {
         Ok(located)
     }
 
+    /// The same base read on the opposite strand, for edits such as ``SequenceGraph.connect``
+    /// that name a point on a specific strand.
+    fn reverse_complement(&self) -> Self {
+        let mut flipped = self.clone();
+        flipped.position.strand = if self.position.is_reverse() {
+            Strand::Forward
+        } else {
+            Strand::Reverse
+        };
+        flipped
+    }
+
     /// The position ``delta`` steps along this position's strand, backward for a negative
     /// ``delta``. The result stays a ``Position`` while the step lands on a single point, and
     /// becomes a ``SuperPosition`` once the step lands at a fork.
@@ -444,6 +463,17 @@ pub(crate) fn positions_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<Position>> 
         Err(PyTypeError::new_err(
             "expected a Position or a SuperPosition",
         ))
+    }
+}
+
+/// The sequence graph a `Position` or `SuperPosition` is attached to, if any.
+pub(crate) fn graph_of(value: &Bound<'_, PyAny>) -> Option<PySequenceGraph> {
+    if let Ok(position) = value.extract::<PyRef<PyPosition>>() {
+        position.sequence_graph.clone()
+    } else if let Ok(superposition) = value.extract::<PyRef<PySuperPosition>>() {
+        superposition.sequence_graph.clone()
+    } else {
+        None
     }
 }
 

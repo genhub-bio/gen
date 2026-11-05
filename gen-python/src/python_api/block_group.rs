@@ -29,7 +29,7 @@ use gen_graph::GraphNode;
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroupSample},
-    block_group::BlockGroup,
+    block_group::{BlockGroup, RandomSequences},
     db::DbContext,
     locus::GraphLocus,
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
@@ -45,15 +45,17 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use super::{
     annotation::PyAnnotation,
     editing::{
-        EditKind, EditMode, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions,
+        Breakpoint, EditKind, EditMode, EditRequest, ExchangeSites, InsertSite, connect_positions, cut_position,
+        edit_sequence_graph, exchange_positions, insert_at_positions,
     },
+    gaf_reads::{PyGafReads, load_gaf_reads},
     graph_node::PyGraphNode,
     graph_read::{current_graph, locus_from_region, shortest_route},
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PlotOptions, PyGraphController, WidgetOptions, build_widget},
     locus::GraphLocusExt as _,
-    position::{PyPosition, positions_of},
+    position::{PyPosition, SuperpositionError, graph_of, positions_of},
     repository::run_context_operation_write,
     sample::PySample,
     sequence::PySequence,
@@ -412,17 +414,29 @@ impl PySequenceGraph {
         // A hit that crosses a zero-width routing block lists an empty slice for it, and routes
         // that differ only in the routing blocks they cross find the same hit again. Neither
         // changes what the hit reads, so each hit is reported once, without empty slices. An
-        // insertion inside a node loops its routing block back onto the node, and a hit that
-        // wraps around that loop reads a block twice, which no route of the graph does.
+        // insertion inside a node meets the node's zero-width junction on both sides, so a hit
+        // can leave the inserted block into the junction and re-enter the same block, reading
+        // it twice, which no route of the graph does. Walks that repeat a block through real
+        // sequence, such as around a cycle, are kept.
         let mut hits: Vec<GraphLocus> = vec![];
         for mut locus in matches {
+            let mut readable = locus
+                .slices
+                .iter()
+                .enumerate()
+                .filter(|(_, slice)| slice.end > slice.start);
+            let mut loops_through_junction = false;
+            let mut previous = readable.next();
+            for (index, slice) in readable {
+                if let Some((previous_index, previous_slice)) = previous {
+                    loops_through_junction |= index > previous_index + 1
+                        && previous_slice.block == slice.block
+                        && previous_slice.strand == slice.strand;
+                }
+                previous = Some((index, slice));
+            }
             locus.slices.retain(|slice| slice.end > slice.start);
-            let revisits = locus.slices.iter().enumerate().any(|(index, slice)| {
-                locus.slices[..index]
-                    .iter()
-                    .any(|earlier| earlier.block == slice.block)
-            });
-            if !revisits && !hits.contains(&locus) {
+            if !loops_through_junction && !hits.contains(&locus) {
                 hits.push(locus);
             }
         }
@@ -433,6 +447,25 @@ impl PySequenceGraph {
                     .attached_to(Some(self.clone()))
             })
             .collect())
+    }
+
+    /// Load the reads of a minigraph GAF file as one `Locus` per read.
+    ///
+    /// The GAF must have been aligned to a GFA exported from this repository, so each path step
+    /// names a segment as `<node hash>.<start>.<end>`. Each `Locus` spells the aligned part of its
+    /// read's walk, clipped to the alignment interval and oriented as the read travels, so
+    /// `locus.sequence` is the graph sequence under the read, `locus.strand` is `"mixed"` when the
+    /// walk crosses an inversion, and `widget.show(locus)` lights exactly the edges the read takes.
+    ///
+    /// A read with several rows keeps the mapped row with the longest aligned block. With
+    /// `primary_only` (the default) only primary rows (`tp:A:P`, or no `tp` tag) are considered.
+    /// Reads that do not lie in this sequence graph are counted in the result's `skipped`, and a
+    /// read whose walk takes a step this graph stores no edge for is never loaded and is listed
+    /// in `untraceable`. Returns a `GafReads`, a read-only mapping from read name to `Locus`.
+    #[pyo3(signature = (path, *, primary_only=true))]
+    pub fn load_gaf(&self, path: &str, primary_only: bool) -> PyResult<PyGafReads> {
+        let context = self.require_context("load_gaf()")?;
+        load_gaf_reads(self, context, path, primary_only)
     }
 
     /// The `Locus` covering path coordinates `start` to `end` of this sequence graph: 0-based,
@@ -484,6 +517,19 @@ impl PySequenceGraph {
             .into_iter()
             .map(PySequence::unnamed)
             .collect())
+    }
+
+    /// An endless iterator of sequences, each read by a random walk from the start of the graph to
+    /// its end that takes one outgoing edge, chosen uniformly, at every step. Nothing is
+    /// enumerated, so it suits a graph with very many paths or with cycles, and a Monte Carlo
+    /// simulation takes as many as it needs, for example with ``itertools.islice``. A cycle can be
+    /// walked any number of times. Pass ``seed`` to repeat the same sequences.
+    #[pyo3(signature = (seed=None))]
+    fn random_sequences(&self, seed: Option<u64>) -> PyResult<PyRandomSequences> {
+        let context = self.require_context("random_sequences()")?;
+        BlockGroup::random_sequences(context.graph().conn(), context.workspace(), &self.id, seed)
+            .map(|sequences| PyRandomSequences { sequences })
+            .map_err(block_group_err_to_pyerr)
     }
 
     /// IPython display hook — called when a cell ends with a SequenceGraph.
@@ -1412,6 +1458,346 @@ impl PySequenceGraph {
             PyGraphLocus::with_context(locus, self.context.clone()).attached_to(Some(self.clone()))
         })
     }
+
+    /// Mark a cut in the sequence, just ``after`` one ``Position`` or just ``before`` it.
+    ///
+    /// A cut is a block boundary for later joins to attach to, such as the end a restriction
+    /// enzyme leaves in a Golden Gate digest. It does not break the graph: the sequence reads
+    /// across it as before, so the graph stays a supergraph of the molecules before and after the
+    /// cut. It is recorded as one operation, read on the top strand and taken as blunt on both
+    /// strands, so the staggered overhang of an enzyme is not modelled yet. The cut must lie inside
+    /// a node, and cutting the same point twice raises ``ValueError``.
+    ///
+    /// Parameters
+    /// message : str, optional
+    ///     Commit message for the recorded operation.
+    #[pyo3(signature = (*, after=None, before=None, message=None))]
+    fn cut(
+        &self,
+        #[gen_stub(override_type(type_repr = "Position | None", imports = ()))] after: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "Position | None", imports = ()))] before: Option<
+            &Bound<'_, PyAny>,
+        >,
+        message: Option<&str>,
+    ) -> PyResult<()> {
+        let single = |name: &str, value: &Bound<'_, PyAny>| {
+            let positions = positions_of(value)?;
+            match positions.as_slice() {
+                [position] => Ok(*position),
+                _ => Err(PyValueError::new_err(format!(
+                    "cut() needs one Position for {name}=, not {}",
+                    positions.len()
+                ))),
+            }
+        };
+        match (after, before) {
+            (Some(after), None) => cut_position(self, &single("after", after)?, true, message),
+            (None, Some(before)) => cut_position(self, &single("before", before)?, false, message),
+            _ => Err(PyTypeError::new_err(
+                "cut() takes exactly one of after= or before=",
+            )),
+        }
+    }
+
+    /// Add a raw edge that reads on from ``after`` into ``before``, without writing new sequence.
+    ///
+    /// ``after`` and ``before`` are each one ``Position``, read on its own strand. The edge leaves
+    /// the point just after ``after`` and arrives at the point just before ``before``. On the
+    /// reverse strand "after" is toward the start of the node, so the edge between a forward and
+    /// a reverse position joins the forward strand to the reverse complement of the sequence
+    /// beyond it. This is the primitive for rearrangements that reconnect existing sequence, such
+    /// as Cre-loxP recombination. Within one molecule, an excision is two forward connections that
+    /// close the flanks and the excised segment separately, and an inversion is two connections
+    /// between a forward and a reverse position::
+    ///
+    ///     # excision of the segment between two direct-repeat sites, leaving a circle
+    ///     sg.connect(after=left_cut - 1, before=right_cut)
+    ///     sg.connect(after=right_cut - 1, before=left_cut)
+    ///
+    ///     # inversion of the segment between two inverted-repeat sites
+    ///     sg.connect(after=left_cut - 1, before=(right_cut - 1).reverse_complement())
+    ///     sg.connect(after=left_cut.reverse_complement(), before=right_cut)
+    ///
+    /// A position attached to another sequence graph of the same sample, with ``position.on(other)``,
+    /// joins two molecules. ``other`` is folded into this sequence graph, which then holds both
+    /// molecules as components, and ``other`` no longer exists in the sample. Reciprocal crossover
+    /// between two linear molecules is two connections, each running a left flank into the other
+    /// molecule's right flank::
+    ///
+    ///     a.connect(after=a_left_last, before=b_right_first.on(b))
+    ///     a.connect(after=b_left_last.on(b), before=a_right_first)
+    ///
+    /// Both molecules attach to this graph's one start and end. Paths of ``other`` are not moved.
+    /// Annotations of ``other`` are copied onto this graph, except one already here over exactly the
+    /// same nodes and coordinates, which is the same feature.
+    ///
+    /// An annotation name that this graph already uses for different spans takes primes, so joining
+    /// graphs that both name a different feature ``P`` keeps one ``P`` and moves the other as
+    /// ``P'``, then ``P''``, and so on until the name is free. Pass ``strict=True`` to raise
+    /// ``ValueError`` on a clash instead.
+    ///
+    /// Everything stays in this one sequence graph, so a circle split off by an excision is a
+    /// component of the same graph. A node cut at either point stays cut there. Joining a point
+    /// back to the position that originally followed it restores the original continuity, which
+    /// reverses an earlier connection.
+    ///
+    /// The current path is left as it was.
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Keep the original continuity at both points as an alternative instead of retiring it
+    ///     (default ``False``).
+    /// strict : bool, optional
+    ///     Raise ``ValueError`` instead of renaming an annotation whose name is already
+    ///     taken here (default ``False``).
+    /// message : str, optional
+    ///     Commit message for the recorded operation.
+    #[pyo3(signature = (*, after, before, message=None, stack=false, strict=false))]
+    fn connect(
+        &self,
+        #[gen_stub(override_type(type_repr = "Position", imports = ()))] after: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "Position", imports = ()))] before: &Bound<'_, PyAny>,
+        message: Option<&str>,
+        stack: bool,
+        strict: bool,
+    ) -> PyResult<()> {
+        let single = |name: &str, value: &Bound<'_, PyAny>| {
+            let positions = positions_of(value)?;
+            match positions.as_slice() {
+                [position] => Ok(*position),
+                _ => Err(PyValueError::new_err(format!(
+                    "connect() needs one Position for {name}=, not {}",
+                    positions.len()
+                ))),
+            }
+        };
+        let mut joined = vec![];
+        for graph in [graph_of(after), graph_of(before)].into_iter().flatten() {
+            if graph.id != self.id
+                && !joined
+                    .iter()
+                    .any(|other: &PySequenceGraph| other.id == graph.id)
+            {
+                joined.push(graph);
+            }
+        }
+        let (after, before) = (single("after", after)?, single("before", before)?);
+        connect_positions(
+            self,
+            &joined,
+            &after,
+            &before,
+            message,
+            EditMode { stack },
+            strict,
+        )
+    }
+
+    /// Exchange the sequence across two breakpoints, as one operation.
+    ///
+    /// Each breakpoint is a pair of nucleotides, read upstream to downstream on one strand, that the
+    /// graph joins: ``exchange((A, B), (C, D))``. The exchange joins ``A`` to ``D`` and ``C`` to ``B``,
+    /// the two products of a recombinase crossing over, and makes no other pairing. Naming both sides of
+    /// each cut pins it to one junction when a position has several continuations, such as the two
+    /// alleles of a variant, or a stacked library of events. A pair the graph does not join raises
+    /// ``ValueError``.
+    ///
+    /// A ``SuperPosition`` in a pair raises ``SuperpositionError``, which is what a step next to a
+    /// fork gives. A step is fine anywhere else, so ``(pos, pos + 1)`` names a breakpoint, and so does
+    /// ``(hit.start(), hit.start() + 1)`` for a search hit. Whether two nucleotides are joined is
+    /// checked in the graph: inside a node on one strand they always are, and elsewhere it takes an
+    /// edge, which may cross strands.
+    ///
+    /// The strands the pairs are written on are the orientation of their sites, and the sequence is
+    /// never read to decide it. Both pairs on the same strand line the sites up as direct repeats, and
+    /// one pair on each strand as inverted repeats.
+    /// Within one molecule direct repeats excise the segment between them as a
+    /// circle and inverted repeats turn it around. Between two linear molecules direct repeats cross the
+    /// arms over, and inverted repeats join each arm to the other's reverse complement. Between a circle
+    /// and a line direct repeats integrate the circle, and inverted repeats integrate it reverse
+    /// complemented. Writing both pairs on the other strand, ``(B.reverse_complement(),
+    /// A.reverse_complement())`` and ``(D.reverse_complement(), C.reverse_complement())``, describes the
+    /// same exchange.
+    ///
+    /// A position attached to another sequence graph of the same sample, with
+    /// ``position.on(other)``, folds ``other`` into this sequence graph first, as in
+    /// ``connect``, and ``other`` no longer exists in the sample.
+    ///
+    /// Unless stacked, the exchange is final: the original continuity at both breakpoints is
+    /// removed from the graph. By default every molecule it leaves stays in this one graph, so an
+    /// excised circle is a component beside the linear molecule, and ``plot(show_history=True,
+    /// align_path=False)`` draws the link between them as retired edges. A plot without
+    /// ``show_history`` and ``all_sequences()`` read only what is reachable from the start. A stacked
+    /// exchange keeps the originals as an alternative, so everything also stays in this graph.
+    ///
+    /// With ``split=True`` an unstacked exchange gives each molecule it leaves its own sequence
+    /// graph. Two linear molecules give two graphs, an excision gives the molecule and a circle, and
+    /// an inversion or an integration gives one. The graph continuing this graph's start keeps this
+    /// graph, the one continuing the other graph's start gets that graph back under its name, and
+    /// any other, such as an excised circle, is named after this graph with a number. Paths are
+    /// dropped, and an annotation that spans a breakpoint is kept by every graph it touches.
+    ///
+    /// Returns the resulting sequence graphs, this one first. Unless ``split`` gives it more, that
+    /// is this graph alone.
+    ///
+    /// Parameters
+    /// first : tuple of Position
+    ///     The first breakpoint, ``(A, B)``.
+    /// second : tuple of Position
+    ///     The second breakpoint, ``(C, D)``.
+    /// stack : bool, optional
+    ///     Keep the original continuity at both points as an alternative instead of removing it
+    ///     (default ``False``).
+    /// strict : bool, optional
+    ///     Raise ``ValueError`` instead of renaming an annotation whose name is already
+    ///     taken here (default ``False``).
+    /// split : bool, optional
+    ///     Give each molecule an unstacked exchange leaves its own sequence graph, instead of
+    ///     keeping them all in this one (default ``False``).
+    /// message : str, optional
+    ///     Commit message for the recorded operation.
+    #[pyo3(signature = (first, second, /, *, message=None, stack=false, strict=false, split=false))]
+    fn exchange(
+        &self,
+        #[gen_stub(override_type(type_repr = "tuple[Position, Position]", imports = ()))]
+        first: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "tuple[Position, Position]", imports = ()))]
+        second: &Bound<'_, PyAny>,
+        message: Option<&str>,
+        stack: bool,
+        strict: bool,
+        split: bool,
+    ) -> PyResult<Vec<PySequenceGraph>> {
+        let pair = |name: &str, value: &Bound<'_, PyAny>| {
+            let (upstream, downstream) = value.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>().map_err(|_| {
+                PyValueError::new_err(format!(
+                    "exchange() needs a pair of Positions for the {name} breakpoint, such as (a, a + 1)"
+                ))
+            })?;
+            let single = |value: &Bound<'_, PyAny>| match positions_of(value)?.as_slice() {
+                [position] => Ok(*position),
+                positions => Err(SuperpositionError::new_err(format!(
+                    "exchange() needs one Position at each end of a breakpoint, but one in the {name} \
+                     breakpoint holds {}. A step next to a fork is a SuperPosition: name the \
+                     position on the branch you mean",
+                    positions.len()
+                ))),
+            };
+            Ok::<_, PyErr>((
+                [graph_of(&upstream), graph_of(&downstream)],
+                Breakpoint {
+                    upstream: single(&upstream)?,
+                    downstream: single(&downstream)?,
+                },
+            ))
+        };
+        let ((first_graphs, first), (second_graphs, second)) =
+            (pair("first", first)?, pair("second", second)?);
+        let mut foreign = first_graphs
+            .into_iter()
+            .chain(second_graphs)
+            .flatten()
+            .filter(|graph| graph.id != self.id)
+            .collect::<Vec<_>>();
+        foreign.dedup_by(|a, b| a.id == b.id);
+        if foreign.len() > 1 {
+            return Err(PyValueError::new_err(
+                "exchange() joins at most one other sequence graph, and one position must be in this one",
+            ));
+        }
+        let sites = ExchangeSites { first, second };
+        let context = self.require_context("exchange")?;
+        let products = exchange_positions(
+            self,
+            foreign.first(),
+            &sites,
+            message,
+            EditMode { stack },
+            strict,
+            split,
+        )?;
+        Ok(products
+            .into_iter()
+            .map(|product| PySequenceGraph {
+                id: product.id,
+                collection_name: product.collection_name,
+                sample_name: product.sample_name,
+                name: product.name,
+                context: Some(context.clone()),
+            })
+            .collect())
+    }
+
+    /// Recombine two sites, as one strand exchange.
+    ///
+    /// A site is a stretch of sequence a recombinase acts on, with the place each strand is cut, as a
+    /// ``Site`` gives it. ``recombine(site_a, site_b)`` exchanges the strands across the two sites, so
+    /// it makes the same junctions as ``exchange`` does at their top-strand cuts, and what the call does
+    /// follows from where the sites are: direct repeats in one molecule excise the segment between them
+    /// as a circle, inverted repeats turn it around, two linear molecules cross their arms over, and a
+    /// circle with a line integrates the circle.
+    ///
+    /// The sites are aligned by the strings they are, so each locus is taken in its reading direction.
+    /// A site with a direction of its own, found by searching for its sequence, is aligned the way it was
+    /// found. A palindromic one, which reads the same on both strands, has no direction, so aligning it
+    /// the other way round takes ``site.reverse_complement()``.
+    ///
+    /// Staggered sites are checked first: their overhangs must be the same length and the same bases,
+    /// because each product carries one strand's overhang from each parent, and different bases would
+    /// leave a bubble in the double strand. Raises ``ValueError`` when they differ. Blunt sites need no
+    /// check. The cut itself is made at the top strand, which the matching overhangs make equivalent to
+    /// the bottom one.
+    ///
+    /// Inverted sites in two linear molecules are not supported yet, and raise ``ValueError``: one
+    /// product would run from the end of a molecule backwards and so have no start, and the other no
+    /// end. A circle with a line is fine, and so is one molecule.
+    ///
+    /// Everything else is as in ``exchange``: ``stack`` keeps the originals as an alternative, a site
+    /// attached to another sequence graph with ``position.on(other)`` folds that graph in first, and the
+    /// resulting sequence graphs are returned, this one first.
+    ///
+    /// Parameters
+    /// first : Site
+    ///     The first site.
+    /// second : Site
+    ///     The second site.
+    /// stack : bool, optional
+    ///     Keep the original continuity at both sites as an alternative instead of removing it
+    ///     (default ``False``).
+    /// strict : bool, optional
+    ///     Raise ``ValueError`` instead of renaming an annotation whose name is already
+    ///     taken here (default ``False``).
+    /// split : bool, optional
+    ///     Give each molecule an unstacked recombination leaves its own sequence graph, instead of
+    ///     keeping them all in this one (default ``False``).
+    /// message : str, optional
+    ///     Commit message for the recorded operation.
+    #[pyo3(signature = (first, second, /, *, message=None, stack=false, strict=false, split=false))]
+    fn recombine(
+        &self,
+        #[gen_stub(override_type(type_repr = "gen.sites.Site", imports = ("gen.sites",)))] first: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "gen.sites.Site", imports = ("gen.sites",)))] second: &Bound<'_, PyAny>,
+        message: Option<&str>,
+        stack: bool,
+        strict: bool,
+        split: bool,
+    ) -> PyResult<Vec<PySequenceGraph>> {
+        let (first_top, second_top) = (top_breakpoint(first)?, top_breakpoint(second)?);
+        first.call_method1("check_overhang_matches", (second,))?;
+        self.exchange(&first_top, &second_top, message, stack, strict, split)
+    }
+}
+
+/// The top-strand breakpoint of a `Site`, which is where `recombine` makes its junction.
+fn top_breakpoint<'py>(site: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    if !site.hasattr("breakpoints")? {
+        return Err(PyTypeError::new_err(
+            "recombine() needs two Sites, such as gen.Site(locus, cut)",
+        ));
+    }
+    site.call_method0("breakpoints")?.get_item(0)
 }
 
 #[cfg(test)]
@@ -1537,5 +1923,24 @@ mod tests {
                 .contains("resolves outside sequence graph 'chr1'"),
             "unexpected error message: {error}"
         );
+    }
+}
+
+/// The endless iterator returned by ``SequenceGraph.random_sequences()``.
+#[gen_stub_pyclass]
+#[pyclass(name = "RandomSequences", unsendable)]
+pub struct PyRandomSequences {
+    sequences: RandomSequences,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyRandomSequences {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PySequence> {
+        slf.sequences.next().map(PySequence::unnamed)
     }
 }

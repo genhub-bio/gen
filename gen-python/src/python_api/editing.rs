@@ -23,15 +23,21 @@
 //! by the ports it sits between and what it reads. The current path is spliced when the edit lies
 //! on it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt::Display,
+};
 
 use gen_core::{
-    HashId, INDETERMINATE_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Sha256Hash,
-    Strand, is_terminal,
+    HashId, INDETERMINATE_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Sha256Hash,
+    Strand, is_end_node, is_start_node, is_terminal, range::Range,
 };
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError},
+    accession::{Accession, AccessionNode, AccessionSpan, NewAccession},
+    annotations::{Annotation, NewAnnotation},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::{Edge, EdgeData},
@@ -52,7 +58,9 @@ use pyo3::{
 use super::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
-    graph_read::{LocusTarget, current_graph, locus_from_region},
+    graph_read::{
+        LocusTarget, current_graph, locus_from_region, reaches_oriented, unpruned_graph,
+    },
     graph_search::PyGraphLocus,
     locus::GraphLocusExt as _,
     position::{Position, adjacent_blocks, is_routing_block, require_blocks},
@@ -236,6 +244,1369 @@ pub(crate) fn insert_at_positions(
     )
 }
 
+/// A point between two bases of a node, with the strand an edge leaves or arrives on there.
+#[derive(Clone, Copy, Debug)]
+struct Junction {
+    node_id: HashId,
+    boundary: i64,
+    strand: Strand,
+}
+
+impl Junction {
+    /// Where an edge leaves from when it follows `position`. On the reverse strand that is toward
+    /// the start of the node.
+    fn following(position: &Position) -> Self {
+        let boundary = if position.strand == Strand::Reverse {
+            position.coordinate
+        } else {
+            position.coordinate + 1
+        };
+        Self {
+            node_id: position.node_id,
+            boundary,
+            strand: position.strand,
+        }
+    }
+
+    /// Where an edge arrives when it precedes `position`.
+    fn preceding(position: &Position) -> Self {
+        let boundary = if position.strand == Strand::Reverse {
+            position.coordinate + 1
+        } else {
+            position.coordinate
+        };
+        Self {
+            node_id: position.node_id,
+            boundary,
+            strand: position.strand,
+        }
+    }
+
+    /// The port a stored edge names for this junction. A reverse-strand edge names the block it
+    /// reads, by the start of the block when arriving and the end of the block when leaving, so
+    /// the nearest boundary of the node beyond this one on the reading side is needed.
+    fn stored_port(&self, leaving: bool, bounds: &BTreeSet<i64>) -> PyResult<Port> {
+        let coordinate = match (self.strand == Strand::Reverse, leaving) {
+            (false, _) => Some(self.boundary),
+            (true, true) => bounds.range(self.boundary + 1..).next().copied(),
+            (true, false) => bounds.range(..self.boundary).next_back().copied(),
+        };
+        coordinate
+            .map(|coordinate| Port {
+                node_id: self.node_id,
+                coordinate,
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "connect has no sequence to read on the reverse strand {} {}",
+                    if leaving { "before" } else { "after" },
+                    describe_point(&Port {
+                        node_id: self.node_id,
+                        coordinate: self.boundary,
+                    }),
+                ))
+            })
+    }
+
+    fn describe(&self, port: &Port) -> String {
+        format!(
+            "{}{}",
+            describe_point(port),
+            if self.strand == Strand::Reverse {
+                '-'
+            } else {
+                '+'
+            }
+        )
+    }
+}
+
+/// The coordinates at which the blocks of `graph` cut `node_id`.
+fn node_bounds(graph: &GenGraph, node_id: HashId) -> BTreeSet<i64> {
+    graph
+        .nodes()
+        .filter(|block| block.node_id == node_id && !is_routing_block(*block))
+        .flat_map(|block| [block.sequence_start, block.sequence_end])
+        .collect()
+}
+
+/// Whether an edge is the marker that keeps a node's sequence continuous across a port.
+fn is_marker(row: &AugmentedEdge) -> bool {
+    Port::source(&row.edge) == Port::target(&row.edge)
+        && row.edge.source_strand == Strand::Forward
+        && row.edge.target_strand == Strand::Forward
+}
+
+/// A name for something moving into a graph that already uses `taken`, found by adding primes until
+/// the name is free: 'P' becomes "P'", then "P''". A join renames rather than refuses by default, so
+/// two graphs annotated with the same feature name can still be combined.
+fn unclaimed_name(name: &str, taken: &HashSet<String>) -> String {
+    let mut candidate = name.to_string();
+    while taken.contains(&candidate) {
+        candidate.push('\'');
+    }
+    candidate
+}
+
+/// The nodes an accession covers, in a form two accessions can be compared by: the same nodes,
+/// coordinates and strands mean the same feature wherever the accession is stored.
+fn accession_spans(conn: &GraphConnection, accession_id: &HashId) -> Vec<AccessionSpan> {
+    let mut spans = Accession::get_nodes_by_id(conn, accession_id, None)
+        .iter()
+        .map(|node| AccessionSpan {
+            node_id: node.node_id,
+            range: Range {
+                start: node.sequence_start,
+                end: node.sequence_end,
+            },
+            strand: node.strand,
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|span| (span.node_id, span.range.start, span.range.end, span.strand));
+    spans
+}
+
+/// The accession of `kept` under `parent` that has this name and covers exactly these spans.
+fn find_duplicate<'a>(
+    conn: &GraphConnection,
+    kept: &'a [Accession],
+    parent: Option<HashId>,
+    name: &str,
+    spans: &[AccessionSpan],
+) -> Option<&'a Accession> {
+    kept.iter().find(|existing| {
+        existing.parent_accession_id == parent
+            && existing.name == name
+            && accession_spans(conn, &existing.id) == spans
+    })
+}
+
+/// Gives `target` its own copy of every accession on `source`, with the annotations that name
+/// them, so annotations of an absorbed graph keep resolving after it is removed. The copies are new
+/// rows over the same stable node slices, so no accession changes the graph it belongs to; the
+/// originals are deleted only because the graph they belong to is about to be. An accession that
+/// `target` already has under the same name over exactly the same spans is the same feature, so it
+/// is not copied again. One that only shares a name takes primes, unless `strict` asks for the
+/// clash to be reported.
+fn move_annotations(
+    conn: &GraphConnection,
+    source: &BlockGroup,
+    target: &BlockGroup,
+    strict: bool,
+) -> PyResult<()> {
+    let accessions = Accession::select(conn)
+        .block_group_id(source.id)
+        .load()
+        .map_err(|error| read_error(&error))?;
+    copy_annotations(conn, &source.name, &accessions, target, strict)?;
+    delete_accessions(conn, &accessions)
+}
+
+fn read_error(error: &dyn Display) -> PyErr {
+    PyRuntimeError::new_err(format!("failed to read annotations: {error}"))
+}
+
+fn write_error(error: &dyn Display) -> PyErr {
+    PyRuntimeError::new_err(format!("failed to copy annotations: {error}"))
+}
+
+/// Copies `accessions`, which must hold the parent of every child in it, onto `target` with their
+/// annotations. `source_name` only names the graph they come from in a clash reported when strict.
+fn copy_annotations(
+    conn: &GraphConnection,
+    source_name: &str,
+    accessions: &[Accession],
+    target: &BlockGroup,
+    strict: bool,
+) -> PyResult<()> {
+    let kept = Accession::select(conn)
+        .block_group_id(target.id)
+        .load()
+        .map_err(|error| read_error(&error))?;
+    if strict
+        && let Some(clash) = accessions.iter().find(|accession| {
+            accession.parent_accession_id.is_none()
+                && kept.iter().any(|existing| {
+                    existing.parent_accession_id.is_none() && existing.name == accession.name
+                })
+                && find_duplicate(
+                    conn,
+                    &kept,
+                    None,
+                    &accession.name,
+                    &accession_spans(conn, &accession.id),
+                )
+                .is_none()
+        })
+    {
+        return Err(PyValueError::new_err(format!(
+            "connect() cannot join '{}' because both sequence graphs have an annotation named '{}'",
+            source_name, clash.name
+        )));
+    }
+
+    // A child accession is created after its parent, whose copy has a new id.
+    let mut taken_names = HashMap::<Option<HashId>, HashSet<String>>::new();
+    for existing in &kept {
+        taken_names
+            .entry(existing.parent_accession_id)
+            .or_default()
+            .insert(existing.name.clone());
+    }
+    let mut copies = HashMap::new();
+    let mut pending = accessions.iter().collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let (ready, waiting) = pending.into_iter().partition::<Vec<_>, _>(|accession| {
+            accession.parent_accession_id.is_none_or(|parent| {
+                copies.contains_key(&parent) || !accessions.iter().any(|other| other.id == parent)
+            })
+        });
+        if ready.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "failed to copy annotations: accession parents form a cycle",
+            ));
+        }
+        for accession in ready {
+            let parent = accession
+                .parent_accession_id
+                .map(|parent| copies.get(&parent).copied().unwrap_or(parent));
+            let spans = accession_spans(conn, &accession.id);
+            if let Some(duplicate) = find_duplicate(conn, &kept, parent, &accession.name, &spans) {
+                copies.insert(accession.id, duplicate.id);
+                continue;
+            }
+            let taken = taken_names.entry(parent).or_default();
+            let name = unclaimed_name(&accession.name, taken);
+            taken.insert(name.clone());
+            let renamed = name != accession.name;
+            let copy = Accession::create(
+                conn,
+                &NewAccession {
+                    name: name.clone(),
+                    block_group_id: target.id,
+                    parent_accession_id: parent,
+                    spans,
+                },
+            )
+            .map_err(|error| write_error(&error))?;
+            let annotations = Annotation::select(conn)
+                .accession_id(accession.id)
+                .load()
+                .map_err(|error| read_error(&error))?;
+            for annotation in &annotations {
+                // An annotation named after its accession follows the accession's new name, so an
+                // annotation added by hand as 'P' reads as "P'" once moved rather than keeping the
+                // name it clashed with. Imported names are their own and stay as they are.
+                Annotation::create(
+                    conn,
+                    &annotation.group,
+                    &NewAnnotation {
+                        name: if renamed && annotation.name == accession.name {
+                            &name
+                        } else {
+                            &annotation.name
+                        },
+                        accession_id: copy.id,
+                        extra: annotation.extra.as_ref(),
+                    },
+                )
+                .map_err(|error| write_error(&error))?;
+            }
+            copies.insert(accession.id, copy.id);
+        }
+        pending = waiting;
+    }
+
+    Ok(())
+}
+
+/// Removes `accessions` with the annotations and node spans that belong to them.
+fn delete_accessions(conn: &GraphConnection, accessions: &[Accession]) -> PyResult<()> {
+    let accession_ids = accessions
+        .iter()
+        .map(|accession| accession.id)
+        .collect::<Vec<_>>();
+    for accession_id in &accession_ids {
+        let annotation_ids = Annotation::select(conn)
+            .accession_id(*accession_id)
+            .load()
+            .map_err(|error| read_error(&error))?
+            .into_iter()
+            .map(|annotation| annotation.id)
+            .collect::<Vec<_>>();
+        Annotation::select(conn)
+            .delete_by_ids(annotation_ids)
+            .map_err(|error| write_error(&error))?;
+        let node_ids = Accession::get_nodes_by_id(conn, accession_id, None)
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        AccessionNode::select(conn)
+            .delete_by_ids(node_ids)
+            .map_err(|error| write_error(&error))?;
+    }
+    Accession::select(conn)
+        .delete_by_ids(accession_ids)
+        .map_err(|error| write_error(&error))?;
+    Ok(())
+}
+
+/// Folds the sequence graph `other` into `block_group`, so a connection can join two molecules of
+/// one sample. Its edges and annotations move over and the emptied graph is removed, leaving one
+/// sequence graph in which each molecule is a component that the connection then links. This is
+/// how a recombinase exchanges strands between two molecules without a second graph to track.
+/// Its paths are not moved. An annotation name already used here for different spans takes
+/// primes, unless `strict` reports it.
+fn absorb_graph(
+    conn: &GraphConnection,
+    block_group: &BlockGroup,
+    other: &PySequenceGraph,
+    strict: bool,
+) -> PyResult<()> {
+    let absorbed = match BlockGroup::get_by_id(conn, &other.id, None) {
+        Ok(absorbed) => absorbed,
+        // An earlier connection already folded this graph in, and its positions now resolve here.
+        Err(BlockGroupError::QueryError(QueryError::ResultsNotFound(_))) => return Ok(()),
+        Err(error) => return Err(block_group_err_to_pyerr(error)),
+    };
+    if absorbed.collection_name != block_group.collection_name
+        || absorbed.sample_name != block_group.sample_name
+    {
+        return Err(PyValueError::new_err(format!(
+            "connect() joins sequence graphs of one sample, but '{}' is in sample '{}' and '{}' is in sample '{}'",
+            block_group.name, block_group.sample_name, absorbed.name, absorbed.sample_name
+        )));
+    }
+    move_annotations(conn, &absorbed, block_group, strict)?;
+
+    // Both molecules keep sharing the graph's start and end. Chromatid indices stop meaning
+    // anything across molecules, so each live edge on one moves as indeterminate: pruning would
+    // otherwise keep only the newest start edge per chromatid and drop a molecule. Retired edit
+    // sites stay retired.
+    // A circular molecule's marker from the end to the start, and the edges that read it linearly
+    // from the start to its first node and from its last node to the end, are left behind too: the
+    // marker flags a whole graph as circular, and the linear reading is not a state a molecule
+    // can be in once it exchanges strands. Its own loop edge still makes it circular.
+    let rows = BlockGroupEdge::edges_for_block_group(conn, &absorbed.id, None);
+    let closes_circle = |row: &AugmentedEdge| {
+        is_end_node(row.edge.source_node_id) && is_start_node(row.edge.target_node_id)
+    };
+    let circular = rows.iter().any(closes_circle);
+    let moved = rows
+        .iter()
+        .filter(|row| {
+            !closes_circle(row)
+                && !(circular
+                    && (is_start_node(row.edge.source_node_id)
+                        || is_end_node(row.edge.target_node_id)))
+        })
+        .map(|row| {
+            let chromosome_index = if row.chromosome_index >= 0 {
+                INDETERMINATE_CHROMOSOME_INDEX
+            } else {
+                row.chromosome_index
+            };
+            BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: row.edge.id,
+                chromosome_index,
+                phased: row.phased,
+            }
+        })
+        .collect::<Vec<_>>();
+    BlockGroupEdge::bulk_create(conn, &moved);
+    // Paths read the absorbed graph's own start and end, which no longer exist as one linear
+    // reading once the molecules exchange strands, so they are dropped with the graph.
+    let paths = Path::select(conn)
+        .block_group_id(absorbed.id)
+        .load()
+        .map_err(|error| PyRuntimeError::new_err(format!("failed to read paths: {error}")))?;
+    for path in &paths {
+        Path::delete(conn, &path.name, &absorbed.id);
+    }
+    BlockGroupEdge::bulk_delete(
+        conn,
+        &rows
+            .iter()
+            .map(|row| row_data(&absorbed.id, row))
+            .collect::<Vec<_>>(),
+    );
+    BlockGroup::select(conn)
+        .delete_by_ids([absorbed.id])
+        .map_err(|error| PyRuntimeError::new_err(format!("failed to remove graph: {error}")))?;
+    Ok(())
+}
+
+/// One new edge of a connection: the junction it leaves, the junction it arrives at, the ports it
+/// is stored on, and whether it restores the continuity it would otherwise retire.
+struct Crossing<'a> {
+    leaving: &'a Junction,
+    arriving: &'a Junction,
+    source: Port,
+    target: Port,
+    restores: bool,
+}
+
+/// The original continuity a new edge replaces: the ports inside a node where it is split, and the
+/// stored edges that left the first point or arrived at the second. Inside a node the continuity
+/// is the sequence itself, so it is only ever replaced by cutting the node at the port.
+fn continuity_at(
+    graph: &GenGraph,
+    stored: &[AugmentedEdge],
+    crossing: &Crossing<'_>,
+) -> (BTreeSet<Port>, HashSet<HashId>) {
+    let Crossing {
+        leaving,
+        arriving,
+        source,
+        target,
+        restores,
+    } = *crossing;
+    let mut split_ports = BTreeSet::new();
+    let mut retired_edges = HashSet::new();
+    for junction in [leaving, arriving] {
+        let bounds = node_bounds(graph, junction.node_id);
+        let port = Port {
+            node_id: junction.node_id,
+            coordinate: junction.boundary,
+        };
+        let first = bounds.first().copied().unwrap_or(junction.boundary);
+        let last = bounds.last().copied().unwrap_or(junction.boundary);
+        if first < junction.boundary && junction.boundary < last {
+            if !restores {
+                split_ports.insert(port);
+            }
+            continue;
+        }
+        // At the start or end of a node the original continuity is a stored edge.
+        for row in stored.iter().filter(|row| {
+            row.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                && row.edge.source_strand == Strand::Forward
+                && row.edge.target_strand == Strand::Forward
+        }) {
+            let leaves_end = junction.boundary == last && Port::source(&row.edge) == port;
+            let arrives_at_start = junction.boundary == first && Port::target(&row.edge) == port;
+            if leaves_end || arrives_at_start {
+                retired_edges.insert(row.edge.id);
+            }
+        }
+    }
+    // Edges that left the same point or arrived at the same point are superseded too.
+    for row in stored.iter().filter(|row| {
+        row.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+    }) {
+        let leaves_source =
+            Port::source(&row.edge) == source && row.edge.source_strand == leaving.strand;
+        let arrives_at_target =
+            Port::target(&row.edge) == target && row.edge.target_strand == arriving.strand;
+        if leaves_source || arrives_at_target {
+            retired_edges.insert(row.edge.id);
+        }
+    }
+    (split_ports, retired_edges)
+}
+
+/// Writes one raw edge from after `after` to before `before`, each read on its own strand, as one
+/// operation. This is the primitive for rearrangements that reconnect existing sequence, such as
+/// the strand exchanges of a recombinase, without writing any new sequence.
+///
+/// Unless stacked, the original continuity at both points is retired: a node split at a point is
+/// cut there by a retired marker edge, and the stored edges that left the first point or arrived
+/// at the second are retired. A point whose far side is the sequence the edge joins to is a
+/// restoration of the original continuity, which writes the marker edge live.
+pub(crate) fn connect_positions(
+    sequence_graph: &PySequenceGraph,
+    joined: &[PySequenceGraph],
+    after: &Position,
+    before: &Position,
+    message: Option<&str>,
+    mode: EditMode,
+    strict: bool,
+) -> PyResult<()> {
+    let EditMode { stack } = mode;
+    let context = sequence_graph.require_context("connect")?;
+    run_context_operation_write(
+        context,
+        |context| {
+            let conn = context.graph().conn();
+            let block_group = BlockGroup::get_by_id(conn, &sequence_graph.id, None)
+                .map_err(block_group_err_to_pyerr)?;
+            for other in joined {
+                absorb_graph(conn, &block_group, other, strict)?;
+            }
+            let graph = unpruned_graph(context, &block_group.id)?;
+            let source_block = require_blocks(&graph, &[*after, *before])?[0];
+            let leaving = Junction::following(after);
+            let arriving = Junction::preceding(before);
+
+            let bounds_at = |junction: &Junction| {
+                let mut bounds = node_bounds(&graph, junction.node_id);
+                for other in [&leaving, &arriving] {
+                    if other.node_id == junction.node_id {
+                        bounds.insert(other.boundary);
+                    }
+                }
+                bounds
+            };
+            let source = leaving.stored_port(true, &bounds_at(&leaving))?;
+            let target = arriving.stored_port(false, &bounds_at(&arriving))?;
+            let edge = EdgeData {
+                source_node_id: source.node_id,
+                source_coordinate: source.coordinate,
+                source_strand: leaving.strand,
+                target_node_id: target.node_id,
+                target_coordinate: target.coordinate,
+                target_strand: arriving.strand,
+            };
+            let restores = source == target
+                && leaving.strand == Strand::Forward
+                && arriving.strand == Strand::Forward;
+
+            let stored = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
+            let (split_ports, mut retired_edges) = continuity_at(
+                &graph,
+                &stored,
+                &Crossing {
+                    leaving: &leaving,
+                    arriving: &arriving,
+                    source,
+                    target,
+                    restores,
+                },
+            );
+            retired_edges.remove(&edge.id_hash());
+            if stack {
+                retired_edges.clear();
+            }
+
+            let plan = EditPlan {
+                lefts: vec![],
+                rights: vec![],
+                entry_rows: vec![],
+                exit_rows: vec![],
+                skip_rows: Rows::new(),
+                retired_edges,
+                dissolved: None,
+                cut_ports: if stack {
+                    BTreeSet::new()
+                } else {
+                    split_ports.clone()
+                },
+                split_ports,
+                connections: vec![(edge, routed_rows(&graph, source_block, Incoming))],
+                purge_markers: false,
+                stack,
+            };
+            write_edit(conn, &block_group.id, &plan, None)?;
+
+            let summary = edit_summary(message, || {
+                let absorbed = joined
+                    .iter()
+                    .map(|other| format!(" (joining '{}')", other.name))
+                    .collect::<String>();
+                format!(
+                    "{}: connect {} -> {} in sample '{}'{absorbed}",
+                    block_group.name,
+                    leaving.describe(&source),
+                    arriving.describe(&target),
+                    block_group.sample_name
+                )
+            });
+            Ok(((), summary))
+        },
+        edit_error,
+    )
+}
+
+/// Whether the sequence graph is a circle, which is marked by an edge from its end back to its
+/// start.
+fn is_circular(conn: &GraphConnection, block_group_id: &HashId) -> bool {
+    BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+        .iter()
+        .any(|row| {
+            row.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                && is_end_node(row.edge.source_node_id)
+                && is_start_node(row.edge.target_node_id)
+        })
+}
+
+/// Where a graph's own start edges arrive, which says which molecule a product continues.
+fn start_ports(conn: &GraphConnection, block_group_id: &HashId) -> HashSet<Port> {
+    BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+        .iter()
+        .filter(|row| {
+            row.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+                && is_start_node(row.edge.source_node_id)
+        })
+        .map(|row| Port::target(&row.edge))
+        .collect()
+}
+
+/// The graphs a final exchange started from, so each product keeps the name of the molecule whose
+/// start it continues.
+struct Origins {
+    host_starts: HashSet<Port>,
+    other: Option<(BlockGroup, HashSet<Port>)>,
+}
+
+fn find_root(parents: &mut [usize], index: usize) -> usize {
+    let mut root = index;
+    while parents[root] != root {
+        root = parents[root];
+    }
+    let mut current = index;
+    while parents[current] != root {
+        let next = parents[current];
+        parents[current] = root;
+        current = next;
+    }
+    root
+}
+
+/// Gives every molecule that lost its start and end a symbolic reading frame. An excised circle
+/// has neither, so paths and coordinates would have nothing to count from. The start arrives at the
+/// recombination site the molecule's new edge arrives at, and the end leaves from where that edge
+/// leaves, so the new edge still closes the loop and the linear reading starts at the site.
+fn add_terminals(
+    conn: &GraphConnection,
+    rows: &[AugmentedEdge],
+    destinations: &HashMap<usize, BlockGroup>,
+    connections: &[EdgeData],
+    mut molecule_of: impl FnMut(&AugmentedEdge) -> usize,
+) {
+    let live = rows
+        .iter()
+        .filter(|row| row.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+        .map(|row| (molecule_of(row), row))
+        .collect::<Vec<_>>();
+    let connection_ids = connections
+        .iter()
+        .map(|edge| edge.id_hash())
+        .collect::<HashSet<_>>();
+    for (root, destination) in destinations {
+        let own = live.iter().filter(|(owner, _)| owner == root);
+        if own.clone().any(|(_, row)| is_start_node(row.edge.source_node_id)) {
+            continue;
+        }
+        let Some((_, closing)) = own
+            .clone()
+            .find(|(_, row)| connection_ids.contains(&row.edge.id))
+        else {
+            continue;
+        };
+        let edge = &closing.edge;
+        let start = EdgeData {
+            source_node_id: PATH_START_NODE_ID,
+            source_coordinate: 0,
+            source_strand: Strand::Forward,
+            target_node_id: edge.target_node_id,
+            target_coordinate: edge.target_coordinate,
+            target_strand: edge.target_strand,
+        };
+        let end = EdgeData {
+            source_node_id: edge.source_node_id,
+            source_coordinate: edge.source_coordinate,
+            source_strand: edge.source_strand,
+            target_node_id: PATH_END_NODE_ID,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        let created = Edge::bulk_create(conn, &[start, end])
+            .into_iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id: destination.id,
+                edge_id,
+                chromosome_index: INDETERMINATE_CHROMOSOME_INDEX,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &created);
+    }
+}
+
+/// Gives each molecule left in `block_group` its own sequence graph. After a final exchange two
+/// linear molecules are two molecules, and an excision leaves a line and a circle, while an
+/// inversion or an integration leaves one. The molecules are the connected parts of the graph the
+/// builder makes from the edges that were there before the exchange, joined by the exchange's new
+/// edges, so what stays together is decided by the same blocks and junctions that read the graph.
+///
+/// The piece continuing the host's start keeps the host, the piece continuing the absorbed graph's
+/// start gets that graph's name back, and any other piece, such as an excised circle, is named
+/// after the host with a number. Edges and annotations follow their molecule; an annotation that
+/// spans a breakpoint is kept by every molecule it touches, as an incomplete locus. Paths read
+/// edges now spread over several graphs, so they are dropped.
+fn split_molecules(
+    context: &DbContext,
+    block_group: &BlockGroup,
+    origins: &Origins,
+    new_edges: &[EdgeData],
+) -> PyResult<Vec<BlockGroup>> {
+    let conn = context.graph().conn();
+    let rows = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
+    // The builder says what stays together: blocks are carved at every edge, the new ones
+    // included, but the graph is built from the edges that were already there, so the pieces are
+    // its connected parts. The new edges then only bridge pieces, and joining pieces by them
+    // gives the molecules. Building with the new edges would add the junctions that re-create the
+    // parental routes.
+    let live = rows
+        .iter()
+        .filter(|row| row.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+        .cloned()
+        .collect::<Vec<_>>();
+    let new_ids = new_edges
+        .iter()
+        .map(EdgeData::id_hash)
+        .collect::<HashSet<_>>();
+    let blocks = Edge::blocks_from_edges(conn, context.workspace(), &block_group.id, &live, None)
+        .map_err(|error| PyRuntimeError::new_err(format!("failed to carve blocks: {error}")))?;
+    let earlier = live
+        .iter()
+        .filter(|row| !new_ids.contains(&row.edge.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (graph, _) = Edge::build_graph(&earlier, &blocks);
+    let indices = graph
+        .nodes()
+        .enumerate()
+        .map(|(index, node)| (node, index))
+        .collect::<HashMap<_, _>>();
+    let mut parents = (0..indices.len()).collect::<Vec<_>>();
+    let mut linked = HashSet::<usize>::new();
+    let mut anchors = HashMap::<HashId, GraphNode>::new();
+    for (source, target, weights) in graph.all_edges() {
+        linked.extend(
+            [indices.get(&source), indices.get(&target)]
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
+        for weight in weights {
+            anchors.insert(
+                weight.edge_id,
+                if is_terminal(source.node_id) {
+                    target
+                } else {
+                    source
+                },
+            );
+        }
+        if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
+            let (source_root, target_root) = (
+                find_root(&mut parents, indices[&source]),
+                find_root(&mut parents, indices[&target]),
+            );
+            parents[source_root] = target_root;
+        }
+    }
+    let block_at = |node_id: HashId, coordinate: i64, ending: bool| {
+        blocks
+            .iter()
+            .filter(|block| {
+                block.node_id == node_id
+                    && if ending {
+                        block.end == coordinate
+                    } else {
+                        block.start == coordinate
+                    }
+            })
+            .max_by_key(|block| block.end - block.start)
+            .map(|block| GraphNode {
+                node_id: block.node_id,
+                sequence_start: block.start,
+                sequence_end: block.end,
+            })
+    };
+    for edge in new_edges {
+        let ends = (
+            block_at(edge.source_node_id, edge.source_coordinate, true),
+            block_at(edge.target_node_id, edge.target_coordinate, false),
+        );
+        if let (Some(source), Some(target)) = ends {
+            let (source_root, target_root) = (
+                find_root(&mut parents, indices[&source]),
+                find_root(&mut parents, indices[&target]),
+            );
+            parents[source_root] = target_root;
+            linked.extend([indices[&source], indices[&target]]);
+            anchors.insert(edge.id_hash(), source);
+        }
+    }
+    let mut molecules = BTreeMap::<usize, Vec<GraphNode>>::new();
+    for (node, index) in &indices {
+        if !is_terminal(node.node_id) {
+            molecules
+                .entry(find_root(&mut parents, *index))
+                .or_default()
+                .push(*node);
+        }
+    }
+    // A stretch no stored edge reaches, such as what a deletion skipped, is not a molecule.
+    molecules.retain(|_, nodes| {
+        nodes
+            .iter()
+            .any(|node| !is_routing_block(*node) && linked.contains(&indices[node]))
+    });
+    if molecules.len() <= 1 {
+        return Ok(vec![block_group.clone()]);
+    }
+    let owners = anchors
+        .iter()
+        .map(|(edge_id, node)| (*edge_id, find_root(&mut parents, indices[node])))
+        .collect::<HashMap<_, _>>();
+    let starting = |port: &Port| {
+        indices
+            .iter()
+            .filter(|(node, _)| node.node_id == port.node_id && node.sequence_start == port.coordinate)
+            .map(|(_, index)| *index)
+            .collect::<Vec<_>>()
+    };
+
+    let root_of = |parents: &mut Vec<usize>, ports: &HashSet<Port>| {
+        ports
+            .iter()
+            .flat_map(&starting)
+            .map(|index| find_root(parents, index))
+            .filter(|root| molecules.contains_key(root))
+            .min()
+    };
+    let host_root = root_of(&mut parents, &origins.host_starts)
+        .or_else(|| molecules.keys().next().copied())
+        .expect("should have a molecule");
+    let other_root = origins
+        .other
+        .as_ref()
+        .and_then(|(_, starts)| root_of(&mut parents, starts))
+        .filter(|root| *root != host_root);
+    let mut destinations = HashMap::from([(host_root, block_group.clone())]);
+    let mut extra = 2;
+    for root in molecules.keys().filter(|root| **root != host_root) {
+        let (name, parent, is_default) = match &origins.other {
+            Some((other, _)) if other_root == Some(*root) => (
+                other.name.clone(),
+                other.parent_block_group_id,
+                other.is_default,
+            ),
+            _ => {
+                extra += 1;
+                (
+                    format!("{}-{}", block_group.name, extra - 1),
+                    block_group.parent_block_group_id,
+                    false,
+                )
+            }
+        };
+        let created = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: &block_group.collection_name,
+                sample_name: &block_group.sample_name,
+                name: &name,
+                parent_block_group_id: parent.as_ref(),
+                is_default,
+            },
+        )
+        .map_err(block_group_err_to_pyerr)?;
+        destinations.insert(*root, created);
+    }
+
+    let mut moved = BTreeMap::<HashId, Vec<&AugmentedEdge>>::new();
+    for row in &rows {
+        let root = owners.get(&row.edge.id).copied().unwrap_or(host_root);
+        let destination = &destinations[&root];
+        if destination.id != block_group.id {
+            moved.entry(destination.id).or_default().push(row);
+        }
+    }
+    for (destination, moving) in &moved {
+        BlockGroupEdge::bulk_delete(
+            conn,
+            &moving
+                .iter()
+                .map(|row| row_data(&block_group.id, row))
+                .collect::<Vec<_>>(),
+        );
+        BlockGroupEdge::bulk_create(
+            conn,
+            &moving
+                .iter()
+                .map(|row| row_data(destination, row))
+                .collect::<Vec<_>>(),
+        );
+    }
+    add_terminals(conn, &rows, &destinations, new_edges, |row| {
+        owners.get(&row.edge.id).copied().unwrap_or(host_root)
+    });
+    let paths = Path::select(conn)
+        .block_group_id(block_group.id)
+        .load()
+        .map_err(|error| PyRuntimeError::new_err(format!("failed to read paths: {error}")))?;
+    for path in &paths {
+        Path::delete(conn, &path.name, &block_group.id);
+    }
+
+    let accessions = Accession::select(conn)
+        .block_group_id(block_group.id)
+        .load()
+        .map_err(|error| read_error(&error))?;
+    let root_accession = |accession: &Accession| {
+        let mut current = accession;
+        while let Some(parent) = current.parent_accession_id {
+            match accessions.iter().find(|other| other.id == parent) {
+                Some(found) => current = found,
+                None => break,
+            }
+        }
+        current.id
+    };
+    let touches = |accession_id: &HashId, segments: &[GraphNode]| {
+        Accession::get_nodes_by_id(conn, accession_id, None)
+            .iter()
+            .any(|node| {
+                segments.iter().any(|segment| {
+                    segment.node_id == node.node_id
+                        && node.sequence_start < segment.sequence_end
+                        && segment.sequence_start < node.sequence_end
+                })
+            })
+    };
+    let touching = |roots: &HashSet<HashId>, segments: &[GraphNode]| {
+        roots
+            .iter()
+            .copied()
+            .filter(|root| touches(root, segments))
+            .collect::<HashSet<_>>()
+    };
+    let roots = accessions
+        .iter()
+        .map(&root_accession)
+        .collect::<HashSet<_>>();
+    let mut hosted = HashSet::new();
+    for (root, destination) in &destinations {
+        let kept = touching(&roots, &molecules[root]);
+        if destination.id == block_group.id {
+            hosted = kept;
+            continue;
+        }
+        let tree = accessions
+            .iter()
+            .filter(|accession| kept.contains(&root_accession(accession)))
+            .cloned()
+            .collect::<Vec<_>>();
+        copy_annotations(conn, &block_group.name, &tree, destination, false)?;
+    }
+    // A tree with no span at all has no molecule to follow, so the host keeps it.
+    let unspanned = roots
+        .iter()
+        .filter(|root| Accession::get_nodes_by_id(conn, root, None).is_empty())
+        .copied();
+    hosted.extend(unspanned);
+    let dropped = accessions
+        .iter()
+        .filter(|accession| !hosted.contains(&root_accession(accession)))
+        .cloned()
+        .collect::<Vec<_>>();
+    delete_accessions(conn, &dropped)?;
+
+    let mut products = molecules
+        .keys()
+        .map(|root| destinations[root].clone())
+        .collect::<Vec<_>>();
+    products.sort_by_key(|product| product.id != block_group.id);
+    Ok(products)
+}
+
+/// A cut across the sequence, named by the two nucleotides it falls between, read upstream to
+/// downstream. Whether the graph joins them is checked, not assumed: inside a node on one strand it
+/// always does, and elsewhere it takes an edge, which may cross strands. The graph has to join them: as neighbors within a node, or by an edge,
+/// which is what tells one variant's junction from another's. The cut is blunt, so the other strand
+/// is cut at the same place. A strand-specific overhang would name the second strand's cut
+/// separately, offset from this one, and the same two positions would still pin the junction.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Breakpoint {
+    pub upstream: Position,
+    pub downstream: Position,
+}
+
+impl Breakpoint {
+    /// The same cut on the opposite strand: the two nucleotides swap places and flip.
+    const fn reverse_complement(&self) -> Self {
+        Self {
+            upstream: complement(&self.downstream),
+            downstream: complement(&self.upstream),
+        }
+    }
+}
+
+/// The two breakpoints an exchange crosses at. The first is `A|B` and the second `C|D`, and the
+/// exchange joins `A` to `D` and `C` to `B`, which is the only pairing it makes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExchangeSites {
+    pub first: Breakpoint,
+    pub second: Breakpoint,
+}
+
+/// Whether `downstream` follows `upstream` in reading order: the next coordinate within a block,
+/// or the first position past an edge of the graph, which may run through routing blocks. An edge
+/// read on the other strand joins the same two positions, so it counts in either direction.
+fn is_adjacent(graph: &GenGraph, upstream: &Position, downstream: &Position) -> bool {
+    let (Some(from), Some(to)) = (upstream.block(graph), downstream.block(graph)) else {
+        return false;
+    };
+    let reverse = |position: &Position| position.strand == Strand::Reverse;
+    if from == to && upstream.strand == downstream.strand {
+        let step = if reverse(upstream) { -1 } else { 1 };
+        if downstream.coordinate == upstream.coordinate + step {
+            return true;
+        }
+    }
+    let leaves = if reverse(upstream) {
+        from.sequence_start
+    } else {
+        from.sequence_end - 1
+    };
+    let arrives = if reverse(downstream) {
+        to.sequence_end - 1
+    } else {
+        to.sequence_start
+    };
+    upstream.coordinate == leaves
+        && downstream.coordinate == arrives
+        && (joined(graph, from, to) || joined(graph, to, from))
+}
+
+/// Whether an edge leads from `from` to `to`, crossing only routing blocks on the way.
+fn joined(graph: &GenGraph, from: GraphNode, to: GraphNode) -> bool {
+    let mut pending = vec![from];
+    let mut seen = HashSet::from([from]);
+    while let Some(block) = pending.pop() {
+        for next in graph.neighbors_directed(block, Outgoing) {
+            if next == to {
+                return true;
+            }
+            if is_routing_block(next) && seen.insert(next) {
+                pending.push(next);
+            }
+        }
+    }
+    false
+}
+
+/// Exchanges the sequence across two breakpoints, as one operation. The first new edge leaves the
+/// downstream side of the `source` nucleotide, `A` in the context `A|C`, and arrives at the upstream
+/// side of the `target` nucleotide, `B` in the context `D|B`. The second joins `D` to `C`, so the
+/// two edges are the products of a recombinase crossing over: a strand exchange between two
+/// molecules, or between two points of one. Which strand each position is read on decides what the
+/// exchange does to the sequence between them: an inversion, an excision, or a crossover.
+///
+/// Unless stacked, the original continuity at both breakpoints is deleted from the graph, and no
+/// retired marker is left in its place, so the originals stay reachable only through history.
+/// Stacked, the originals stay as an alternative, so both the exchange and what it replaced read.
+/// A position attached to another sequence graph of the same sample folds that graph into this one
+/// first.
+///
+/// Every molecule the exchange leaves stays in this one graph, like the ones a stacked exchange
+/// keeps, unless `split` gives each its own graph. Without the split the retired continuity can
+/// still be drawn as history, and the call returns only this graph.
+pub(crate) fn exchange_positions(
+    sequence_graph: &PySequenceGraph,
+    other: Option<&PySequenceGraph>,
+    sites: &ExchangeSites,
+    message: Option<&str>,
+    mode: EditMode,
+    strict: bool,
+    split: bool,
+) -> PyResult<Vec<BlockGroup>> {
+    let EditMode { stack } = mode;
+    let context = sequence_graph.require_context("exchange")?;
+    run_context_operation_write(
+        context,
+        |context| {
+            let conn = context.graph().conn();
+            let block_group = BlockGroup::get_by_id(conn, &sequence_graph.id, None)
+                .map_err(block_group_err_to_pyerr)?;
+            let both_linear = !is_circular(conn, &block_group.id)
+                && other.is_none_or(|other| !is_circular(conn, &other.id));
+            let origins = Origins {
+                host_starts: start_ports(conn, &block_group.id),
+                other: other.and_then(|other| {
+                    BlockGroup::get_by_id(conn, &other.id, None)
+                        .ok()
+                        .map(|group| (group, start_ports(conn, &other.id)))
+                }),
+            };
+            if let Some(other) = other {
+                absorb_graph(conn, &block_group, other, strict)?;
+            }
+            let graph = unpruned_graph(context, &block_group.id)?;
+            // Written entirely on the reverse strand, the exchange is the same as its mirror on
+            // the forward strand, `(rc D, rc C)` and `(rc B, rc A)`, and only that spelling is
+            // one a read from the start of the molecule can follow.
+            let mirrored = ExchangeSites {
+                first: sites.second.reverse_complement(),
+                second: sites.first.reverse_complement(),
+            };
+            let sites = if sites.first.upstream.strand == Strand::Reverse
+                && sites.second.downstream.strand == Strand::Reverse
+            {
+                &mirrored
+            } else {
+                sites
+            };
+            let (first, second) = (&sites.first, &sites.second);
+            // Inverted sites in two linear molecules would join one arm to the other's reverse
+            // complement. One product would then run from the end of a molecule backwards and
+            // so have no start, and the other no end, and the graph has nowhere to put them.
+            if other.is_some()
+                && both_linear
+                && first.upstream.strand != second.downstream.strand
+            {
+                return Err(PyValueError::new_err(
+                    "exchange of inverted sites between two linear molecules is not supported: \
+                     one product would have no start and the other no end",
+                ));
+            }
+            require_blocks(
+                &graph,
+                &[
+                    first.upstream,
+                    first.downstream,
+                    second.upstream,
+                    second.downstream,
+                ],
+            )?;
+            for breakpoint in [first, second] {
+                if !is_adjacent(&graph, &breakpoint.upstream, &breakpoint.downstream) {
+                    return Err(PyValueError::new_err(format!(
+                        "exchange needs {} to follow {} in this graph, but they are not joined",
+                        breakpoint.downstream.describe(),
+                        breakpoint.upstream.describe()
+                    )));
+                }
+            }
+            // The breakpoints are `A|B` and `C|D`, joined as `A` to `D` and `C` to `B`. Below, `A`
+            // is the source and `D` the target of the first edge, and `B` and `C` are the
+            // successor and predecessor that the second edge joins.
+            let (source, target) = (&first.upstream, &second.downstream);
+            let (successor, predecessor) = (first.downstream, second.upstream);
+            // The second edge joins `C` to `B`, which the read reaches as it is written unless
+            // the two breakpoints lie on different strands of one molecule, as in an inversion.
+            // There the read continues from `D` along its strand to the mirror of `B`, so the
+            // second edge is the same junction written as the mirror of `B` into the mirror of
+            // `C`. Between molecules, or around a circle, it is read as written.
+            let mirror = source.strand != target.strand
+                && (reaches_oriented(&graph, &successor, &complement(&predecessor))
+                    || reaches_oriented(&graph, &complement(&predecessor), &successor));
+            let reciprocal = if mirror {
+                (complement(&successor), complement(&predecessor))
+            } else {
+                (predecessor, successor)
+            };
+            let joins = [(*source, *target), reciprocal];
+            let junctions = joins
+                .iter()
+                .map(|(from, to)| (Junction::following(from), Junction::preceding(to)))
+                .collect::<Vec<_>>();
+            let bounds_at = |junction: &Junction| {
+                let mut bounds = node_bounds(&graph, junction.node_id);
+                for (from, to) in &junctions {
+                    for other in [from, to] {
+                        if other.node_id == junction.node_id {
+                            bounds.insert(other.boundary);
+                        }
+                    }
+                }
+                bounds
+            };
+            let crossings = junctions
+                .iter()
+                .map(|(from, to)| {
+                    Ok(Crossing {
+                        leaving: from,
+                        arriving: to,
+                        source: from.stored_port(true, &bounds_at(from))?,
+                        target: to.stored_port(false, &bounds_at(to))?,
+                        restores: false,
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let edges = crossings
+                .iter()
+                .map(|crossing| EdgeData {
+                    source_node_id: crossing.source.node_id,
+                    source_coordinate: crossing.source.coordinate,
+                    source_strand: crossing.leaving.strand,
+                    target_node_id: crossing.target.node_id,
+                    target_coordinate: crossing.target.coordinate,
+                    target_strand: crossing.arriving.strand,
+                })
+                .collect::<Vec<_>>();
+
+            let stored = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
+            let mut split_ports = BTreeSet::new();
+            let mut retired_edges = HashSet::new();
+            for crossing in &crossings {
+                let (ports, retired) = continuity_at(&graph, &stored, crossing);
+                split_ports.extend(ports);
+                retired_edges.extend(retired);
+            }
+            // A split gives each molecule a graph of its own, so the sequence is cut at each split
+            // port by the edges that now leave and arrive there, and a marker that kept it
+            // continuous is deleted rather than retired. Without one, the molecules share this
+            // graph and the retired continuity stays in it as history, as `connect` leaves it.
+            let cut_ports = if stack {
+                retired_edges.clear();
+                BTreeSet::new()
+            } else if split {
+                retired_edges.extend(split_ports.iter().map(|port| port.edge_to(*port).id_hash()));
+                split_ports.clear();
+                BTreeSet::new()
+            } else {
+                split_ports.clone()
+            };
+            for edge in &edges {
+                retired_edges.remove(&edge.id_hash());
+            }
+
+            let plan = EditPlan {
+                lefts: vec![],
+                rights: vec![],
+                entry_rows: vec![],
+                exit_rows: vec![],
+                skip_rows: Rows::new(),
+                retired_edges,
+                dissolved: None,
+                cut_ports,
+                split_ports,
+                connections: edges
+                    .iter()
+                    .map(|edge| (*edge, Rows::from([INDETERMINATE_CHROMOSOME_INDEX])))
+                    .collect(),
+                purge_markers: split,
+                stack,
+            };
+            write_edit(conn, &block_group.id, &plan, None)?;
+            let products = if stack || !split {
+                vec![block_group.clone()]
+            } else {
+                split_molecules(context, &block_group, &origins, &edges)?
+            };
+
+            let summary = edit_summary(message, || {
+                let joined = other
+                    .map(|other| format!(" (joining '{}')", other.name))
+                    .unwrap_or_default();
+                format!(
+                    "{}: exchange {} -> {} in sample '{}'{joined}",
+                    block_group.name,
+                    crossings[0].leaving.describe(&crossings[0].source),
+                    crossings[0].arriving.describe(&crossings[0].target),
+                    block_group.sample_name
+                )
+            });
+            Ok((products, summary))
+        },
+        edit_error,
+    )
+}
+
+/// The same base read on the opposite strand.
+const fn complement(position: &Position) -> Position {
+    Position {
+        strand: match position.strand {
+            Strand::Forward => Strand::Reverse,
+            Strand::Reverse => Strand::Forward,
+            other => other,
+        },
+        ..*position
+    }
+}
+
+/// Marks a cut in the node at the point just after (or just before) `position`, as one operation.
+///
+/// A cut is a block boundary that a later join can attach to, such as the end a restriction enzyme
+/// leaves. It does not break the graph: the sequence stays continuous across it, so the graph is
+/// still a supergraph of the molecules before and after the cut. A retired marker edge records the
+/// cut, and a live one beside it keeps the sequence continuous if another edit splits the node at
+/// the same point. A cut is read on the top strand and taken as blunt on both strands, so the
+/// staggered ends of an overhang are not yet separate edges.
+pub(crate) fn cut_position(
+    sequence_graph: &PySequenceGraph,
+    position: &Position,
+    after: bool,
+    message: Option<&str>,
+) -> PyResult<()> {
+    let context = sequence_graph.require_context("cut")?;
+    run_context_operation_write(
+        context,
+        |context| {
+            let conn = context.graph().conn();
+            let block_group = BlockGroup::get_by_id(conn, &sequence_graph.id, None)
+                .map_err(block_group_err_to_pyerr)?;
+            let graph = unpruned_graph(context, &block_group.id)?;
+            require_blocks(&graph, &[*position])?;
+            let junction = if after {
+                Junction::following(position)
+            } else {
+                Junction::preceding(position)
+            };
+            let bounds = node_bounds(&graph, junction.node_id);
+            let first = bounds.first().copied().unwrap_or(junction.boundary);
+            let last = bounds.last().copied().unwrap_or(junction.boundary);
+            if junction.boundary <= first || last <= junction.boundary {
+                return Err(PyValueError::new_err(format!(
+                    "cut needs a point inside a node, but {} is at the end of one",
+                    describe_point(&Port {
+                        node_id: junction.node_id,
+                        coordinate: junction.boundary,
+                    }),
+                )));
+            }
+
+            let port = Port {
+                node_id: junction.node_id,
+                coordinate: junction.boundary,
+            };
+            let marker = port.edge_to(port);
+            let existing = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+                .into_iter()
+                .filter(|row| row.edge.id == marker.id_hash())
+                .collect::<Vec<_>>();
+            let cut_before = existing
+                .iter()
+                .any(|row| row.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX);
+            if cut_before {
+                return Err(PyValueError::new_err(format!(
+                    "{} is already cut",
+                    describe_point(&port)
+                )));
+            }
+            let row = |chromosome_index| BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: marker.id_hash(),
+                chromosome_index,
+                phased: 0,
+            };
+            let mut created = vec![row(PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)];
+            if existing.is_empty() {
+                created.push(row(0));
+            }
+            Edge::bulk_create(conn, &[marker]);
+            BlockGroupEdge::bulk_create(conn, &created);
+
+            let summary = edit_summary(message, || {
+                format!(
+                    "{}: cut at {} in sample '{}'",
+                    block_group.name,
+                    describe_point(&port),
+                    block_group.sample_name
+                )
+            });
+            Ok(((), summary))
+        },
+        edit_error,
+    )
+}
+
 /// What an edit writes: the anchors its new edges leave from and arrive at, the chromosomes those
 /// edges inherit, and the stored connections it supersedes.
 struct EditPlan {
@@ -257,6 +1628,12 @@ struct EditPlan {
     /// The split ports where the sequence is cut, so the routes the edit replaces end there. At
     /// the others the original sequence stays continuous.
     cut_ports: BTreeSet<Port>,
+    /// Raw edges written as given, with the rows each is recorded under, for a connection or an
+    /// exchange.
+    connections: Vec<(EdgeData, Rows)>,
+    /// Whether a retired marker edge is deleted outright. Otherwise it keeps a row on the index
+    /// that marks it retired, so a cut stays recorded where an edit replaced the sequence at it.
+    purge_markers: bool,
     stack: bool,
 }
 
@@ -276,6 +1653,13 @@ impl EditPlan {
                 rows.clone()
             }
         };
+        if !self.connections.is_empty() {
+            return self
+                .connections
+                .iter()
+                .map(|(edge, rows)| (*edge, inherited(rows)))
+                .collect();
+        }
         let Some((node_id, length)) = allele else {
             let skip_rows = inherited(&self.skip_rows);
             return self
@@ -426,10 +1810,17 @@ fn write_edit(
         .filter(|existing_row| existing_row.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
         .map(|existing_row| existing_row.edge.id)
         .collect::<HashSet<_>>();
+    let purged = |data: &BlockGroupEdgeData| {
+        plan.purge_markers
+            && existing
+                .iter()
+                .any(|existing_row| existing_row.edge.id == data.edge_id && is_marker(existing_row))
+    };
     for data in &doomed {
         let kept = data.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
             || live_after.contains(&data.edge_id)
-            || retired_before.contains(&data.edge_id);
+            || retired_before.contains(&data.edge_id)
+            || purged(data);
         if !kept {
             created.insert(BlockGroupEdgeData {
                 chromosome_index: PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
@@ -567,6 +1958,8 @@ fn insertion_plan(
         dissolved: None,
         split_ports,
         cut_ports,
+        connections: vec![],
+        purge_markers: false,
         stack,
     }
 }
@@ -912,6 +2305,8 @@ fn apply_edit(
                     .filter(|port| !is_terminal(port.node_id))
                     .collect(),
                 cut_ports: BTreeSet::new(),
+                connections: vec![],
+                purge_markers: false,
                 stack: request.mode.stack,
             };
             if !request.mode.stack {
@@ -1483,8 +2878,12 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use r#gen::test_helpers::{TestContext, setup_gen_on_disk};
-    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_core::{
+        HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand,
+        range::Range,
+    };
     use gen_models::{
+        accession::{Accession, AccessionSpan, NewAccession},
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
@@ -4032,6 +5431,549 @@ assert len(inserted) == 2
                 fixture.sequences(),
                 strings(&["ABCDWZEFGHXYMNOP", "ABCDWZIJKLXYMNOP"])
             );
+        }
+    }
+
+    mod connections {
+        use super::*;
+        use gen_core::{is_end_node, is_start_node};
+        use crate::python_api::{
+            editing::{Breakpoint, ExchangeSites, connect_positions, exchange_positions},
+            graph_read::unpruned_graph,
+            position::{Neighbor, neighbors},
+        };
+
+        /// The breakpoints of an exchange between two nucleotides, taking what lies across each
+        /// from a graph with no earlier event, where it is unique.
+        fn between(
+            source_in: &Fixture,
+            source: Position,
+            target_in: &Fixture,
+            target: Position,
+        ) -> ExchangeSites {
+            let across = |fixture: &Fixture, position: &Position, forward: bool| {
+                let graph = unpruned_graph(&fixture.context, &fixture.graph.id)
+                    .expect("should build the graph");
+                match neighbors(&graph, position, forward)
+                    .expect("should step from the position")
+                    .as_slice()
+                {
+                    [Neighbor::Position(neighbor)] => *neighbor,
+                    other => panic!("expected one neighbor, found {other:?}"),
+                }
+            };
+            ExchangeSites {
+                first: Breakpoint {
+                    upstream: source,
+                    downstream: across(source_in, &source, true),
+                },
+                second: Breakpoint {
+                    upstream: across(target_in, &target, false),
+                    downstream: target,
+                },
+            }
+        }
+
+        const MOLECULE: &str = "AAACCGTTT";
+
+        /// One node whose middle `CCG` lies between two cut points, as between two loxP sites.
+        fn molecule() -> Fixture {
+            fixture(&[(START, MOLECULE, 0), (MOLECULE, END, 0)], &[MOLECULE])
+        }
+
+        /// Two sites, each split in two nodes at the point a recombinase cuts, around `CAC` and
+        /// flanked by `AAA` and `TTT`.
+        fn sites() -> Fixture {
+            fixture(
+                &[
+                    (START, "AAA", 0),
+                    ("AAA", "GG", 0),
+                    ("GG", "CC", 0),
+                    ("CC", "CAC", 0),
+                    ("CAC", "GA", 0),
+                    ("GA", "TC", 0),
+                    ("TC", "TTT", 0),
+                    ("TTT", END, 0),
+                ],
+                &["AAA", "GG", "CC", "CAC", "GA", "TC", "TTT"],
+            )
+        }
+
+        impl Fixture {
+            fn connect(&self, after: Position, before: Position, stack: bool) {
+                Python::initialize();
+                connect_positions(
+                    &self.graph,
+                    &[],
+                    &after,
+                    &before,
+                    None,
+                    EditMode { stack },
+                    false,
+                )
+                .expect("should connect the positions");
+            }
+        }
+
+        impl Fixture {
+            fn exchange(&self, source: Position, target: Position, stack: bool) -> Vec<BlockGroup> {
+                Python::initialize();
+                exchange_positions(
+&self.graph,
+None,
+&between(self, source, self, target),
+None,
+EditMode { stack },
+false,
+true,
+)
+                .unwrap_or_else(|error| panic!("{}", error_message(error)))
+            }
+
+            fn sequences_of(&self, block_group: &BlockGroup) -> HashSet<String> {
+                BlockGroup::get_all_sequences(
+                    self.context.graph().conn(),
+                    self.context.workspace(),
+                    &block_group.id,
+                    true,
+                )
+                .expect("should read sequences")
+            }
+
+            fn retired_rows(&self) -> usize {
+                BlockGroupEdge::edges_for_block_group(
+                    self.context.graph().conn(),
+                    &self.graph.id,
+                    None,
+                )
+                .into_iter()
+                .filter(|row| row.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+                .count()
+            }
+        }
+
+        fn invert(fixture: &Fixture, stack: bool) {
+            fixture.connect(
+                fixture.position(MOLECULE, 2),
+                fixture.reverse_position(MOLECULE, 5),
+                stack,
+            );
+            fixture.connect(
+                fixture.reverse_position(MOLECULE, 3),
+                fixture.position(MOLECULE, 6),
+                stack,
+            );
+        }
+
+        fn excise(fixture: &Fixture) {
+            fixture.connect(fixture.position("GG", 1), fixture.position("TC", 0), false);
+            fixture.connect(fixture.position("GA", 1), fixture.position("CC", 0), false);
+        }
+
+        #[test]
+        fn test_connect_inverts_the_segment_between_two_points() {
+            let fixture = molecule();
+
+            invert(&fixture, false);
+
+            assert_eq!(fixture.sequences(), strings(&["AAACGGTTT"]));
+        }
+
+        #[test]
+        fn test_connect_back_to_the_original_neighbors_reverses_an_inversion() {
+            let fixture = molecule();
+            invert(&fixture, false);
+
+            fixture.connect(
+                fixture.position(MOLECULE, 2),
+                fixture.position(MOLECULE, 3),
+                false,
+            );
+            fixture.connect(
+                fixture.position(MOLECULE, 5),
+                fixture.position(MOLECULE, 6),
+                false,
+            );
+
+            assert_eq!(fixture.sequences(), strings(&[MOLECULE]));
+        }
+
+        #[test]
+        fn test_stacked_connect_keeps_the_original_route() {
+            let fixture = molecule();
+
+            invert(&fixture, true);
+            assert_eq!(fixture.sequences(), strings(&[MOLECULE, "AAACGGTTT"]));
+        }
+
+        #[test]
+        fn test_exchange_inverts_the_segment_between_two_points() {
+            let fixture = molecule();
+
+            fixture.exchange(
+                fixture.position(MOLECULE, 2),
+                fixture.reverse_position(MOLECULE, 5),
+                false,
+            );
+
+            assert_eq!(fixture.sequences(), strings(&["AAACGGTTT"]));
+        }
+
+        #[test]
+        fn test_exchange_inversion_written_from_the_reverse_strand_inverts_the_segment() {
+            let fixture = molecule();
+
+            fixture.exchange(
+                fixture.reverse_position(MOLECULE, 3),
+                fixture.position(MOLECULE, 6),
+                false,
+            );
+
+            assert_eq!(fixture.sequences(), strings(&["AAACGGTTT"]));
+        }
+
+        #[test]
+        fn test_exchange_inside_nodes_between_graphs_gives_both_recombinants() {
+            let fixture = fixture(&[(START, "AAAGG", 0), ("AAAGG", END, 0)], &["AAAGG"]);
+            let other = build_graph(
+                &fixture.context,
+                "chr2",
+                &[(START, "TTTCC", 0), ("TTTCC", END, 0)],
+                &["TTTCC"],
+            );
+            Python::initialize();
+
+            let products = exchange_positions(
+&fixture.graph,
+Some(&other.graph),
+&between(&fixture, fixture.position("AAAGG", 2), &other, other.position("TTTCC", 3)),
+None,
+EditMode { stack: false },
+false,
+true,
+)
+            .unwrap_or_else(|error| panic!("{}", error_message(error)));
+
+            assert_eq!(fixture.sequences_of(&products[0]), strings(&["AAACC"]));
+            assert_eq!(fixture.sequences_of(&products[1]), strings(&["TTTGG"]));
+            assert_eq!(fixture.retired_rows(), 0);
+        }
+
+        #[test]
+        fn test_exchange_excision_leaves_the_circle_in_its_own_graph() {
+            let fixture = sites();
+
+            let products =
+                fixture.exchange(fixture.position("GG", 1), fixture.position("TC", 0), false);
+
+            assert_eq!(products.len(), 2);
+            assert_eq!(products[0].name, "chr1");
+            assert_eq!(products[1].name, "chr1-2");
+            assert_eq!(fixture.sequences_of(&products[0]), strings(&["AAAGGTCTTT"]));
+        }
+
+        #[test]
+        fn test_exchange_gives_the_excised_circle_a_start_and_an_end() {
+            let fixture = sites();
+
+            let products =
+                fixture.exchange(fixture.position("GG", 1), fixture.position("TC", 0), false);
+
+            let rows = BlockGroupEdge::edges_for_block_group(
+                fixture.context.graph().conn(),
+                &products[1].id,
+                None,
+            );
+            let starts = rows
+                .iter()
+                .filter(|row| is_start_node(row.edge.source_node_id))
+                .count();
+            let ends = rows
+                .iter()
+                .filter(|row| is_end_node(row.edge.target_node_id))
+                .count();
+            assert_eq!((starts, ends), (1, 1));
+            assert!(!fixture.sequences_of(&products[1]).is_empty());
+        }
+
+        #[test]
+        fn test_exchange_inversion_leaves_one_graph() {
+            let fixture = molecule();
+
+            let products = fixture.exchange(
+                fixture.position(MOLECULE, 2),
+                fixture.reverse_position(MOLECULE, 5),
+                false,
+            );
+
+            assert_eq!(products.len(), 1);
+        }
+
+        #[test]
+        fn test_stacked_exchange_between_graphs_stays_one_graph() {
+            let fixture = fixture(
+                &[(START, "AAA", 0), ("AAA", "GG", 0), ("GG", END, 0)],
+                &["AAA", "GG"],
+            );
+            let other = build_graph(
+                &fixture.context,
+                "chr2",
+                &[(START, "TTT", 0), ("TTT", "CC", 0), ("CC", END, 0)],
+                &["TTT", "CC"],
+            );
+            Python::initialize();
+
+            let products = exchange_positions(
+&fixture.graph,
+Some(&other.graph),
+&between(&fixture, fixture.position("AAA", 2), &other, other.position("CC", 0)),
+None,
+EditMode { stack: true },
+false,
+true,
+)
+            .unwrap_or_else(|error| panic!("{}", error_message(error)));
+
+            assert_eq!(products.len(), 1);
+            assert_eq!(
+                fixture.sequences(),
+                strings(&["AAAGG", "AAACC", "TTTCC", "TTTGG"])
+            );
+        }
+
+        #[test]
+        fn test_annotations_follow_the_molecule_they_touch() {
+            let fixture = fixture(&[(START, "AAAGG", 0), ("AAAGG", END, 0)], &["AAAGG"]);
+            let other = build_graph(
+                &fixture.context,
+                "chr2",
+                &[(START, "TTTCC", 0), ("TTTCC", END, 0)],
+                &["TTTCC"],
+            );
+            let conn = fixture.context.graph().conn();
+            for (name, start, end) in [("left", 0, 2), ("spanning", 0, 5)] {
+                Accession::create(
+                    conn,
+                    &NewAccession {
+                        name: name.to_string(),
+                        block_group_id: fixture.graph.id,
+                        parent_accession_id: None,
+                        spans: vec![AccessionSpan {
+                            node_id: HashId::convert_str("AAAGG"),
+                            range: Range { start, end },
+                            strand: Strand::Forward,
+                        }],
+                    },
+                )
+                .expect("should create accession");
+            }
+            Python::initialize();
+
+            let products = exchange_positions(
+&fixture.graph,
+Some(&other.graph),
+&between(&fixture, fixture.position("AAAGG", 2), &other, other.position("TTTCC", 3)),
+None,
+EditMode { stack: false },
+false,
+true,
+)
+            .unwrap_or_else(|error| panic!("{}", error_message(error)));
+
+            let names = |block_group: &BlockGroup| {
+                let mut names = Accession::select(conn)
+                    .block_group_id(block_group.id)
+                    .load()
+                    .expect("should read accessions")
+                    .into_iter()
+                    .map(|accession| accession.name)
+                    .collect::<Vec<_>>();
+                names.sort();
+                names
+            };
+            assert_eq!(names(&products[0]), vec!["left", "spanning"]);
+            assert_eq!(names(&products[1]), vec!["spanning"]);
+        }
+
+        #[test]
+        fn test_exchange_excises_a_circle_in_the_same_graph() {
+            let fixture = sites();
+
+            fixture.exchange(fixture.position("GG", 1), fixture.position("TC", 0), false);
+
+            assert_eq!(fixture.sequences(), strings(&["AAAGGTCTTT"]));
+        }
+
+        #[test]
+        fn test_exchange_inside_a_node_leaves_no_retired_marker() {
+            let fixture = molecule();
+
+            fixture.exchange(
+                fixture.position(MOLECULE, 2),
+                fixture.reverse_position(MOLECULE, 5),
+                false,
+            );
+
+            assert_eq!(fixture.retired_rows(), 0);
+        }
+
+        #[test]
+        fn test_stacked_exchange_keeps_the_original_route() {
+            let fixture = molecule();
+
+            fixture.exchange(
+                fixture.position(MOLECULE, 2),
+                fixture.reverse_position(MOLECULE, 5),
+                true,
+            );
+
+            assert_eq!(fixture.sequences(), strings(&[MOLECULE, "AAACGGTTT"]));
+        }
+
+        #[test]
+        fn test_exchange_between_graphs_gives_both_recombinants() {
+            let fixture = fixture(
+                &[(START, "AAA", 0), ("AAA", "GG", 0), ("GG", END, 0)],
+                &["AAA", "GG"],
+            );
+            let other = build_graph(
+                &fixture.context,
+                "chr2",
+                &[(START, "TTT", 0), ("TTT", "CC", 0), ("CC", END, 0)],
+                &["TTT", "CC"],
+            );
+            Python::initialize();
+
+            let products = exchange_positions(
+&fixture.graph,
+Some(&other.graph),
+&between(&fixture, fixture.position("AAA", 2), &other, other.position("CC", 0)),
+None,
+EditMode { stack: false },
+false,
+true,
+)
+            .unwrap_or_else(|error| panic!("{}", error_message(error)));
+
+            // Each recombinant is its own graph, and the second one is the absorbed graph again.
+            assert_eq!(fixture.sequences(), strings(&["AAACC"]));
+            let names = products
+                .iter()
+                .map(|product| product.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, vec!["chr1", "chr2"]);
+            assert_eq!(products[1].id, other.graph.id);
+            let second = BlockGroup::get_all_sequences(
+                fixture.context.graph().conn(),
+                fixture.context.workspace(),
+                &products[1].id,
+                true,
+            )
+            .expect("should read sequences");
+            assert_eq!(second, strings(&["TTTGG"]));
+        }
+
+        #[test]
+        fn test_connect_excises_a_circle_in_the_same_graph() {
+            let fixture = sites();
+
+            excise(&fixture);
+            assert_eq!(fixture.sequences(), strings(&["AAAGGTCTTT"]));
+        }
+
+        #[test]
+        fn test_connect_reintegrates_an_excised_circle() {
+            let fixture = sites();
+            excise(&fixture);
+
+            fixture.connect(fixture.position("GG", 1), fixture.position("CC", 0), false);
+            fixture.connect(fixture.position("GA", 1), fixture.position("TC", 0), false);
+
+            assert_eq!(fixture.sequences(), strings(&["AAAGGCCCACGATCTTT"]));
+        }
+    }
+
+    mod joined_annotations {
+        use super::*;
+        use crate::python_api::editing::connect_positions;
+
+        /// Two graphs of one sample that both hold the node `AAAC`, with `arm` annotated on
+        /// `start..end` of that node in each.
+        fn graphs_annotated(host: (i64, i64), other: (i64, i64)) -> (Fixture, Fixture) {
+            let fixture = fixture(&[(START, "AAAC", 0), ("AAAC", END, 0)], &["AAAC"]);
+            let second = build_graph(
+                &fixture.context,
+                "chr2",
+                &[(START, "AAAC", 0), ("AAAC", "GGGT", 0), ("GGGT", END, 0)],
+                &["AAAC", "GGGT"],
+            );
+            for (graph, (start, end)) in [(&fixture, host), (&second, other)] {
+                Accession::create(
+                    fixture.context.graph().conn(),
+                    &NewAccession {
+                        name: "arm".to_string(),
+                        block_group_id: graph.graph.id,
+                        parent_accession_id: None,
+                        spans: vec![AccessionSpan {
+                            node_id: HashId::convert_str("AAAC"),
+                            range: Range { start, end },
+                            strand: Strand::Forward,
+                        }],
+                    },
+                )
+                .expect("should create accession");
+            }
+            (fixture, second)
+        }
+
+        fn join(host: &Fixture, other: &Fixture, strict: bool) -> PyResult<()> {
+            connect_positions(
+                &host.graph,
+                std::slice::from_ref(&other.graph),
+                &host.position("AAAC", 3),
+                &other.position("GGGT", 0),
+                None,
+                EditMode { stack: true },
+                strict,
+            )
+        }
+
+        fn names(host: &Fixture) -> Vec<String> {
+            let mut names = Accession::select(host.context.graph().conn())
+                .block_group_id(host.graph.id)
+                .load()
+                .expect("should read accessions")
+                .into_iter()
+                .map(|accession| accession.name)
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn test_an_accession_over_the_same_spans_is_not_added_again() {
+            let (host, other) = graphs_annotated((0, 3), (0, 3));
+
+            join(&host, &other, true).unwrap_or_else(|error| panic!("{}", error_message(error)));
+            assert_eq!(names(&host), vec!["arm".to_string()]);
+        }
+
+        #[test]
+        fn test_an_accession_over_other_spans_takes_a_prime() {
+            let (host, other) = graphs_annotated((0, 3), (1, 4));
+
+            join(&host, &other, false).unwrap_or_else(|error| panic!("{}", error_message(error)));
+            assert_eq!(names(&host), vec!["arm".to_string(), "arm'".to_string()]);
+        }
+
+        #[test]
+        fn test_an_accession_over_other_spans_is_reported_when_strict() {
+            let (host, other) = graphs_annotated((0, 3), (1, 4));
+
+            let Err(error) = join(&host, &other, true) else {
+                panic!("a clash over different spans must be reported when strict");
+            };
+            assert!(error_message(error).contains("annotation named 'arm'"));
         }
     }
 }

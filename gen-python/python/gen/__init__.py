@@ -17,6 +17,7 @@ from .gen import (
     Annotation,
     Asset,
     Branch,
+    GafReads,
     HashId,
     Locus,
     Node,
@@ -28,12 +29,14 @@ from .gen import (
     Sequence,
     SequenceGraph,
     SuperPosition,
+    SuperpositionError,
     clone,
 )
 
 # Only a live Jupyter kernel can display the browser canvas. Route terminals,
 # scripts, and AI REPLs to the text widget even when the optional dependencies
 # happen to be installed.
+from .sites import Breakpoint, Motif, Site, recombination_closure, site_pairs
 from .text_widget import TextGraphWidget, _in_jupyter_kernel
 
 if _in_jupyter_kernel() and _os.environ.get("GEN_NOTEBOOK_TEXT_OUTPUT") != "1":
@@ -51,8 +54,11 @@ __all__ = [
     "Annotation",
     "Asset",
     "Branch",
+    "Breakpoint",
+    "GafReads",
     "HashId",
     "Locus",
+    "Motif",
     "Node",
     "Operation",
     "Position",
@@ -61,8 +67,12 @@ __all__ = [
     "Sample",
     "Sequence",
     "SequenceGraph",
+    "Site",
     "SuperPosition",
+    "SuperpositionError",
     "clone",
+    "recombination_closure",
+    "site_pairs",
     "freeze_all_widgets",
 ]
 

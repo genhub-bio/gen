@@ -1636,6 +1636,7 @@ dependencies = [
  "opendal",
  "petgraph 0.6.5",
  "postcard",
+ "rand 0.10.1",
  "rusqdoltlite",
  "rusqdoltlite_migration",
  "serde",

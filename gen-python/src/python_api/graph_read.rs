@@ -14,13 +14,13 @@ use gen_models::{
     locus::GraphLocus,
     region::{Region, ResolvedRegionKind, resolve},
 };
-use petgraph::Direction::Outgoing;
+use petgraph::Direction::{Incoming, Outgoing};
 use pyo3::{
     PyResult,
     exceptions::{PyRuntimeError, PyValueError},
 };
 
-use super::{locus::GraphLocusExt as _, utils::block_group_err_to_pyerr};
+use super::{locus::GraphLocusExt as _, position::Position, utils::block_group_err_to_pyerr};
 
 /// A locus and the sequence graph named by its region, when available.
 pub(crate) struct LocusTarget {
@@ -117,6 +117,14 @@ pub(crate) fn locus_from_region(
 
 /// The graph as sequence reading sees it: retired edit sites dropped, then pruned.
 pub(crate) fn current_graph(context: &DbContext, block_group_id: &HashId) -> PyResult<GenGraph> {
+    let mut graph = unpruned_graph(context, block_group_id)?;
+    BlockGroup::prune_graph(&mut graph);
+    Ok(graph)
+}
+
+/// The graph with retired edit sites dropped but not pruned, so sequence that no route from the
+/// start reaches, such as an excised circle, keeps its blocks.
+pub(crate) fn unpruned_graph(context: &DbContext, block_group_id: &HashId) -> PyResult<GenGraph> {
     let conn = context.graph().conn();
     // Markers are excluded before projection, as in sequence enumeration, because a later
     // edit can reuse a marker's edge as a live one.
@@ -124,11 +132,8 @@ pub(crate) fn current_graph(context: &DbContext, block_group_id: &HashId) -> PyR
         .into_iter()
         .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
         .collect::<Vec<_>>();
-    let mut graph =
-        BlockGroup::get_graph_from_edges(conn, context.workspace(), block_group_id, &edges)
-            .map_err(block_group_err_to_pyerr)?;
-    BlockGroup::prune_graph(&mut graph);
-    Ok(graph)
+    BlockGroup::get_graph_from_edges(conn, context.workspace(), block_group_id, &edges)
+        .map_err(block_group_err_to_pyerr)
 }
 
 pub(crate) fn forward_edge(graph: &GenGraph, source: GraphNode, target: GraphNode) -> bool {
@@ -137,6 +142,68 @@ pub(crate) fn forward_edge(graph: &GenGraph, source: GraphNode, target: GraphNod
             edge.source_strand == Strand::Forward && edge.target_strand == Strand::Forward
         })
     })
+}
+
+/// Whether reading from `from` on its own strand can arrive at `to` on its own strand, where each
+/// stored edge can be used as written or as its reverse complement, so a walk may be flipped any
+/// number of times on the way. The search runs over a block together with the side of it being
+/// read, because the side a walk is on depends on how many flips it has made and not on the block.
+/// Within one block, reading on a strand moves toward higher coordinates on the forward strand and
+/// lower ones on the reverse.
+pub(crate) fn reaches_oriented(graph: &GenGraph, from: &Position, to: &Position) -> bool {
+    let (Some(first), Some(last)) = (from.block(graph), to.block(graph)) else {
+        return false;
+    };
+    let in_reading_order = |upstream: i64, downstream: i64, strand: Strand| {
+        if strand == Strand::Reverse {
+            upstream >= downstream
+        } else {
+            upstream <= downstream
+        }
+    };
+    if first == last
+        && from.strand == to.strand
+        && in_reading_order(from.coordinate, to.coordinate, from.strand)
+    {
+        return true;
+    }
+    let mut pending = VecDeque::from([(first, from.strand)]);
+    let mut seen = HashSet::from([(first, from.strand)]);
+    while let Some((block, side)) = pending.pop_front() {
+        let mut arrivals = Vec::new();
+        for successor in graph.neighbors_directed(block, Outgoing) {
+            for edge in graph.edge_weight(block, successor).into_iter().flatten() {
+                if edge.source_strand == side {
+                    arrivals.push((successor, edge.target_strand));
+                }
+            }
+        }
+        for predecessor in graph.neighbors_directed(block, Incoming) {
+            for edge in graph.edge_weight(predecessor, block).into_iter().flatten() {
+                if flipped(edge.target_strand) == side {
+                    arrivals.push((predecessor, flipped(edge.source_strand)));
+                }
+            }
+        }
+        for (next, next_side) in arrivals {
+            if is_terminal(next.node_id) || !seen.insert((next, next_side)) {
+                continue;
+            }
+            if next == last && next_side == to.strand {
+                return true;
+            }
+            pending.push_back((next, next_side));
+        }
+    }
+    false
+}
+
+const fn flipped(strand: Strand) -> Strand {
+    match strand {
+        Strand::Forward => Strand::Reverse,
+        Strand::Reverse => Strand::Forward,
+        other => other,
+    }
 }
 
 /// The fewest-block forward route from `start` to `end`, both included, if `end` can be reached.
