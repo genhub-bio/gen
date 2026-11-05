@@ -531,11 +531,21 @@ pub fn project_path(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<(GraphNo
         prev: Option<Rc<PathNode>>,
     }
 
+    // A graph folded from several block groups has a start for each, so take the one the path's
+    // first block names.
+    let first_block = &path_blocks[0];
     let start_nodes = graph
         .nodes()
         .filter(|node| node.node_id == PATH_START_NODE_ID)
         .collect::<Vec<GraphNode>>();
-    let start_node = start_nodes.first().unwrap();
+    let start_node = start_nodes
+        .iter()
+        .find(|node| {
+            node.sequence_start == first_block.sequence_start
+                && node.sequence_end == first_block.sequence_end
+        })
+        .or(start_nodes.first())
+        .unwrap();
 
     let mut final_path = vec![];
     let mut stack: VecDeque<Rc<PathNode>> = VecDeque::new();

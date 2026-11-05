@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
     rc::Rc,
 };
@@ -904,24 +904,39 @@ impl Edge {
 
         // NOTE: We need a dedicated start node and a dedicated end node for the graph formed by the
         // block group, since different paths in the block group may start or end at different
-        // places on sequences.  These two "start sequence" and "end sequence" blocks will serve
-        // that role.
-        let start_block = GroupBlock::new(
-            block_index + 1,
-            PATH_START_NODE_ID,
-            &Sequence::new().sequence_type("DNA").sequence("").build(),
-            0,
-            0,
-        );
-        blocks.push(start_block);
-        let end_block = GroupBlock::new(
-            block_index + 2,
-            PATH_END_NODE_ID,
-            &Sequence::new().sequence_type("DNA").sequence("").build(),
-            0,
-            0,
-        );
-        blocks.push(end_block);
+        // places on sequences.  These "start sequence" and "end sequence" blocks will serve that
+        // role. A terminal edge names the terminal at a coordinate, and every coordinate in use
+        // gets its own block, so graphs folded together keep the start and end of each original
+        // block group as distinct graph nodes sharing the terminal node id. A graph with no
+        // terminal edges still gets one pair at coordinate 0.
+        let terminal_coordinates = |node_id: HashId| {
+            let mut coordinates = BTreeSet::new();
+            coordinates.extend(
+                starts_by_node_id
+                    .get(&node_id)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+            coordinates.extend(ends_by_node_id.get(&node_id).into_iter().flatten().copied());
+            if coordinates.is_empty() {
+                coordinates.insert(0);
+            }
+            coordinates
+        };
+        for terminal_node_id in [PATH_START_NODE_ID, PATH_END_NODE_ID] {
+            for coordinate in terminal_coordinates(terminal_node_id) {
+                block_index += 1;
+                blocks.push(GroupBlock {
+                    id: block_index,
+                    node_id: terminal_node_id,
+                    sequence: Some(String::new()),
+                    external_sequence: None,
+                    start: coordinate,
+                    end: coordinate,
+                });
+            }
+        }
         Ok(blocks)
     }
 
@@ -2929,5 +2944,91 @@ mod tests {
                 (second_insert, 2, reference, 40),
             ])
         );
+    }
+
+    #[test]
+    fn test_blocks_from_edges_makes_a_terminal_block_per_coordinate() {
+        // Graphs folded together keep the start and end of each original block group as distinct
+        // graph nodes, told apart by the coordinate their terminal edges name.
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "folded",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let backing_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAATTT")
+            .save(&conn)
+            .unwrap();
+        let node_id = Node::create(
+            &conn,
+            &backing_sequence.hash,
+            &HashId::convert_str("folded"),
+        )
+        .unwrap();
+
+        let mut augmented_edges = vec![];
+        for terminal_coordinate in [0, 5] {
+            for edge in [
+                Edge::create(
+                    &conn,
+                    PATH_START_NODE_ID,
+                    terminal_coordinate,
+                    Strand::Forward,
+                    node_id,
+                    0,
+                    Strand::Forward,
+                )
+                .unwrap(),
+                Edge::create(
+                    &conn,
+                    node_id,
+                    6,
+                    Strand::Forward,
+                    PATH_END_NODE_ID,
+                    terminal_coordinate,
+                    Strand::Forward,
+                )
+                .unwrap(),
+            ] {
+                augmented_edges.push(AugmentedEdge {
+                    edge,
+                    chromosome_index: 0,
+                    phased: 0,
+                    created_on: 0,
+                });
+            }
+        }
+
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &bg.id, &augmented_edges, None)
+                .unwrap();
+        let coordinates_of = |terminal_node_id| {
+            let mut coordinates = blocks
+                .iter()
+                .filter(|block| block.node_id == terminal_node_id)
+                .map(|block| (block.start, block.end))
+                .collect::<Vec<_>>();
+            coordinates.sort();
+            coordinates
+        };
+
+        assert_eq!(coordinates_of(PATH_START_NODE_ID), vec![(0, 0), (5, 5)]);
+        assert_eq!(coordinates_of(PATH_END_NODE_ID), vec![(0, 0), (5, 5)]);
     }
 }

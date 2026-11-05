@@ -624,6 +624,14 @@ impl Path {
         let edges = Path::edges_for_path(conn, &self.id, history_ref);
         let mut blocks = vec![];
         let mut path_length = 0;
+        // Graphs folded together keep the start and end of each original block group as distinct
+        // terminals told apart by coordinate, so the path names the ones its own edges use.
+        let start_coordinate = edges
+            .first()
+            .map_or(0, |first_edge| first_edge.source_coordinate);
+        let end_coordinate = edges
+            .last()
+            .map_or(0, |last_edge| last_edge.target_coordinate);
 
         // NOTE: Adding a "start block" for the dedicated start sequence with a range from i64::MIN
         // to 0 makes interval tree lookups work better.  If the point being looked up is -1 (or
@@ -631,8 +639,8 @@ impl Path {
         blocks.push(PathBlock {
             node_id: PATH_START_NODE_ID,
             block_sequence: "".to_string(),
-            sequence_start: 0,
-            sequence_end: 0,
+            sequence_start: start_coordinate,
+            sequence_end: start_coordinate,
             path_start: i64::MIN + 1,
             path_end: 0,
             strand: Strand::Forward,
@@ -660,8 +668,8 @@ impl Path {
         blocks.push(PathBlock {
             node_id: PATH_END_NODE_ID,
             block_sequence: "".to_string(),
-            sequence_start: 0,
-            sequence_end: 0,
+            sequence_start: end_coordinate,
+            sequence_end: end_coordinate,
             path_start: path_length,
             path_end: i64::MAX - 1,
             strand: Strand::Forward,

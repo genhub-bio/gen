@@ -4,7 +4,7 @@ use gen_annotations::projection;
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, is_terminal,
 };
-use gen_graph::{GraphNode, all_intermediate_edges};
+use gen_graph::{GenGraph, GraphNode, all_intermediate_edges};
 use gen_models::{
     annotations::Annotation,
     block_group::{BlockGroup, NewBlockGroup},
@@ -15,7 +15,11 @@ use gen_models::{
     path::revcomp,
     sequence::Sequence,
 };
-use petgraph::{Direction, graphmap::DiGraphMap, visit::EdgeRef};
+use petgraph::{
+    Direction,
+    graphmap::DiGraphMap,
+    visit::{EdgeRef, IntoEdgeReferences},
+};
 use thiserror::Error;
 
 // NCBI table 1 – Standard
@@ -611,6 +615,35 @@ pub fn translate_block_group(
     )
 }
 
+/// Every start or end block of a graph. A graph folded from several block groups has one of each
+/// per original block group, so a walk that only took the first would miss the other molecules.
+fn terminal_blocks(graph: &GenGraph, terminal_node_id: HashId) -> Vec<GraphNode> {
+    graph
+        .nodes()
+        .filter(|graph_node| graph_node.node_id == terminal_node_id)
+        .collect()
+}
+
+/// The edges on some path from any of `starts` to any of `ends`, each edge once.
+fn edges_between_any<'a>(
+    graph: &'a GenGraph,
+    starts: &[GraphNode],
+    ends: &[GraphNode],
+) -> Vec<<&'a GenGraph as IntoEdgeReferences>::EdgeRef> {
+    let mut seen = HashSet::new();
+    let mut edges = vec![];
+    for start in starts {
+        for end in ends {
+            for edge in all_intermediate_edges(graph, *start, *end) {
+                if seen.insert((edge.source(), edge.target())) {
+                    edges.push(edge);
+                }
+            }
+        }
+    }
+    edges
+}
+
 /// Extract the entire sequence graph (everything between the start and end
 /// terminals) as an in-memory sub-DAG. No database writes.
 fn extract_full_graph(
@@ -620,14 +653,18 @@ fn extract_full_graph(
 ) -> Result<TranslationSubgraph, TranslationError> {
     let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
-    let start_node = gen_graph
-        .nodes()
-        .find(|graph_node| graph_node.node_id == PATH_START_NODE_ID)
-        .ok_or_else(|| TranslationError::BlockGroupError("graph has no start node".into()))?;
-    let end_node = gen_graph
-        .nodes()
-        .find(|graph_node| graph_node.node_id == PATH_END_NODE_ID)
-        .ok_or_else(|| TranslationError::BlockGroupError("graph has no end node".into()))?;
+    let start_nodes = terminal_blocks(&gen_graph, PATH_START_NODE_ID);
+    let end_nodes = terminal_blocks(&gen_graph, PATH_END_NODE_ID);
+    if start_nodes.is_empty() {
+        return Err(TranslationError::BlockGroupError(
+            "graph has no start node".into(),
+        ));
+    }
+    if end_nodes.is_empty() {
+        return Err(TranslationError::BlockGroupError(
+            "graph has no end node".into(),
+        ));
+    }
 
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
     let mut node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)> = HashMap::new();
@@ -635,7 +672,7 @@ fn extract_full_graph(
     let mut entry_set: HashSet<HashId> = HashSet::new();
     let mut exit_set: HashSet<HashId> = HashSet::new();
 
-    for edge_ref in all_intermediate_edges(&gen_graph, start_node, end_node) {
+    for edge_ref in edges_between_any(&gen_graph, &start_nodes, &end_nodes) {
         let source = edge_ref.source();
         let target = edge_ref.target();
         // Edges touching a terminal mark the entry/exit frontier but are not added
@@ -721,10 +758,12 @@ fn extract_from_entry(
                 "entry coordinate {entry_coord} not found in graph"
             ))
         })?;
-    let end_node = gen_graph
-        .nodes()
-        .find(|graph_node| graph_node.node_id == PATH_END_NODE_ID)
-        .ok_or_else(|| TranslationError::BlockGroupError("graph has no end node".into()))?;
+    let end_nodes = terminal_blocks(&gen_graph, PATH_END_NODE_ID);
+    if end_nodes.is_empty() {
+        return Err(TranslationError::BlockGroupError(
+            "graph has no end node".into(),
+        ));
+    }
 
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
     let mut node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)> = HashMap::new();
@@ -732,7 +771,7 @@ fn extract_from_entry(
     let mut exit_nodes: HashSet<HashId> = HashSet::new();
 
     let entry_virtual_id = virtual_id(entry_node);
-    let intermediate_edges = all_intermediate_edges(&gen_graph, entry_node, end_node);
+    let intermediate_edges = edges_between_any(&gen_graph, &[entry_node], &end_nodes);
     if intermediate_edges.is_empty() {
         // A direct edge to the end (no internal sequence beyond the entry, e.g. a
         // single-node annotation) makes the entry its own standalone exit too.
@@ -832,10 +871,12 @@ fn extract_to_anchor(
                 "anchor coordinate {anchor_coord} not found in graph"
             ))
         })?;
-    let start_node = gen_graph
-        .nodes()
-        .find(|graph_node| graph_node.node_id == PATH_START_NODE_ID)
-        .ok_or_else(|| TranslationError::BlockGroupError("graph has no start node".into()))?;
+    let start_nodes = terminal_blocks(&gen_graph, PATH_START_NODE_ID);
+    if start_nodes.is_empty() {
+        return Err(TranslationError::BlockGroupError(
+            "graph has no start node".into(),
+        ));
+    }
 
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
     let mut node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)> = HashMap::new();
@@ -843,7 +884,7 @@ fn extract_to_anchor(
     let mut entry_nodes: HashSet<HashId> = HashSet::new();
 
     let anchor_virtual_id = virtual_id(anchor_node);
-    let intermediate_edges = all_intermediate_edges(&gen_graph, start_node, anchor_node);
+    let intermediate_edges = edges_between_any(&gen_graph, &start_nodes, &[anchor_node]);
     if intermediate_edges.is_empty() {
         // A direct edge from the start (no internal sequence before the anchor,
         // e.g. a single-node annotation) makes the anchor its own standalone entry.
