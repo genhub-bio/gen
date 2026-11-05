@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::{
     gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments},
-    views::junction_projection::project_junctions,
+    views::{junction_projection::project_junctions, mirror_edges::collapse_mirror_edges},
 };
 
 #[derive(Debug, Error)]
@@ -111,7 +111,8 @@ pub fn export_gfa(
     // Zero-width junctions have no sequence, so GFA would emit empty segments that break aligners.
     // Links come from the viewer's junction projection, while the original graph still drives
     // path projection and has junctions dropped from each walk afterwards.
-    let link_graph = project_junctions(&graph).graph;
+    let mut link_graph = project_junctions(&graph).graph;
+    collapse_mirror_edges(&mut link_graph, None);
     let original_endpoints = edge_endpoints(&graph);
 
     let file = File::create(filename)?;
@@ -161,54 +162,54 @@ pub fn export_gfa(
     let mut links = BTreeSet::new();
     for (source, target, edge_info) in link_graph.all_edges() {
         if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
-            // A link that replaced a junction bundles edges from several hops, so each end's
-            // strand comes from an edge that originally touched that end.
-            let (source_strand, target_strand) =
-                link_strands(&original_endpoints, source, target, edge_info);
-            let source_segment = if let Some(splits) = split_segments.get(&source.node_id) {
-                let last_split = splits.last().unwrap();
-                Segment {
-                    sequence: "".to_string(),
-                    node_id: source.node_id,
-                    sequence_start: last_split.0,
-                    sequence_end: last_split.1,
-                    strand: source_strand,
-                }
-            } else {
-                Segment {
-                    sequence: "".to_string(),
-                    node_id: source.node_id,
-                    sequence_start: source.sequence_start,
-                    sequence_end: source.sequence_end,
-                    strand: source_strand,
-                }
-            };
+            for (source_strand, target_strand) in
+                link_strands(&original_endpoints, source, target, edge_info)
+            {
+                let source_segment = if let Some(splits) = split_segments.get(&source.node_id) {
+                    let last_split = splits.last().unwrap();
+                    Segment {
+                        sequence: "".to_string(),
+                        node_id: source.node_id,
+                        sequence_start: last_split.0,
+                        sequence_end: last_split.1,
+                        strand: source_strand,
+                    }
+                } else {
+                    Segment {
+                        sequence: "".to_string(),
+                        node_id: source.node_id,
+                        sequence_start: source.sequence_start,
+                        sequence_end: source.sequence_end,
+                        strand: source_strand,
+                    }
+                };
 
-            let target_segment = if let Some(splits) = split_segments.get(&target.node_id) {
-                let first_split = splits.first().unwrap();
-                Segment {
-                    sequence: "".to_string(),
-                    node_id: target.node_id,
-                    sequence_start: first_split.0,
-                    sequence_end: first_split.1,
-                    strand: source_strand,
-                }
-            } else {
-                Segment {
-                    sequence: "".to_string(),
-                    node_id: target.node_id,
-                    sequence_start: target.sequence_start,
-                    sequence_end: target.sequence_end,
-                    strand: target_strand,
-                }
-            };
+                let target_segment = if let Some(splits) = split_segments.get(&target.node_id) {
+                    let first_split = splits.first().unwrap();
+                    Segment {
+                        sequence: "".to_string(),
+                        node_id: target.node_id,
+                        sequence_start: first_split.0,
+                        sequence_end: first_split.1,
+                        strand: source_strand,
+                    }
+                } else {
+                    Segment {
+                        sequence: "".to_string(),
+                        node_id: target.node_id,
+                        sequence_start: target.sequence_start,
+                        sequence_end: target.sequence_end,
+                        strand: target_strand,
+                    }
+                };
 
-            links.insert(Link {
-                source_segment_id: source_segment.segment_id(),
-                source_strand,
-                target_segment_id: target_segment.segment_id(),
-                target_strand,
-            });
+                links.insert(Link {
+                    source_segment_id: source_segment.segment_id(),
+                    source_strand,
+                    target_segment_id: target_segment.segment_id(),
+                    target_strand,
+                });
+            }
         }
     }
 
@@ -257,14 +258,28 @@ fn edge_endpoints(graph: &GenGraph) -> HashMap<GraphEdge, Vec<(GraphNode, GraphN
     endpoints
 }
 
-/// Strands for a link from `source` to `target`. A link that replaced a junction bundles edges
-/// from several hops, so each end's strand comes from an edge that originally touched that end.
+/// Strand pairs to link `source` to `target`. Parallel edges between the same two segments can
+/// differ in orientation, and GFA needs one link per orientation. A link that replaced a junction
+/// bundles edges from several hops, so it gets a single pair where each end's strand comes from an
+/// edge that originally touched that end.
 fn link_strands(
     endpoints: &HashMap<GraphEdge, Vec<(GraphNode, GraphNode)>>,
     source: GraphNode,
     target: GraphNode,
     edges: &[GraphEdge],
-) -> (Strand, Strand) {
+) -> BTreeSet<(Strand, Strand)> {
+    let direct_strands = edges
+        .iter()
+        .filter(|edge| {
+            endpoints
+                .get(edge)
+                .is_some_and(|pairs| pairs.contains(&(source, target)))
+        })
+        .map(|edge| (edge.source_strand, edge.target_strand))
+        .collect::<BTreeSet<_>>();
+    if !direct_strands.is_empty() {
+        return direct_strands;
+    }
     let source_strand = edges
         .iter()
         .find(|edge| {
@@ -283,7 +298,7 @@ fn link_strands(
         })
         .unwrap_or(&edges[0])
         .target_strand;
-    (source_strand, target_strand)
+    BTreeSet::from([(source_strand, target_strand)])
 }
 
 fn get_paths(
@@ -389,7 +404,9 @@ fn write_paths(
 mod tests {
     use std::{collections::HashSet, fs};
 
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
+    use gen_core::{
+        NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock,
+    };
     use gen_graph::GraphNode;
     use gen_models::{
         annotations::add_annotation,
@@ -410,6 +427,100 @@ mod tests {
         test_helpers::{get_sample_bg, setup_block_group, setup_gen},
         updates::{library::update_with_library, sequence::update_with_sequence},
     };
+
+    #[test]
+    fn test_export_preserves_all_strands_between_same_segments() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (block_group_id, path) = setup_block_group(conn);
+        let path_edges = Path::edges_for_path(conn, &path.id, None);
+        let reference_edge = &path_edges[1];
+        let source_node_id = reference_edge.source_node_id;
+        let target_node_id = reference_edge.target_node_id;
+
+        for (source_strand, target_strand) in [
+            (Strand::Reverse, Strand::Forward),
+            (Strand::Forward, Strand::Reverse),
+            (Strand::Reverse, Strand::Reverse),
+        ] {
+            let edge = Edge::create(
+                conn,
+                source_node_id,
+                reference_edge.source_coordinate,
+                source_strand,
+                target_node_id,
+                reference_edge.target_coordinate,
+                target_strand,
+            )
+            .expect("should create another orientation of the same segment connection");
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id: edge.id,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                }],
+            );
+        }
+
+        let expected_strands = HashSet::from([
+            (Strand::Forward, Strand::Forward),
+            (Strand::Reverse, Strand::Forward),
+            (Strand::Forward, Strand::Reverse),
+            (Strand::Reverse, Strand::Reverse),
+        ]);
+        let stored_strands = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .into_iter()
+            .filter(|entry| {
+                entry.edge.source_node_id == source_node_id
+                    && entry.edge.target_node_id == target_node_id
+            })
+            .map(|entry| (entry.edge.source_strand, entry.edge.target_strand))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            stored_strands, expected_strands,
+            "the graph should contain all four strand orientations before export"
+        );
+
+        let directory = tempdir().expect("should create a temporary directory");
+        let gfa_path = directory.path().join("four-strands.gfa");
+        export_gfa(
+            conn,
+            context.workspace(),
+            "test",
+            &gfa_path,
+            "test",
+            None,
+            None,
+        )
+        .expect("should export the graph");
+
+        let source_segment = format!("{source_node_id}.0.10");
+        let target_segment = format!("{target_node_id}.0.10");
+        let exported_links = fs::read_to_string(&gfa_path)
+            .expect("should read the exported GFA")
+            .lines()
+            .filter(|line| line.starts_with("L\t"))
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let expected_links = expected_strands
+            .iter()
+            .map(|(source_strand, target_strand)| {
+                format!(
+                    "L\t{source_segment}\t{source_strand}\t{target_segment}\t{target_strand}\t0M"
+                )
+            })
+            .collect::<HashSet<_>>();
+        let actual_links = exported_links
+            .into_iter()
+            .filter(|line| line.contains(&source_segment) && line.contains(&target_segment))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            actual_links, expected_links,
+            "GFA should retain all four orientations between the same segments"
+        );
+    }
 
     #[test]
     fn test_simple_export() {
