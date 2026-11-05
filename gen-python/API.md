@@ -151,6 +151,110 @@ graph.delete("chr1:100-110")
   position. Supply exactly one of `before` and `after`; each accepts a `Position` or
   `SuperPosition`. It returns the inserted `Locus`.
 
+- `graph.cut(*, after=None, before=None, message=None)` marks a cut just after or just before one
+  `Position`, as a block boundary for later joins such as a restriction enzyme's end. It does not
+  break the graph: the sequence reads across the cut as before, so the graph stays a supergraph of
+  the molecules before and after it. A cut is read on the top strand and taken as blunt, and it must
+  lie inside a node. Cutting the same point twice raises `ValueError`.
+
+- `graph.connect(*, after, before, message=None, stack=False, strict=False)` adds one raw edge from
+  just after one `Position` to just before another, without writing sequence. Each position is read
+  on its own strand, and `position.reverse_complement()` gives the same base on the opposite strand.
+  An edge between a forward and a reverse position joins the forward strand to the reverse
+  complement of the sequence beyond it. Unless stacked, the original continuity at both points is
+  retired. Joining a point back to the position that originally followed it restores that
+  continuity. The current path is left as it was.
+
+- `graph.exchange(first, second, /, *, message=None, stack=False, strict=False)` exchanges the
+  sequence across two breakpoints in one operation and returns the resulting graphs, this one first.
+  Each breakpoint is a pair of nucleotides the graph joins, read upstream to downstream on one
+  strand: `exchange((A, B), (C, D))`. The exchange joins `A` to `D` and `C` to `B` and makes no
+  other pairing. Naming both sides of a cut pins it to one junction when a position has several
+  continuations, such as two alleles or a stacked library of events, and a pair the graph does not
+  join raises `ValueError`. Whether two nucleotides are joined is checked in the graph: inside a
+  node on one strand they always are, and elsewhere it takes an edge, which may cross strands. A
+  `SuperPosition` in a pair raises `SuperpositionError`, which is what a step next to a fork gives.
+  Anywhere else `(pos, pos + 1)` names a breakpoint, and so does `(hit.start(), hit.start() + 1)`
+  for a search hit.
+
+  The strands the pairs are written on are the orientation of their sites, and the sequence is
+  never read to decide it. Both pairs on the same strand are direct repeats, and one pair on each
+  strand are inverted repeats. Within one molecule direct repeats excise the segment as a circle and inverted repeats
+  turn it around. Between two linear molecules they cross the arms over, or join each arm to the
+  other's reverse complement. Between a circle and a line they integrate the circle, or integrate it
+  reverse complemented. Positions attached to the other graph through `position.on(other)` make it
+  an exchange between two graphs.
+
+  Unless stacked, the exchange is final. The original continuity is deleted from the graph, and each
+  molecule it leaves becomes its own graph: two linear molecules give two graphs, an excision gives
+  the molecule and a circle, and an inversion or an integration gives one. The graph continuing this
+  graph's start keeps this graph, the one continuing the other graph's start gets that graph back
+  under its name, and any other, such as an excised circle, is named after this graph with a number
+  (`chr1-2`). Paths are dropped, and an annotation that spans a breakpoint is kept by every graph it
+  touches, as an incomplete locus. With `stack=True` the originals stay as an alternative and
+  everything remains in this graph.
+
+- `graph.recombine(first, second, /, *, message=None, stack=False, strict=False)` exchanges the
+  strands across two `Site`s, as one operation, and returns the resulting graphs, this one first. It
+  makes the junctions `exchange` makes at the sites' top-strand cuts, so what it does follows from
+  where the sites are: direct repeats in one molecule excise the segment as a circle, inverted
+  repeats turn it around, two linear molecules cross their arms over, and a circle with a line
+  integrates the circle. The sites are aligned by the strings they are. A site with a direction of
+  its own, found by searching for its sequence, is aligned the way it was found, and a palindromic
+  one has none, so `site.reverse_complement()` aligns it the other way round. Staggered sites are
+  checked first, and a `ValueError` is raised unless their overhangs are the same length and the
+  same bases, because different bases would leave a bubble in the double strand. That is how a
+  serine recombinase is modelled: the sites are an `attP` and an `attB` with the same core, cut
+  inside the core, and integrating a plasmid into a chromosome leaves `attL` and `attR`. Inverted
+  sites in two linear molecules are not supported yet and raise `ValueError`.
+
+- `gen.Breakpoint(upstream, downstream)` is one cut on one strand, named by the two nucleotides it
+  falls between. It is a pair, so it can be passed anywhere `exchange` takes a pair of positions.
+  `Breakpoint.after(position)` is `(position, position + 1)`, `.reverse_complement()` is the same cut
+  on the other strand, `.strand` is the strand of the upstream nucleotide, and a `SuperPosition` on
+  either side raises `SuperpositionError`.
+
+- `gen.Site(locus, top, bottom=None)` is a stretch of sequence an enzyme acts on, with the place each
+  strand is cut. Both cuts count bases from the start of the locus in its reading direction, so a cut
+  of 3 falls between the third and fourth base. Equal cuts are blunt, a `bottom` further along leaves
+  5' overhangs of the difference, and a negative difference leaves 3' overhangs (`.overhang`).
+  `site.breakpoints()` gives the top-strand and bottom-strand `Breakpoint`s. Counting along the locus
+  keeps a site independent of the strands of its bases, so a hit that crosses an inversion works.
+
+- `locus.direction` is `"+"` for the oriented string a locus was found or given as and `"-"` for its
+  reverse complement. It belongs to the string, so a locus that crosses an inversion still has one,
+  where `locus.strand` reports `"mixed"`. Reversing a locus flips it.
+
+A position attached to another sequence graph of the same sample (`position.on(other)`) joins two
+molecules. `other` is folded into the graph `connect` is called on, which then holds both molecules
+as components, and `other` no longer exists in the sample. Reciprocal crossover between two linear
+molecules is two connections, each running a left flank into the other molecule's right flank:
+
+```python
+a.connect(after=a_left_last, before=b_right_first.on(b))
+a.connect(after=b_left_last.on(b), before=a_right_first)
+```
+
+Both molecules attach to the surviving graph's one start and end. Paths of `other` are not moved; they are removed with it. Annotations of `other` are
+copied onto the surviving graph. An annotation with the same name over exactly the same nodes and
+coordinates as one already there is the same feature and is not added again. One that only shares a
+name takes primes, so joining graphs that both name a different feature `P` keeps one `P` and moves
+the other as `P'`, then `P''`, and so on until the name is free. Pass `strict=True` to raise
+`ValueError` on such a clash instead.
+
+An inversion between two cut points is two connections, and it stays in one graph:
+
+```python
+graph.connect(after=left_last, before=segment_last.reverse_complement())
+graph.connect(after=segment_first.reverse_complement(), before=right_first)
+```
+
+An excision is two forward connections, one joining the flanks and one closing the segment into a
+circle. Graph reading treats any route that reaches a point as continuing along every route that
+leaves it, so put the cut points at node boundaries for the circle to stay separate from the
+linear molecule. A circle closed through coordinates inside the same node is also read as a loop
+attached at the flank junction.
+
 Replacement and deletion targets may be region strings, `Locus` values, or `Annotation` values.
 Use a returned locus for follow-up edits or annotations. Saved loci and positions continue to name
 their node coordinates when unrelated edits split display nodes. Edits resolve targets against the
