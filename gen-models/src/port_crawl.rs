@@ -2033,6 +2033,83 @@ mod tests {
         }
     }
 
+    /// Cre excisions leave a chromosome closure and a reciprocal circle closure between the same
+    /// two ports. The crawl must carve the same blocks and edges as the eager builder, and two
+    /// circle closures that meet at a shared site must not chain through a junction there.
+    #[test]
+    fn test_reciprocal_excisions_crawl_like_the_eager_graph_without_chaining() {
+        let sites = [("sites", "AAACCGGTTTCCC")];
+        let cases: [(&str, Vec<EdgeSpec>); 3] = [
+            (
+                "one excision",
+                vec![
+                    ("start", 0, "sites", 0, 0),
+                    ("sites", 13, "end", 0, 0),
+                    ("sites", 3, "sites", 9, 0),
+                    ("sites", 9, "sites", 3, 1),
+                    ("sites", 3, "sites", 3, 0),
+                    ("sites", 9, "sites", 9, 0),
+                ],
+            ),
+            (
+                "excisions sharing a site",
+                vec![
+                    ("start", 0, "sites", 0, 0),
+                    ("sites", 13, "end", 0, 0),
+                    ("sites", 3, "sites", 6, 0),
+                    ("sites", 6, "sites", 3, 1),
+                    ("sites", 6, "sites", 9, 0),
+                    ("sites", 9, "sites", 6, 2),
+                    ("sites", 3, "sites", 3, 0),
+                    ("sites", 6, "sites", 6, 0),
+                    ("sites", 9, "sites", 9, 0),
+                ],
+            ),
+            (
+                "adjacent deletions",
+                vec![
+                    ("start", 0, "sites", 0, 0),
+                    ("sites", 13, "end", 0, 0),
+                    ("sites", 3, "sites", 6, 0),
+                    ("sites", 6, "sites", 9, 0),
+                    ("sites", 3, "sites", 3, 0),
+                    ("sites", 6, "sites", 6, 0),
+                    ("sites", 9, "sites", 9, 0),
+                ],
+            ),
+        ];
+        for (name, edges) in cases {
+            let conn = get_connection(None).unwrap();
+            let block_group_id = setup_block_group(&conn, &sites, &edges);
+            let eager =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            let mut crawler = PortCrawler::new(block_group_id, false);
+            let mut lazy = GenGraph::new();
+            lazy.add_node(start_sentinel());
+            crawl_to_exhaustion(&conn, &mut crawler, &mut lazy);
+
+            assert_matches_up_to_junction_shortcuts(&lazy, &eager);
+            if name != "excisions sharing a site" {
+                continue;
+            }
+            for graph in [&lazy, &eager] {
+                let chained_into_first_closure = graph
+                    .nodes()
+                    .filter(|node| {
+                        node.node_id == node_id_for("sites")
+                            && node.sequence_start == 6
+                            && node.sequence_end == 6
+                    })
+                    .flat_map(|junction| graph.neighbors_directed(junction, Direction::Outgoing))
+                    .any(|target| target.sequence_start == 3);
+                assert!(
+                    !chained_into_first_closure,
+                    "a junction at the shared site chains one circle closure into the next"
+                );
+            }
+        }
+    }
+
     /// Every coordinate of every block a full crawl carves locates to that block from a fresh
     /// crawler, and crawling on from the located block alone rebuilds the same graph, so a
     /// viewer that jumps somewhere first never carves a node differently.
