@@ -309,20 +309,61 @@ fn is_same_node_jump(augmented_edge: &AugmentedEdge) -> bool {
     edge.source_node_id == edge.target_node_id && edge.source_coordinate != edge.target_coordinate
 }
 
-/// Whether any edge at one side of a port is a distinct, non-marker edge between real nodes.
-/// A port with such edges on both sides is a shared position.
-fn is_shared_position_edge_set(edges: &[AugmentedEdge]) -> bool {
-    edges.iter().any(|augmented_edge| {
-        let edge = &augmented_edge.edge;
-        !edge.is_same_coordinate_edge()
-            && !is_terminal(edge.source_node_id)
-            && !is_terminal(edge.target_node_id)
-    })
+/// Whether an edge is a distinct, non-marker edge between real nodes.
+fn is_ordinary_edge(augmented_edge: &AugmentedEdge) -> bool {
+    let edge = &augmented_edge.edge;
+    !edge.is_same_coordinate_edge()
+        && !is_terminal(edge.source_node_id)
+        && !is_terminal(edge.target_node_id)
 }
 
-/// Whether a port is a shared position: ordinary edges both arrive at and leave it.
+/// Whether a port is a shared position: an ordinary edge arrives at it and an ordinary edge
+/// leaves it, and the pair may compose without consuming sequence.
 fn is_shared_position(incoming: &[AugmentedEdge], outgoing: &[AugmentedEdge]) -> bool {
-    is_shared_position_edge_set(incoming) && is_shared_position_edge_set(outgoing)
+    incoming
+        .iter()
+        .filter(|edge| is_ordinary_edge(edge))
+        .any(|arriving| {
+            outgoing
+                .iter()
+                .filter(|edge| is_ordinary_edge(edge))
+                .any(|leaving| Edge::can_compose_at_junction(&arriving.edge, &leaving.edge))
+        })
+}
+
+/// Whether an edge at one side of a port is not a jump. Same-coordinate edges count, so a plain
+/// deletion keeps a junction beside each of its edit-site markers.
+fn meets_non_jump_edge(edges: &[AugmentedEdge]) -> bool {
+    edges
+        .iter()
+        .any(|augmented_edge| !is_same_node_jump(augmented_edge))
+}
+
+/// Whether two jumps meet at a port and compose into one longer skip.
+fn has_composable_jumps(incoming: &[AugmentedEdge], outgoing: &[AugmentedEdge]) -> bool {
+    incoming
+        .iter()
+        .filter(|edge| is_same_node_jump(edge))
+        .any(|arriving| {
+            outgoing
+                .iter()
+                .filter(|edge| is_same_node_jump(edge))
+                .any(|leaving| Edge::can_compose_at_junction(&arriving.edge, &leaving.edge))
+        })
+}
+
+/// Drops zero-width junctions from a port's blocks unless that would leave nothing to connect to.
+fn sequence_blocks_only(blocks: &[GraphNode]) -> Vec<GraphNode> {
+    let sequence_blocks = blocks
+        .iter()
+        .copied()
+        .filter(|node| node.sequence_start != node.sequence_end)
+        .collect::<Vec<_>>();
+    if sequence_blocks.is_empty() {
+        blocks.to_vec()
+    } else {
+        sequence_blocks
+    }
 }
 
 /// Both sides of a stored edge, resolved to the blocks adjacent to its two ports.
@@ -628,10 +669,12 @@ impl PortCrawler {
         let outgoing = self.load_group(conn, port, Direction::Outgoing)?;
         let incoming_jump = incoming.iter().any(is_same_node_jump);
         let outgoing_jump = outgoing.iter().any(is_same_node_jump);
-        // Mirrors the eager builder's junction rule: a jump endpoint meeting any other edge, or
-        // two distinct edges meeting at the port, needs a zero-width block to route through.
-        let junction = (outgoing_jump && !incoming.is_empty())
-            || (incoming_jump && !outgoing.is_empty())
+        // Mirrors the eager builder's junction rule: composable jumps, a jump endpoint meeting a
+        // non-jump edge, or two distinct edges meeting at the port need a zero-width block to
+        // route through.
+        let junction = has_composable_jumps(&incoming, &outgoing)
+            || (outgoing_jump && meets_non_jump_edge(&incoming))
+            || (incoming_jump && meets_non_jump_edge(&outgoing))
             || is_shared_position(&incoming, &outgoing);
         let mut blocks = Vec::new();
         if let Some(previous) = previous {
@@ -752,10 +795,30 @@ impl PortCrawler {
     ) -> Result<Vec<(GraphNode, GraphNode)>, EdgeError> {
         let source_port = Port::endpoint(&augmented_edge.edge, Direction::Outgoing);
         let target_port = Port::endpoint(&augmented_edge.edge, Direction::Incoming);
-        let source_blocks = self.port_blocks(conn, source_port)?;
-        let target_blocks = self.port_blocks(conn, target_port)?;
-        let source_is_shared_position = self.is_shared_position_port(conn, source_port)?;
-        let target_is_shared_position = self.is_shared_position_port(conn, target_port)?;
+        let mut source_blocks = self.port_blocks(conn, source_port)?;
+        let mut target_blocks = self.port_blocks(conn, target_port)?;
+        let mut source_is_shared_position = self.is_shared_position_port(conn, source_port)?;
+        let mut target_is_shared_position = self.is_shared_position_port(conn, target_port)?;
+        // The eager builder lets a jump use a junction only alongside edges it may compose
+        // with; see `Edge::may_leave_through_junction`.
+        let arriving = self.load_group(conn, source_port, Direction::Incoming)?;
+        let arriving_edges = arriving.iter().map(|edge| &edge.edge).collect::<Vec<_>>();
+        if !augmented_edge
+            .edge
+            .may_leave_through_junction(&arriving_edges)
+        {
+            source_blocks = sequence_blocks_only(&source_blocks);
+            source_is_shared_position = false;
+        }
+        let leaving = self.load_group(conn, target_port, Direction::Outgoing)?;
+        let leaving_edges = leaving.iter().map(|edge| &edge.edge).collect::<Vec<_>>();
+        if !augmented_edge
+            .edge
+            .may_arrive_through_junction(&leaving_edges)
+        {
+            target_blocks = sequence_blocks_only(&target_blocks);
+            target_is_shared_position = false;
+        }
         Ok(connected_blocks(
             augmented_edge,
             &EdgeEndpoints {

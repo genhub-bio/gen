@@ -610,31 +610,6 @@ impl Edge {
         Ok(intervals)
     }
 
-    /// Records a coordinate jump whose endpoints belong to the same backing node.
-    ///
-    /// `blocks_from_edges` calls this for its initial edges and for neighboring edges fetched while
-    /// completing partially described nodes. The source is an outgoing jump coordinate and the
-    /// target is an incoming jump coordinate. Keeping those sets separate lets block generation
-    /// identify where one jump arrives and another leaves.
-    fn record_same_node_jump_coordinates(
-        edge: &Edge,
-        outgoing_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
-        incoming_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
-    ) {
-        if edge.source_node_id == edge.target_node_id
-            && edge.source_coordinate != edge.target_coordinate
-        {
-            outgoing_coordinates_by_node_id
-                .entry(edge.source_node_id)
-                .or_default()
-                .insert(edge.source_coordinate);
-            incoming_coordinates_by_node_id
-                .entry(edge.target_node_id)
-                .or_default()
-                .insert(edge.target_coordinate);
-        }
-    }
-
     /// Finds base boundaries that need a shared zero-width position.
     ///
     /// In reference `TACG`, deleting `A` spells `TCG`, deleting `C` spells `TAG`, and taking both
@@ -649,7 +624,7 @@ impl Edge {
     ///                               +----------+--> [G]
     /// ```
     fn shared_position_coordinates(edges: &[AugmentedEdge]) -> HashSet<BlockKey> {
-        let mut outgoing_coordinates = HashSet::new();
+        let mut outgoing_edges_by_key: HashMap<BlockKey, Vec<&Edge>> = HashMap::new();
         // Same-coordinate edges have a separate projection for connections between adjacent
         // sequence slices.
         // Distinct edges identify coordinates that need a shared site.
@@ -659,28 +634,36 @@ impl Edge {
                 && !is_terminal(edge.source_node_id)
                 && !is_terminal(edge.target_node_id)
             {
-                outgoing_coordinates.insert(BlockKey {
-                    node_id: edge.source_node_id,
-                    coordinate: edge.source_coordinate,
-                });
+                outgoing_edges_by_key
+                    .entry(BlockKey {
+                        node_id: edge.source_node_id,
+                        coordinate: edge.source_coordinate,
+                    })
+                    .or_default()
+                    .push(edge);
             }
         }
 
         let mut incoming_coordinates = HashSet::new();
         for augmented_edge in edges {
             let edge = &augmented_edge.edge;
-            if !is_terminal(edge.target_node_id)
-                && !is_terminal(edge.source_node_id)
-                && !edge.is_same_coordinate_edge()
-                && outgoing_coordinates.contains(&BlockKey {
-                    node_id: edge.target_node_id,
-                    coordinate: edge.target_coordinate,
-                })
+            if is_terminal(edge.target_node_id)
+                || is_terminal(edge.source_node_id)
+                || edge.is_same_coordinate_edge()
             {
-                incoming_coordinates.insert(BlockKey {
-                    node_id: edge.target_node_id,
-                    coordinate: edge.target_coordinate,
-                });
+                continue;
+            }
+            let target_key = BlockKey {
+                node_id: edge.target_node_id,
+                coordinate: edge.target_coordinate,
+            };
+            if outgoing_edges_by_key
+                .get(&target_key)
+                .into_iter()
+                .flatten()
+                .any(|outgoing| Edge::can_compose_at_junction(edge, outgoing))
+            {
+                incoming_coordinates.insert(target_key);
             }
         }
 
@@ -739,20 +722,8 @@ impl Edge {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
-        // A same-node coordinate jump connects positions without consuming the intervening
-        // sequence. Track where jumps leave and arrive so their intersections can become
-        // junctions.
-        let mut outgoing_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
-            HashMap::new();
-        let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
-            HashMap::new();
         let mut routing_edges = edges.to_vec();
         for edge in edges.iter().map(|edge| &edge.edge) {
-            Self::record_same_node_jump_coordinates(
-                edge,
-                &mut outgoing_jump_coordinates_by_node_id,
-                &mut incoming_jump_coordinates_by_node_id,
-            );
             if !is_terminal(edge.source_node_id) {
                 node_ids.insert(edge.source_node_id);
             }
@@ -805,11 +776,6 @@ impl Edge {
             for augmented_edge in neighboring_edges {
                 routing_edges.push(augmented_edge.clone());
                 let edge = &augmented_edge.edge;
-                Self::record_same_node_jump_coordinates(
-                    edge,
-                    &mut outgoing_jump_coordinates_by_node_id,
-                    &mut incoming_jump_coordinates_by_node_id,
-                );
                 if !is_terminal(edge.source_node_id) {
                     node_ids.insert(edge.source_node_id);
                 }
@@ -840,6 +806,61 @@ impl Edge {
         }
 
         let node_ids = node_ids.iter().copied().collect::<Vec<HashId>>();
+        // A same-node coordinate jump connects positions without consuming the intervening
+        // sequence. Jumps get junctions only where they compose with a neighboring jump; see
+        // `can_compose_at_junction`. Endpoints of other edges are tracked separately so a jump
+        // meeting one of those still gets a junction. That includes same-coordinate edges, so a
+        // plain deletion keeps a junction beside each of its edit-site markers.
+        let mut composable_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
+            HashMap::new();
+        let mut outgoing_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
+            HashMap::new();
+        let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
+            HashMap::new();
+        let mut other_starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
+        let mut other_ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
+        for routing_edge in routing_edges.iter().map(|edge| &edge.edge) {
+            if routing_edge.is_same_node_jump() {
+                outgoing_jump_coordinates_by_node_id
+                    .entry(routing_edge.source_node_id)
+                    .or_default()
+                    .insert(routing_edge.source_coordinate);
+                incoming_jump_coordinates_by_node_id
+                    .entry(routing_edge.target_node_id)
+                    .or_default()
+                    .insert(routing_edge.target_coordinate);
+            } else {
+                other_ends_by_node_id
+                    .entry(routing_edge.source_node_id)
+                    .or_default()
+                    .insert(routing_edge.source_coordinate);
+                other_starts_by_node_id
+                    .entry(routing_edge.target_node_id)
+                    .or_default()
+                    .insert(routing_edge.target_coordinate);
+            }
+        }
+        for incoming in routing_edges
+            .iter()
+            .map(|edge| &edge.edge)
+            .filter(|edge| edge.is_same_node_jump())
+        {
+            for outgoing in routing_edges
+                .iter()
+                .map(|edge| &edge.edge)
+                .filter(|edge| edge.is_same_node_jump())
+            {
+                if incoming.target_node_id == outgoing.source_node_id
+                    && incoming.target_coordinate == outgoing.source_coordinate
+                    && Self::can_compose_at_junction(incoming, outgoing)
+                {
+                    composable_jump_coordinates_by_node_id
+                        .entry(incoming.target_node_id)
+                        .or_default()
+                        .insert(incoming.target_coordinate);
+                }
+            }
+        }
         let shared_position_coordinates = Self::shared_position_coordinates(&routing_edges);
         let mut shared_position_coordinates_by_node_id = HashMap::<HashId, HashSet<i64>>::new();
         for position in shared_position_coordinates {
@@ -863,13 +884,22 @@ impl Edge {
             let empty_ends = HashSet::new();
             let starts = starts_by_node_id.get(node_id).unwrap_or(&empty_starts);
             let ends = ends_by_node_id.get(node_id).unwrap_or(&empty_ends);
-            let empty_jumps = HashSet::new();
+            let empty_coordinates = HashSet::new();
             let outgoing_jump_coordinates = outgoing_jump_coordinates_by_node_id
                 .get(node_id)
-                .unwrap_or(&empty_jumps);
+                .unwrap_or(&empty_coordinates);
             let incoming_jump_coordinates = incoming_jump_coordinates_by_node_id
                 .get(node_id)
-                .unwrap_or(&empty_jumps);
+                .unwrap_or(&empty_coordinates);
+            let composable_jump_coordinates = composable_jump_coordinates_by_node_id
+                .get(node_id)
+                .unwrap_or(&empty_coordinates);
+            let other_starts = other_starts_by_node_id
+                .get(node_id)
+                .unwrap_or(&empty_coordinates);
+            let other_ends = other_ends_by_node_id
+                .get(node_id)
+                .unwrap_or(&empty_coordinates);
             // In `TACG`, the same-node jump deleting `A` arrives at `(2,2)` and the same-node jump
             // deleting the adjacent `C` leaves from that empty position:
             //
@@ -881,12 +911,14 @@ impl Edge {
             //
             // Shared endpoints with other edges are also routing positions. A lone jump connects
             // sequence blocks directly when neither endpoint needs a junction.
-            let mut junction_coordinates = outgoing_jump_coordinates
-                .intersection(incoming_jump_coordinates)
-                .copied()
-                .collect::<HashSet<_>>();
-            junction_coordinates.extend(outgoing_jump_coordinates.intersection(starts).copied());
-            junction_coordinates.extend(incoming_jump_coordinates.intersection(ends).copied());
+            let mut junction_coordinates = composable_jump_coordinates.clone();
+            junction_coordinates.extend(
+                outgoing_jump_coordinates
+                    .intersection(other_starts)
+                    .copied(),
+            );
+            junction_coordinates
+                .extend(incoming_jump_coordinates.intersection(other_ends).copied());
             junction_coordinates.extend(
                 shared_position_coordinates_by_node_id
                     .get(node_id)
@@ -938,6 +970,117 @@ impl Edge {
             }
         }
         Ok(blocks)
+    }
+
+    /// Checks whether the edge jumps between two coordinates of one backing node.
+    ///
+    /// Deletions and Cre/lox recombination edges are same-node jumps. Edges to other nodes and
+    /// same-coordinate edges are not.
+    fn is_same_node_jump(&self) -> bool {
+        self.source_node_id == self.target_node_id
+            && self.source_coordinate != self.target_coordinate
+    }
+
+    /// Checks whether a zero-width junction may join an arriving edge to a departing edge.
+    ///
+    /// A junction lets two edges compose without consuming sequence. Adjacent deletions `5 -> 8`
+    /// and `8 -> 12` compose into the deletion `5 -> 12`. Cre excision gives `5 -> 12` for the
+    /// chromosome and `12 -> 5` for the circle; joining them at `12` would add a `5 -> 12 -> 5`
+    /// traversal consuming no bases, rather than the circle that spells `[5,12)`. Two jumps
+    /// compose only when both advance in the direction of travel along the backing sequence, which
+    /// depends on the strand. Reciprocal edges between the same two ports never compose. Pairs
+    /// involving any other kind of edge compose as before.
+    pub(crate) fn can_compose_at_junction(incoming: &Edge, outgoing: &Edge) -> bool {
+        // Two edges that run between the same two ports in opposite directions, such as the two
+        // junctions of a strand exchange, would compose into a round trip that consumes no bases.
+        // An insertion's edges are not like this, because they meet the inserted node at its two
+        // different ends.
+        if incoming.source_node_id == outgoing.target_node_id
+            && incoming.source_coordinate == outgoing.target_coordinate
+            && incoming.target_node_id == outgoing.source_node_id
+            && incoming.target_coordinate == outgoing.source_coordinate
+        {
+            return false;
+        }
+        if incoming.is_same_node_jump() && outgoing.is_same_node_jump() {
+            let (first, middle, last) = (
+                incoming.source_coordinate,
+                incoming.target_coordinate,
+                outgoing.target_coordinate,
+            );
+            let strands = [
+                incoming.source_strand,
+                incoming.target_strand,
+                outgoing.source_strand,
+                outgoing.target_strand,
+            ];
+            // Skipping sequence moves in the direction of travel: up the coordinates on the
+            // forward strand and down them on the reverse strand. Two backward jumps on the
+            // forward strand are two circle closures meeting, not a longer skip.
+            if strands.iter().all(|strand| *strand == Strand::Forward) {
+                return first < middle && middle < last;
+            }
+            if strands.iter().all(|strand| *strand == Strand::Reverse) {
+                return first > middle && middle > last;
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Checks whether the edge is neither a jump nor a same-coordinate marker. A marker links
+    /// its coordinate's sequence blocks to the junction there, which does not make any jump
+    /// that touches the junction a valid continuation of it.
+    fn is_junction_partner(&self) -> bool {
+        !self.is_same_node_jump() && !self.is_same_coordinate_edge()
+    }
+
+    /// Checks whether a jump may route through the junction at its source coordinate.
+    ///
+    /// A junction joins every edge that arrives to every edge that leaves, so a jump leaving it
+    /// could follow an arriving edge it does not compose with. In a Cre excision, `9 -> 6` lands
+    /// on the junction at `6`, and leaving by `6 -> 3` would chain two circle closures into one
+    /// molecule. The jump may use the junction only if some arriving edge is not a jump or
+    /// composes with it, with markers not counting. Otherwise it leaves from the sequence block
+    /// ending there.
+    pub(crate) fn may_leave_through_junction(&self, arriving: &[&Edge]) -> bool {
+        !self.is_same_node_jump()
+            || arriving.iter().any(|edge| {
+                if edge.is_same_node_jump() {
+                    Edge::can_compose_at_junction(edge, self)
+                } else {
+                    edge.is_junction_partner()
+                }
+            })
+    }
+
+    /// Checks whether a jump may route through the junction at its target coordinate.
+    ///
+    /// The mirror of `may_leave_through_junction`: the jump may arrive at the junction only if
+    /// some leaving edge is not a jump or composes with it.
+    pub(crate) fn may_arrive_through_junction(&self, leaving: &[&Edge]) -> bool {
+        !self.is_same_node_jump()
+            || leaving.iter().any(|edge| {
+                if edge.is_same_node_jump() {
+                    Edge::can_compose_at_junction(self, edge)
+                } else {
+                    edge.is_junction_partner()
+                }
+            })
+    }
+
+    /// Drops zero-width junctions from `blocks` unless that would leave nothing to connect to.
+    pub(crate) fn sequence_blocks_only<'a>(blocks: &[&'a GroupBlock]) -> Vec<&'a GroupBlock> {
+        let sequence_blocks = blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start != block.end)
+            .collect::<Vec<_>>();
+        if sequence_blocks.is_empty() {
+            blocks.to_vec()
+        } else {
+            sequence_blocks
+        }
     }
 
     /// Checks whether both endpoints use the same node and coordinate.
@@ -1310,6 +1453,25 @@ impl Edge {
         blocks: &[GroupBlock],
     ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
         let shared_position_coordinates = Self::shared_position_coordinates(edges);
+        let mut arriving_edges_by_key: HashMap<BlockKey, Vec<&Edge>> = HashMap::new();
+        let mut leaving_edges_by_key: HashMap<BlockKey, Vec<&Edge>> = HashMap::new();
+        for augmented_edge in edges {
+            let edge = &augmented_edge.edge;
+            arriving_edges_by_key
+                .entry(BlockKey {
+                    node_id: edge.target_node_id,
+                    coordinate: edge.target_coordinate,
+                })
+                .or_default()
+                .push(edge);
+            leaving_edges_by_key
+                .entry(BlockKey {
+                    node_id: edge.source_node_id,
+                    coordinate: edge.source_coordinate,
+                })
+                .or_default()
+                .push(edge);
+        }
         let graph_node_for_block = |block: &GroupBlock| GraphNode {
             node_id: block.node_id,
             sequence_start: block.start,
@@ -1376,11 +1538,29 @@ impl Edge {
                 // A coordinate may match both a sequence block and a junction. When connecting
                 // to junctions, multiple edges may be needed to fully represent the graph.
                 // `block_connections` orchestrates this.
-                let source_is_shared_position = shared_position_coordinates.contains(&source_key);
-                let target_is_shared_position = shared_position_coordinates.contains(&target_key);
+                let mut source_is_shared_position =
+                    shared_position_coordinates.contains(&source_key);
+                let mut target_is_shared_position =
+                    shared_position_coordinates.contains(&target_key);
+                let mut source_blocks = source_blocks.clone();
+                let mut target_blocks = target_blocks.clone();
+                let arriving = arriving_edges_by_key
+                    .get(&source_key)
+                    .map_or(&[][..], Vec::as_slice);
+                if !edge.may_leave_through_junction(arriving) {
+                    source_blocks = Self::sequence_blocks_only(&source_blocks);
+                    source_is_shared_position = false;
+                }
+                let leaving = leaving_edges_by_key
+                    .get(&target_key)
+                    .map_or(&[][..], Vec::as_slice);
+                if !edge.may_arrive_through_junction(leaving) {
+                    target_blocks = Self::sequence_blocks_only(&target_blocks);
+                    target_is_shared_position = false;
+                }
                 let connections = edge.block_connections(
-                    source_blocks,
-                    target_blocks,
+                    &source_blocks,
+                    &target_blocks,
                     source_is_shared_position,
                     target_is_shared_position,
                 );
@@ -2332,6 +2512,92 @@ mod tests {
     }
 
     #[test]
+    fn test_blocks_from_edges_makes_a_terminal_block_per_coordinate() {
+        // Graphs folded together keep the start and end of each original block group as distinct
+        // graph nodes, told apart by the coordinate their terminal edges name.
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "folded",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let backing_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAATTT")
+            .save(&conn)
+            .unwrap();
+        let node_id = Node::create(
+            &conn,
+            &backing_sequence.hash,
+            &HashId::convert_str("folded"),
+        )
+        .unwrap();
+
+        let mut augmented_edges = vec![];
+        for terminal_coordinate in [0, 5] {
+            for edge in [
+                Edge::create(
+                    &conn,
+                    PATH_START_NODE_ID,
+                    terminal_coordinate,
+                    Strand::Forward,
+                    node_id,
+                    0,
+                    Strand::Forward,
+                )
+                .unwrap(),
+                Edge::create(
+                    &conn,
+                    node_id,
+                    6,
+                    Strand::Forward,
+                    PATH_END_NODE_ID,
+                    terminal_coordinate,
+                    Strand::Forward,
+                )
+                .unwrap(),
+            ] {
+                augmented_edges.push(AugmentedEdge {
+                    edge,
+                    chromosome_index: 0,
+                    phased: 0,
+                    created_on: 0,
+                });
+            }
+        }
+
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &bg.id, &augmented_edges, None)
+                .unwrap();
+        let coordinates_of = |terminal_node_id| {
+            let mut coordinates = blocks
+                .iter()
+                .filter(|block| block.node_id == terminal_node_id)
+                .map(|block| (block.start, block.end))
+                .collect::<Vec<_>>();
+            coordinates.sort();
+            coordinates
+        };
+
+        assert_eq!(coordinates_of(PATH_START_NODE_ID), vec![(0, 0), (5, 5)]);
+        assert_eq!(coordinates_of(PATH_END_NODE_ID), vec![(0, 0), (5, 5)]);
+    }
+
+    #[test]
     fn test_blocks_from_edges_does_not_treat_asymmetric_boundaries_as_incomplete() {
         // It's possible that the passed in set of edges is deliberately incomplete.
         // This asserts we do not expand the graph if node information is present.
@@ -2869,6 +3135,188 @@ mod tests {
         assert_eq!(incoming_boundaries, vec![3]);
     }
 
+    fn jump_graph_blocks(jumps: &[(i64, i64)]) -> Vec<GroupBlock> {
+        let conn = get_connection(None).unwrap();
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ACGTACGTACGTACGTACGT")
+            .save(&conn)
+            .unwrap();
+        let node_id = Node::create(&conn, &sequence.hash, &HashId::convert_str("jumps")).unwrap();
+        let mut edges = vec![
+            Edge::create(
+                &conn,
+                PATH_START_NODE_ID,
+                -1,
+                Strand::Forward,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap(),
+            Edge::create(
+                &conn,
+                node_id,
+                20,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                -1,
+                Strand::Forward,
+            )
+            .unwrap(),
+        ];
+        for (source, target) in jumps {
+            edges.push(
+                Edge::create(
+                    &conn,
+                    node_id,
+                    *source,
+                    Strand::Forward,
+                    node_id,
+                    *target,
+                    Strand::Forward,
+                )
+                .unwrap(),
+            );
+        }
+        let augmented_edges = edges
+            .into_iter()
+            .map(|edge| AugmentedEdge {
+                edge,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            })
+            .collect::<Vec<_>>();
+        Edge::blocks_from_edges(
+            &conn,
+            test_workspace(),
+            &HashId::convert_str("jumps"),
+            &augmented_edges,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn junction_coordinates(blocks: &[GroupBlock]) -> Vec<i64> {
+        let mut coordinates = blocks
+            .iter()
+            .filter(|block| {
+                block.start == block.end
+                    && block.node_id != PATH_START_NODE_ID
+                    && block.node_id != PATH_END_NODE_ID
+            })
+            .map(|block| block.start)
+            .collect::<Vec<_>>();
+        coordinates.sort();
+        coordinates
+    }
+
+    #[test]
+    fn test_adjacent_deletions_get_a_junction() {
+        let blocks = jump_graph_blocks(&[(5, 8), (8, 12)]);
+        assert_eq!(junction_coordinates(&blocks), vec![8]);
+    }
+
+    #[test]
+    fn test_excision_and_return_get_no_junctions() {
+        let blocks = jump_graph_blocks(&[(5, 12), (12, 5)]);
+        assert_eq!(junction_coordinates(&blocks), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn test_return_jump_does_not_remove_adjacent_deletion_junction() {
+        let blocks = jump_graph_blocks(&[(5, 8), (8, 12), (12, 5)]);
+        assert_eq!(junction_coordinates(&blocks), vec![8]);
+    }
+
+    #[test]
+    fn test_reciprocal_excisions_sharing_a_site_do_not_chain_through_its_junction() {
+        // Two Cre excisions of `CCG` (3,6) and `GTT` (6,9) share the site at 6. The circle
+        // closures `6 -> 3` and `9 -> 6` meet at the junction there but do not compose.
+        let conn = get_connection(None).unwrap();
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAACCGGTTTCCC")
+            .save(&conn)
+            .unwrap();
+        let node_id = Node::create(&conn, &sequence.hash, &HashId::convert_str("sites")).unwrap();
+        let mut edges = vec![
+            Edge::create(
+                &conn,
+                PATH_START_NODE_ID,
+                -1,
+                Strand::Forward,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap(),
+            Edge::create(
+                &conn,
+                node_id,
+                13,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                -1,
+                Strand::Forward,
+            )
+            .unwrap(),
+        ];
+        for (source, target) in [(3, 6), (6, 3), (6, 9), (9, 6), (3, 3), (6, 6), (9, 9)] {
+            edges.push(
+                Edge::create(
+                    &conn,
+                    node_id,
+                    source,
+                    Strand::Forward,
+                    node_id,
+                    target,
+                    Strand::Forward,
+                )
+                .unwrap(),
+            );
+        }
+        let augmented_edges = edges
+            .into_iter()
+            .map(|edge| AugmentedEdge {
+                edge,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            })
+            .collect::<Vec<_>>();
+        let blocks = Edge::blocks_from_edges(
+            &conn,
+            test_workspace(),
+            &HashId::convert_str("sites"),
+            &augmented_edges,
+            None,
+        )
+        .unwrap();
+        let (graph, _) = Edge::build_graph(&augmented_edges, &blocks);
+        let links = graph
+            .all_edges()
+            .map(|(source, target, _)| {
+                (
+                    (source.sequence_start, source.sequence_end),
+                    (target.sequence_start, target.sequence_end),
+                )
+            })
+            .collect::<HashSet<_>>();
+
+        // The circle closures return to their own segments, and the chromosome skips both.
+        assert!(links.contains(&((3, 6), (3, 6))));
+        assert!(links.contains(&((6, 9), (6, 9))));
+        assert!(links.contains(&((0, 3), (6, 6))));
+        assert!(links.contains(&((6, 6), (9, 13))));
+        // Neither closure may continue into the other through the shared junction.
+        assert!(!links.contains(&((6, 9), (6, 6))));
+        assert!(!links.contains(&((9, 9), (6, 6))));
+        assert!(!links.contains(&((6, 6), (3, 3))));
+        assert!(!links.contains(&((6, 6), (3, 6))));
+    }
+
     #[test]
     fn test_edge_capnp_serialization() {
         use capnp::message::TypedBuilder;
@@ -2944,91 +3392,5 @@ mod tests {
                 (second_insert, 2, reference, 40),
             ])
         );
-    }
-
-    #[test]
-    fn test_blocks_from_edges_makes_a_terminal_block_per_coordinate() {
-        // Graphs folded together keep the start and end of each original block group as distinct
-        // graph nodes, told apart by the coordinate their terminal edges name.
-        let conn = get_connection(None).unwrap();
-        Collection::get_or_create(&conn, "test").unwrap();
-        crate::sample::Sample::get_or_create(
-            &conn,
-            crate::sample::NewSample {
-                name: "test",
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let bg = BlockGroup::create(
-            &conn,
-            crate::block_group::NewBlockGroup {
-                collection_name: "test",
-                sample_name: "test",
-                name: "folded",
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let backing_sequence = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("AAATTT")
-            .save(&conn)
-            .unwrap();
-        let node_id = Node::create(
-            &conn,
-            &backing_sequence.hash,
-            &HashId::convert_str("folded"),
-        )
-        .unwrap();
-
-        let mut augmented_edges = vec![];
-        for terminal_coordinate in [0, 5] {
-            for edge in [
-                Edge::create(
-                    &conn,
-                    PATH_START_NODE_ID,
-                    terminal_coordinate,
-                    Strand::Forward,
-                    node_id,
-                    0,
-                    Strand::Forward,
-                )
-                .unwrap(),
-                Edge::create(
-                    &conn,
-                    node_id,
-                    6,
-                    Strand::Forward,
-                    PATH_END_NODE_ID,
-                    terminal_coordinate,
-                    Strand::Forward,
-                )
-                .unwrap(),
-            ] {
-                augmented_edges.push(AugmentedEdge {
-                    edge,
-                    chromosome_index: 0,
-                    phased: 0,
-                    created_on: 0,
-                });
-            }
-        }
-
-        let blocks =
-            Edge::blocks_from_edges(&conn, test_workspace(), &bg.id, &augmented_edges, None)
-                .unwrap();
-        let coordinates_of = |terminal_node_id| {
-            let mut coordinates = blocks
-                .iter()
-                .filter(|block| block.node_id == terminal_node_id)
-                .map(|block| (block.start, block.end))
-                .collect::<Vec<_>>();
-            coordinates.sort();
-            coordinates
-        };
-
-        assert_eq!(coordinates_of(PATH_START_NODE_ID), vec![(0, 0), (5, 5)]);
-        assert_eq!(coordinates_of(PATH_END_NODE_ID), vec![(0, 0), (5, 5)]);
     }
 }
