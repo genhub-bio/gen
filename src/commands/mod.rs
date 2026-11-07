@@ -143,9 +143,10 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
-        /// Name of an imported annotation file (GFF or BED) to draw on the graph, XX Repeat the flag to draw several files.
-        /// Annotations stored in the database are always drawn. The full explorer lists every
-        /// imported file in its sidebar instead.
+        /// Name of an annotation file (GFF or BED) added with `gen add-annotation-file` to draw
+        /// on the graph; a file added without a name goes by its file name. Repeat the flag to
+        /// draw several files. Annotations stored in the database are always drawn. The full
+        /// explorer lists every added file in its sidebar instead.
         #[arg(long = "annotation", value_name = "NAME")]
         annotations: Vec<String>,
         /// Show the full TUI explorer instead of the inline preview. Includes sidebar explorer and additional interactive features.
