@@ -11,7 +11,10 @@ use gen_tui::{
 use itertools::Itertools;
 use ratatui::style::Color;
 
-use crate::views::{annotation_track::AnnotationSpan, gen_graph_widget::stored_ported_edge};
+use crate::views::{
+    annotation_track::{AnnotationSpan, AnnotationTrack},
+    gen_graph_widget::stored_ported_edge,
+};
 
 /// Remembers the color last chosen for each annotation id by the greedy conflict-avoiding
 /// assignment in `gen_graph_widget::reapply_overlays`. That pass reruns every frame (the
@@ -305,6 +308,30 @@ pub fn replace_track_overlays(
             style,
         });
     }
+}
+
+/// The overlays that draw an annotation file's track: bold bars in the theme's text color,
+/// longest first so shorter (inner) spans paint on top.
+pub fn file_track_overlays(track: AnnotationTrack) -> Vec<GraphOverlay> {
+    let mut spans = track.annotations;
+    spans.sort_by_key(|span| {
+        -span
+            .segments
+            .iter()
+            .map(|segment| segment.range.end - segment.range.start)
+            .sum::<i64>()
+    });
+    let style = PathStyle::new(Color::Reset)
+        .with_line_style(LineStyle::Bold)
+        .with_merge_glyphs(true);
+    spans
+        .into_iter()
+        .map(|span| GraphOverlay {
+            content: OverlayContent::Span(span),
+            source: OverlaySource::Track(track.name.clone()),
+            style,
+        })
+        .collect()
 }
 
 /// Remove every overlay belonging to track `key`.

@@ -6,6 +6,7 @@ use gen_models::{
     db::GraphConnection,
     file_types::FileTypes,
 };
+use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationAssetEntry {
@@ -91,17 +92,58 @@ pub fn load_annotation_file_entries(
     entries
 }
 
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum AnnotationFileSelectionError {
+    #[error("no imported annotation file is named {name:?}; imported files: {available}")]
+    Unknown { name: String, available: String },
+}
+
+/// The imported annotation files the user named, in the order named. A name matches a file's
+/// track name or, when it has none, the file name it is shown under. Viewers draw only these
+/// files, so a typo has to stop the command rather than silently draw nothing.
+pub fn select_annotation_file_entries(
+    entries: Vec<AnnotationFileEntry>,
+    names: &[String],
+) -> Result<Vec<AnnotationFileEntry>, AnnotationFileSelectionError> {
+    let mut selected: Vec<AnnotationFileEntry> = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(entry) = entries.iter().find(|entry| &entry.display_name == name) else {
+            let available = if entries.is_empty() {
+                "none".to_string()
+            } else {
+                entries
+                    .iter()
+                    .map(|entry| entry.display_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(AnnotationFileSelectionError::Unknown {
+                name: name.clone(),
+                available,
+            });
+        };
+        if !selected.contains(entry) {
+            selected.push(entry.clone());
+        }
+    }
+    Ok(selected)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use gen_core::HashId;
     use gen_models::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::Assets,
         file_types::FileTypes,
     };
 
-    use super::load_annotation_file_entries;
+    use super::{
+        AnnotationAssetEntry, AnnotationFileEntry, load_annotation_file_entries,
+        select_annotation_file_entries,
+    };
     use crate::test_helpers::setup_gen_on_disk;
 
     #[test]
@@ -261,5 +303,63 @@ mod tests {
             .versioned_store_path(context.workspace())
             .expect("should locate annotation asset in versioned store");
         assert!(versioned_store_path.is_file());
+    }
+
+    fn entry_named(name: &str) -> AnnotationFileEntry {
+        let asset = AnnotationAssetEntry {
+            id: HashId::convert_str(name),
+            asset_uri: format!("file:///{name}.gff"),
+            file_type: FileTypes::from_storage_tag("gff3"),
+            checksum: None,
+        };
+        AnnotationFileEntry {
+            file_addition: asset,
+            index_file_addition: None,
+            attribute_index_file_addition: None,
+            name: Some(name.to_string()),
+            display_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_selects_the_named_files_in_the_order_named() {
+        let entries = vec![entry_named("genes"), entry_named("peaks")];
+
+        let selected = select_annotation_file_entries(
+            entries,
+            &[
+                "peaks".to_string(),
+                "genes".to_string(),
+                "peaks".to_string(),
+            ],
+        )
+        .expect("should select the named files");
+
+        let names: Vec<&str> = selected
+            .iter()
+            .map(|entry| entry.display_name.as_str())
+            .collect();
+        assert_eq!(names, ["peaks", "genes"]);
+    }
+
+    #[test]
+    fn test_selecting_an_unknown_file_lists_the_imported_ones() {
+        let entries = vec![entry_named("genes"), entry_named("peaks")];
+
+        let error = select_annotation_file_entries(entries, &["gens".to_string()])
+            .expect_err("should reject an unknown name");
+
+        assert_eq!(
+            error.to_string(),
+            "no imported annotation file is named \"gens\"; imported files: genes, peaks"
+        );
+    }
+
+    #[test]
+    fn test_selecting_no_names_selects_no_files() {
+        let selected = select_annotation_file_entries(vec![entry_named("genes")], &[])
+            .expect("should select nothing");
+
+        assert!(selected.is_empty());
     }
 }

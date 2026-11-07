@@ -8,6 +8,7 @@ pub mod block_group_inline;
 pub mod collection;
 mod compact_annotations;
 pub mod diff;
+pub mod diff_annotations;
 pub mod diff_graph;
 pub mod dot_export;
 pub mod gen_graph_controller;

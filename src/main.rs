@@ -28,6 +28,7 @@ use r#gen::{
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
     views::{
+        annotation_files::{load_annotation_file_entries, select_annotation_file_entries},
         block_group::{
             BlockGroupLookup, BlockGroupViewOptions, find_block_group, view_block_group,
         },
@@ -36,6 +37,7 @@ use r#gen::{
             write_block_group_png, write_diff_graph_png,
         },
         diff::{view_diff, view_diff_graph},
+        diff_annotations::{DiffAnnotationSources, DiffAnnotations},
         diff_graph::DiffLegend,
         operations::view_operations,
         patch::view_patch,
@@ -304,12 +306,18 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             png_columns,
             png_rows,
             png_scale,
+            annotations,
         }) => {
             let collection_name = &resolve_initial_collection(
                 graph_conn,
                 config_conn,
                 collection,
                 history_ref.as_deref(),
+            )?;
+            // A misspelled name stops the command before any viewer opens.
+            let annotation_files = select_annotation_file_entries(
+                load_annotation_file_entries(graph_conn, history_ref.as_deref()),
+                &annotations,
             )?;
 
             if let (Some(query_name), Some(base_name)) = (query, base) {
@@ -325,12 +333,22 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     history_ref.as_deref(),
                 )?;
                 let title = format!("{graph_name}: query {query_name} against base {base_name}");
+                let annotation_sources = DiffAnnotationSources {
+                    conn: graph_conn,
+                    workspace: &workspace,
+                    history_ref: history_ref.as_deref(),
+                    query_block_group: &diff.query_block_group,
+                    base_block_group: &diff.base_block_group,
+                    files: &annotation_files,
+                };
+                let annotations = || DiffAnnotations::load(&annotation_sources, &diff.graph);
                 if let Some(png_path) = png {
                     let mut file = BufWriter::new(File::create(&png_path)?);
                     write_diff_graph_png(
                         graph_conn,
                         &workspace,
                         &diff.graph,
+                        annotations(),
                         PlotSize {
                             columns: png_columns,
                             rows: png_rows,
@@ -343,18 +361,31 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let legend = DiffLegend::between(&query_name, &base_name);
                 if full {
-                    view_diff_graph(graph_conn, &workspace, &diff.graph, title, &legend)?;
+                    view_diff_graph(
+                        graph_conn,
+                        &workspace,
+                        &diff.graph,
+                        title,
+                        &legend,
+                        annotations(),
+                    )?;
                 } else {
                     match show_inline_diff_graph_widget(
                         graph_conn,
                         &workspace,
                         &diff.graph,
                         &legend,
+                        annotations(),
                         clamp_inline_view_height(height),
                     ) {
-                        Ok(true) => {
-                            view_diff_graph(graph_conn, &workspace, &diff.graph, title, &legend)?
-                        }
+                        Ok(true) => view_diff_graph(
+                            graph_conn,
+                            &workspace,
+                            &diff.graph,
+                            title,
+                            &legend,
+                            annotations(),
+                        )?,
                         Ok(false) => {}
                         Err(error) => eprintln!("Error showing inline widget: {error}"),
                     }
@@ -381,6 +412,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     &workspace,
                     block_group.id,
                     history_ref.as_deref(),
+                    &annotation_files,
                     PlotSize {
                         columns: png_columns,
                         rows: png_rows,
@@ -416,6 +448,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     vec![current_path],
                     clamp_inline_view_height(height),
                     history_ref.as_deref(),
+                    &annotation_files,
                 ) {
                     Ok(InlineOutcome::OpenFullViewer(controller)) => {
                         // User requested upgrade to full TUI, which keeps drawing the

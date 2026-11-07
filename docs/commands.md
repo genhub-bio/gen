@@ -181,6 +181,22 @@ gen diff --query <query> --base <base> --gfa <output.gfa>
 
 The older `--sample1` and `--sample2` names remain aliases for compatibility.
 
+## Annotations
+
+The inline viewers, the PNG export and the comparison viewers draw the annotations
+stored in the repository without any flag, for the sample shown (or for either sample of a
+comparison). An annotation file added with `gen add-annotation-file` is drawn when named
+with `--annotation`, which can be repeated:
+
+```sh
+gen view <graph> --sample <sample> --annotation genes
+gen view <graph> --query <query> --base <base> --annotation genes --annotation peaks
+```
+
+A file is named as it was added with `--name`, or by its file name when it has none.
+An unknown name stops the command and lists the imported files. The full explorer
+(`--full` without a comparison) keeps its sidebar, which lists every imported file.
+
 ## PNG export
 
 Write a plot to an image file instead of opening the viewer, for scripts, CI and

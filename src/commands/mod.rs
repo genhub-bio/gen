@@ -143,6 +143,11 @@ pub enum Commands {
         /// Position as "node id:coordinate" to center the graph on
         #[arg(short, long)]
         position: Option<String>,
+        /// Name of an imported annotation file (GFF or BED) to draw on the graph, XX Repeat the flag to draw several files.
+        /// Annotations stored in the database are always drawn. The full explorer lists every
+        /// imported file in its sidebar instead.
+        #[arg(long = "annotation", value_name = "NAME")]
+        annotations: Vec<String>,
         /// Show the full TUI explorer instead of the inline preview. Includes sidebar explorer and additional interactive features.
         #[arg(short, long)]
         full: bool,
@@ -762,6 +767,28 @@ mod tests {
             panic!("should parse view command");
         };
         assert_eq!(png_scale, 3);
+    }
+
+    #[test]
+    fn test_view_takes_repeated_annotation_names() {
+        let cli = Cli::try_parse_from([
+            "gen",
+            "view",
+            "m123",
+            "--query",
+            "foo",
+            "--base",
+            "bar",
+            "--annotation",
+            "genes",
+            "--annotation",
+            "peaks",
+        ])
+        .expect("should parse annotation names");
+        let Some(Commands::View { annotations, .. }) = cli.command else {
+            panic!("should parse view command");
+        };
+        assert_eq!(annotations, ["genes", "peaks"]);
     }
 
     #[test]

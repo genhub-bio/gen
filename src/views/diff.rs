@@ -18,6 +18,7 @@ use ratatui::{
 };
 
 use crate::views::{
+    diff_annotations::DiffAnnotations,
     diff_graph::{
         DiffGraphComponent, DiffLegend, apply_diff_highlights, block_group_label,
         build_diff_graph_component, change_label_for_block_group, handle_diff_key,
@@ -253,15 +254,17 @@ pub fn view_diff_graph(
     diff_graph: &DiffGenGraph,
     title: String,
     legend: &DiffLegend,
+    mut annotations: DiffAnnotations,
 ) -> Result<(), io::Error> {
     let component = build_diff_graph_component(diff_graph, title);
     let (mut graph_engine, zoom_levels, mut view_state) =
-        create_gen_graph_engine(component.graph.clone(), (conn, workspace));
+        annotations.create_engine(component.graph.clone(), (conn, workspace));
     apply_diff_highlights(&mut view_state, &component);
     let mut session = TuiSession::enter()?;
     let terminal = session.terminal_mut();
 
     loop {
+        annotations.prepare(&graph_engine, &mut view_state, &zoom_levels, &component);
         terminal.draw(|frame| {
             let areas = Layout::default()
                 .direction(Direction::Vertical)

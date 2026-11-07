@@ -10,7 +10,6 @@ use gen_diff::graph::DiffGenGraph;
 use gen_graph::{GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
-    LineStyle,
     graph_view::{GraphView, GraphViewState},
     highlight_style::PathStyle,
     layout_engine::LayoutEngine,
@@ -22,16 +21,20 @@ use ratatui::{
 };
 
 use crate::views::{
-    annotation_files::load_annotation_file_entries,
+    annotation_files::AnnotationFileEntry,
     annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
     block_group::{
         active_neighborhood_coordinate_window, discard_pending_input, expand_query_window,
     },
-    diff_graph::{DiffLegend, apply_diff_highlights, build_diff_graph_component, handle_diff_key},
+    diff_annotations::DiffAnnotations,
+    diff_graph::{
+        DiffGraphComponent, DiffLegend, apply_diff_highlights, build_diff_graph_component,
+        handle_diff_key,
+    },
     gen_graph_controller::{GenGraphController, GraphKeyOutcome},
-    gen_graph_widget::{ZoomLevels, create_gen_graph_engine},
+    gen_graph_widget::ZoomLevels,
     graph_database::GraphDatabase,
-    graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, has_path_overlay},
+    graph_overlay::{file_track_overlays, has_path_overlay},
     helpers::style_text,
     path_scale::ScalePlacement,
     png_export::write_cropped_png,
@@ -184,7 +187,8 @@ fn inline_controller(
     Ok(controller)
 }
 
-/// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
+/// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded: the ones
+/// stored in the database and the imported annotation `files`.
 ///
 /// The widget appears inline in the terminal without taking over the entire screen. Like the
 /// full viewer, it loads the graph lazily one batch at a time and steps between batches
@@ -208,6 +212,7 @@ pub fn show_inline_block_group_widget<'a>(
     paths: Vec<Path>,
     height: u16,
     history_ref: Option<&'a str>,
+    files: &[AnnotationFileEntry],
 ) -> io::Result<InlineOutcome> {
     let mut controller = inline_controller(conn, workspace, &block_group_id, history_ref)?;
     for path in paths {
@@ -222,6 +227,19 @@ pub fn show_inline_block_group_widget<'a>(
 
     match terminal_result {
         Ok(mut terminal) => {
+            // Annotation files are read for the nodes already loaded, so they follow the
+            // first draw.
+            if !files.is_empty() {
+                draw_synced(&mut terminal, &mut controller)?;
+                show_annotation_files(
+                    &mut controller,
+                    conn,
+                    workspace,
+                    &block_group_id,
+                    files,
+                    history_ref,
+                );
+            }
             let upgrade_requested =
                 run_inline_event_loop(&mut terminal, &mut controller, &mut CrosstermEventSource)?;
 
@@ -263,6 +281,8 @@ fn leave_inline_terminal(viewport_area: Rect) {
 /// A sample diff held in memory with its layout engine, the way the full-screen diff viewer
 /// holds it. A diff graph is not stored in a block group, so it has no lazy crawl to drive.
 struct InlineDiffView<'a> {
+    annotations: DiffAnnotations,
+    component: DiffGraphComponent,
     engine: LayoutEngine<PackedGenGraph>,
     zoom_levels: ZoomLevels<'a>,
     view_state: GraphViewState<GraphNode>,
@@ -275,24 +295,33 @@ impl<'a> InlineDiffView<'a> {
         workspace: &'a Workspace,
         diff_graph: &DiffGenGraph,
         legend: &DiffLegend,
+        annotations: DiffAnnotations,
     ) -> Self {
         let component = build_diff_graph_component(diff_graph, String::new());
         let (engine, zoom_levels, mut view_state) =
-            create_gen_graph_engine(component.graph.clone(), (conn, workspace));
+            annotations.create_engine(component.graph.clone(), (conn, workspace));
         apply_diff_highlights(&mut view_state, &component);
         // The inline widget follows the keyboard cursor from the start.
         view_state.show_cursor();
         Self {
+            annotations,
             engine,
             zoom_levels,
             view_state,
             legend: legend.line(component.has_modified_marks()),
+            component,
         }
     }
 
     /// Draw the graph on the terminal's own background, like the inline block-group widget, so
     /// the plot sits in the scrollback instead of looking like a separate screen.
     fn render(&mut self, frame: &mut Frame, area: Rect) {
+        self.annotations.prepare(
+            &self.engine,
+            &mut self.view_state,
+            &self.zoom_levels,
+            &self.component,
+        );
         let renderer = &self.zoom_levels[self.view_state.zoom_index].1;
         let view = GraphView::new(&mut self.engine, renderer).style(Style::default());
         frame.render_stateful_widget(view, area, &mut self.view_state);
@@ -356,9 +385,10 @@ pub fn show_inline_diff_graph_widget(
     workspace: &Workspace,
     diff_graph: &DiffGenGraph,
     legend: &DiffLegend,
+    annotations: DiffAnnotations,
     height: u16,
 ) -> io::Result<bool> {
-    let mut view = InlineDiffView::new(conn, workspace, diff_graph, legend);
+    let mut view = InlineDiffView::new(conn, workspace, diff_graph, legend, annotations);
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(height),
@@ -391,12 +421,14 @@ pub struct PlotSize {
     pub scale: usize,
 }
 
-/// Write a PNG of a `BlockGroup`'s graph, with annotations, without needing a terminal.
+/// Write a PNG of a `BlockGroup`'s graph, with its stored annotations and the imported annotation
+/// `files`, without needing a terminal.
 pub fn write_block_group_png(
     conn: &GraphConnection,
     workspace: &Workspace,
     block_group_id: HashId,
     history_ref: Option<&str>,
+    files: &[AnnotationFileEntry],
     size: PlotSize,
     output: &mut impl Write,
 ) -> io::Result<()> {
@@ -419,6 +451,7 @@ pub fn write_block_group_png(
         conn,
         workspace,
         &block_group_id,
+        files,
         history_ref,
     );
     if redraw {
@@ -433,13 +466,15 @@ pub fn write_diff_graph_png(
     conn: &GraphConnection,
     workspace: &Workspace,
     diff_graph: &DiffGenGraph,
+    mut annotations: DiffAnnotations,
     size: PlotSize,
     output: &mut impl Write,
 ) -> io::Result<()> {
     let component = build_diff_graph_component(diff_graph, String::new());
     let (mut engine, zoom_levels, mut view_state) =
-        create_gen_graph_engine(component.graph.clone(), (conn, workspace));
+        annotations.create_engine(component.graph.clone(), (conn, workspace));
     apply_diff_highlights(&mut view_state, &component);
+    annotations.prepare(&engine, &mut view_state, &zoom_levels, &component);
     let area = Rect::new(0, 0, size.columns, size.rows);
     let mut buffer = Buffer::empty(area);
     view_state.layout_mode = gen_tui::LayoutMode::Curved;
@@ -452,14 +487,14 @@ fn draw_flags_under_nodes(controller: &mut GenGraphController, buffer: &mut Buff
     controller.render_settled(buffer, area, Style::default());
 }
 
-/// Show every annotation file recorded in the repository as an overlay track over the loaded
-/// graph, returning whether any file added annotations. A file that can't be read is skipped so
-/// it doesn't hide the others.
+/// Show `files` as overlay tracks over the loaded graph, returning whether any file added
+/// annotations. A file that can't be read is skipped so it doesn't hide the others.
 fn show_annotation_files(
     controller: &mut GenGraphController,
     conn: &GraphConnection,
     workspace: &Workspace,
     block_group_id: &HashId,
+    files: &[AnnotationFileEntry],
     history_ref: Option<&str>,
 ) -> bool {
     let Ok(block_group) = BlockGroup::get_by_id(conn, block_group_id, history_ref) else {
@@ -469,7 +504,7 @@ fn show_annotation_files(
     let query_window =
         active_neighborhood_coordinate_window(controller.engine()).map(expand_query_window);
     let mut shown = false;
-    for entry in load_annotation_file_entries(conn, history_ref) {
+    for entry in files {
         let Ok(loaded) = load_annotation_file_track(&AnnotationFileTrackRequest {
             conn,
             history_ref,
@@ -479,30 +514,13 @@ fn show_annotation_files(
             block_group_name: Some(&block_group.name),
             query_window,
             node_filter: &node_filter,
-            entry: &entry,
+            entry,
         }) else {
             continue;
         };
-        let mut spans = loaded.track.annotations;
-        // Longest first, so shorter (inner) spans paint on top.
-        spans.sort_by_key(|span| {
-            -span
-                .segments
-                .iter()
-                .map(|segment| segment.range.end - segment.range.start)
-                .sum::<i64>()
-        });
-        shown |= !spans.is_empty();
-        let style = PathStyle::new(Color::Reset)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        controller
-            .overlays_mut()
-            .extend(spans.into_iter().map(|span| GraphOverlay {
-                content: OverlayContent::Span(span),
-                source: OverlaySource::Track(loaded.track.name.clone()),
-                style,
-            }));
+        let overlays = file_track_overlays(loaded.track);
+        shown |= !overlays.is_empty();
+        controller.overlays_mut().extend(overlays);
     }
     shown
 }
@@ -838,6 +856,7 @@ mod tests {
             &workspace,
             block_group_id,
             None,
+            &[],
             PlotSize {
                 columns: 40,
                 rows: 10,
@@ -871,6 +890,7 @@ mod tests {
                 &workspace,
                 block_group_id,
                 None,
+                &[],
                 PlotSize {
                     columns: 40,
                     rows: 10,
@@ -921,6 +941,7 @@ mod tests {
             context.workspace(),
             &added_chain_diff(),
             &DiffLegend::between("query", "base"),
+            DiffAnnotations::none(),
         );
         let mut terminal =
             Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
@@ -943,6 +964,7 @@ mod tests {
             context.workspace(),
             &added_chain_diff(),
             &DiffLegend::between("query", "base"),
+            DiffAnnotations::none(),
         );
         let mut terminal =
             Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
@@ -971,6 +993,7 @@ mod tests {
             context.workspace(),
             &added_chain_diff(),
             &DiffLegend::between("query", "base"),
+            DiffAnnotations::none(),
         );
         let mut terminal =
             Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
@@ -991,6 +1014,7 @@ mod tests {
             context.workspace(),
             &added_chain_diff(),
             &DiffLegend::between("query", "base"),
+            DiffAnnotations::none(),
         );
         let mut terminal =
             Terminal::new(TestBackend::new(60, 12)).expect("should create a test terminal");
@@ -1035,6 +1059,7 @@ mod tests {
             context.workspace(),
             &added_chain_diff(),
             &DiffLegend::between("unknown", "reference"),
+            DiffAnnotations::none(),
         );
         let mut terminal =
             Terminal::new(TestBackend::new(70, 12)).expect("should create a test terminal");
@@ -1070,6 +1095,7 @@ mod tests {
             context.workspace(),
             &added_chain_diff(),
             &DiffLegend::changes(),
+            DiffAnnotations::none(),
         );
         let mut terminal =
             Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
