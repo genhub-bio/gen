@@ -12,7 +12,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_view::{GraphView, GraphViewState},
     highlight_style::PathStyle,
-    layout_engine::LayoutEngine,
+    layout_engine::{BatchId, LayoutEngine},
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -34,7 +34,7 @@ use crate::views::{
     gen_graph_controller::{GenGraphController, GraphKeyOutcome},
     gen_graph_widget::ZoomLevels,
     graph_database::GraphDatabase,
-    graph_overlay::{file_track_overlays, has_path_overlay},
+    graph_overlay::{file_track_overlays, has_path_overlay, remove_track_overlays},
     helpers::style_text,
     path_scale::ScalePlacement,
     png_export::write_cropped_png,
@@ -135,9 +135,15 @@ fn draw_synced<B: Backend>(
 fn run_inline_event_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     controller: &mut GenGraphController,
+    mut files: Option<InlineAnnotationFiles<'_>>,
     events: &mut impl EventSource,
 ) -> Result<bool, B::Error> {
     draw_synced(terminal, controller)?;
+    if let Some(files) = files.as_mut()
+        && files.follow_active_batch(controller)
+    {
+        draw_synced(terminal, controller)?;
+    }
     loop {
         // Rendering is event-driven (no animation to advance): block indefinitely until the
         // next input event wakes us.
@@ -156,6 +162,11 @@ fn run_inline_event_loop<B: Backend>(
             AppEvent::Resize(_, _) => false,
         };
         draw_synced(terminal, controller)?;
+        if let Some(files) = files.as_mut()
+            && files.follow_active_batch(controller)
+        {
+            draw_synced(terminal, controller)?;
+        }
         // Keys pressed while the new batch loaded were aimed at the old screen.
         if entered_door && events.discard_pending() {
             draw_synced(terminal, controller)?;
@@ -227,21 +238,20 @@ pub fn show_inline_block_group_widget<'a>(
 
     match terminal_result {
         Ok(mut terminal) => {
-            // Annotation files are read for the nodes already loaded, so they follow the
-            // first draw.
-            if !files.is_empty() {
-                draw_synced(&mut terminal, &mut controller)?;
-                show_annotation_files(
-                    &mut controller,
-                    conn,
-                    workspace,
-                    &block_group_id,
-                    files,
-                    history_ref,
-                );
-            }
-            let upgrade_requested =
-                run_inline_event_loop(&mut terminal, &mut controller, &mut CrosstermEventSource)?;
+            let annotation_files = (!files.is_empty()).then_some(InlineAnnotationFiles {
+                conn,
+                workspace,
+                block_group_id: &block_group_id,
+                files,
+                history_ref,
+                batch: None,
+            });
+            let upgrade_requested = run_inline_event_loop(
+                &mut terminal,
+                &mut controller,
+                annotation_files,
+                &mut CrosstermEventSource,
+            )?;
 
             // Final render without border -> capture the viewport area
             let viewport_area = terminal.get_frame().area();
@@ -487,6 +497,38 @@ fn draw_flags_under_nodes(controller: &mut GenGraphController, buffer: &mut Buff
     controller.render_settled(buffer, area, Style::default());
 }
 
+/// The imported annotation files an inline widget draws, and the batch of the graph they were
+/// last projected onto. A file's features sit on the nodes loaded when it was read, so a door
+/// into another batch needs them read again.
+struct InlineAnnotationFiles<'a> {
+    conn: &'a GraphConnection,
+    workspace: &'a Workspace,
+    block_group_id: &'a HashId,
+    files: &'a [AnnotationFileEntry],
+    history_ref: Option<&'a str>,
+    batch: Option<BatchId>,
+}
+
+impl InlineAnnotationFiles<'_> {
+    /// Read the files again when the controller's active batch is not the one they were last
+    /// read for, returning whether the overlays changed and the widget needs another draw.
+    fn follow_active_batch(&mut self, controller: &mut GenGraphController) -> bool {
+        let active_batch = controller.engine().active_batch();
+        if active_batch.is_none() || active_batch == self.batch {
+            return false;
+        }
+        self.batch = active_batch;
+        show_annotation_files(
+            controller,
+            self.conn,
+            self.workspace,
+            self.block_group_id,
+            self.files,
+            self.history_ref,
+        )
+    }
+}
+
 /// Show `files` as overlay tracks over the loaded graph, returning whether any file added
 /// annotations. A file that can't be read is skipped so it doesn't hide the others.
 fn show_annotation_files(
@@ -518,6 +560,7 @@ fn show_annotation_files(
         }) else {
             continue;
         };
+        remove_track_overlays(controller.overlays_mut(), &loaded.track.name);
         let overlays = file_track_overlays(loaded.track);
         shown |= !overlays.is_empty();
         controller.overlays_mut().extend(overlays);
@@ -626,8 +669,13 @@ mod tests {
     fn run_script(controller: &mut GenGraphController, width: u16, keys: Vec<KeyCode>) -> bool {
         let mut terminal =
             Terminal::new(TestBackend::new(width, 12)).expect("should create a test terminal");
-        run_inline_event_loop(&mut terminal, controller, &mut ScriptedEvents(keys.into()))
-            .expect("should run the inline event loop")
+        run_inline_event_loop(
+            &mut terminal,
+            controller,
+            None,
+            &mut ScriptedEvents(keys.into()),
+        )
+        .expect("should run the inline event loop")
     }
 
     #[test]
@@ -716,7 +764,7 @@ mod tests {
         let mut events = ScriptedEvents(vec![KeyCode::Right; 2000].into());
         let mut terminal =
             Terminal::new(TestBackend::new(12, 12)).expect("should create a test terminal");
-        run_inline_event_loop(&mut terminal, &mut controller, &mut events)
+        run_inline_event_loop(&mut terminal, &mut controller, None, &mut events)
             .expect("should run the inline event loop");
 
         assert!(
@@ -1114,5 +1162,112 @@ mod tests {
                 .all(|cell| cell.bg != theme_background),
             "the inline plot should not paint the theme background over the terminal's own"
         );
+    }
+
+    /// A repository with one sequence and one imported GFF file, and a controller open on the
+    /// sequence's block group with its first batch drawn.
+    fn setup_annotated_controller() -> (
+        crate::test_helpers::TestContext,
+        GenGraphController,
+        HashId,
+        Vec<AnnotationFileEntry>,
+    ) {
+        let context = crate::test_helpers::setup_gen_on_disk();
+        let fasta_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .expect("should encode the fixture path")
+            .to_string();
+        let import = crate::imports::fasta::import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            gen_models::sample::Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .expect("should import the fixture FASTA");
+        gen_models::operations::commit_operation_summary(&context, &import)
+            .expect("should commit the fixture FASTA");
+        let gff_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        gen_models::annotations::add_annotation_file(
+            &context,
+            gff_path.to_str().expect("should encode the GFF path"),
+            Some("gff3"),
+            None,
+            Some("feature-annotations"),
+            Some("add feature annotations"),
+            gen_models::annotations::AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should add the annotation file");
+        let conn = context.graph().conn();
+        let block_group = BlockGroup::get_by_name(
+            conn,
+            "test",
+            gen_models::sample::Sample::DEFAULT_NAME,
+            "m123",
+            None,
+        )
+        .expect("should find the imported block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(conn, context.workspace())
+                .expect("should open the graph database"),
+            &block_group.id,
+            None,
+        )
+        .expect("should open the block group");
+        let area = Rect::new(0, 0, 80, 12);
+        controller.render_settled(&mut Buffer::empty(area), area, Style::default());
+        let files = crate::views::annotation_files::load_annotation_file_entries(conn, None);
+        (context, controller, block_group.id, files)
+    }
+
+    fn drawn_file_features(controller: &GenGraphController) -> usize {
+        controller
+            .overlays()
+            .iter()
+            .filter(|overlay| overlay.span().is_some())
+            .count()
+    }
+
+    #[test]
+    fn test_inline_files_are_read_once_per_active_batch() {
+        let (context, mut controller, block_group_id, files) = setup_annotated_controller();
+        let mut annotation_files = InlineAnnotationFiles {
+            conn: context.graph().conn(),
+            workspace: context.workspace(),
+            block_group_id: &block_group_id,
+            files: &files,
+            history_ref: None,
+            batch: None,
+        };
+
+        assert!(annotation_files.follow_active_batch(&mut controller));
+        let features = drawn_file_features(&controller);
+        assert!(features > 0, "should draw the file's features");
+        assert!(!annotation_files.follow_active_batch(&mut controller));
+        assert_eq!(drawn_file_features(&controller), features);
+    }
+
+    #[test]
+    fn test_inline_files_read_for_a_new_batch_replace_the_earlier_features() {
+        let (context, mut controller, block_group_id, files) = setup_annotated_controller();
+        let mut annotation_files = InlineAnnotationFiles {
+            conn: context.graph().conn(),
+            workspace: context.workspace(),
+            block_group_id: &block_group_id,
+            files: &files,
+            history_ref: None,
+            batch: None,
+        };
+        annotation_files.follow_active_batch(&mut controller);
+        let features = drawn_file_features(&controller);
+
+        // Forgetting the batch makes the next call read the files again, as a door does.
+        annotation_files.batch = None;
+        assert!(annotation_files.follow_active_batch(&mut controller));
+
+        assert_eq!(drawn_file_features(&controller), features);
     }
 }
