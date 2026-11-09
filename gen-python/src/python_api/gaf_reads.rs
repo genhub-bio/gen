@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs};
 
 use r#gen::{
     updates::gaf::{GafAlignment, GafUpdateError, clip_gaf_walk, parse_gaf_line},
-    views::gen_graph_widget::walk_hop_edge_key,
+    views::gen_graph_widget::walk_hop_ported_edge,
 };
 use gen_graph::{GenGraph, GraphNodeSlice};
 use gen_models::{db::DbContext, locus::GraphLocus};
@@ -126,7 +126,7 @@ fn first_missing_hop(graph: &GenGraph, walk: &[GraphNodeSlice]) -> Option<String
         )
     };
     walk.windows(2)
-        .find(|hop| walk_hop_edge_key(graph, &hop[0], &hop[1]).is_none())
+        .find(|hop| walk_hop_ported_edge(graph, &hop[0], &hop[1]).is_none())
         .map(|hop| format!("{} -> {}", describe(&hop[0]), describe(&hop[1])))
 }
 
