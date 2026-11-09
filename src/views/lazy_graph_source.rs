@@ -4,11 +4,15 @@
 //! because it is the shared `GenGraph`-viewer glue every binding sits on top of - see
 //! `gen_graph_widget`.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
-use gen_models::{db::GraphConnection, edge::Edge, port_crawl::PortCrawler};
+use gen_models::{
+    db::GraphConnection,
+    edge::Edge,
+    port_crawl::{LocateError, PortCrawler},
+};
 use gen_tui::crawl::{
     EagerSource, GraphCursor, GraphSource, PreferredWormholeDoors, StructuralSubgraph, crawl_batch,
     subgraph_for,
@@ -58,51 +62,6 @@ pub fn prepare_projected_batch<S: ProjectedBatchSource>(
     )?;
     source.finish_projected_batch(graph, &members)?;
     Ok(subgraph_for(anchor, members, graph, preferred_doors))
-}
-
-/// Omit routes that the shared projection marked superseded, then discard nodes reached only
-/// through those routes once their incoming side is complete.
-fn prune_projected_graph(
-    projected: &GenGraph,
-    surviving_routes: &GenGraph,
-    is_frontier: impl Fn(GraphNode, Direction) -> bool,
-) -> GenGraph {
-    let mut hidden = HashSet::new();
-    loop {
-        let before = hidden.len();
-        for node in projected.nodes() {
-            if node.node_id == PATH_START_NODE_ID || is_frontier(node, Direction::Incoming) {
-                continue;
-            }
-            if projected
-                .neighbors_directed(node, Direction::Incoming)
-                .all(|predecessor| {
-                    !surviving_routes.contains_edge(predecessor, node)
-                        || hidden.contains(&predecessor)
-                })
-            {
-                hidden.insert(node);
-            }
-        }
-        if hidden.len() == before {
-            break;
-        }
-    }
-    let mut retained = GenGraph::new();
-    for node in projected.nodes() {
-        if !hidden.contains(&node) {
-            retained.add_node(node);
-        }
-    }
-    for (source, target, records) in projected.all_edges() {
-        if !hidden.contains(&source)
-            && !hidden.contains(&target)
-            && surviving_routes.contains_edge(source, target)
-        {
-            retained.add_edge(source, target, records.clone());
-        }
-    }
-    retained
 }
 
 /// The fixed `(node_id, 0, 0)` value a `PATH_START`/`PATH_END` sentinel always carries (see
@@ -297,19 +256,7 @@ impl ProjectedGraphSource {
             discard_circular_marker_and_sentinels(&mut projection.surviving_routes);
         }
         self.surviving_routes = projection.surviving_routes;
-        if self.prune {
-            *graph = prune_projected_graph(
-                &projection.graph,
-                &self.surviving_routes,
-                |node, direction| {
-                    self.port_source
-                        .as_ref()
-                        .is_some_and(|source| source.is_frontier(node, direction))
-                },
-            );
-        } else {
-            *graph = projection.graph;
-        }
+        *graph = projection.graph;
     }
 
     fn resolve_junction_frontier(&mut self) -> Result<(), String> {
@@ -343,16 +290,18 @@ impl ProjectedGraphSource {
         graph: &mut GenGraph,
         node_id: HashId,
         coordinate: i64,
-    ) -> Option<GraphNode> {
-        self.ensure_source(graph).ok()?;
+    ) -> Result<GraphNode, LocateError> {
+        self.ensure_source(graph)
+            .map_err(LocateError::Unavailable)?;
         let located = self
             .port_source
-            .as_mut()?
-            .locate(&mut self.raw_graph, node_id, coordinate)
-            .ok()??;
+            .as_mut()
+            .expect("should have initialized port source")
+            .locate(&mut self.raw_graph, node_id, coordinate)?;
         if located.sequence_start == located.sequence_end && !gen_core::is_terminal(located.node_id)
         {
-            self.resolve_junction_frontier().ok()?;
+            self.resolve_junction_frontier()
+                .map_err(LocateError::Unavailable)?;
             let mut outgoing: Vec<_> = self
                 .raw_graph
                 .neighbors_directed(located, Direction::Outgoing)
@@ -369,10 +318,11 @@ impl ProjectedGraphSource {
             return outgoing
                 .into_iter()
                 .chain(incoming)
-                .find(|node| graph.contains_node(*node));
+                .find(|node| graph.contains_node(*node))
+                .ok_or(LocateError::NotFound);
         }
         self.refresh_projection(graph);
-        Some(located)
+        Ok(located)
     }
 }
 
@@ -459,21 +409,23 @@ impl EagerOrProjectedSource {
     }
 
     /// The loaded block of `node_id` holding `coordinate`, or, for a lazily crawled graph, the
-    /// one the crawl would carve there, added as frontier.
+    /// one the crawl would carve there, added as frontier. A position the block group lacks, or a
+    /// pruned view finds cut off from its start, is an error the caller reports to the user.
     pub fn locate(
         &mut self,
         graph: &mut GenGraph,
         node_id: HashId,
         coordinate: i64,
-    ) -> Option<GraphNode> {
+    ) -> Result<GraphNode, LocateError> {
         let loaded = graph.nodes().find(|node| {
             node.node_id == node_id
                 && node.sequence_start <= coordinate
                 && coordinate < node.sequence_end
         });
-        match self {
-            Self::Eager { .. } => loaded,
-            Self::Projected(source) => loaded.or_else(|| source.locate(graph, node_id, coordinate)),
+        match (self, loaded) {
+            (_, Some(node)) => Ok(node),
+            (Self::Eager { .. }, None) => Err(LocateError::NotFound),
+            (Self::Projected(source), None) => source.locate(graph, node_id, coordinate),
         }
     }
 }
@@ -515,6 +467,8 @@ impl ProjectedBatchSource for EagerOrProjectedSource {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::collections::HashMap;
+
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
         block_group::{BlockGroup, NewBlockGroup},
@@ -565,26 +519,6 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(&connection, &edges);
         block_group_id
-    }
-
-    #[test]
-    fn test_prune_projected_graph_omits_only_decided_superseded_routes() {
-        let start = start_sentinel();
-        let current = graph_node("current");
-        let retired = graph_node("retired");
-        let mut projected = GenGraph::new();
-        projected.add_edge(start, current, Vec::new());
-        projected.add_edge(start, retired, Vec::new());
-        let mut surviving = GenGraph::new();
-        surviving.add_edge(start, current, Vec::new());
-        let pruned = prune_projected_graph(&projected, &surviving, |_, _| false);
-        assert!(pruned.contains_edge(start, current));
-        assert!(!pruned.contains_node(retired));
-        let partial = prune_projected_graph(&projected, &surviving, |node, direction| {
-            node == retired && direction == Direction::Incoming
-        });
-        assert!(partial.contains_node(retired));
-        assert!(!partial.contains_edge(start, retired));
     }
 
     /// Build an on-disk `start -> labels[0] -> ... -> end` chain of 5-base nodes, each node id
@@ -703,6 +637,121 @@ pub(crate) mod tests {
                 return;
             }
             source.expand_frontier(graph, &frontier).unwrap();
+        }
+    }
+
+    /// `start -> upstream -> {old, new} -> ...`: `old` and `new` leave `upstream` on the same
+    /// chromosome, `new` more recently, so the route through `old` is superseded. `old` still
+    /// leads on to `claimed -> end`, which makes `claimed` reachable only through a route that
+    /// pruning will later hide.
+    fn setup_superseded_route_block_group(db_path: &std::path::Path) -> HashId {
+        let (block_group_id, _) = setup_labelled_chain_block_group(db_path, &["unused"]);
+        let connection = get_connection(db_path).unwrap();
+        let mut node_ids = HashMap::new();
+        for label in ["upstream", "old", "new", "claimed"] {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("AAAAA")
+                .save(&connection)
+                .unwrap();
+            node_ids.insert(
+                label,
+                Node::create(&connection, &sequence.hash, &HashId::convert_str(label)).unwrap(),
+            );
+        }
+        let routes = [
+            ("start", 0, "upstream", 0, 0),
+            ("old", 5, "claimed", 0, 0),
+            ("claimed", 5, "end", 0, 0),
+            ("upstream", 5, "old", 0, 1),
+            ("upstream", 5, "new", 0, 1),
+            ("new", 5, "end", 0, 0),
+        ];
+        for (source_label, source_coordinate, target_label, target_coordinate, chromosome_index) in
+            routes
+        {
+            let node_for = |label: &str| match label {
+                "start" => PATH_START_NODE_ID,
+                "end" => PATH_END_NODE_ID,
+                label => node_ids[label],
+            };
+            let source_node = node_for(source_label);
+            let target_node = node_for(target_label);
+            let edge = Edge::create(
+                &connection,
+                source_node,
+                source_coordinate,
+                Strand::Forward,
+                target_node,
+                target_coordinate,
+                Strand::Forward,
+            )
+            .unwrap();
+            // One call per edge keeps the creation times in the order listed.
+            BlockGroupEdge::bulk_create(
+                &connection,
+                &[BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id: edge.id,
+                    chromosome_index,
+                    phased: 0,
+                }],
+            );
+        }
+        block_group_id
+    }
+
+    #[test]
+    fn test_locate_refuses_a_block_only_a_superseded_route_leads_to() {
+        let temporary = tempfile::tempdir().unwrap();
+        let db_path = temporary.path().join("graph.db");
+        let block_group_id = setup_superseded_route_block_group(&db_path);
+        let connection = get_connection(&db_path).unwrap();
+        let mut graph = PackedGenGraph::from(seed_block_group_graph(&connection, &block_group_id));
+
+        let mut pruned = ProjectedGraphSource::new_pruned(db_path.clone(), block_group_id);
+        assert!(matches!(
+            pruned.locate(&mut graph, HashId::convert_str("claimed"), 2),
+            Err(LocateError::Unreachable)
+        ));
+        assert!(
+            pruned
+                .locate(&mut graph, HashId::convert_str("new"), 2)
+                .is_ok(),
+            "the superseding route's block should still be found"
+        );
+
+        let mut unpruned = ProjectedGraphSource::new(db_path, block_group_id);
+        assert!(
+            unpruned
+                .locate(&mut graph, HashId::convert_str("claimed"), 2)
+                .is_ok(),
+            "an unpruned view keeps every stored block"
+        );
+    }
+
+    #[test]
+    fn test_pruned_source_never_loads_blocks_only_a_superseded_route_leads_to() {
+        let temporary = tempfile::tempdir().unwrap();
+        let db_path = temporary.path().join("graph.db");
+        let block_group_id = setup_superseded_route_block_group(&db_path);
+        let connection = get_connection(&db_path).unwrap();
+        let claimed = HashId::convert_str("claimed");
+
+        for (pruned, expect_claimed) in [(true, false), (false, true)] {
+            let mut graph =
+                PackedGenGraph::from(seed_block_group_graph(&connection, &block_group_id));
+            let mut source = if pruned {
+                ProjectedGraphSource::new_pruned(db_path.clone(), block_group_id)
+            } else {
+                ProjectedGraphSource::new(db_path.clone(), block_group_id)
+            };
+            crawl_everything(&mut source, &mut graph);
+            assert_eq!(
+                graph.nodes().any(|node| node.node_id == claimed),
+                expect_claimed,
+                "pruned={pruned}: only an unpruned crawl should load the superseded route's block"
+            );
         }
     }
 

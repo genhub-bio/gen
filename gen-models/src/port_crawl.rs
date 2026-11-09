@@ -11,7 +11,7 @@ use std::{
 
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
+    PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use intervaltree::IntervalTree;
@@ -36,6 +36,24 @@ pub enum CrawlStart<'a> {
     /// annotations and accessions, including reverse blocks. To keep the crawl within the
     /// region, pass half its length as the radius.
     Region(&'a ResolvedGenRegion),
+}
+
+/// Why a backing-node position could not be turned into a block of the crawled graph.
+#[derive(Debug, Error)]
+pub enum LocateError {
+    /// The position does not belong to the block group.
+    #[error("the position is not in the block group")]
+    NotFound,
+    /// Edits cut the position off from the start of the block group. A pruned view omits it, as
+    /// `BlockGroup::prune_graph` does, so there is no block to show.
+    #[error("the position is cut off from the start of the block group by later edits")]
+    Unreachable,
+    /// A database query failed.
+    #[error(transparent)]
+    Edge(#[from] EdgeError),
+    /// The graph source could not be used, for example because its connection was lost.
+    #[error("the graph source is unavailable: {0}")]
+    Unavailable(String),
 }
 
 #[derive(Debug, Error)]
@@ -132,8 +150,12 @@ pub fn crawl_graph(
 
     let mut crawler = PortCrawler::new(block_group_id, false);
     let mut loaded = GenGraph::new();
-    let Some(anchor) = crawler.locate(conn, &mut loaded, node_id, coordinate)? else {
-        return Ok(None);
+    let anchor = match crawler.locate(conn, &mut loaded, node_id, coordinate) {
+        Ok(anchor) => anchor,
+        Err(LocateError::NotFound | LocateError::Unreachable | LocateError::Unavailable(_)) => {
+            return Ok(None);
+        }
+        Err(LocateError::Edge(error)) => return Err(error.into()),
     };
     let mut selected = HashSet::from([anchor]);
     // Bases from the start to each slice's incoming and outgoing port, tracked only when the
@@ -274,6 +296,11 @@ pub struct PortCrawler {
     /// edge ID alone is insufficient because several chromosome copies can share that edge.
     visited_edge_records: HashSet<GraphEdge>,
     materialized: HashSet<(GraphNode, Direction)>,
+    /// Blocks known to be reached from a start sentinel by routes that survive pruning. A
+    /// backward step stops its reachability walk at any of them, so checking a predecessor
+    /// costs a few queries instead of a walk back to the start. It lives as long as the graph
+    /// this crawler grows, so it is never staler than that graph.
+    proven_live: HashSet<GraphNode>,
 }
 
 /// A jump skips sequence within one backing node, so its endpoints sit at different coordinates.
@@ -317,15 +344,16 @@ fn graph_edge_for(augmented_edge: &AugmentedEdge) -> GraphEdge {
     }
 }
 
-/// Project one stored edge onto the blocks at its two ports, the same way the eager graph
-/// builder does for ordinary edges. A junction is a port with a self loop, and every edge at it
-/// is loaded with the port, so the filtered product of the blocks arriving at and leaving the
-/// port can be decided locally. Unlike the eager builder, the crawler does not add cycle-escape
-/// edges for traversal algorithms that cannot revisit junctions, as can happen around insertions
-/// anchored to a junction. Detecting those shortcuts requires reachability analysis over the full
-/// graph. Without them, the crawled neighborhood still represents the routes through its junctions
-/// and is suitable for the viewer widgets.
-fn merge_fragment(graph: &mut GenGraph, augmented_edge: &AugmentedEdge, endpoints: &EdgeEndpoints) {
+/// The block-to-block links one stored edge produces at its two ports, the same way the eager
+/// graph builder does for ordinary edges. A junction is a port with a self loop, and every edge at
+/// it is loaded with the port, so the filtered product of the blocks arriving at and leaving the
+/// port can be decided locally. Both `merge_fragment`, which draws the links, and
+/// `PortCrawler::is_reachable`, which only follows them, call this so they can never disagree
+/// about which blocks an edge joins.
+fn connected_blocks(
+    augmented_edge: &AugmentedEdge,
+    endpoints: &EdgeEndpoints,
+) -> Vec<(GraphNode, GraphNode)> {
     let edge = &augmented_edge.edge;
     let group_block = |node: &GraphNode| {
         GroupBlock::without_sequence(0, node.node_id, node.sequence_start, node.sequence_end)
@@ -346,24 +374,43 @@ fn merge_fragment(graph: &mut GenGraph, augmented_edge: &AugmentedEdge, endpoint
         })
         .map(group_block)
         .collect();
-    let connections = edge.block_connections(
+    edge.block_connections(
         &source_blocks.iter().collect::<Vec<_>>(),
         &target_blocks.iter().collect::<Vec<_>>(),
         endpoints.source_is_shared_position,
         endpoints.target_is_shared_position,
-    );
+    )
+    .into_iter()
+    .map(|(source_block, target_block)| {
+        (
+            GraphNode {
+                node_id: source_block.node_id,
+                sequence_start: source_block.start,
+                sequence_end: source_block.end,
+            },
+            GraphNode {
+                node_id: target_block.node_id,
+                sequence_start: target_block.start,
+                sequence_end: target_block.end,
+            },
+        )
+    })
+    .collect()
+}
+
+/// Project one stored edge onto the blocks at its two ports (see `connected_blocks`). Unlike the
+/// eager builder, the crawler does not add cycle-escape edges for traversal algorithms that
+/// cannot revisit junctions, as can happen around insertions anchored to a junction. Detecting
+/// those shortcuts requires reachability analysis over the full graph. Without them, the crawled
+/// neighborhood still represents the routes through its junctions and is suitable for the viewer
+/// widgets.
+fn merge_fragment(
+    graph: &mut GenGraph,
+    augmented_edge: &AugmentedEdge,
+    connections: &[(GraphNode, GraphNode)],
+) {
     let graph_edge = graph_edge_for(augmented_edge);
-    for (source_block, target_block) in connections {
-        let source = GraphNode {
-            node_id: source_block.node_id,
-            sequence_start: source_block.start,
-            sequence_end: source_block.end,
-        };
-        let target = GraphNode {
-            node_id: target_block.node_id,
-            sequence_start: target_block.start,
-            sequence_end: target_block.end,
-        };
+    for (source, target) in connections.iter().copied() {
         if let Some(existing) = graph.edge_weight_mut(source, target) {
             if !existing.contains(&graph_edge) {
                 existing.push(graph_edge);
@@ -383,6 +430,7 @@ impl PortCrawler {
             edge_groups: HashMap::new(),
             visited_edge_records: HashSet::new(),
             materialized: HashSet::new(),
+            proven_live: HashSet::new(),
         }
     }
 
@@ -448,10 +496,31 @@ impl PortCrawler {
     /// The graph slice holding a backing-node coordinate, added as frontier if needed.
     /// The surrounding port coordinates define its sequence bounds; a coordinate on an outer
     /// junction with no sequence to its right resolves to the zero-width junction itself.
+    /// With pruning on, a slice that no surviving route reaches from a start sentinel is refused,
+    /// since a pruned view has no such block.
     pub fn locate(
         &mut self,
         conn: &GraphConnection,
         graph: &mut GenGraph,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Result<GraphNode, LocateError> {
+        let block = self
+            .find_block(conn, node_id, coordinate)?
+            .ok_or(LocateError::NotFound)?;
+        if self.prune && !self.is_reachable(conn, block)? {
+            return Err(LocateError::Unreachable);
+        }
+        graph.add_node(block);
+        Ok(block)
+    }
+
+    /// The graph slice holding a backing-node coordinate, if the block group has one there.
+    /// The surrounding port coordinates define its sequence bounds; a coordinate on an outer
+    /// junction with no sequence to its right resolves to the zero-width junction itself.
+    fn find_block(
+        &mut self,
+        conn: &GraphConnection,
         node_id: HashId,
         coordinate: i64,
     ) -> Result<Option<GraphNode>, EdgeError> {
@@ -483,7 +552,6 @@ impl PortCrawler {
                 sequence_start: start,
                 sequence_end: end,
             };
-            graph.add_node(block);
             return Ok(Some(block));
         }
         if coordinate == start {
@@ -502,7 +570,6 @@ impl PortCrawler {
                 )?
                 .contains(&junction)
             {
-                graph.add_node(junction);
                 return Ok(Some(junction));
             }
         }
@@ -620,36 +687,200 @@ impl PortCrawler {
             if self.visited_edge_records.contains(&graph_edge) {
                 continue;
             }
-            if self.prune && !self.survives_pruning(conn, augmented_edge)? {
-                self.visited_edge_records.insert(graph_edge);
-                continue;
-            }
-            let source_port = Port {
-                node_id: augmented_edge.edge.source_node_id,
-                coordinate: augmented_edge.edge.source_coordinate,
-            };
-            let target_port = Port {
-                node_id: augmented_edge.edge.target_node_id,
-                coordinate: augmented_edge.edge.target_coordinate,
-            };
-            let source_blocks = self.port_blocks(conn, source_port)?;
-            let target_blocks = self.port_blocks(conn, target_port)?;
-            let source_is_shared_position = self.is_shared_position_port(conn, source_port)?;
-            let target_is_shared_position = self.is_shared_position_port(conn, target_port)?;
-            merge_fragment(
-                graph,
-                augmented_edge,
-                &EdgeEndpoints {
-                    source_blocks: &source_blocks,
-                    target_blocks: &target_blocks,
-                    source_is_shared_position,
-                    target_is_shared_position,
-                },
-            );
+            let connections = self.surviving_connections(conn, augmented_edge)?;
+            let connections = self.live_connections(conn, connections)?;
+            merge_fragment(graph, augmented_edge, &connections);
             self.visited_edge_records.insert(graph_edge);
         }
         self.materialized.insert((node, direction));
         Ok(())
+    }
+
+    /// The block-to-block links a stored edge produces, resolved against the blocks adjacent to
+    /// both of its ports, plus the cycle-exit link the eager builder adds for an insertion.
+    ///
+    /// An insertion leaves a port and returns to it, so its returning edge can only reach the
+    /// junction at that port. The reference continuation past the junction is carried by the cut
+    /// marker, which pruning drops, so the returning edge also links its source straight to the
+    /// sequence starting at the port, and keeps its own records.
+    fn connections_of(
+        &mut self,
+        conn: &GraphConnection,
+        augmented_edge: &AugmentedEdge,
+    ) -> Result<Vec<(GraphNode, GraphNode)>, EdgeError> {
+        let mut connections = self.edge_links(conn, augmented_edge)?;
+        let edge = &augmented_edge.edge;
+        if edge.is_same_coordinate_edge() {
+            return Ok(connections);
+        }
+        let target_port = Port::endpoint(edge, Direction::Incoming);
+        if !self.is_shared_position_port(conn, target_port)? {
+            return Ok(connections);
+        }
+        let target_sequences: Vec<GraphNode> = self
+            .port_blocks(conn, target_port)?
+            .into_iter()
+            .filter(|block| {
+                block.node_id == edge.target_node_id
+                    && block.sequence_start == edge.target_coordinate
+                    && block.sequence_start != block.sequence_end
+            })
+            .collect();
+        let entries: Vec<(GraphNode, GraphNode)> = connections
+            .iter()
+            .filter(|(_, target)| target.sequence_start == target.sequence_end)
+            .copied()
+            .collect();
+        for (source, position) in entries {
+            if !self.leads_back_to(conn, source, position)? {
+                continue;
+            }
+            for target in &target_sequences {
+                if !connections.contains(&(source, *target)) {
+                    connections.push((source, *target));
+                }
+            }
+        }
+        Ok(connections)
+    }
+
+    /// The links one stored edge produces between the blocks at its two ports.
+    fn edge_links(
+        &mut self,
+        conn: &GraphConnection,
+        augmented_edge: &AugmentedEdge,
+    ) -> Result<Vec<(GraphNode, GraphNode)>, EdgeError> {
+        let source_port = Port::endpoint(&augmented_edge.edge, Direction::Outgoing);
+        let target_port = Port::endpoint(&augmented_edge.edge, Direction::Incoming);
+        let source_blocks = self.port_blocks(conn, source_port)?;
+        let target_blocks = self.port_blocks(conn, target_port)?;
+        let source_is_shared_position = self.is_shared_position_port(conn, source_port)?;
+        let target_is_shared_position = self.is_shared_position_port(conn, target_port)?;
+        Ok(connected_blocks(
+            augmented_edge,
+            &EdgeEndpoints {
+                source_blocks: &source_blocks,
+                target_blocks: &target_blocks,
+                source_is_shared_position,
+                target_is_shared_position,
+            },
+        ))
+    }
+
+    /// Whether `position` can reach `block` through the stored edges, which makes an edge from
+    /// `block` into `position` a cycle. The walk goes backward from `block` over every stored
+    /// edge, pruned or not, and across the boundaries where other edits split an inserted node.
+    /// It never enters the backing node of `position`: the reference side is not part of a
+    /// return path, and stopping there keeps the walk inside the inserted sequence.
+    fn leads_back_to(
+        &mut self,
+        conn: &GraphConnection,
+        block: GraphNode,
+        position: GraphNode,
+    ) -> Result<bool, EdgeError> {
+        let mut pending = vec![block];
+        let mut seen = HashSet::new();
+        while let Some(current) = pending.pop() {
+            if current.node_id == position.node_id || !seen.insert(current) {
+                continue;
+            }
+            let start_port = Port::of(&current, Direction::Incoming);
+            let arrivals = self.load_group(conn, start_port, Direction::Incoming)?;
+            for augmented_edge in arrivals.iter() {
+                for (source, target) in self.edge_links(conn, augmented_edge)? {
+                    if target != current {
+                        continue;
+                    }
+                    if source == position {
+                        return Ok(true);
+                    }
+                    pending.push(source);
+                }
+            }
+            for neighbor in self.port_blocks(conn, start_port)? {
+                if neighbor.node_id == current.node_id
+                    && neighbor.sequence_end == current.sequence_start
+                    && neighbor.sequence_start != neighbor.sequence_end
+                {
+                    pending.push(neighbor);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether a route that survives pruning leads from a start sentinel to `block`.
+    ///
+    /// The walk goes backward only, one port at a time: at each block it reads the edges
+    /// arriving at that block's own incoming port, skips the ones pruning drops, and moves to
+    /// the blocks they leave from. It never reads a whole backing node. A cut-off neighbourhood
+    /// runs out of edges and answers `false`; a live block ends the walk at a start sentinel or
+    /// at a block already proven live, and every block on that route is proven live too.
+    /// Nothing is added to a graph, so a caller can ask before it materializes a block, whether
+    /// that block comes from `locate` or is the source of a batch.
+    pub fn is_reachable(
+        &mut self,
+        conn: &GraphConnection,
+        block: GraphNode,
+    ) -> Result<bool, EdgeError> {
+        let mut pending = vec![block];
+        let mut seen = HashSet::new();
+        let mut reached_from: HashMap<GraphNode, GraphNode> = HashMap::new();
+        while let Some(current) = pending.pop() {
+            if current.node_id == PATH_START_NODE_ID || self.proven_live.contains(&current) {
+                self.proven_live.insert(current);
+                let mut route = current;
+                while let Some(downstream) = reached_from.get(&route).copied() {
+                    self.proven_live.insert(downstream);
+                    route = downstream;
+                }
+                return Ok(true);
+            }
+            if !seen.insert(current) {
+                continue;
+            }
+            let arriving = self.load_group(
+                conn,
+                Port::of(&current, Direction::Incoming),
+                Direction::Incoming,
+            )?;
+            for augmented_edge in arriving.iter() {
+                for (source, target) in self.surviving_connections(conn, augmented_edge)? {
+                    if target == current {
+                        // The starting block never gets a downstream, or a loop back to it would
+                        // make the route marked below circular.
+                        if source != block {
+                            reached_from.entry(source).or_insert(current);
+                        }
+                        pending.push(source);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Narrow `connections` to the links whose source a surviving route reaches from a start
+    /// sentinel. An edge read at one block's port also binds to every other block sharing that
+    /// port, and a source nothing reaches is a dead block that pruning leaves out even though its
+    /// own edge into a live block survives, as beside adjacent deletions or a superseded allele.
+    /// The target of a kept link is live, so later steps stop their walk there.
+    fn live_connections(
+        &mut self,
+        conn: &GraphConnection,
+        connections: Vec<(GraphNode, GraphNode)>,
+    ) -> Result<Vec<(GraphNode, GraphNode)>, EdgeError> {
+        if !self.prune {
+            return Ok(connections);
+        }
+        let mut live = Vec::new();
+        for (source, target) in connections {
+            if self.is_reachable(conn, source)? {
+                self.proven_live.insert(target);
+                live.push((source, target));
+            }
+        }
+        Ok(live)
     }
 
     fn is_shared_position_port(
@@ -662,31 +893,52 @@ impl PortCrawler {
         Ok(is_shared_position(&incoming, &outgoing))
     }
 
-    /// Reverse pruning needs the source's outgoing siblings; forward crawling already cached them.
-    fn survives_pruning(
+    /// The links of `connections_of` that pruning keeps. Like `BlockGroup::prune_graph`, which
+    /// walks graph nodes, siblings compete per source block and chromosome index, not per port:
+    /// a same-coordinate edge into a junction and the edge leaving that junction share a port
+    /// but leave different blocks, so neither supersedes the other. Reverse pruning needs the
+    /// source port's outgoing siblings; forward crawling already cached them.
+    fn surviving_connections(
         &mut self,
         conn: &GraphConnection,
         augmented_edge: &AugmentedEdge,
-    ) -> Result<bool, EdgeError> {
+    ) -> Result<Vec<(GraphNode, GraphNode)>, EdgeError> {
+        let connections = self.connections_of(conn, augmented_edge)?;
+        if !self.prune {
+            return Ok(connections);
+        }
         let chromosome_index = augmented_edge.chromosome_index;
         if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         if chromosome_index == NO_CHROMOSOME_INDEX
             || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
         {
-            return Ok(true);
+            return Ok(connections);
         }
-        let edges = self.load_group(
+        let siblings = self.load_group(
             conn,
             Port::endpoint(&augmented_edge.edge, Direction::Outgoing),
             Direction::Outgoing,
         )?;
-        Ok(edges
+        let mut newest_by_source: HashMap<GraphNode, (i64, HashId)> = HashMap::new();
+        for sibling in siblings
             .iter()
             .filter(|sibling| sibling.chromosome_index == chromosome_index)
-            .max_by_key(|sibling| (sibling.created_on, sibling.edge.id))
-            .is_some_and(|newest| newest.edge.id == augmented_edge.edge.id))
+        {
+            let rank = (sibling.created_on, sibling.edge.id);
+            for (source, _) in self.connections_of(conn, sibling)? {
+                newest_by_source
+                    .entry(source)
+                    .and_modify(|newest| *newest = (*newest).max(rank))
+                    .or_insert(rank);
+            }
+        }
+        let own_rank = (augmented_edge.created_on, augmented_edge.edge.id);
+        Ok(connections
+            .into_iter()
+            .filter(|(source, _)| newest_by_source.get(source) == Some(&own_rank))
+            .collect())
     }
 }
 
@@ -701,7 +953,7 @@ mod tests {
     use gen_graph::{GenGraph, GraphNode};
     use petgraph::Direction;
 
-    use super::{CrawlError, CrawlStart, PortCrawler, crawl_graph};
+    use super::{CrawlError, CrawlStart, LocateError, PortCrawler, crawl_graph};
     use crate::{
         accession::{Accession, AccessionSpan, NewAccession},
         annotations::Annotation,
@@ -1310,6 +1562,21 @@ mod tests {
         nodes: &[(&str, &str)],
         edges: &[EdgeSpec<'_>],
     ) -> HashId {
+        let timed_edges: Vec<(EdgeSpec<'_>, i64)> = edges
+            .iter()
+            .enumerate()
+            .map(|(order, edge)| (*edge, order as i64))
+            .collect();
+        setup_block_group_at_times(conn, nodes, &timed_edges)
+    }
+
+    /// Like `setup_block_group`, with an explicit `created_on` per edge so a fixture can give
+    /// edges the same creation time, as one VCF import chunk does.
+    fn setup_block_group_at_times(
+        conn: &GraphConnection,
+        nodes: &[(&str, &str)],
+        edges: &[(EdgeSpec<'_>, i64)],
+    ) -> HashId {
         Collection::get_or_create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
@@ -1337,16 +1604,18 @@ mod tests {
                 .unwrap();
             Node::create(conn, &sequence.hash, &HashId::convert_str(label)).unwrap();
         }
-        for (order, (source, source_coordinate, target, target_coordinate, chromosome_index)) in
-            edges.iter().enumerate()
+        for (
+            (source, source_coordinate, target, target_coordinate, chromosome_index),
+            created_on,
+        ) in edges.iter().copied()
         {
             let edge = Edge::create(
                 conn,
                 node_id_for(source),
-                *source_coordinate,
+                source_coordinate,
                 Strand::Forward,
                 node_id_for(target),
-                *target_coordinate,
+                target_coordinate,
                 Strand::Forward,
             )
             .unwrap();
@@ -1355,13 +1624,13 @@ mod tests {
                 &[BlockGroupEdgeData {
                     block_group_id: block_group.id,
                     edge_id: edge.id,
-                    chromosome_index: *chromosome_index,
+                    chromosome_index,
                     phased: 0,
                 }],
             );
             conn.execute(
                 "UPDATE block_group_edges SET created_on = ?1 WHERE edge_id = ?2",
-                (order as i64, edge.id),
+                (created_on, edge.id),
             )
             .unwrap();
         }
@@ -1724,8 +1993,8 @@ mod tests {
                     let mut graph = GenGraph::new();
                     let located = crawler
                         .locate(&conn, &mut graph, block.node_id, coordinate)
-                        .unwrap();
-                    assert_eq!(located, Some(*block), "coordinate {coordinate}");
+                        .expect("should locate a block of the crawled graph");
+                    assert_eq!(located, *block, "coordinate {coordinate}");
                     crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
                     let (nodes, edges) = connected_shape(&graph);
                     assert!(
@@ -1749,18 +2018,14 @@ mod tests {
         let mut crawler = PortCrawler::new(block_group_id, false);
         let mut graph = GenGraph::new();
 
-        assert_eq!(
-            crawler
-                .locate(&conn, &mut graph, node_id_for("unrelated"), 2)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            crawler
-                .locate(&conn, &mut graph, PATH_START_NODE_ID, 0)
-                .unwrap(),
-            None
-        );
+        assert!(matches!(
+            crawler.locate(&conn, &mut graph, node_id_for("unrelated"), 2),
+            Err(LocateError::NotFound)
+        ));
+        assert!(matches!(
+            crawler.locate(&conn, &mut graph, PATH_START_NODE_ID, 0),
+            Err(LocateError::NotFound)
+        ));
         assert_eq!(graph.node_count(), 0);
     }
 
@@ -1799,5 +2064,261 @@ mod tests {
         assert!(reached.contains(&HashId::convert_str("tail")));
         assert!(!reached.contains(&HashId::convert_str("old")));
         assert!(!reached.contains(&HashId::convert_str("marked")));
+    }
+
+    /// Two deletions that meet at base 6, as the Python editing API writes them: a cut marker
+    /// at each of the three ports and one skip edge per deletion. The blocks `[3,6)` and `[6,9)`
+    /// are dead, but the second skip edge starts at the shared port 6, so it also leaves `[3,6)`.
+    fn adjacent_deletions_block_group(conn: &GraphConnection) -> HashId {
+        setup_block_group(
+            conn,
+            &[("ref", ADJACENT_EDIT_BASE)],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 3, "ref", 3, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+                ("ref", 6, "ref", 6, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+                ("ref", 9, "ref", 9, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+                ("ref", 3, "ref", 6, 0),
+                ("ref", 6, "ref", 9, 0),
+            ],
+        )
+    }
+
+    /// A heterozygous SNP at `[4,5)` followed by a homozygous one at `[5,6)`, imported in one
+    /// chunk so every variant edge shares one creation time. The first record's right marker and
+    /// the second record's entry edge both leave port 5 on chromosome 0. `swap_creation_order`
+    /// flips which of the two is stored first, and so which has the lower edge ID.
+    fn adjacent_heterozygous_then_homozygous_block_group(
+        conn: &GraphConnection,
+        swap_creation_order: bool,
+    ) -> HashId {
+        let first_record: [EdgeSpec<'_>; 4] = [
+            ("ref", 4, "ref", 4, 0),
+            ("ref", 5, "ref", 5, 0),
+            ("ref", 4, "first", 0, 1),
+            ("first", 1, "ref", 5, 1),
+        ];
+        let second_record: [EdgeSpec<'_>; 6] = [
+            ("ref", 5, "ref", 5, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+            ("ref", 6, "ref", 6, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+            ("ref", 5, "second", 0, 0),
+            ("ref", 5, "second", 0, 1),
+            ("second", 1, "ref", 6, 0),
+            ("second", 1, "ref", 6, 1),
+        ];
+        let mut edges: Vec<(EdgeSpec<'_>, i64)> = vec![
+            (("start", 0, "ref", 0, 0), 0),
+            (("ref", 12, "end", 0, 0), 0),
+        ];
+        let (earlier, later): (&[EdgeSpec<'_>], &[EdgeSpec<'_>]) = if swap_creation_order {
+            (&second_record, &first_record)
+        } else {
+            (&first_record, &second_record)
+        };
+        edges.extend(earlier.iter().chain(later).map(|edge| (*edge, 1)));
+        setup_block_group_at_times(
+            conn,
+            &[("ref", "ACGTACGTACGT"), ("first", "G"), ("second", "C")],
+            &edges,
+        )
+    }
+
+    /// A homozygous insertion at base 8, as a one-record VCF import writes it: the inserted
+    /// node leaves port 8 and returns to the same port, and the only link between the reference
+    /// blocks `[0,8)` and `[8,16)` is the cut marker with the reserved index, which pruning drops.
+    fn homozygous_insertion_block_group(conn: &GraphConnection) -> HashId {
+        setup_block_group(
+            conn,
+            &[("ref", "ATCGATCGATCGATCG"), ("inserted", "G")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 8, "ref", 8, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+                ("ref", 8, "inserted", 0, 0),
+                ("ref", 8, "inserted", 0, 1),
+                ("inserted", 1, "ref", 8, 0),
+                ("inserted", 1, "ref", 8, 1),
+            ],
+        )
+    }
+
+    /// A homozygous insertion built from two nodes, so the return to port 8 is two edges long.
+    fn two_node_insertion_block_group(conn: &GraphConnection) -> HashId {
+        setup_block_group(
+            conn,
+            &[("ref", "ATCGATCGATCGATCG"), ("first", "G"), ("second", "C")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 8, "ref", 8, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+                ("ref", 8, "first", 0, 0),
+                ("ref", 8, "first", 0, 1),
+                ("first", 1, "second", 0, 0),
+                ("first", 1, "second", 0, 1),
+                ("second", 1, "ref", 8, 0),
+                ("second", 1, "ref", 8, 1),
+            ],
+        )
+    }
+
+    /// A homozygous two-base insertion whose second base another edit replaces, which splits the
+    /// inserted node into slices the return path has to cross.
+    fn split_insertion_block_group(conn: &GraphConnection) -> HashId {
+        setup_block_group(
+            conn,
+            &[
+                ("ref", "ATCGATCGATCGATCG"),
+                ("inserted", "GG"),
+                ("replacement", "C"),
+            ],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 16, "end", 0, 0),
+                ("ref", 8, "ref", 8, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+                ("ref", 8, "inserted", 0, 0),
+                ("ref", 8, "inserted", 0, 1),
+                ("inserted", 2, "ref", 8, 0),
+                ("inserted", 2, "ref", 8, 1),
+                (
+                    "inserted",
+                    1,
+                    "inserted",
+                    1,
+                    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+                ),
+                (
+                    "inserted",
+                    2,
+                    "inserted",
+                    2,
+                    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+                ),
+                ("inserted", 1, "replacement", 0, 0),
+                ("replacement", 1, "inserted", 2, 0),
+            ],
+        )
+    }
+
+    fn pruning_fixtures() -> Vec<(&'static str, Box<dyn Fn(&GraphConnection) -> HashId>)> {
+        vec![
+            (
+                "adjacent deletions",
+                Box::new(adjacent_deletions_block_group),
+            ),
+            (
+                "inserted reference",
+                Box::new(inserted_reference_block_group),
+            ),
+            ("junction heavy", Box::new(junction_heavy_block_group)),
+            (
+                "homozygous insertion",
+                Box::new(homozygous_insertion_block_group),
+            ),
+            (
+                "two node insertion",
+                Box::new(two_node_insertion_block_group),
+            ),
+            ("split insertion", Box::new(split_insertion_block_group)),
+        ]
+    }
+
+    #[test]
+    fn test_pruned_crawl_has_the_blocks_the_pruned_eager_graph_keeps() {
+        let mut problems = Vec::new();
+        for (name, setup) in pruning_fixtures() {
+            let conn = get_connection(None).unwrap();
+            let block_group_id = setup(&conn);
+            let mut eager =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            BlockGroup::prune_graph(&mut eager);
+            for anchor in [start_sentinel(), block("end", 0, 0)] {
+                let mut crawler = PortCrawler::new(block_group_id, true);
+                let mut graph = GenGraph::new();
+                graph.add_node(anchor);
+                crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+                let crawled = connected_shape(&graph).0;
+                let kept = connected_shape(&eager).0;
+                let extra: Vec<&GraphNode> = crawled.difference(&kept).collect();
+                let missing: Vec<&GraphNode> = kept.difference(&crawled).collect();
+                if !extra.is_empty() || !missing.is_empty() {
+                    problems.push(format!(
+                        "{name} from {anchor:?}: loaded blocks pruning removes {extra:?}; lacks blocks pruning keeps {missing:?}"
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn test_is_reachable_agrees_with_pruning_for_every_block() {
+        for (name, setup) in pruning_fixtures() {
+            let conn = get_connection(None).unwrap();
+            let block_group_id = setup(&conn);
+            let everything =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            let mut pruned = everything.clone();
+            BlockGroup::prune_graph(&mut pruned);
+            let mut crawler = PortCrawler::new(block_group_id, true);
+            for node in everything.nodes() {
+                assert_eq!(
+                    crawler.is_reachable(&conn, node).unwrap(),
+                    pruned.contains_node(node),
+                    "{name}: reachability of {node:?} should match what pruning keeps"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_reachable_finds_the_live_route_beside_adjacent_deletions() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = adjacent_deletions_block_group(&conn);
+        let mut crawler = PortCrawler::new(block_group_id, true);
+        for live in [block("ref", 0, 3), block("ref", 6, 6), block("ref", 9, 16)] {
+            assert!(
+                crawler.is_reachable(&conn, live).unwrap(),
+                "{live:?} should be reachable"
+            );
+        }
+        for dead in [block("ref", 3, 6), block("ref", 6, 9)] {
+            assert!(
+                !crawler.is_reachable(&conn, dead).unwrap(),
+                "{dead:?} should be cut off by the retired markers"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_reachable_without_pruning_follows_every_stored_edge() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = adjacent_deletions_block_group(&conn);
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        assert!(crawler.is_reachable(&conn, block("ref", 3, 6)).unwrap());
+    }
+
+    /// Competing edges from one import chunk share a creation time, and edge IDs are content
+    /// hashes, so neither the ID nor the storage order says which should win. Both prunings must
+    /// keep the same edges whatever order the competing edges were stored in.
+    #[test]
+    fn test_pruning_breaks_creation_time_ties_the_same_way_eagerly_and_lazily() {
+        for swap_creation_order in [false, true] {
+            let conn = get_connection(None).unwrap();
+            let block_group_id =
+                adjacent_heterozygous_then_homozygous_block_group(&conn, swap_creation_order);
+            let mut eager =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            BlockGroup::prune_graph(&mut eager);
+            let mut crawler = PortCrawler::new(block_group_id, true);
+            let mut lazy = GenGraph::new();
+            lazy.add_node(start_sentinel());
+            crawl_to_exhaustion(&conn, &mut crawler, &mut lazy);
+            assert_eq!(
+                connected_shape(&lazy).0,
+                connected_shape(&eager).0,
+                "swap_creation_order={swap_creation_order}: both prunings should keep the same blocks"
+            );
+        }
     }
 }

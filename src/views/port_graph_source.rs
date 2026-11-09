@@ -7,7 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use gen_core::HashId;
 use gen_graph::{GenGraph, GraphNode, GraphSource};
-use gen_models::{db::GraphConnection, edge::EdgeError, port_crawl::PortCrawler};
+use gen_models::{
+    db::GraphConnection,
+    edge::EdgeError,
+    port_crawl::{LocateError, PortCrawler},
+};
 use petgraph::Direction;
 use thiserror::Error;
 
@@ -54,20 +58,18 @@ impl PortGraphSource {
     }
 
     /// Add the slice containing a backing-node coordinate as an unexplored seed.
-    /// Returns `None` when the position does not belong to the block group.
+    /// Fails with [`LocateError::NotFound`] when the position does not belong to the block group
+    /// and [`LocateError::Unreachable`] when a pruned source finds it cut off from the start.
     pub fn locate(
         &mut self,
         graph: &mut GenGraph,
         node_id: HashId,
         coordinate: i64,
-    ) -> Result<Option<GraphNode>, PortGraphSourceError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| PortGraphSourceError::ConnectionPoisoned)?;
-        Ok(self
-            .crawler
-            .locate(&connection, graph, node_id, coordinate)?)
+    ) -> Result<GraphNode, LocateError> {
+        let connection = self.connection.lock().map_err(|_| {
+            LocateError::Unavailable(PortGraphSourceError::ConnectionPoisoned.to_string())
+        })?;
+        self.crawler.locate(&connection, graph, node_id, coordinate)
     }
 }
 
@@ -104,6 +106,7 @@ mod tests {
         db::GraphConnection,
         edge::Edge,
         node::Node,
+        port_crawl::LocateError,
         sample::{NewSample, Sample},
         sequence::Sequence,
     };
@@ -241,8 +244,7 @@ mod tests {
         let mut graph = GenGraph::new();
         let anchor = source
             .locate(&mut graph, node_id_for("a"), 2)
-            .unwrap()
-            .unwrap();
+            .expect("should locate the block");
         let mut cloned_source = source.clone();
         let mut cloned_graph = graph.clone();
         assert!(Arc::ptr_eq(&source.connection, &cloned_source.connection));
@@ -297,7 +299,7 @@ mod tests {
         ));
         assert!(matches!(
             source.locate(&mut graph, node_id_for("a"), 2),
-            Err(PortGraphSourceError::ConnectionPoisoned)
+            Err(LocateError::Unavailable(_))
         ));
         assert!(source.is_frontier(anchor, Direction::Outgoing));
         assert_eq!(graph.node_count(), 1);
@@ -321,8 +323,7 @@ mod tests {
         let mut graph = GenGraph::new();
         let anchor = source
             .locate(&mut graph, node_id_for("b"), 2)
-            .unwrap()
-            .unwrap();
+            .expect("should locate the block");
         assert_eq!(graph.node_count(), 1);
         source.expand_frontier(&mut graph, &[anchor]).unwrap();
         assert_eq!(graph.node_count(), 3);
@@ -382,8 +383,7 @@ mod tests {
         let mut graph = GenGraph::new();
         let anchor = source
             .locate(&mut graph, node_id_for("a"), 2)
-            .unwrap()
-            .unwrap();
+            .expect("should locate the block");
         source
             .connection
             .lock()

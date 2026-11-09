@@ -578,9 +578,12 @@ impl GraphPage {
         self.controller.pan(dx, dy);
     }
 
-    fn go_to_pos(&mut self, pos: &PyPosition, center: bool) {
+    /// Fails with a `ValueError` naming why a position cannot be shown: the block group lacks it,
+    /// or edits cut it off from the start of the pruned view.
+    fn go_to_pos(&mut self, pos: &PyPosition, center: bool) -> PyResult<()> {
         self.controller
-            .go_to_coordinate(pos.position.node_id, pos.position.coordinate, center);
+            .go_to_coordinate(pos.position.node_id, pos.position.coordinate, center)
+            .map_err(|error| PyValueError::new_err(format!("cannot go to position: {error}")))
     }
 
     /// Highlight each named base and navigate to the leftmost one in the current layout.
@@ -613,8 +616,9 @@ impl GraphPage {
                     )
                 })
         });
+        // A hit the pruned view omits has no block to show, but the other hits still highlight.
         if let Some(position) = leftmost {
-            self.go_to_pos(position, center);
+            let _ = self.go_to_pos(position, center);
         }
         let span = AnnotationSpan {
             id: HashId::random_str(),
@@ -724,11 +728,15 @@ impl GraphPage {
     }
 
     /// Navigate to an `Annotation` object.
-    pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) {
+    pub fn go_to_annotation_obj(
+        &mut self,
+        annotation: &PyAnnotation,
+        center: bool,
+    ) -> PyResult<()> {
         // The locus carries absolute node coordinates, so the controller locates the target
         // itself and nodes outside the loaded window are reachable.
         let locus = PyGraphLocus::with_context(annotation.graph_locus(), None);
-        self.go_to_locus(&locus, center);
+        self.go_to_locus(&locus, center)
     }
 
     /// Highlight an `Annotation` on the graph without a label. The highlight gets its own id,
@@ -742,11 +750,11 @@ impl GraphPage {
     }
 
     /// Navigate to a `GraphLocus`.
-    pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) {
+    pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) -> PyResult<()> {
         let Some(position) = locus.target_position(center) else {
-            return;
+            return Ok(());
         };
-        self.go_to_pos(&position, center);
+        self.go_to_pos(&position, center)
     }
 
     /// Remove the track `name`: an annotation group stays hidden for later batches too, until
@@ -1291,8 +1299,7 @@ impl PyGraphController {
 
     #[pyo3(signature = (pos, center=false))]
     fn go_to_pos(&mut self, pos: &PyPosition, center: bool) -> PyResult<()> {
-        self.active()?.go_to_pos(pos, center);
-        Ok(())
+        self.active()?.go_to_pos(pos, center)
     }
 
     #[pyo3(signature = (positions, color=None, center=false))]
@@ -1360,8 +1367,7 @@ impl PyGraphController {
         annotation: &PyAnnotation,
         center: bool,
     ) -> PyResult<()> {
-        self.active()?.go_to_annotation_obj(annotation, center);
-        Ok(())
+        self.active()?.go_to_annotation_obj(annotation, center)
     }
 
     /// Highlight an `Annotation` on the graph as a nameless inline annotation,
@@ -1377,8 +1383,7 @@ impl PyGraphController {
     /// Navigate to a `GraphLocus`.
     #[pyo3(signature = (locus, center=false))]
     pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) -> PyResult<()> {
-        self.active()?.go_to_locus(locus, center);
-        Ok(())
+        self.active()?.go_to_locus(locus, center)
     }
 
     /// Every annotation-group name visible from this sequence graph — the full menu
@@ -1662,14 +1667,16 @@ mod tests {
             let stored = Py::new(python, stored).expect("should wrap the stored annotation");
             page.highlight_match(&locus.borrow(python), None)
                 .expect("should highlight a locus");
-            page.go_to_locus(&locus.borrow(python), true);
+            page.go_to_locus(&locus.borrow(python), true)
+                .expect("should go to the locus");
             page.push_track(
                 "stored",
                 vec![super::annotation_to_span(&stored.borrow(python))],
             );
             page.highlight_annotation_obj(&stored.borrow(python), None)
                 .expect("should highlight a stored annotation");
-            page.go_to_annotation_obj(&stored.borrow(python), true);
+            page.go_to_annotation_obj(&stored.borrow(python), true)
+                .expect("should go to the stored annotation");
             assert_eq!(page.controller.overlays().len(), 3);
             for overlay in page.controller.overlays() {
                 let OverlayContent::Span(span) = &overlay.content else {
@@ -2090,6 +2097,47 @@ mod tests {
             .members()
             .any(|node| node.node_id == far_node_id);
         assert!(in_active_batch, "should open the batch holding n75");
+    }
+
+    #[test]
+    fn test_go_to_annotation_off_the_block_group_raises_and_keeps_the_view() {
+        Python::initialize();
+        let context = setup_gen_on_disk();
+        let block_group_id = setup_long_chain(context.graph().conn());
+        let mut controller = PyGraphController::new(context.graph().conn(), block_group_id)
+            .expect("should create a controller");
+        let before = rendered_text(&mut controller);
+        let annotation = PyAnnotation {
+            inner: Annotation {
+                id: HashId::convert_str("missing"),
+                name: "missing".to_string(),
+                group: String::new(),
+                accession_id: HashId([0u8; 16]),
+                cached_accession: ForeignKeyCache::default(),
+                cached_interval_tree: None,
+                history_ref: None,
+                extra: None,
+            },
+            context: None,
+            ann_segments: vec![AnnotationSegment {
+                node_id: HashId::convert_str("not in this block group"),
+                range: Range { start: 1, end: 4 },
+                strand: Strand::Forward,
+            }],
+            source_block_group_id: None,
+            locus: None,
+            sequence_graph: None,
+        };
+
+        let error = controller
+            .go_to_annotation_obj(&annotation, true)
+            .expect_err("should refuse a position that is not in the block group");
+
+        assert!(
+            error.to_string().contains("cannot go to position"),
+            "{error}"
+        );
+        assert_eq!(rendered_text(&mut controller), before);
     }
 
     fn rendered_text(controller: &mut PyGraphController) -> String {

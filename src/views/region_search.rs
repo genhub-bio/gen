@@ -849,9 +849,9 @@ pub(super) fn activate_search_match(
     } else {
         span_midpoint(&span).ok_or_else(|| "region did not map to a graph position".to_string())?
     };
-    if !controller.go_to_coordinate(node_id, coordinate, true) {
-        return Err("region did not map to a graph position".to_string());
-    }
+    controller
+        .go_to_coordinate(node_id, coordinate, true)
+        .map_err(|error| format!("region did not map to a graph position: {error}"))?;
     replace_search_overlay(controller.overlays_mut(), span);
     Ok(())
 }

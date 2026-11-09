@@ -4110,7 +4110,9 @@ mod tests {
                     controller.render_settled(frame.buffer_mut(), area, Style::default());
                 })
                 .expect("should render initial widget frame");
-            assert!(controller.go_to_coordinate(centered.node_id, position, true));
+            controller
+                .go_to_coordinate(centered.node_id, position, true)
+                .expect("should go to the centered position");
             controller.set_detail_level(VisualDetail::Truncated);
             terminal
                 .draw(|frame| {

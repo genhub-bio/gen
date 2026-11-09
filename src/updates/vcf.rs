@@ -1223,6 +1223,7 @@ mod tests {
         accession::Accession,
         edge::Edge,
         node::Node,
+        port_crawl::PortCrawler,
         sample::Sample,
         sample_lineage::SampleLineage,
         sample_metadata::{MetadataValue, SampleMetadata},
@@ -3082,5 +3083,76 @@ mod tests {
             heterozygous_snp_sequences("third_haplotype_variant.vcf"),
             HashSet::from_iter(["AAGAAAAAAA".to_string(), "AACAAAAAAA".to_string()])
         );
+    }
+
+    /// Every single-record change at every genotype, imported through the VCF path so the edges
+    /// are exactly what users store. The crawler's reachability must agree with what the eager
+    /// graph keeps after pruning, for every block of the stored graph.
+    #[test]
+    fn test_vcf_single_changes_are_reachable_exactly_where_pruning_keeps_them() {
+        let changes = [
+            ("snp", "10\t.\tT\tG"),
+            ("insertion", "10\t.\tT\tTG"),
+            ("deletion", "9\t.\tAT\tA"),
+            ("replacement", "9\t.\tAT\tGCC"),
+        ];
+        let genotypes = ["0/1", "1/0", "1/1", "0|1", "1|0", "1|1"];
+        let mut problems = Vec::new();
+        for (change_name, change) in changes {
+            for genotype in genotypes {
+                let context = setup_gen();
+                let conn = context.graph().conn();
+                let fasta_path =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+                import_fasta(
+                    &context,
+                    &fasta_path.to_string_lossy().into_owned(),
+                    "test",
+                    Sample::DEFAULT_NAME,
+                    None,
+                    None,
+                )
+                .expect("should import reference");
+                let directory = tempfile::tempdir().expect("should create temporary directory");
+                let vcf_path = directory.path().join("change.vcf");
+                std::fs::write(
+                    &vcf_path,
+                    format!("##fileformat=VCFv4.3\n##contig=<ID=m123,length=34>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\nm123\t{change}\t.\t.\t.\tGT\t{genotype}\n"),
+                )
+                .expect("should write VCF");
+                update_with_vcf_options(
+                    &context,
+                    &vcf_path.to_string_lossy().into_owned(),
+                    "test",
+                    VcfUpdateOptions {
+                        fixed_genotype: genotype.to_string(),
+                        fixed_sample: Some("sample".to_string()),
+                        parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                        ..VcfUpdateOptions::default()
+                    },
+                )
+                .expect("should apply the change");
+
+                let block_group = get_sample_bg(conn, "test", "sample");
+                let everything =
+                    BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
+                        .expect("should build the stored graph");
+                let mut pruned = everything.clone();
+                BlockGroup::prune_graph(&mut pruned);
+                let mut crawler = PortCrawler::new(block_group.id, true);
+                for node in everything.nodes() {
+                    let reachable = crawler
+                        .is_reachable(conn, node)
+                        .expect("should check reachability");
+                    if reachable != pruned.contains_node(node) {
+                        problems.push(format!(
+                            "{change_name} {genotype}: {node:?} reachable={reachable} but pruning keeps={}",
+                            pruned.contains_node(node)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }

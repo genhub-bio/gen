@@ -17,7 +17,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
-use gen_models::{block_group::BlockGroup, path::Path};
+use gen_models::{block_group::BlockGroup, path::Path, port_crawl::LocateError};
 use gen_tui::{
     diagonal::{DeferredEdge, DiagonalDrawing, EdgeStyle},
     graph_view::{GraphView, GraphViewState},
@@ -682,27 +682,27 @@ impl GenGraphController {
 
     /// Show `coordinate` of node `node_id` at the current detail level, centred when `center` is
     /// set and otherwise against the left edge, with the cursor on it. The block holding it is
-    /// located even where the crawl hasn't reached yet, and the batch around it opened. Returns
-    /// whether the block group has that position at all.
+    /// located even where the crawl hasn't reached yet, and the batch around it opened. Fails
+    /// when the block group lacks that position, or when edits cut it off from the start of a
+    /// pruned view, so callers can tell the user which.
     ///
     /// Taking a node coordinate rather than a block keeps positions from elsewhere (a search
     /// result, an annotation) usable, since each graph carves its blocks by its own edges.
-    pub fn go_to_coordinate(&mut self, node_id: HashId, coordinate: i64, center: bool) -> bool {
+    pub fn go_to_coordinate(
+        &mut self,
+        node_id: HashId,
+        coordinate: i64,
+        center: bool,
+    ) -> Result<(), LocateError> {
         let (source, graph) = self.engine.source_and_graph_mut();
-        let Some(node) = source.locate(graph, node_id, coordinate) else {
-            return false;
-        };
+        let node = source.locate(graph, node_id, coordinate)?;
         let offset = coordinate - node.sequence_start;
         let node_budget = self
             .engine
             .neighborhood_node_budget(self.view_state.last_area_width() as usize);
-        if self
-            .engine
+        self.engine
             .activate_batch_containing(node, node_budget)
-            .is_err()
-        {
-            return false;
-        }
+            .map_err(|error| LocateError::Unavailable(error.to_string()))?;
         // The cursor is placed by fractions of the node's drawn width, which differs per detail
         // level, so the column comes from the renderer.
         let renderer = &self.zoom_levels[self.view_state.zoom_index].1;
@@ -714,7 +714,7 @@ impl GenGraphController {
         if !center {
             self.view_state.queue_snap_left();
         }
-        true
+        Ok(())
     }
 
     /// The open block group, if any.
@@ -1545,7 +1545,7 @@ mod tests {
         use gen_annotations::projection::AnnotationSegment;
         use gen_core::{HashId, PATH_START_NODE_ID, Strand, range::Range};
         use gen_graph::GraphNode;
-        use gen_models::db::GraphConnection;
+        use gen_models::{db::GraphConnection, port_crawl::LocateError};
         use gen_tui::{
             geometry::WorldRect,
             layout::VisualDetail,
@@ -2181,7 +2181,9 @@ mod tests {
                 "the first batch should not reach the end of the chain"
             );
 
-            assert!(controller.go_to_coordinate(far_node_id, 2, true));
+            controller
+                .go_to_coordinate(far_node_id, 2, true)
+                .expect("should go to the far node");
             render_text(&mut controller, 40, 12);
 
             let active: Vec<GraphNode> = controller
@@ -2191,7 +2193,10 @@ mod tests {
                 .members()
                 .collect();
             assert!(active.iter().any(|node| node.node_id == far_node_id));
-            assert!(!controller.go_to_coordinate(HashId::convert_str("elsewhere"), 2, true));
+            assert!(matches!(
+                controller.go_to_coordinate(HashId::convert_str("elsewhere"), 2, true),
+                Err(LocateError::NotFound)
+            ));
         }
     }
 }
