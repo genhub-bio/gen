@@ -7,7 +7,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use petgraph::{Direction, algo::toposort, graph::DiGraph, visit::EdgeRef};
+use petgraph::{
+    Direction,
+    algo::tarjan_scc,
+    graph::{DiGraph, NodeIndex},
+    visit::EdgeRef,
+};
 
 pub type ItemId = usize;
 
@@ -72,90 +77,184 @@ pub fn compact_low<I>(
 where
     I: IntoIterator<Item = ItemId>,
 {
-    // Deduplicate while preserving encounter order.
-    let items: Vec<ItemId> = {
+    let index = ItemIndex::new(item_ids);
+    let edges = index.dense_edges(constraints)?;
+    let distances = normalized(longest_paths(index.len(), &edges)?);
+    Ok(index.label(&distances))
+}
+
+/// Item ids in encounter order, each mapped to the dense position the solver works on. The
+/// solver visits every constraint several times, so it indexes vectors instead of hashing ids.
+struct ItemIndex {
+    items: Vec<ItemId>,
+    /// `None` when the items are exactly `0..items.len()` in order, which is how the layout
+    /// numbers its segments, so an id is its own position.
+    positions: Option<HashMap<ItemId, usize>>,
+}
+
+impl ItemIndex {
+    fn new(item_ids: impl IntoIterator<Item = ItemId>) -> Self {
+        let mut items: Vec<ItemId> = item_ids.into_iter().collect();
+        if items
+            .iter()
+            .enumerate()
+            .all(|(position, &id)| position == id)
+        {
+            return Self {
+                items,
+                positions: None,
+            };
+        }
+        // Deduplicate while preserving encounter order.
         let mut seen = HashSet::new();
-        item_ids.into_iter().filter(|id| seen.insert(*id)).collect()
-    };
-
-    let mut graph: DiGraph<ItemId, i64> = DiGraph::new();
-    let mut id_to_node = HashMap::new();
-
-    // Add every item as a node before adding edges so unknown-item checks work.
-    for &id in &items {
-        let node = graph.add_node(id);
-        id_to_node.insert(id, node);
+        items.retain(|id| seen.insert(*id));
+        let positions = items
+            .iter()
+            .enumerate()
+            .map(|(position, &id)| (id, position))
+            .collect();
+        Self {
+            items,
+            positions: Some(positions),
+        }
     }
 
-    for &c in constraints {
-        let &from_node = id_to_node
-            .get(&c.from)
-            .ok_or(CompactionError::UnknownItem { item: c.from })?;
-        let &to_node = id_to_node
-            .get(&c.to)
-            .ok_or(CompactionError::UnknownItem { item: c.to })?;
-        graph.add_edge(from_node, to_node, c.gap);
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn position(&self, id: ItemId) -> Result<usize, CompactionError> {
+        let position = match &self.positions {
+            None => (id < self.items.len()).then_some(id),
+            Some(positions) => positions.get(&id).copied(),
+        };
+        position.ok_or(CompactionError::UnknownItem { item: id })
+    }
+
+    fn dense_edges(
+        &self,
+        constraints: &[Constraint],
+    ) -> Result<Vec<(usize, usize, i64)>, CompactionError> {
+        constraints
+            .iter()
+            .map(|constraint| {
+                Ok((
+                    self.position(constraint.from)?,
+                    self.position(constraint.to)?,
+                    constraint.gap,
+                ))
+            })
+            .collect()
+    }
+
+    fn label(&self, distances: &[i64]) -> HashMap<ItemId, i64> {
+        self.items
+            .iter()
+            .copied()
+            .zip(distances.iter().copied())
+            .collect()
+    }
+}
+
+/// Shifts distances so the minimum coordinate is 0.
+fn normalized(mut distances: Vec<i64>) -> Vec<i64> {
+    if let Some(&minimum) = distances.iter().min()
+        && minimum != 0
+    {
+        distances
+            .iter_mut()
+            .for_each(|distance| *distance -= minimum);
+    }
+    distances
+}
+
+/// Least distance of each of `count` items from the start of the axis that satisfies every
+/// `(from, to, gap)` edge.
+fn longest_paths(count: usize, edges: &[(usize, usize, i64)]) -> Result<Vec<i64>, CompactionError> {
+    let mut graph: DiGraph<(), i64> = DiGraph::with_capacity(count, edges.len());
+    let nodes: Vec<NodeIndex> = (0..count).map(|_| graph.add_node(())).collect();
+    for &(from, to, gap) in edges {
+        graph.add_edge(nodes[from], nodes[to], gap);
     }
 
     // Initialize all distances to 0; disconnected items stay at 0.
-    let mut dist = vec![0i64; graph.node_count()];
+    let mut dist = vec![0i64; count];
 
-    if let Ok(topo) = toposort(&graph, None) {
-        for node in topo {
-            let d = dist[node.index()];
+    // Strongly connected components come out sinks first, so walking them in reverse visits every
+    // predecessor before its successors. Most items form a component of their own and need a
+    // single relaxation of their outgoing edges; only the small cycles that paired upper and
+    // lower bounds create are iterated, and only over their own constraints.
+    let components = tarjan_scc(&graph);
+    let mut component_of = vec![0usize; count];
+    for (component_index, component) in components.iter().enumerate() {
+        for node in component {
+            component_of[node.index()] = component_index;
+        }
+    }
+    for (component_index, component) in components.iter().enumerate().rev() {
+        if component.len() > 1 {
+            relax_cycle(&graph, component, &component_of, &mut dist)?;
+        }
+        for &node in component {
             for edge in graph.edges_directed(node, Direction::Outgoing) {
                 let target = edge.target().index();
-                let candidate = checked_gap(d, *edge.weight());
+                let candidate = checked_gap(dist[node.index()], *edge.weight());
+                if component_of[target] == component_index {
+                    if component.len() == 1 && candidate > dist[target] {
+                        return Err(CompactionError::CycleDetected);
+                    }
+                    continue;
+                }
                 if candidate > dist[target] {
                     dist[target] = candidate;
                 }
             }
         }
-    } else {
-        let indexed_constraints: Vec<(usize, usize, i64)> = constraints
-            .iter()
-            .map(|constraint| {
-                (
-                    id_to_node[&constraint.from].index(),
-                    id_to_node[&constraint.to].index(),
-                    constraint.gap,
-                )
-            })
-            .collect();
-        for _ in 1..graph.node_count() {
-            let mut changed = false;
-            for &(from, to, gap) in &indexed_constraints {
-                let candidate = checked_gap(dist[from], gap);
-                if candidate > dist[to] {
-                    dist[to] = candidate;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        if indexed_constraints
-            .iter()
-            .any(|&(from, to, gap)| checked_gap(dist[from], gap) > dist[to])
-        {
-            return Err(CompactionError::CycleDetected);
-        }
     }
+    Ok(dist)
+}
 
-    let mut result: HashMap<ItemId, i64> = id_to_node
+/// Raises the distances of one strongly connected component to the least values that satisfy
+/// every constraint between its members, by repeated relaxation. A component of `n` items needs
+/// at most `n - 1` passes, so a constraint still violated after that closes a cycle whose gaps
+/// add up to more than zero.
+fn relax_cycle(
+    graph: &DiGraph<(), i64>,
+    component: &[NodeIndex],
+    component_of: &[usize],
+    dist: &mut [i64],
+) -> Result<(), CompactionError> {
+    let component_index = component_of[component[0].index()];
+    let constraints: Vec<(usize, usize, i64)> = component
         .iter()
-        .map(|(&id, &node)| (id, dist[node.index()]))
+        .flat_map(|&node| {
+            graph
+                .edges_directed(node, Direction::Outgoing)
+                .filter(|edge| component_of[edge.target().index()] == component_index)
+                .map(|edge| (node.index(), edge.target().index(), *edge.weight()))
+                .collect::<Vec<_>>()
+        })
         .collect();
-
-    // Normalize so the minimum coordinate is 0.
-    if let Some(&min_val) = result.values().min()
-        && min_val != 0
-    {
-        result.values_mut().for_each(|v| *v -= min_val);
+    for _ in 1..component.len() {
+        let mut changed = false;
+        for &(from, to, gap) in &constraints {
+            let candidate = checked_gap(dist[from], gap);
+            if candidate > dist[to] {
+                dist[to] = candidate;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
     }
-
-    Ok(result)
+    if constraints
+        .iter()
+        .any(|&(from, to, gap)| checked_gap(dist[from], gap) > dist[to])
+    {
+        return Err(CompactionError::CycleDetected);
+    }
+    Ok(())
 }
 
 /// Runs the low-side solver, then a mirrored high-side pass, and returns all
@@ -177,35 +276,38 @@ pub fn compact_axis_with_centering<I>(
     constraints: &[Constraint],
 ) -> Result<AxisPlacement, CompactionError>
 where
-    I: IntoIterator<Item = ItemId> + Clone,
+    I: IntoIterator<Item = ItemId>,
 {
-    let low = compact_low(item_ids.clone(), constraints)?;
-    let span = low.values().copied().max().unwrap_or(0);
+    let index = ItemIndex::new(item_ids);
+    let edges = index.dense_edges(constraints)?;
+    let low = normalized(longest_paths(index.len(), &edges)?);
+    let span = low.iter().copied().max().unwrap_or(0);
 
-    let reversed = reverse_constraints(constraints);
-    let rev_low = compact_low(item_ids, &reversed)?;
-
-    let high: HashMap<ItemId, i64> = rev_low
+    let reversed: Vec<(usize, usize, i64)> = edges
         .iter()
-        .map(|(&id, &rev_pos)| (id, span - rev_pos))
+        .map(|&(from, to, gap)| (to, from, gap))
         .collect();
+    let rev_low = normalized(longest_paths(index.len(), &reversed)?);
 
-    let centered: HashMap<ItemId, i64> = low
+    let high: Vec<i64> = rev_low.iter().map(|&rev_pos| span - rev_pos).collect();
+    let centered: Vec<i64> = low
         .iter()
-        .map(|(&id, &lo)| (id, (lo + high[&id]).div_euclid(2)))
+        .zip(&high)
+        .map(|(&lo, &hi)| (lo + hi).div_euclid(2))
         .collect();
+    let placement = AxisPlacement {
+        low: index.label(&low),
+        high: index.label(&high),
+        centered: index.label(&centered),
+        span,
+    };
 
     debug_assert!(
-        constraints_are_satisfied(&centered, constraints),
+        constraints_are_satisfied(&placement.centered, constraints),
         "centered placement violates a constraint — this is a bug in the solver"
     );
 
-    Ok(AxisPlacement {
-        low,
-        high,
-        centered,
-        span,
-    })
+    Ok(placement)
 }
 
 /// Reverses every constraint: `from → to, gap` becomes `to → from, gap`.
@@ -463,5 +565,90 @@ mod tests {
         assert!(constraints_are_satisfied(&pos, &cs));
         *pos.get_mut(&1).unwrap() = 2;
         assert!(!constraints_are_satisfied(&pos, &cs));
+    }
+
+    #[test]
+    fn test_a_feasible_cycle_in_a_chain_pushes_its_successors() {
+        // Items 1 and 2 are tethered 3 apart in both directions; item 0 precedes them and
+        // item 3 follows item 2.
+        let cs = vec![
+            Constraint {
+                from: 0,
+                to: 1,
+                gap: 2,
+            },
+            Constraint {
+                from: 1,
+                to: 2,
+                gap: 3,
+            },
+            Constraint {
+                from: 2,
+                to: 1,
+                gap: -3,
+            },
+            Constraint {
+                from: 2,
+                to: 3,
+                gap: 1,
+            },
+        ];
+        let pos = compact_low(0..4, &cs).expect("should solve a feasible cycle");
+        assert_eq!((pos[&0], pos[&1], pos[&2], pos[&3]), (0, 2, 5, 6));
+    }
+
+    #[test]
+    fn test_a_positive_self_loop_is_infeasible() {
+        let cs = vec![Constraint {
+            from: 0,
+            to: 0,
+            gap: 1,
+        }];
+        assert_eq!(compact_low(0..1, &cs), Err(CompactionError::CycleDetected));
+    }
+
+    #[test]
+    fn test_a_zero_gap_self_loop_is_ignored() {
+        let cs = vec![Constraint {
+            from: 0,
+            to: 0,
+            gap: 0,
+        }];
+        let pos = compact_low(0..1, &cs).expect("should accept a zero-gap self loop");
+        assert_eq!(pos[&0], 0);
+    }
+
+    #[test]
+    fn test_items_with_arbitrary_ids_and_duplicates_keep_encounter_order() {
+        let cs = vec![
+            Constraint {
+                from: 30,
+                to: 10,
+                gap: 4,
+            },
+            Constraint {
+                from: 10,
+                to: 20,
+                gap: 2,
+            },
+        ];
+        let pos = compact_low([30, 10, 20, 10], &cs).expect("should solve sparse ids");
+        assert_eq!((pos[&30], pos[&10], pos[&20]), (0, 4, 6));
+        assert_eq!(pos.len(), 3);
+    }
+
+    #[test]
+    fn test_centering_agrees_with_the_low_and_high_passes_for_sparse_ids() {
+        let cs = vec![Constraint {
+            from: 7,
+            to: 9,
+            gap: 3,
+        }];
+        let placement =
+            compact_axis_with_centering([7, 9, 5], &cs).expect("should solve sparse ids");
+        assert_eq!(placement.low[&9], 3);
+        assert_eq!(placement.high[&7], 0);
+        assert_eq!(placement.span, 3);
+        assert_eq!(placement.centered[&5], 1);
     }
 }
