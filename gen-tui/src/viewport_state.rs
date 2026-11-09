@@ -12,9 +12,6 @@ pub struct ViewportState {
 
     /// Viewport bounds in screen coordinates
     pub viewport_bounds: Rect,
-
-    /// Whether this viewport has input focus; only then do scroll events move the camera.
-    pub has_focus: bool,
 }
 
 impl Default for ViewportState {
@@ -27,7 +24,6 @@ impl ViewportState {
     pub fn new() -> Self {
         ViewportState {
             camera_current: WorldPos::ZERO,
-            has_focus: true, // Enable focus by default for keyboard input
             viewport_bounds: Rect::new(0, 0, 0, 0), // Will be set during rendering
         }
     }
@@ -55,7 +51,8 @@ impl ViewportState {
     }
 
     /// Inverse of `world_to_viewport`: given a viewport cell, return the corresponding world pos.
-    pub fn viewport_to_world(&self, screen: ViewportPos) -> WorldPos {
+    #[cfg(test)]
+    pub(crate) fn viewport_to_world(&self, screen: ViewportPos) -> WorldPos {
         // Use camera_rect().min as origin for correct calculation
         let origin = self.camera_rect().min;
         WorldPos::new(origin.x + screen.x as i64, origin.y + screen.y as i64)
@@ -64,7 +61,7 @@ impl ViewportState {
     /// Convert a world position to terminal buffer coordinates.
     /// Returns `Some((x, y))` if the position is visible in the terminal, otherwise `None`.
     /// Handles viewport offset, large coordinates, and Y-axis flipping.
-    pub fn world_to_terminal(&self, world_pos: WorldPos) -> Option<(u16, u16)> {
+    pub(crate) fn world_to_terminal(&self, world_pos: WorldPos) -> Option<(u16, u16)> {
         // Handle uninitialized viewport bounds
         if self.viewport_bounds.width == 0 || self.viewport_bounds.height == 0 {
             return None;
@@ -102,7 +99,7 @@ impl ViewportState {
     /// Convert a continuous world coordinate to continuous buffer coordinates (x right, y down,
     /// cell `(column, row)` spanning `[column, column + 1) x [row, row + 1)`), without clipping
     /// to the viewport.
-    pub fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
+    pub(crate) fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
         let origin = self.camera_rect().min;
         (
             f64::from(self.viewport_bounds.x) + world.0 - origin.x as f64,
@@ -112,24 +109,13 @@ impl ViewportState {
     }
 
     /// Returns the area the camera sees, i.e. the viewport in world coordinates
-    pub fn camera_rect(&self) -> WorldRect {
+    pub(crate) fn camera_rect(&self) -> WorldRect {
         let center = self.camera_current;
         let size = (
             self.viewport_bounds.width as u64,
             self.viewport_bounds.height as u64,
         );
         WorldRect::from_center_and_size(center, size)
-    }
-
-    /// Give this viewport input focus. Scroll events and key events will move the camera.
-    pub fn focus(&mut self) {
-        self.has_focus = true;
-    }
-
-    /// Remove input focus. Scroll events are ignored.
-    #[cfg(test)]
-    pub(crate) fn blur(&mut self) {
-        self.has_focus = false;
     }
 }
 
@@ -180,13 +166,8 @@ impl<'a> WorldBuffer<'a> {
         self.viewport_state.world_to_viewport(world_pos)
     }
 
-    /// Convert a viewport position to world coordinates
-    pub fn viewport_to_world(&self, screen: ViewportPos) -> WorldPos {
-        self.viewport_state.viewport_to_world(screen)
-    }
-
     /// See [`ViewportState::world_to_terminal_continuous`].
-    pub fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
+    pub(crate) fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
         self.viewport_state.world_to_terminal_continuous(world)
     }
 
@@ -399,18 +380,6 @@ mod tests {
         let visible = state.camera_current;
         assert!(state.world_to_viewport(visible).is_some());
         assert!(state.world_to_terminal(visible).is_some());
-    }
-
-    #[test]
-    fn test_focus_management() {
-        let mut state = ViewportState::new();
-        assert!(state.has_focus); // Focus is enabled by default for keyboard input
-
-        state.blur();
-        assert!(!state.has_focus);
-
-        state.focus();
-        assert!(state.has_focus);
     }
 
     #[test]

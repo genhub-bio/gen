@@ -793,23 +793,6 @@ impl GenGraphController {
         (&self.engine, &mut self.overlays)
     }
 
-    /// The loaded graph, view state and overlays together, for a jump that both moves the
-    /// cursor and highlights where it lands.
-    pub fn graph_view_and_overlays_mut(
-        &mut self,
-    ) -> (
-        &GenGraph,
-        &mut GraphViewState<GraphNode>,
-        &mut Vec<GraphOverlay>,
-    ) {
-        self.overlays_dirty = true;
-        (
-            self.engine.graph(),
-            &mut self.view_state,
-            &mut self.overlays,
-        )
-    }
-
     /// The annotation groups currently drawn.
     pub fn loaded_annotation_groups(&self) -> impl Iterator<Item = &str> {
         self.overlays

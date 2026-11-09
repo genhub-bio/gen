@@ -19,6 +19,13 @@ pub struct CycleRemovalResult<NodeId> {
     pub ordering: Vec<NodeId>,
     /// Edges that point backward relative to the ordering.
     /// For self-loops (u == v), both endpoints are the same.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only the cycle removal tests inspect the backward edges"
+        )
+    )]
     pub backward_edges: HashSet<(NodeId, NodeId)>,
 }
 

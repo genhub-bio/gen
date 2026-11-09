@@ -71,12 +71,12 @@ pub struct ArrowMark {
 /// in buffer cell units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NodeGlow {
-    pub top_left: (f64, f64),
+    pub(crate) top_left: (f64, f64),
     pub bottom_right: (f64, f64),
     /// Whether the highlight continues into unhighlighted cells of the same node on that side,
     /// where the glow must stop at the cell boundary instead of spreading past it.
-    pub clip_left: bool,
-    pub clip_right: bool,
+    pub(crate) clip_left: bool,
+    pub(crate) clip_right: bool,
     pub color: Color,
 }
 
@@ -276,9 +276,9 @@ const BEND_MAX_REACH_ROWS: f64 = 1.0;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct BendArch {
     /// The pin's neighbor on its west side, where the arch starts.
-    pub west: WorldPos,
+    pub(crate) west: WorldPos,
     /// The pin's neighbor on its east side, where the arch ends.
-    pub east: WorldPos,
+    pub(crate) east: WorldPos,
     pub curve: BezierCurve,
 }
 

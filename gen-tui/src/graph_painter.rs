@@ -7,12 +7,7 @@ use petgraph::{
     graph::NodeIndex,
     visit::{GraphBase, NodeIndexable},
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Style,
-    widgets::{Block, Widget},
-};
+use ratatui::{buffer::Buffer, layout::Rect};
 
 use crate::{
     assembly::AssembledLayout,
@@ -34,10 +29,10 @@ use crate::{
 
 /// Every placed wormhole (`NodeRole::Wormhole`) stub's screen rect, boundary node, and
 /// off-screen domain target. See `GraphPainter::render`.
-pub type WormholeStubs<NodeId> = Vec<(WorldRect, NodeId, NodeId)>;
+pub(crate) type WormholeStubs<NodeId> = Vec<(WorldRect, NodeId, NodeId)>;
 
 /// What painting a window produced besides the cells it drew into the buffer.
-pub struct RenderedWindow<NodeId> {
+pub(crate) struct RenderedWindow<NodeId> {
     /// Where every data node landed.
     pub frame: FrameIndex<NodeId>,
     /// Every placed wormhole stub.
@@ -72,8 +67,8 @@ pub enum HighlightKind<N> {
 pub struct Camera<N> {
     pub anchor: N,
     pub anchor_fraction: (f64, f64),
-    pub anchor_screen: (i64, i64),
-    pub hard_zone: u16,
+    pub(crate) anchor_screen: (i64, i64),
+    pub(crate) hard_zone: u16,
 }
 
 /// Persistent, domain-terms highlight/lowlight state, resolved to screen positions fresh on
@@ -97,7 +92,7 @@ impl<N> Default for Highlights<N> {
 }
 
 /// Keep the cursor inside `hard_zone` by shifting the camera anchor when needed.
-pub fn snap_camera(
+pub(crate) fn snap_camera(
     cursor_screen: (i64, i64),
     area: Rect,
     anchor_screen: (i64, i64),
@@ -136,107 +131,11 @@ pub fn snap_camera(
     screen
 }
 
-/// Pure ephemeral graph painter: renders one `AssembledLayout` window into a buffer and
-/// returns the `FrameIndex` describing where everything landed. Never touches
-/// `LayoutEngine` or any cursor/view state - callers own the anchor and the highlight
-/// lists and pass them in fresh every call.
-pub struct GraphPainter<'a, G, V>
-where
-    G: GraphBase,
-{
-    window: AssembledLayout,
-    graph: &'a G,
-    visual: &'a V,
-    gaps: GapPolicy,
-    layout_mode: LayoutMode,
-    block: Option<Block<'a>>,
-    style: Style,
-}
-
-impl<'a, G, V> GraphPainter<'a, G, V>
-where
-    G: GraphBase + NodeIndexable,
-    G::NodeId: Copy + Eq + Hash,
-    V: NodeRenderer<G>,
-{
-    /// Construct a painter for one assembled window. `graph` is the domain graph the window
-    /// was assembled from (needed only to translate its `NodeRole::Data` indices to/from
-    /// `G::NodeId` when talking to `visual` and to the caller's domain-terms `Camera`/
-    /// `Highlights`).
-    pub fn new(window: AssembledLayout, graph: &'a G, visual: &'a V) -> Self {
-        Self {
-            window,
-            graph,
-            visual,
-            gaps: GapPolicy::default(),
-            layout_mode: LayoutMode::default(),
-            block: None,
-            style: Style::default(),
-        }
-    }
-
-    /// Set the minimum inter-node gap for each axis (the current zoom level's target).
-    pub fn spacing(mut self, gaps: &GapPolicy) -> Self {
-        self.gaps = *gaps;
-        self
-    }
-
-    /// Choose how edges are routed and drawn. Defaults to [`LayoutMode::Rectilinear`].
-    pub fn layout_mode(mut self, layout_mode: LayoutMode) -> Self {
-        self.layout_mode = layout_mode;
-        self
-    }
-
-    pub fn block(mut self, block: Block<'a>) -> Self {
-        self.block = Some(block);
-        self
-    }
-
-    pub fn style(mut self, style: Style) -> Self {
-        self.style = style;
-        self
-    }
-
-    /// Size every node via `visual`, route and compact the window, place it so the camera's
-    /// anchor pixel lands at `camera.anchor_screen`, paint the visible parts into `buf`, and
-    /// return a `FrameIndex` over every placed Data node (including ones outside `area`),
-    /// alongside a flat list of every placed wormhole (`NodeRole::Wormhole`) stub's screen rect,
-    /// boundary node, and off-screen domain target - kept separate from `FrameIndex` rather
-    /// than folded into it, since `FrameIndex`'s `N` key space is domain node ids only and
-    /// wormhole stubs are synthetic routing nodes with no domain id of their own. The third
-    /// element holds the overlay primitives of the curved style.
-    pub fn render(
-        self,
-        area: Rect,
-        buf: &mut Buffer,
-        camera: &Camera<G::NodeId>,
-        highlights: &Highlights<G::NodeId>,
-    ) -> RenderedWindow<G::NodeId> {
-        buf.set_style(area, self.style);
-        let inner_area = if let Some(block) = &self.block {
-            let inner = block.inner(area);
-            block.clone().render(area, buf);
-            inner
-        } else {
-            area
-        };
-
-        let scene = WindowScene::new(
-            self.window,
-            self.graph,
-            self.visual,
-            &self.gaps,
-            self.layout_mode,
-        );
-        scene.paint(self.graph, self.visual, inner_area, buf, camera, highlights)
-    }
-}
-
 /// One window's routed, compacted geometry at fixed node sizes and gaps, with the viewport
 /// graph painted from it. Neither depends on the camera, so a view that only pans or moves its
 /// cursor keeps painting the same scene at a new offset instead of re-routing the window.
 #[derive(Clone)]
-pub struct WindowScene {
+pub(crate) struct WindowScene {
     geometry: WindowGeometry,
     routed_window_graph: RoutedWindowGraph,
     layout_mode: LayoutMode,
@@ -315,7 +214,7 @@ impl WindowScene {
 
     /// Where `paint` would draw the point at `fraction` within `node` under `camera`, if the
     /// scene places `node` as a data node. Lets a caller correct the camera before painting.
-    pub fn screen_point<G>(
+    pub(crate) fn screen_point<G>(
         &self,
         graph: &G,
         camera: &Camera<G::NodeId>,
@@ -765,7 +664,11 @@ mod tests {
     use std::collections::HashMap;
 
     use petgraph::graph::NodeIndex;
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Style},
+    };
 
     use super::*;
     use crate::{
@@ -775,6 +678,79 @@ mod tests {
         layout_engine::LayoutEngine,
         testing::mocks::{MockDomainGraph, TestGraphs},
     };
+
+    /// Pure ephemeral graph painter: renders one `AssembledLayout` window into a buffer and
+    /// returns the `FrameIndex` describing where everything landed. Never touches
+    /// `LayoutEngine` or any cursor/view state - callers own the anchor and the highlight
+    /// lists and pass them in fresh every call.
+    struct GraphPainter<'a, G, V>
+    where
+        G: GraphBase,
+    {
+        window: AssembledLayout,
+        graph: &'a G,
+        visual: &'a V,
+        gaps: GapPolicy,
+        layout_mode: LayoutMode,
+    }
+
+    impl<'a, G, V> GraphPainter<'a, G, V>
+    where
+        G: GraphBase + NodeIndexable,
+        G::NodeId: Copy + Eq + Hash,
+        V: NodeRenderer<G>,
+    {
+        /// Construct a painter for one assembled window. `graph` is the domain graph the window
+        /// was assembled from (needed only to translate its `NodeRole::Data` indices to/from
+        /// `G::NodeId` when talking to `visual` and to the caller's domain-terms `Camera`/
+        /// `Highlights`).
+        fn new(window: AssembledLayout, graph: &'a G, visual: &'a V) -> Self {
+            Self {
+                window,
+                graph,
+                visual,
+                gaps: GapPolicy::default(),
+                layout_mode: LayoutMode::default(),
+            }
+        }
+
+        /// Set the minimum inter-node gap for each axis (the current zoom level's target).
+        fn spacing(mut self, gaps: &GapPolicy) -> Self {
+            self.gaps = *gaps;
+            self
+        }
+
+        /// Choose how edges are routed and drawn. Defaults to [`LayoutMode::Rectilinear`].
+        fn layout_mode(mut self, layout_mode: LayoutMode) -> Self {
+            self.layout_mode = layout_mode;
+            self
+        }
+
+        /// Size every node via `visual`, route and compact the window, place it so the camera's
+        /// anchor pixel lands at `camera.anchor_screen`, paint the visible parts into `buf`, and
+        /// return a `FrameIndex` over every placed Data node (including ones outside `area`),
+        /// alongside a flat list of every placed wormhole (`NodeRole::Wormhole`) stub's screen rect,
+        /// boundary node, and off-screen domain target - kept separate from `FrameIndex` rather
+        /// than folded into it, since `FrameIndex`'s `N` key space is domain node ids only and
+        /// wormhole stubs are synthetic routing nodes with no domain id of their own. The third
+        /// element holds the overlay primitives of the curved style.
+        fn render(
+            self,
+            area: Rect,
+            buf: &mut Buffer,
+            camera: &Camera<G::NodeId>,
+            highlights: &Highlights<G::NodeId>,
+        ) -> RenderedWindow<G::NodeId> {
+            let scene = WindowScene::new(
+                self.window,
+                self.graph,
+                self.visual,
+                &self.gaps,
+                self.layout_mode,
+            );
+            scene.paint(self.graph, self.visual, area, buf, camera, highlights)
+        }
+    }
 
     #[derive(Clone)]
     struct FixedSizeVisual {

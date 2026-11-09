@@ -5,8 +5,8 @@
 //!
 //! The solver is axis-agnostic: the caller builds spacing constraints from the
 //! drawing geometry and passes them in. The same algorithm handles x and y.
-//! See [`crate::layout_compaction::compact_layout`] for how constraints are
-//! derived from a layout graph.
+//! See [`crate::layout_compaction::compact_layout_with_vertical_placement`] for how constraints
+//! are derived from a layout graph.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,35 +55,6 @@ pub struct AxisPlacement {
     pub centered: HashMap<ItemId, i64>,
     /// Maximum coordinate from the low-side pass; defines the axis span.
     pub span: i64,
-}
-
-/// Computes the smallest valid integer position for every item.
-///
-/// A constraint `from → to, gap` requires `position[to] >= position[from] + gap`.
-///
-/// For acyclic separation constraints, each item's
-/// minimum position is the length of the longest path from any source to that item. Processing
-/// nodes in topological order guarantees that every predecessor has already been relaxed before
-/// its outgoing edges are visited, so a single forward pass suffices.
-///
-/// Signed reverse constraints encode upper bounds and introduce feasible cycles. Those systems
-/// use repeated longest-path relaxation instead; only a positive-total cycle is infeasible.
-///
-/// # Errors
-///
-/// Returns an error when a constraint references an unknown item or when the constraint system
-/// contains an infeasible positive-total cycle.
-pub fn compact_low<I>(
-    item_ids: I,
-    constraints: &[Constraint],
-) -> Result<HashMap<ItemId, i64>, CompactionError>
-where
-    I: IntoIterator<Item = ItemId>,
-{
-    let index = ItemIndex::new(item_ids);
-    let edges = index.dense_edges(constraints)?;
-    let distances = normalized(longest_paths(index.len(), &edges)?);
-    Ok(index.label(&distances))
 }
 
 /// Item ids in encounter order, each mapped to the dense position the solver works on. The
@@ -313,19 +284,6 @@ where
     Ok(placement)
 }
 
-/// Reverses every constraint: `from → to, gap` becomes `to → from, gap`.
-/// Used to build the high-side pass input.
-pub fn reverse_constraints(constraints: &[Constraint]) -> Vec<Constraint> {
-    constraints
-        .iter()
-        .map(|c| Constraint {
-            from: c.to,
-            to: c.from,
-            gap: c.gap,
-        })
-        .collect()
-}
-
 /// Returns `true` if every constraint `position[to] >= position[from] + gap`
 /// is satisfied by `positions`.
 pub fn constraints_are_satisfied(
@@ -343,6 +301,48 @@ pub fn constraints_are_satisfied(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Computes the smallest valid integer position for every item.
+    ///
+    /// A constraint `from → to, gap` requires `position[to] >= position[from] + gap`.
+    ///
+    /// For acyclic separation constraints, each item's
+    /// minimum position is the length of the longest path from any source to that item. Processing
+    /// nodes in topological order guarantees that every predecessor has already been relaxed before
+    /// its outgoing edges are visited, so a single forward pass suffices.
+    ///
+    /// Signed reverse constraints encode upper bounds and introduce feasible cycles. Those systems
+    /// use repeated longest-path relaxation instead; only a positive-total cycle is infeasible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a constraint references an unknown item or when the constraint system
+    /// contains an infeasible positive-total cycle.
+    fn compact_low<I>(
+        item_ids: I,
+        constraints: &[Constraint],
+    ) -> Result<HashMap<ItemId, i64>, CompactionError>
+    where
+        I: IntoIterator<Item = ItemId>,
+    {
+        let index = ItemIndex::new(item_ids);
+        let edges = index.dense_edges(constraints)?;
+        let distances = normalized(longest_paths(index.len(), &edges)?);
+        Ok(index.label(&distances))
+    }
+
+    /// Reverses every constraint: `from → to, gap` becomes `to → from, gap`.
+    /// Used to build the high-side pass input.
+    fn reverse_constraints(constraints: &[Constraint]) -> Vec<Constraint> {
+        constraints
+            .iter()
+            .map(|c| Constraint {
+                from: c.to,
+                to: c.from,
+                gap: c.gap,
+            })
+            .collect()
+    }
 
     /// Chain: A → B → C.  Each node's position equals the sum of gaps along
     /// the only path reaching it.

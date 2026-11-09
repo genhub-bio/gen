@@ -366,10 +366,10 @@ where
 }
 
 pub(crate) struct PlotDecorations<'a> {
-    pub node_highlights: &'a [(WorldPos, PathStyle)],
+    pub(crate) node_highlights: &'a [(WorldPos, PathStyle)],
     pub edge_highlights: &'a [((WorldPos, WorldPos), PathStyle)],
-    pub hairpin_highlights: &'a [((NodeIndex, NodeSide), PathStyle)],
-    pub cell_highlights: &'a [CellHighlight],
+    pub(crate) hairpin_highlights: &'a [((NodeIndex, NodeSide), PathStyle)],
+    pub(crate) cell_highlights: &'a [CellHighlight],
     pub lowlights: &'a [(WorldPos, WorldPos)],
     pub node_lowlights: &'a [WorldPos],
 }
@@ -1617,7 +1617,7 @@ fn is_blank(character: char) -> bool {
 
 #[cfg(test)]
 mod curved_highlight_tests {
-    use petgraph::graph::NodeIndex;
+    use petgraph::{graph::NodeIndex, visit::GraphBase};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     use super::{
@@ -1630,8 +1630,22 @@ mod curved_highlight_tests {
         routed_window_graph::RoutedWindowGraph,
         theme::current_theme,
         viewport_state::{ViewportState, WorldBuffer},
-        window_geometry::MinimalNodeRenderer,
+        window_geometry::NODE_GLYPH,
     };
+
+    /// Draws every node as a single glyph, regardless of domain data.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct MinimalNodeRenderer;
+
+    impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
+        fn get_node_size(&self, _node: &G::NodeId) -> (u64, u64) {
+            (1, 1)
+        }
+
+        fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, _node_id: &G::NodeId) {
+            buffer.set_char(area.left_center(), NODE_GLYPH);
+        }
+    }
 
     /// Two crossing diagonals between routing points: edge 0 runs up, edge 1 runs down, and
     /// they meet in the middle cells.

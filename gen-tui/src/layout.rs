@@ -38,7 +38,7 @@ pub enum VisualDetail {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct JunctionSymbol {
+pub(crate) struct JunctionSymbol {
     pub index: u8,
 }
 
@@ -113,7 +113,7 @@ impl JunctionSymbol {
     }
 
     /// Get the heavy routing glyph character for this index
-    pub fn heavy_glyph(&self) -> char {
+    pub(crate) fn heavy_glyph(&self) -> char {
         Self::HEAVY_ROUTING_GLYPHS
             .get(self.index as usize)
             .copied()
@@ -121,7 +121,7 @@ impl JunctionSymbol {
     }
 
     /// Get the dashed routing glyph character for this index
-    pub fn dashed_glyph(&self) -> char {
+    pub(crate) fn dashed_glyph(&self) -> char {
         Self::DASHED_ROUTING_GLYPHS
             .get(self.index as usize)
             .copied()
@@ -169,7 +169,7 @@ pub enum PinSide {
 impl PinSide {
     /// Whether the pin turns an edge around the end of the layout, as opposed to bending it
     /// between two neighbouring layers.
-    pub const fn is_loopback(self) -> bool {
+    pub(crate) const fn is_loopback(self) -> bool {
         matches!(self, Self::Left | Self::Right)
     }
 }
@@ -186,7 +186,7 @@ pub enum VerticalAnchor {
 
 impl VerticalAnchor {
     /// Offset from the connection row to the discrete rectangle center.
-    pub fn center_offset(self, height: u64) -> i64 {
+    pub(crate) fn center_offset(self, height: u64) -> i64 {
         match self {
             Self::Center => 0,
             Self::Top => -(height as i64 / 2),
@@ -285,7 +285,7 @@ impl LayoutNode {
 pub struct LayoutEdge {
     pub bundle: Vec<(NodeIndex, NodeIndex)>,
     /// Whether this is the reversed main span of a backward-edge loop.
-    pub is_pin_span: bool,
+    pub(crate) is_pin_span: bool,
 }
 
 impl LayoutEdge {
@@ -315,7 +315,7 @@ impl Default for LayoutEdge {
 /// The graph is undirected to allow bidirectional edge routing, with final coordinates mapped
 /// to its nodes.
 #[derive(Clone, Serialize)]
-pub struct WindowGeometry {
+pub(crate) struct WindowGeometry {
     pub graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     pub width: i64,
     pub height: i64,
@@ -870,7 +870,7 @@ impl WindowGeometry {
     /// The routing node an invisible domain node became, if it is in this window. A
     /// `prune_pin_stubs` splice can remove one lying on a backward-edge loop's stub, in which
     /// case there is none.
-    pub fn junction_node(&self, domain_index: NodeIndex) -> Option<&LayoutNode> {
+    pub(crate) fn junction_node(&self, domain_index: NodeIndex) -> Option<&LayoutNode> {
         self.junctions
             .iter()
             .find(|(junction, _)| *junction == domain_index)
@@ -884,26 +884,6 @@ impl WindowGeometry {
             self.junction_node(domain_index)
                 .map(|node| (domain_index, node))
         })
-    }
-
-    /// Check if the layout graph is empty (no nodes)
-    pub fn is_empty(&self) -> bool {
-        self.graph.node_count() == 0
-    }
-
-    /// Check if the layout contains a specific node
-    pub fn contains_key(&self, node_idx: &NodeIndex<u32>) -> bool {
-        self.graph.node_weight(*node_idx).is_some()
-    }
-
-    /// Get the position of a node in the layout's coordinate system
-    pub fn get_node_position(&self, node_idx: NodeIndex<u32>) -> Option<LocalPos> {
-        self.graph.node_weight(node_idx).map(|node| node.pos)
-    }
-
-    /// Get the size of a node
-    pub fn get_node_size(&self, node_idx: NodeIndex<u32>) -> Option<(u64, u64)> {
-        self.graph.node_weight(node_idx).map(|node| node.size)
     }
 }
 
@@ -945,15 +925,15 @@ impl std::fmt::Debug for WindowGeometry {
 /// vertex here comes straight from `rust_sugiyama::from_edges_with_dummies`'s own
 /// crossing-minimized placement, not something gen-tui synthesizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Vertex {
-    pub input_node_idx: Option<NodeIndex<u32>>,
+pub(crate) struct Vertex {
+    pub(crate) input_node_idx: Option<NodeIndex<u32>>,
 }
 
 /// Which window-graph edge (if any) this hop belongs to, so a dummy chain traces back to the
 /// domain edge it routes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Edge {
-    pub input_node_idx_pair: Option<(NodeIndex<u32>, NodeIndex<u32>)>,
+    pub(crate) input_node_idx_pair: Option<(NodeIndex<u32>, NodeIndex<u32>)>,
 }
 
 /// Cached, size-independent Sugiyama layers and routing vertices for one window.
@@ -961,17 +941,17 @@ pub struct Edge {
 pub struct WindowStructure {
     /// Post-layering vertex graph. Dummy routing vertices are present; each data vertex
     /// carries the window-graph node index it stands for in `Vertex::input_node_idx`.
-    pub vertex_graph: StableDiGraph<Vertex, Edge, u32>,
+    pub(crate) vertex_graph: StableDiGraph<Vertex, Edge, u32>,
     /// Per-layer vertex ordering from crossing minimization. The outer index is the layer;
     /// the inner order is the within-layer ordering. Entries index `vertex_graph`.
-    pub vertex_layers: Vec<Vec<NodeIndex<u32>>>,
+    pub(crate) vertex_layers: Vec<Vec<NodeIndex<u32>>>,
     /// Which `vertex_graph` edges render a backward edge's `left_pin -> right_pin` main span
     /// (see `WindowGraph::pin_span_edges`), keyed by each edge's `(source, target)`
     /// endpoints. Resolved once in `WindowStructureBuilder::build_structure` by walking
     /// `WindowGraph::pin_span_edges` through any dummy-vertex chain Sugiyama inserted for
     /// that edge, so `assemble_window` can carry the flag straight into `LayoutEdge` without
     /// re-deriving it later. Empty for a graph with no backward edges.
-    pub pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
+    pub(crate) pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
 }
 
 impl WindowStructure {
@@ -1002,7 +982,7 @@ impl WindowStructure {
 /// The cached layer framework is reused across zoom levels so the relative orientation of nodes
 /// remains stable while the widget computes window geometry at the current detail.
 #[derive(Debug)]
-pub struct WindowStructureBuilder<'a> {
+pub(crate) struct WindowStructureBuilder<'a> {
     window_graph: &'a StableDiGraph<WindowNode, WindowEdge, u32>,
     /// Pairs of data nodes that Sugiyama must rank in order. See `with_ordering_edges`.
     ordering_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
@@ -1054,7 +1034,7 @@ impl<'a> WindowStructureBuilder<'a> {
     /// Supply pairs of data nodes whose layers must stay in the given order while Sugiyama runs.
     /// Pinned routes use them to keep their endpoints' ranks fixed; the pairs add no edge to the
     /// structure, and the dummies Sugiyama routes along them are dropped from the layers.
-    pub fn with_ordering_edges(
+    pub(crate) fn with_ordering_edges(
         mut self,
         ordering_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
     ) -> Self {
@@ -1068,7 +1048,7 @@ impl<'a> WindowStructureBuilder<'a> {
     /// bypass loop is mirrored to a consistent orientation in `build_ranks`; every other window
     /// keeps the crate's own placement untouched. Idempotent; a single-node window needs no
     /// layering.
-    pub fn build_structure(&mut self) -> Result<(), String> {
+    pub(crate) fn build_structure(&mut self) -> Result<(), String> {
         if self.window_graph.node_count() == 0 {
             return Err("Cannot compute layout for empty graph".to_string());
         }
@@ -1239,10 +1219,9 @@ impl<'a> WindowStructureBuilder<'a> {
         // each dummy vertex and appending it to its edge's chain accumulator - both in true rank
         // order, since that's the order this loop visits them in.
         let mut ranks_full: RankedLayers = Vec::with_capacity(rank_ys.len());
-        let mut rank_of: HashMap<NodeIndex<u32>, usize> = HashMap::new();
         let mut chains_by_edge: HashMap<usize, Vec<u32>> = HashMap::new();
         let mut next_id: u32 = 0;
-        for (rank_index, y) in rank_ys.iter().enumerate() {
+        for y in &rank_ys {
             let mut layer = groups.remove(&y.to_bits()).unwrap();
             layer.sort_by(|a, b| a.1.total_cmp(&b.1));
             let layer: Vec<(LayerEntry, f64)> = layer
@@ -1263,11 +1242,6 @@ impl<'a> WindowStructureBuilder<'a> {
                     Some((entry, x))
                 })
                 .collect();
-            for &(entry, _) in &layer {
-                if let LayerEntry::Real(node) = entry {
-                    rank_of.insert(node, rank_index);
-                }
-            }
             if !layer.is_empty() {
                 ranks_full.push(layer);
             }

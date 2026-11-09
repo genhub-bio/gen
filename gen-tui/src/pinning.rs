@@ -51,7 +51,7 @@ pub struct PinPlan {
     /// The side of the node a hairpin turns around on, when the plan is one.
     pub hair_pin: Option<NodeSide>,
     /// Whether an edge drawn with curves is carried around its nodes by routing nodes inserted
-    /// after layout (see [`crate::assembly::route_sideways_edges`]) instead of by left and right
+    /// after layout (see [`crate::loopback_pins::insert_sideways_nodes`]) instead of by left and right
     /// pins that join the layered layout.
     pub sideways: bool,
 }
@@ -91,6 +91,7 @@ impl PinPlan {
     }
 
     /// The leg joining the left pin to the right pin, when the plan has both.
+    #[cfg(test)]
     pub fn span(&self) -> Option<Leg> {
         self.legs
             .iter()

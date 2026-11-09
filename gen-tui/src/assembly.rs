@@ -32,10 +32,6 @@ pub struct AssembledLayout {
     pub graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     pub width: i64,
     pub height: i64,
-    /// The assembled-graph node the query anchor landed on. `None` only when the anchor
-    /// itself fell outside the assembled window (a caller-side inconsistency), so callers
-    /// that assemble a window around their own anchor can treat this as reliably `Some`.
-    pub anchor_index: Option<NodeIndex<u32>>,
     /// Collapsed boundary edges, filled by `LayoutEngine` after assembly.
     pub external_edges: Vec<ExternalEdge<NodeIndex<u32>>>,
     /// Domain edge routes and their rectilinear arrow policy, filled by `LayoutEngine`.
@@ -67,7 +63,6 @@ pub fn assemble_window(window: &WindowGraph) -> Option<AssembledLayout> {
             graph,
             width: 0,
             height: 0,
-            anchor_index: None,
             external_edges: Vec::new(),
             domain_edges: Vec::new(),
         });
@@ -150,7 +145,6 @@ pub fn assemble_window(window: &WindowGraph) -> Option<AssembledLayout> {
         graph,
         width,
         height,
-        anchor_index: None,
         external_edges: Vec::new(),
         domain_edges: Vec::new(),
     })

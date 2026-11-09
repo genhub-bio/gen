@@ -1625,7 +1625,9 @@ mod tests {
     use ratatui::{layout::Rect, style::Color};
     use serde_json::Value;
 
-    use super::{PlotOptions, PyGraphController, current_theme, frame_areas, static_viewport};
+    use super::{
+        MAX_SCALE, PlotOptions, PyGraphController, current_theme, frame_areas, static_viewport,
+    };
     use crate::python_api::{
         annotation::PyAnnotation, block_group::PySequenceGraph, graph_search::PyGraphLocus,
     };

@@ -22,7 +22,6 @@ use crate::{
         subgraph_for,
     },
     curved::LayoutMode,
-    layout::NodeRole,
 };
 
 /// Identifies one batch: a chunk of the domain graph claimed by a single crawl. Batches never
@@ -39,14 +38,15 @@ struct Batch<NodeId> {
 }
 
 /// Callback through which a domain source supplies a fully projected structural batch.
-pub type BatchPreparer<G, S> = fn(
-    <G as GraphBase>::NodeId,
-    usize,
-    &mut G,
-    &mut S,
-    &dyn Fn(<G as GraphBase>::NodeId) -> bool,
-    &PreferredWormholeDoors<<G as GraphBase>::NodeId>,
-) -> Result<StructuralSubgraph<<G as GraphBase>::NodeId>, String>;
+pub(crate) type BatchPreparer<G, S> =
+    fn(
+        <G as GraphBase>::NodeId,
+        usize,
+        &mut G,
+        &mut S,
+        &dyn Fn(<G as GraphBase>::NodeId) -> bool,
+        &PreferredWormholeDoors<<G as GraphBase>::NodeId>,
+    ) -> Result<StructuralSubgraph<<G as GraphBase>::NodeId>, String>;
 
 /// Source of [`LoadedWorld::revision`]. Process-wide rather than per engine, so a view state
 /// that outlives its engine (a viewer switching block groups) never mistakes a new engine's
@@ -64,7 +64,6 @@ pub struct LoadedWorld<NodeId> {
     revision: u64,
     anchor: NodeId,
     members: HashSet<NodeId>,
-    external_edges: Vec<(NodeId, NodeId)>,
     layout: AssembledLayout,
 }
 
@@ -98,13 +97,6 @@ impl<NodeId: Copy + Eq + Hash> LoadedWorld<NodeId> {
     pub fn layout(&self) -> &AssembledLayout {
         &self.layout
     }
-
-    /// Find the in-world boundary node whose collapsed edge points at `target`.
-    pub fn boundary_for(&self, target: NodeId) -> Option<NodeId> {
-        self.external_edges
-            .iter()
-            .find_map(|&(boundary, outside)| (outside == target).then_some(boundary))
-    }
 }
 
 /// Nodes per viewport column in the budget for the breadth-first crawl that claims a new batch
@@ -126,7 +118,7 @@ const WORLD_CACHE_CAPACITY: usize = 8;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct StructuralBuildCounts {
     pub crawl: usize,
-    pub sugiyama: usize,
+    pub(crate) sugiyama: usize,
     pub assembly: usize,
 }
 
@@ -255,7 +247,7 @@ where
 
     /// [`Self::new_with_source`], additionally rewiring known backward edges - see
     /// [`Self::new_with_backward_edges`].
-    pub fn new_with_source_and_backward_edges(
+    pub(crate) fn new_with_source_and_backward_edges(
         graph: G,
         source: S,
         backward_edges: &[(G::NodeId, G::NodeId)],
@@ -282,7 +274,7 @@ where
     /// Build worlds for `layout_mode`. Curved edges route sideways edges themselves instead
     /// of through left and right pins, so a change of style drops the cached worlds and
     /// rebuilds the active one.
-    pub fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
+    pub(crate) fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
         if layout_mode == self.layout_mode {
             return;
         }
@@ -345,7 +337,7 @@ where
     /// Ensure the graph has an active world, claiming the first batch with a budget fixed from
     /// `viewport_width` only when none is active yet. Prefers
     /// [`Self::set_preferred_initial_anchor`]'s choice, falling back to [`Self::default_anchor`].
-    pub fn ensure_initial_world(
+    pub(crate) fn ensure_initial_world(
         &mut self,
         viewport_width: usize,
     ) -> Result<Option<BatchId>, String> {
@@ -418,7 +410,7 @@ where
     /// Make `batch` active, rebuilding its world from its stored members if the LRU evicted
     /// it. Rebuilding never crawls: a member's edges were fully loaded when it was claimed, so
     /// the same members always yield the same window.
-    pub fn activate_batch(&mut self, batch: BatchId) -> Result<(), String> {
+    pub(crate) fn activate_batch(&mut self, batch: BatchId) -> Result<(), String> {
         if let Some(position) = self
             .world_cache
             .iter()
@@ -466,13 +458,6 @@ where
         let to_node_index = |node_id: G::NodeId| {
             NodeIndex::new(<G as NodeIndexable>::to_index(&self.graph, node_id))
         };
-        let anchor_node_index = to_node_index(anchor);
-        layout.anchor_index = layout.graph.node_indices().find(|&node_index| {
-            matches!(
-                layout.graph[node_index].role,
-                NodeRole::Data(domain_index) if domain_index == anchor_node_index
-            )
-        });
         layout.external_edges = subgraph
             .external_edges
             .iter()
@@ -494,11 +479,6 @@ where
             revision: NEXT_WORLD_REVISION.fetch_add(1, Ordering::Relaxed),
             anchor,
             members: subgraph.nodes.iter().copied().collect(),
-            external_edges: subgraph
-                .external_edges
-                .iter()
-                .map(|edge| (edge.boundary, edge.target))
-                .collect(),
             layout,
         });
         self.active_batch = Some(batch);
@@ -588,31 +568,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use petgraph::{graph::NodeIndex, visit::NodeIndexable};
+    use petgraph::graph::NodeIndex;
 
     use crate::{
         layout::NodeRole,
         layout_engine::{LayoutEngine, StructuralBuildCounts, WORLD_CACHE_CAPACITY},
         testing::mocks::{MockDomainGraph, TestGraphs},
     };
-
-    #[test]
-    fn test_window_for_sets_anchor_index() {
-        let domain_graph = TestGraphs::domain_complex_dag();
-        let mut engine = LayoutEngine::new(domain_graph);
-        let anchor = engine.default_anchor().expect("should have graph nodes");
-
-        let window = engine
-            .window_for(anchor, 10)
-            .expect("should build a window");
-        let anchor_index = window
-            .anchor_index
-            .expect("should place the anchor in its window");
-        assert!(matches!(
-            window.graph[anchor_index].role,
-            NodeRole::Data(domain_index) if domain_index == NodeIndex::new(<crate::testing::mocks::MockDomainGraph as NodeIndexable>::to_index(engine.graph(), anchor))
-        ));
-    }
 
     /// Wide, shallow graphs must remain bounded by the node budget.
     #[test]
@@ -746,9 +708,14 @@ mod tests {
             .expect("should claim the second batch");
 
         assert_eq!(
-            engine
-                .active_world()
-                .and_then(|world| world.boundary_for(nodes[next - 1])),
+            engine.active_world().and_then(|world| {
+                world
+                    .layout()
+                    .external_edges
+                    .iter()
+                    .find(|edge| edge.target == nodes[next - 1])
+                    .map(|edge| edge.boundary)
+            }),
             Some(nodes[next]),
             "the second batch should show a door back into the first"
         );

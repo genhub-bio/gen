@@ -186,7 +186,7 @@ pub struct GraphViewState<N> {
     pan_since_render: (i64, i64),
     pub zoom_index: usize,
     /// Minimum inter-node gap for each axis - the current zoom level's target distance,
-    /// enforced by compaction (see `layout_compaction::compact_layout`).
+    /// enforced by compaction (see `layout_compaction::compact_layout_with_vertical_placement`).
     pub gaps: GapPolicy,
     /// How edges are routed and drawn. Changing it rebuilds the geometry on the next render.
     pub layout_mode: LayoutMode,
@@ -266,20 +266,18 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.last_area.width
     }
 
-    pub fn last_batch(&self) -> Option<BatchId> {
-        self.last_batch
-    }
-
     /// Changes exactly when a render routed and compacted the window anew: the active world,
     /// the zoom step, or the renderer's `size_generation` changed. Anything placed relative to
     /// the geometry rather than the camera only needs recomputing when this moves.
-    pub fn geometry_revision(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn geometry_revision(&self) -> u64 {
         self.geometry_revision
     }
 
     /// Discard per-frame products so this state can be reused as an independent view of the
     /// controller's active world.
-    pub fn reset_render_state(&mut self) {
+    #[cfg(test)]
+    pub(crate) fn reset_render_state(&mut self) {
         self.frame = FrameIndex::empty();
         self.wormhole.clear();
         self.camera = None;
@@ -735,7 +733,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
             .push((HighlightKind::Node(node), style));
     }
 
-    /// Highlight one edge, named in full by an [`PortedEdge`] or, as a `(source, target)` pair, by
+    /// Highlight one edge, named in full by an [`PortedEdge`](crate::edge_ports::PortedEdge) or, as a `(source, target)` pair, by
     /// its endpoints alone (see [`EdgeSelector`] for which edge that picks).
     pub fn set_edge_highlight(&mut self, edge: impl Into<EdgeSelector<N>>, style: PathStyle) {
         self.highlights
@@ -757,10 +755,6 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
 
     pub fn has_highlight(&self, style: &PathStyle) -> bool {
         self.highlights.styles.iter().any(|(_, s)| s == style)
-    }
-
-    pub fn clear_highlight(&mut self, style: &PathStyle) {
-        self.highlights.styles.retain(|(_, s)| s != style);
     }
 
     pub fn clear_all_highlights(&mut self) {

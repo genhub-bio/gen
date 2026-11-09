@@ -217,7 +217,7 @@ pub fn simplify_graph(
     // Add new edges with their preserved bundles and flags (only if both nodes still exist).
     // `new_edges_with_bundles` is a `HashMap`, so iterating it directly would add edges in an
     // order that varies between otherwise-identical calls (Rust's default hasher reseeds per
-    // instance) - and that edge-insertion order is visible downstream, since `compact_layout`
+    // instance) - and that edge-insertion order is visible downstream, since `compact_layout_with_vertical_placement`
     // walks `graph.edge_references()` in insertion order when building its constraint graph.
     // Sort by endpoint first so newly contracted edges have deterministic insertion order.
     let mut sorted_new_edges: Vec<_> = new_edges_with_bundles.into_iter().collect();

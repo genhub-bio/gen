@@ -2,7 +2,7 @@
 //!
 //! Rebuilds routed coordinates with size-aware separation constraints. This module derives
 //! the constraints from a positioned layout graph; the axis-independent solver that
-//! satisfies them lives in [`crate::compaction`].
+//! satisfies them lives in `crate::compaction`.
 //!
 //! Aligned nodes move as rigid segments. Tight Y placement packs them toward a chosen path.
 
@@ -45,7 +45,7 @@ pub struct Halves {
 
 /// An inclusive interval [start, end] representing occupied cells.
 #[derive(Clone, Copy, Debug)]
-pub struct Interval {
+pub(crate) struct Interval {
     pub start: i64, // inclusive
     pub end: i64,   // inclusive
 }
@@ -60,7 +60,7 @@ pub fn halves(size: i64) -> Halves {
 
 /// Calculate the base center-to-center distance between two adjacent nodes
 /// when they are touching (no gap).
-pub fn base_step(width_i: i64, width_j: i64) -> i64 {
+pub(crate) fn base_step(width_i: i64, width_j: i64) -> i64 {
     let hi = halves(width_i);
     let hj = halves(width_j);
     hi.hi + hj.lo
@@ -203,7 +203,7 @@ struct AxisSolution {
 }
 
 /// Transforms an incoming free-space gap into the gap to enforce.
-pub type GapSizer = fn(u64) -> u64;
+pub(crate) type GapSizer = fn(u64) -> u64;
 
 /// The least vertical distance routing nodes keep from each other and from data nodes, however far
 /// apart the layout placed them: the minimal zoom level's policy, which curved edges reuse at every
@@ -281,23 +281,6 @@ fn transform_distance(
         i64::try_from(transformed_gap).expect("should fit transformed gap in layout coordinates");
     base.checked_add(transformed_gap)
         .expect("should fit constraint distance in layout coordinates")
-}
-
-/// Compact both axes until stable while enforcing the requested rendered gaps.
-///
-/// Alternating axes handles overlaps introduced by the preceding solve. Incoming coordinates
-/// remain the baseline for gap transforms, and data layers are re-snapped after each X solve.
-pub fn compact_layout(
-    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapPolicy,
-) {
-    compact_layout_with_vertical_placement(
-        graph,
-        gaps,
-        VerticalPlacement::Balanced,
-        None,
-        LayoutMode::Rectilinear,
-    );
 }
 
 /// Tight placement uses minimum Y gaps and packs toward `vertical_anchor`.
@@ -907,6 +890,23 @@ mod tests {
         geometry::{LocalPos, WorldPos},
         layout::{PinSide, VerticalAnchor},
     };
+
+    /// Compact both axes until stable while enforcing the requested rendered gaps.
+    ///
+    /// Alternating axes handles overlaps introduced by the preceding solve. Incoming coordinates
+    /// remain the baseline for gap transforms, and data layers are re-snapped after each X solve.
+    fn compact_layout(
+        graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+        gaps: &GapPolicy,
+    ) {
+        compact_layout_with_vertical_placement(
+            graph,
+            gaps,
+            VerticalPlacement::Balanced,
+            None,
+            LayoutMode::Rectilinear,
+        );
+    }
 
     /// The column gap for the edge between the east port of a node and the west port of the node
     /// in the next layer, which sit on one row, with hairpins on the given sides of the two nodes.

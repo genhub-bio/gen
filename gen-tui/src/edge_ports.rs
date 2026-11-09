@@ -2,7 +2,7 @@
 //!
 //! Layouts read left to right, so an edge normally leaves the east side of its source and
 //! arrives at the west side of its target. An edge that attaches elsewhere, such as the two
-//! ends of a head-to-head repeat, is carried around its nodes by pins; see [`crate::pinning`].
+//! ends of a head-to-head repeat, is carried around its nodes by pins; see `crate::pinning`.
 
 use serde::{Deserialize, Serialize};
 

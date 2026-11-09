@@ -1,15 +1,14 @@
 //! A Ratatui widget to render very large graphs, originally developed for
 //! the Gen version control system for graph genome sequences.
 
-pub mod assembly;
-pub mod compaction;
+pub(crate) mod assembly;
+pub(crate) mod compaction;
 pub mod crawl;
-pub mod cross_coordinates;
+pub(crate) mod cross_coordinates;
 pub mod curved;
-pub mod cycle_removal;
-pub mod dot_export;
+pub(crate) mod cycle_removal;
 pub mod edge_ports;
-pub mod edge_router;
+pub(crate) mod edge_router;
 pub mod frame_index;
 pub mod geometry;
 pub mod graph_painter;
@@ -20,17 +19,17 @@ pub mod layout;
 pub mod layout_compaction;
 pub mod layout_engine;
 pub(crate) mod loopback_pins;
-pub mod navigator;
-pub mod pinning;
+pub(crate) mod navigator;
+pub(crate) mod pinning;
 pub mod pixel_overlay;
 pub mod plotter;
 pub mod raster_config;
-pub mod routed_window_graph;
+pub(crate) mod routed_window_graph;
 pub mod testing;
 pub mod theme;
 pub mod viewport_state;
 pub mod window_geometry;
-pub mod window_graph;
+pub(crate) mod window_graph;
 
 pub use curved::{
     ArrowMark, BezierCurve, LayoutMode, NodeGlow, OverlayPrimitive, StraightSegment, SymbolGlow,

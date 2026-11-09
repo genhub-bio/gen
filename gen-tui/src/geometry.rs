@@ -100,7 +100,7 @@ impl<T: Sub<Output = T>> Sub<(T, T)> for Point<T> {
 /// World coordinates (absolute or relative)
 pub type WorldPos = Point<i64>;
 /// Coordinates relative to the viewport, in viewport units
-pub type ViewportPos = Point<u16>;
+pub(crate) type ViewportPos = Point<u16>;
 
 // Origin shortcuts:
 impl Point<i64> {
@@ -123,7 +123,7 @@ pub struct BigRect<T> {
 
 impl<T> BigRect<T> {
     /// Create from two corner points.
-    pub fn from_corners(a: Point<T>, b: Point<T>) -> Self
+    pub(crate) fn from_corners(a: Point<T>, b: Point<T>) -> Self
     where
         T: Ord + Copy + Serialize + DeserializeOwned,
     {
@@ -259,7 +259,7 @@ where
     }
 
     /// Do these two rects overlap?
-    pub fn intersects(&self, other: &Self) -> bool {
+    pub(crate) fn intersects(&self, other: &Self) -> bool {
         self.min.x <= other.max.x
             && self.max.x >= other.min.x
             && self.min.y <= other.max.y
@@ -303,7 +303,7 @@ where
 
     /// Find the closest cell in this rectangle to the given point
     /// Useful for snapping cursor positions to valid cells within the rectangle
-    pub fn find_closest_cell(&self, p: Point<T>) -> Point<T> {
+    pub(crate) fn find_closest_cell(&self, p: Point<T>) -> Point<T> {
         Point::new(
             p.x.clamp(self.min.x, self.max.x),
             p.y.clamp(self.min.y, self.max.y),
@@ -334,7 +334,7 @@ impl BigRect<i64> {
     /// Inverse of `point_at_fraction`: the fractional offset of `p` within this rect, clamped
     /// to [0.0, 1.0]. Guards against a zero-span rect (a 1-cell-wide node) by treating it as a
     /// span of 1.0.
-    pub fn fraction_of(&self, p: Point<i64>) -> (f64, f64) {
+    pub(crate) fn fraction_of(&self, p: Point<i64>) -> (f64, f64) {
         let span_x = self.width().max(1) as f64;
         let span_y = self.height().max(1) as f64;
         (
@@ -359,7 +359,7 @@ impl LocalPos {
         }
     }
 
-    pub fn new_xy(x: i64, y: i64) -> Self {
+    pub(crate) fn new_xy(x: i64, y: i64) -> Self {
         Self { x, y }
     }
 

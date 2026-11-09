@@ -93,13 +93,13 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
 
     /// Record where each invisible node's edges meet, in the same screen space as the placed
     /// rects.
-    pub fn with_junctions(mut self, junctions: HashMap<N, Point<i64>>) -> Self {
+    pub(crate) fn with_junctions(mut self, junctions: HashMap<N, Point<i64>>) -> Self {
         self.junctions = junctions;
         self
     }
 
     /// Where an invisible node's edges meet, if it was in the painted window.
-    pub fn junction_point(&self, id: N) -> Option<Point<i64>> {
+    pub(crate) fn junction_point(&self, id: N) -> Option<Point<i64>> {
         self.junctions.get(&id).copied()
     }
 
@@ -125,7 +125,8 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
     }
 
     /// The layer a node was placed in, whether or not it is currently visible.
-    pub fn layer_of(&self, id: N) -> Option<i32> {
+    #[cfg(test)]
+    pub(crate) fn layer_of(&self, id: N) -> Option<i32> {
         self.by_id.get(&id).map(|&index| self.placed[index].layer)
     }
 
@@ -173,7 +174,7 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
     /// `pos`), or among every placed node when `toward` is `None` or nothing lies that way.
     /// Moves the cursor off a junction onto whichever of the junction's branches is nearest,
     /// however many there are.
-    pub fn closest_toward(&self, pos: Point<i64>, toward: Option<Direction>) -> Option<N> {
+    pub(crate) fn closest_toward(&self, pos: Point<i64>, toward: Option<Direction>) -> Option<N> {
         let distance = |node: &PlacedNode<N>| {
             let closest_cell = node.rect.find_closest_cell(pos);
             let dx = closest_cell.x - pos.x;

@@ -1,42 +1,25 @@
-//! Builds `WindowGeometry` for a graph window and supplies the minimal single-glyph node
-//! renderer, plus the cursor styling helpers shared by the painters. Callers such as the
+//! Builds `WindowGeometry` for a graph window and supplies the single-glyph node marker, plus
+//! the cursor styling helpers shared by the painters. Callers such as the
 //! painter, tests and exports use these to get positioned, compacted nodes without
 //! going through a full controller.
 
 use std::collections::HashSet;
 
-use petgraph::{graph::NodeIndex, visit::GraphBase};
+use petgraph::graph::NodeIndex;
 use ratatui::style::Style;
 
 use crate::{
     assembly::AssembledLayout,
     curved::LayoutMode,
-    geometry::{WorldPos, WorldRect},
+    geometry::WorldPos,
     layout::{HAIR_PIN_SIZE, NodeRole, VerticalAnchor, WindowGeometry},
     layout_compaction::GapPolicy,
-    plotter::NodeRenderer,
     theme::Theme,
     viewport_state::WorldBuffer,
 };
 
-/// Single-cell glyph used by [`MinimalNodeRenderer`].
+/// Single-cell glyph a node is drawn as at the lowest zoom level.
 pub const NODE_GLYPH: char = '●';
-
-/// A `NodeRenderer` that draws every node as a single glyph, regardless of domain data.
-/// Needs no sequence/domain lookup, so it works for any `GraphBase` - the default,
-/// always-available renderer for the lowest zoom level.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MinimalNodeRenderer;
-
-impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
-    fn get_node_size(&self, _node: &G::NodeId) -> (u64, u64) {
-        (1, 1)
-    }
-
-    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, _node_id: &G::NodeId) {
-        buffer.set_char(area.left_center(), NODE_GLYPH);
-    }
-}
 
 /// Route and compact an assembled neighbourhood window into renderable geometry.
 ///
@@ -51,7 +34,8 @@ impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
 /// nodes are drawn; the rest become junctions of their edges (see [`WindowGeometry::new`]) and
 /// should be given a routing node's size. `is_aligned` marks nodes that pin their layer to
 /// y = 0 (see `NodeRenderer::is_aligned`).
-pub fn build_window_geometry(
+#[cfg(test)]
+pub(crate) fn build_window_geometry(
     assembled: AssembledLayout,
     gaps: &GapPolicy,
     size_of: impl FnMut(&NodeRole) -> (u64, u64),
@@ -70,7 +54,7 @@ pub fn build_window_geometry(
 }
 
 /// Build geometry with a per-node vertical attachment row, shared by layout and rendering.
-pub fn build_window_geometry_with_anchors(
+pub(crate) fn build_window_geometry_with_anchors(
     assembled: AssembledLayout,
     gaps: &GapPolicy,
     layout_mode: LayoutMode,

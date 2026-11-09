@@ -31,10 +31,10 @@ pub type PreferredWormholeDoors<NodeId> = HashMap<(NodeId, bool), NodeId>;
 
 /// Where a node belongs in the order a caller wants the layout to read left to right, if the
 /// caller has one. See `build_window_graph_with_order`.
-pub type OrderHintFn<G> = dyn Fn(<G as GraphBase>::NodeId) -> Option<i64> + Send + Sync;
+pub(crate) type OrderHintFn<G> = dyn Fn(<G as GraphBase>::NodeId) -> Option<i64> + Send + Sync;
 
 /// How to read the ports of an edge from the graph that holds it.
-pub type EdgePortsFn<G> = fn(&G, &<G as GraphBase>::EdgeId) -> EdgePorts;
+pub(crate) type EdgePortsFn<G> = fn(&G, &<G as GraphBase>::EdgeId) -> EdgePorts;
 
 /// The domain direction in which a collapsed wormhole door leaves its in-window boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,7 +55,7 @@ pub struct ExternalEdge<NodeId> {
     /// The chosen off-window node used for navigation.
     pub target: NodeId,
     /// Every off-window neighbour represented by this collapsed door.
-    pub all_collapsed: Vec<NodeId>,
+    pub(crate) all_collapsed: Vec<NodeId>,
     /// The domain direction from `boundary` toward the represented nodes.
     pub side: ExternalEdgeSide,
 }
@@ -140,7 +140,7 @@ pub struct StructuralSubgraph<NodeId> {
     pub edges: Vec<(NodeId, NodeId)>,
     /// The ports of every edge between a node pair, for pairs whose edges do not all attach
     /// east to west. A pair missing here has the default ports. See
-    /// [`StructuralSubgraph::assign_edge_ports`].
+    /// `StructuralSubgraph::assign_edge_ports`.
     pub edge_ports: BTreeMap<(NodeId, NodeId), Vec<EdgePorts>>,
     /// Boundary edges collapsed to one wormhole door per node and direction.
     pub external_edges: Vec<ExternalEdge<NodeId>>,
@@ -297,7 +297,7 @@ impl<NodeId: Copy + Eq + Hash + Ord> StructuralSubgraph<NodeId> {
     /// Read the ports of each edge inside the window from `graph`. Parallel edges between one
     /// node pair each keep their own ports, which is why `graph` must expose one petgraph edge
     /// per domain edge (see `gen_graph::PackedGraphMap`).
-    pub fn assign_edge_ports<G>(&mut self, graph: &G, ports_of: EdgePortsFn<G>)
+    pub(crate) fn assign_edge_ports<G>(&mut self, graph: &G, ports_of: EdgePortsFn<G>)
     where
         G: GraphBase<NodeId = NodeId>,
         for<'b> &'b G: GraphBase<NodeId = NodeId, EdgeId = G::EdgeId> + IntoEdges,
@@ -323,7 +323,7 @@ impl<NodeId: Copy + Eq + Hash + Ord> StructuralSubgraph<NodeId> {
     }
 
     /// The distinct ports of the edges from `source` to `target`.
-    pub fn ports_of(&self, source: NodeId, target: NodeId) -> Vec<EdgePorts> {
+    pub(crate) fn ports_of(&self, source: NodeId, target: NodeId) -> Vec<EdgePorts> {
         self.edge_ports
             .get(&(source, target))
             .cloned()
@@ -344,7 +344,7 @@ struct DomainEdge<NodeId> {
 ///
 /// Nodes are first ordered by the edges that ask for an order (cycle removal breaks any cycle
 /// among them). Each edge is then drawn directly when its sides agree with that order, and
-/// otherwise routed through left and right pins (see [`plan_sideways_bends`]). Every pin joins
+/// otherwise routed through left and right pins (see `plan_sideways_bends`). Every pin joins
 /// the Sugiyama input, along with a temporary edge between the endpoints of each pinned route
 /// that keeps their ranks in the chosen order; the builder removes it once layers are known.
 /// Boundary edges become ranked wormhole nodes. `explicit_backward_edges` names node pairs to
@@ -373,7 +373,7 @@ where
 /// whatever cycles the edges form, so an edge running against the hints is drawn as a backward
 /// edge instead of cycle removal choosing which edge of a cycle to flip. `layout_mode` decides
 /// whether left and right pins join the Sugiyama input: the curved styles leave them out.
-pub fn build_window_graph_with_order<G>(
+pub(crate) fn build_window_graph_with_order<G>(
     neighborhood: &StructuralSubgraph<G::NodeId>,
     graph: &G,
     explicit_backward_edges: Option<&HashSet<(G::NodeId, G::NodeId)>>,
