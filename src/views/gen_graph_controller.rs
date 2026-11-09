@@ -341,6 +341,12 @@ impl GenGraphController {
         true
     }
 
+    /// The cells of the frame buffer the graph was last drawn into, which the overlay primitives
+    /// are measured within.
+    pub const fn graph_area(&self) -> Rect {
+        self.view_state.last_area()
+    }
+
     /// The overlay primitives the last draw left for the caller, in cells of the buffer drawn into.
     /// Empty unless the layout mode is curved.
     pub fn overlay_primitives(&self) -> &[OverlayPrimitive] {

@@ -14,7 +14,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, history::dolt::ac
 use gen_tui::{
     crawl::GraphSource,
     graph_view::GraphViewState,
-    kitty_graphics::{KittyPixelOverlay, supports_kitty_graphics},
+    kitty_graphics::{KittyOverlayPresenter, supports_kitty_graphics},
     layout_engine::{BatchId, LayoutEngine},
     theme::current_theme,
 };
@@ -918,7 +918,7 @@ pub fn view_block_group<'a>(
     let terminal = session.terminal_mut();
 
     // Basic event loop
-    let mut kitty_overlay = KittyPixelOverlay::default();
+    let mut kitty_overlay = KittyOverlayPresenter::default();
     // The terminal is asked once, in raw mode and before any event is read, because its answer
     // arrives on standard input. Curved edges are drawn through the Kitty graphics protocol, so
     // a terminal without it keeps the rectilinear style.
@@ -2071,6 +2071,7 @@ pub fn view_block_group<'a>(
                 kitty_overlay.update(
                     &mut escapes,
                     completed_frame.buffer,
+                    controller.graph_area(),
                     controller.overlay_primitives(),
                 )?;
             } else {
@@ -2186,6 +2187,11 @@ pub fn view_block_group<'a>(
         ));
     }
 
+    if curved_layout_available {
+        let mut escapes = Vec::new();
+        kitty_overlay.clear(&mut escapes)?;
+        terminal.backend_mut().write_all(&escapes)?;
+    }
     Ok(())
 }
 

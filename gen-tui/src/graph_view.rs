@@ -262,6 +262,11 @@ impl<N> GraphViewState<N> {
 }
 
 impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
+    /// The area the most recent `GraphView::render` call drew the graph into, inside any block.
+    pub const fn last_area(&self) -> Rect {
+        self.last_area
+    }
+
     /// The width of the area passed to the most recent `GraphView::render` call. Lets a caller
     /// outside `render()` compute the same fixed budget for an explicit world activation.
     pub fn last_area_width(&self) -> u16 {
