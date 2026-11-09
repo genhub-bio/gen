@@ -1,4 +1,5 @@
-//! Routes edges around the ends of their nodes in the curved styles without left or right pins.
+//! Routes edges around the ends of their nodes in the curved layout mode without left or right
+//! pins in the layered layout.
 //!
 //! In a curved drawing a pin is never drawn, yet while it is a vertex of the layered layout it
 //! claims a layer, rows and columns of empty space, and it pulls the chains of the edges it
@@ -525,7 +526,7 @@ fn seat_in_layers(graph: &mut LayoutGraph, order: &LayerOrder, seats: &HashMap<i
 /// pin's own two edges.
 ///
 /// A pin sits just outside the nearer end of its two neighbors, on the anchor's row, on a cell no
-/// other node uses: the viewport graph keys nodes by position, so a shared cell would merge two
+/// other node uses: the routed window graph keys nodes by position, so a shared cell would merge two
 /// nodes into one.
 pub(crate) fn reattach_loopback_pins(graph: &mut LayoutGraph, detached: Vec<DetachedPin>) {
     for pin in detached {

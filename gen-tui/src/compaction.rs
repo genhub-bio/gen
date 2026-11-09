@@ -47,9 +47,10 @@ pub enum CompactionError {
 /// Placement result for a single axis, holding all three coordinate maps and the span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxisPlacement {
-    /// Tightest placement toward the low side (left / top).
+    /// Tightest placement toward the low side: the lowest coordinate each item's constraints allow.
     pub low: HashMap<ItemId, i64>,
-    /// Tightest placement toward the high side (right / bottom).
+    /// Tightest placement toward the high side: the highest coordinate each item's constraints
+    /// allow within the span.
     pub high: HashMap<ItemId, i64>,
     /// Centered placement: `floor((low + high) / 2)` for each item.
     pub centered: HashMap<ItemId, i64>,
@@ -237,7 +238,7 @@ fn relax_cycle(
 /// Reversing every constraint `from → to, gap` to
 /// `to → from, gap` and solving gives each item's minimum distance from the
 /// far end of the axis. Converting back with `high[id] = span - reversed[id]`
-/// yields the rightmost (or bottommost) valid coordinate.
+/// yields the highest valid coordinate.
 ///
 /// Both placements satisfy every lower bound, so their coordinate-wise midpoint does too.
 /// Integer division preserves this because twice each gap is even.
@@ -434,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_reverse_constraint_caps_distance() {
+    fn test_signed_reverse_constraint_caps_distance() {
         let constraints = [
             Constraint {
                 from: 0,

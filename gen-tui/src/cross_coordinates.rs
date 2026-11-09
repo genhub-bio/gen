@@ -69,9 +69,9 @@ pub fn orient_aligned_bubbles(
         outgoing.entry(left).or_default().push(right);
         incoming.entry(right).or_default().push(left);
     }
-    for neighbours in outgoing.values_mut().chain(incoming.values_mut()) {
-        neighbours.sort_unstable();
-        neighbours.dedup();
+    for neighbors in outgoing.values_mut().chain(incoming.values_mut()) {
+        neighbors.sort_unstable();
+        neighbors.dedup();
     }
 
     let columns: HashMap<i64, usize> = layers
@@ -443,8 +443,8 @@ fn solve_aligned_layers(
 
 /// Dense representation used by the four Brandes–Köpf alignment passes.
 ///
-/// Only plain routing nodes are dummy chain segments. Data, pin, and wormhole nodes retain
-/// ordinary alignment behavior.
+/// Plain routing nodes and hair pins are dummy chain segments (a hair pin moves with the node it
+/// turns around). Data, pin, and wormhole nodes retain ordinary alignment behavior.
 struct CrossGraph {
     column: Vec<i64>,
     order: Vec<i64>,
@@ -475,7 +475,7 @@ impl CrossGraph {
     }
 
     /// Group nodes into layers by `column` (ascending) with each layer ordered by `(order, id)`,
-    /// and index that structure for layer/position/neighbour lookups.
+    /// and index that structure for layer/position/neighbor lookups.
     fn layered(&self) -> CrossLayered {
         let mut columns: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
         for node_index in 0..self.len() {
@@ -513,7 +513,7 @@ impl CrossGraph {
     /// Run the four Brandes–Köpf passes and balance them into one coordinate per node.
     fn assign(&self) -> Vec<i64> {
         let layered = self.layered();
-        let adjacent = AdjacentNeighbours::new(self, &layered);
+        let adjacent = AdjacentNeighbors::new(self, &layered);
         let marked = mark_type1_conflicts(self, &layered, &adjacent);
 
         let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(4);
@@ -536,54 +536,54 @@ impl CrossGraph {
     }
 }
 
-/// Per-node adjacent-layer neighbour lists in within-layer order, computed once per solve.
-/// `CrossLayered::upper_neighbours`/`lower_neighbours` refilter and re-sort the adjacency list on
+/// Per-node adjacent-layer neighbor lists in within-layer order, computed once per solve.
+/// `CrossLayered::upper_neighbors`/`lower_neighbors` refilter and re-sort the adjacency list on
 /// every call, and the passes query the same lists many times over.
-struct AdjacentNeighbours {
+struct AdjacentNeighbors {
     upper: Vec<Vec<usize>>,
     lower: Vec<Vec<usize>>,
 }
 
-impl AdjacentNeighbours {
-    fn new(graph: &CrossGraph, layered: &CrossLayered) -> AdjacentNeighbours {
-        AdjacentNeighbours {
+impl AdjacentNeighbors {
+    fn new(graph: &CrossGraph, layered: &CrossLayered) -> AdjacentNeighbors {
+        AdjacentNeighbors {
             upper: (0..graph.len())
-                .map(|node_index| layered.upper_neighbours(graph, node_index))
+                .map(|node_index| layered.upper_neighbors(graph, node_index))
                 .collect(),
             lower: (0..graph.len())
-                .map(|node_index| layered.lower_neighbours(graph, node_index))
+                .map(|node_index| layered.lower_neighbors(graph, node_index))
                 .collect(),
         }
     }
 }
 
 impl CrossLayered {
-    /// Neighbours in the layer immediately to the left (`column - 1`), in within-layer order.
-    fn upper_neighbours(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
+    /// Neighbors in the layer immediately to the left (`column - 1`), in within-layer order.
+    fn upper_neighbors(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
         match self.layer_of[node_index].checked_sub(1) {
-            Some(layer_index) => self.neighbours_in_layer(graph, node_index, layer_index),
+            Some(layer_index) => self.neighbors_in_layer(graph, node_index, layer_index),
             None => Vec::new(),
         }
     }
 
-    /// Neighbours in the layer immediately to the right (`column + 1`), in within-layer order.
-    fn lower_neighbours(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
-        self.neighbours_in_layer(graph, node_index, self.layer_of[node_index] + 1)
+    /// Neighbors in the layer immediately to the right (`column + 1`), in within-layer order.
+    fn lower_neighbors(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
+        self.neighbors_in_layer(graph, node_index, self.layer_of[node_index] + 1)
     }
 
-    fn neighbours_in_layer(
+    fn neighbors_in_layer(
         &self,
         graph: &CrossGraph,
         node_index: usize,
         layer_index: usize,
     ) -> Vec<usize> {
-        let mut neighbours: Vec<usize> = graph.adjacency[node_index]
+        let mut neighbors: Vec<usize> = graph.adjacency[node_index]
             .iter()
             .copied()
-            .filter(|&neighbour| self.layer_of[neighbour] == layer_index)
+            .filter(|&neighbor| self.layer_of[neighbor] == layer_index)
             .collect();
-        neighbours.sort_by_key(|&neighbour| self.position_of[neighbour]);
-        neighbours
+        neighbors.sort_by_key(|&neighbor| self.position_of[neighbor]);
+        neighbors
     }
 }
 
@@ -593,7 +593,7 @@ impl CrossLayered {
 fn mark_type1_conflicts(
     graph: &CrossGraph,
     layered: &CrossLayered,
-    adjacent: &AdjacentNeighbours,
+    adjacent: &AdjacentNeighbors,
 ) -> HashSet<(usize, usize)> {
     let mut marked = HashSet::new();
     let layer_count = layered.layers.len();
@@ -637,7 +637,7 @@ fn mark_type1_conflicts(
     marked
 }
 
-/// Align each node to the median of its unmarked neighbours in the adjacent layer, keeping a
+/// Align each node to the median of its unmarked neighbors in the adjacent layer, keeping a
 /// layer's alignment edges mutually non-crossing so blocks never cross. `align_to_upper` picks which
 /// adjacent layer to align against; `prefer_low` picks the lower-position median on ties (and scans
 /// low-to-high), otherwise the higher-position median scanning high-to-low.
@@ -650,7 +650,7 @@ fn mark_type1_conflicts(
 fn vertical_alignment(
     graph: &CrossGraph,
     layered: &CrossLayered,
-    adjacent: &AdjacentNeighbours,
+    adjacent: &AdjacentNeighbors,
     marked: &HashSet<(usize, usize)>,
     align_to_upper: bool,
     prefer_low: bool,
@@ -674,15 +674,15 @@ fn vertical_alignment(
         };
         let mut claims: Vec<(i64, i64)> = Vec::new();
         for &node_index in &scan {
-            let neighbours = if align_to_upper {
+            let neighbors = if align_to_upper {
                 &adjacent.upper[node_index]
             } else {
                 &adjacent.lower[node_index]
             };
-            if neighbours.is_empty() {
+            if neighbors.is_empty() {
                 continue;
             }
-            let degree = neighbours.len();
+            let degree = neighbors.len();
             let median_pair = [(degree - 1) / 2, degree / 2];
             let candidate_order = if prefer_low {
                 median_pair
@@ -693,7 +693,7 @@ fn vertical_alignment(
                 if align[node_index] != node_index {
                     break;
                 }
-                let medium = neighbours[median_index];
+                let medium = neighbors[median_index];
                 let segment = if align_to_upper {
                     (medium, node_index)
                 } else {
@@ -842,7 +842,7 @@ fn horizontal_compaction(
 /// to its maximum. When candidate widths differ that pins the two ends of a mirror-image pass pair
 /// at different offsets, skewing the medians by half the width difference — enough to break exact
 /// row co-registration of the grid fixtures. Aligning every candidate to a common minimum keeps
-/// mirror pairs coincident, and the final normalisation to `min = 0` makes the reference irrelevant.
+/// mirror pairs coincident, and the final normalization to `min = 0` makes the reference irrelevant.
 fn balance(graph: &CrossGraph, mut candidates: Vec<Vec<f64>>) -> Vec<i64> {
     let node_count = graph.len();
     if node_count == 0 {
@@ -873,7 +873,7 @@ fn balance(graph: &CrossGraph, mut candidates: Vec<Vec<f64>>) -> Vec<i64> {
 }
 
 /// Round to the nearest integer, ties to even, so a pair of half-integer values symmetric about an
-/// integer centre stays symmetric after rounding (unlike round-half-away-from-zero).
+/// integer center stays symmetric after rounding (unlike round-half-away-from-zero).
 fn round_half_even(value: f64) -> i64 {
     let floor = value.floor();
     let fraction = value - floor;

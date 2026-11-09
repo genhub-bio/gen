@@ -51,7 +51,7 @@ struct SceneKey {
 /// A domain node's local (pre-offset) position within an already-assembled window, if it's
 /// present as a `NodeRole::Data` node there. Used by the `go_to_node_framed` go-to path to
 /// compute a screen-position delta between two nodes in the same window without needing a full
-/// paint pass (`GraphPainter`'s `anchor_offset` does the equivalent lookup, but only for the
+/// paint pass (`graph_painter`'s `anchor_offset` does the equivalent lookup, but only for the
 /// camera's own anchor and only as part of painting).
 fn node_pos_in_window<G>(window: &AssembledLayout, graph: &G, node: G::NodeId) -> Option<(i64, i64)>
 where
@@ -167,7 +167,7 @@ fn min_shift_to_avoid_left_clip(
 /// Navigation, camera, zoom, and highlighting state retained between renders.
 ///
 /// `zoom_index` is an opaque position into whatever renderer/`GapPolicy` table the owning
-/// widget/event loop maintains - `gen-tui` has no notion of which concrete zoom levels
+/// application maintains - `gen-tui` has no notion of which concrete zoom levels
 /// exist; it only tracks which position in that (external) table this view is currently
 /// showing, and applies `gaps` as told.
 #[derive(Clone)]
@@ -275,7 +275,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     }
 
     /// Discard per-frame products so this state can be reused as an independent view of the
-    /// controller's active world.
+    /// layout engine's active world.
     #[cfg(test)]
     pub(crate) fn reset_render_state(&mut self) {
         self.frame = FrameIndex::empty();
@@ -315,7 +315,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     }
 
     /// Like `go_to_node`, but uses `camera_anchor` for camera translation while framing
-    /// `frame_node`. Both nodes should belong to the controller's active world.
+    /// `frame_node`. Both nodes should belong to the layout engine's active world.
     pub fn go_to_node_framed(&mut self, camera_anchor: N, frame_node: N, offset: (f64, f64)) {
         if !self.go_to_pending {
             self.go_to_previous_cursor = Some(self.cursor);
@@ -351,7 +351,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
 
     /// Let the cursor stay on `column` of `node` even if the renderer lists it as no cursor
     /// stop. A go-to or zoom whose target sits in a truncated node's hidden middle aims at the
-    /// ellipsis, and snapping the cursor to a neighbouring base would put it somewhere else
+    /// ellipsis, and snapping the cursor to a neighboring base would put it somewhere else
     /// than the highlight on that target. Only as long as the cursor is still on that column,
     /// so any move releases it.
     pub fn rest_cursor_on_column(&mut self, node: N, column: i64) {
@@ -375,15 +375,15 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     /// (free-camera mode). The Y-axis flip (world Y+ is up, terminal Y+ is down) is handled
     /// here so callers can pass raw terminal deltas directly, matching `terminal_to_screen`
     /// (X unflipped, Y flipped). Applied immediately, no easing.
-    pub fn move_by_terminal(&mut self, terminal_dx: i16, terminal_dy: i16) {
+    pub fn move_by_terminal(&mut self, terminal_delta_x: i16, terminal_delta_y: i16) {
         self.hide_cursor();
-        let world_dx = terminal_dx as i64;
-        let world_dy = -(terminal_dy as i64);
+        let world_delta_x = terminal_delta_x as i64;
+        let world_delta_y = -(terminal_delta_y as i64);
         if let Some(camera) = &mut self.camera {
-            camera.anchor_screen.0 += world_dx;
-            camera.anchor_screen.1 += world_dy;
-            self.pan_since_render.0 += world_dx;
-            self.pan_since_render.1 += world_dy;
+            camera.anchor_screen.0 += world_delta_x;
+            camera.anchor_screen.1 += world_delta_y;
+            self.pan_since_render.0 += world_delta_x;
+            self.pan_since_render.1 += world_delta_y;
         }
     }
 
@@ -550,9 +550,11 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         }
         let distance = |rect: crate::geometry::WorldRect| {
             let closest = rect.find_closest_cell(cursor);
-            let dx = closest.x - cursor.x;
-            let dy = closest.y - cursor.y;
-            dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+            let delta_x = closest.x - cursor.x;
+            let delta_y = closest.y - cursor.y;
+            delta_x
+                .saturating_mul(delta_x)
+                .saturating_add(delta_y.saturating_mul(delta_y))
         };
 
         let wormhole = self
@@ -580,9 +582,11 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         let cursor = origin.point_at_fraction(self.cursor.fractional);
         let distance = |rect: WorldRect| {
             let closest = rect.find_closest_cell(cursor);
-            let dx = closest.x - cursor.x;
-            let dy = closest.y - cursor.y;
-            dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+            let delta_x = closest.x - cursor.x;
+            let delta_y = closest.y - cursor.y;
+            delta_x
+                .saturating_mul(delta_x)
+                .saturating_add(delta_y.saturating_mul(delta_y))
         };
         self.wormhole
             .iter()
@@ -704,27 +708,26 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     pub fn next_accent_color(&self) -> Color {
         let theme = current_theme();
         const ACCENTS: [usize; 8] = [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F];
-        let accent_colors: Vec<Color> = ACCENTS.iter().map(|&i| theme[i]).collect();
+        let accent_colors: Vec<Color> = ACCENTS.iter().map(|&slot| theme[slot]).collect();
 
-        let last_idx = self
-            .highlights
-            .styles
-            .iter()
-            .rev()
-            .find_map(|(_, s)| accent_colors.iter().position(|&c| c == s.color));
+        let last_index = self.highlights.styles.iter().rev().find_map(|(_, style)| {
+            accent_colors
+                .iter()
+                .position(|&candidate| candidate == style.color)
+        });
 
-        let next_idx = match last_idx {
+        let next_index = match last_index {
             None => 0,
-            Some(i) => {
-                let n = (i + 1) % 8;
-                if n == 0 {
-                    log::warn!("all 8 accent colours have been used; cycling back to the first");
+            Some(last) => {
+                let next = (last + 1) % 8;
+                if next == 0 {
+                    log::warn!("all 8 accent colors have been used; cycling back to the first");
                 }
-                n
+                next
             }
         };
 
-        accent_colors[next_idx]
+        accent_colors[next_index]
     }
 
     pub fn set_node_highlight(&mut self, node: N, style: PathStyle) {
@@ -770,11 +773,13 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     }
 }
 
-/// The actual `StatefulWidget`: per-frame geometry and painting over the controller's active
-/// structural world. Applications hold `GraphViewState` and construct a fresh, borrowing
-/// `GraphView` for each render call.
+/// Callback that draws extra content over the buffer once the window is painted and placed.
 type OverlayFn<'a, NodeId> = Box<dyn FnOnce(&mut Buffer, &FrameIndex<NodeId>) + 'a>;
 
+/// The actual `StatefulWidget`: per-frame painting over the layout engine's active structural
+/// world, building the window's geometry whenever zoom, node sizes or the layout mode change.
+/// Applications hold `GraphViewState` and construct a fresh, borrowing `GraphView` for each
+/// render call.
 pub struct GraphView<'a, G, V, S = EagerSource>
 where
     G: GraphBase,
@@ -837,11 +842,11 @@ where
 {
     type State = GraphViewState<G::NodeId>;
 
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        buf.set_style(area, self.style);
+    fn render(self, area: Rect, buffer: &mut Buffer, state: &mut Self::State) {
+        buffer.set_style(area, self.style);
         let inner_area = if let Some(block) = &self.block {
             let inner = block.inner(area);
-            block.clone().render(area, buf);
+            block.clone().render(area, buffer);
             inner
         } else {
             area
@@ -1120,7 +1125,7 @@ where
             graph,
             self.visual,
             inner_area,
-            buf,
+            buffer,
             &camera,
             &state.highlights,
         );
@@ -1153,9 +1158,9 @@ where
             }
         }
         if let Some(overlay_fn) = self.overlay_fn {
-            overlay_fn(buf, &frame);
+            overlay_fn(buffer, &frame);
         }
-        CursorOverlay::render(inner_area, buf, &state.cursor, &frame);
+        CursorOverlay::render(inner_area, buffer, &state.cursor, &frame);
         state.frame = frame;
         state.wormhole = wormhole;
         state.overlay_primitives = overlay_primitives;
@@ -1375,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn node_hit_accounts_for_render_area_terminal_offset() {
+    fn test_node_hit_accounts_for_render_area_terminal_offset() {
         let domain_graph = TestGraphs::domain_extended_diamond();
         let mut engine = LayoutEngine::new(domain_graph);
         let visual = FixedSizeVisual;
@@ -1407,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_render_preserves_complete_buffer_and_frame() {
+    fn test_repeated_render_preserves_complete_buffer_and_frame() {
         let domain_graph = TestGraphs::domain_complex_dag();
         let mut engine = LayoutEngine::new(domain_graph);
         let visual = FixedSizeVisual;
@@ -1438,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn two_view_states_share_one_structural_world() {
+    fn test_two_view_states_share_one_structural_world() {
         let domain_graph = TestGraphs::domain_complex_dag();
         let mut engine = LayoutEngine::new(domain_graph);
         let visual = FixedSizeVisual;
@@ -1490,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn interactions_and_resize_do_not_rebuild_active_world() {
+    fn test_interactions_and_resize_do_not_rebuild_active_world() {
         let domain_graph = TestGraphs::domain_complex_dag();
         let mut engine = LayoutEngine::new(domain_graph);
         let visual = FixedSizeVisual;
@@ -1539,8 +1544,8 @@ mod tests {
                 .rect_of(node)
                 .expect("should place the node")
                 .center();
-            for &(terminal_dx, terminal_dy) in frame_steps {
-                state.move_by_terminal(terminal_dx, terminal_dy);
+            for &(terminal_delta_x, terminal_delta_y) in frame_steps {
+                state.move_by_terminal(terminal_delta_x, terminal_delta_y);
                 state.rebase_camera_to_closest_node();
             }
             GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
@@ -1550,12 +1555,12 @@ mod tests {
                 .expect("should place the node")
                 .center();
 
-            let pointer_dx: i64 = frame_steps.iter().map(|step| step.0 as i64).sum();
-            let pointer_dy: i64 = frame_steps.iter().map(|step| step.1 as i64).sum();
+            let pointer_delta_x: i64 = frame_steps.iter().map(|step| step.0 as i64).sum();
+            let pointer_delta_y: i64 = frame_steps.iter().map(|step| step.1 as i64).sum();
             // Terminal rows grow downward; screen space grows upward.
             assert_eq!(
                 (after.x - before.x, after.y - before.y),
-                (pointer_dx, -pointer_dy),
+                (pointer_delta_x, -pointer_delta_y),
                 "frame {frame_number}: content should move exactly as far as the pointer"
             );
         }
@@ -1649,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn go_to_outside_active_world_builds_once() {
+    fn test_go_to_outside_active_world_builds_once() {
         // Longer than a 30-column viewport's budget, so the far end starts outside the world.
         let mut domain_graph = MockDomainGraph::new();
         let nodes: Vec<_> = (0..100).map(|_| domain_graph.add_node(())).collect();
@@ -1681,7 +1686,7 @@ mod tests {
 
     /// Rendering the same structural world must not depend on temporary hash-map order.
     #[test]
-    fn render_is_stable_across_repeated_renders_of_an_unchanged_world() {
+    fn test_render_is_stable_across_repeated_renders_of_an_unchanged_world() {
         let mut domain_graph = MockDomainGraph::new();
         // More nodes than a 24-column viewport's budget, so the world has a boundary.
         const LAYERS: usize = 20;
@@ -1741,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_wormhole_is_hit_testable_at_its_glyph() {
+    fn test_rendered_wormhole_is_hit_testable_at_its_glyph() {
         // Longer than a 30-column viewport's budget, so the world ends in a door.
         let mut domain_graph = MockDomainGraph::new();
         let nodes: Vec<_> = (0..100).map(|_| domain_graph.add_node(())).collect();

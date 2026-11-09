@@ -88,7 +88,7 @@ pub(crate) fn make_rectilinear(
 
         // A boundary node with no edge inside this layer pair contributes nothing to the pair's
         // routing, yet `layout_layer` still emits a stray routing stub off it. When that node is
-        // a pin, the stub gives it a second neighbour, so `prune_pin_stubs` reads the pin as a
+        // a pin, the stub gives it a second neighbor, so `prune_pin_stubs` reads the pin as a
         // load-bearing corner and leaves the stub in the render. Route only the nodes
         // that participate in an edge here; a skipped node still appears in its other adjacent
         // layer pair, where its edges live (a wormhole node's one edge to its boundary is a real
@@ -639,7 +639,7 @@ mod tests {
         );
     }
 
-    /// A wormhole door collapsing several off-window neighbours (see
+    /// A wormhole door collapsing several off-window neighbors (see
     /// `crawl::neighborhood`'s external-edge collapsing) carries every one of them on its
     /// edge's bundle from crawl time onward - `make_rectilinear` must not lose any of them.
     #[test]

@@ -714,7 +714,7 @@ pub(crate) fn teleport_through_wormhole<S: GraphSource<PackedGenGraph>>(
     };
     graph_engine.remember_wormhole_choice(boundary, target, exits_toward_successor);
     // Also record the reverse, so `target`'s door on the side facing `boundary` leads straight
-    // back to where we came from rather than to whichever neighbour on that side sorts lowest.
+    // back to where we came from rather than to whichever neighbor on that side sorts lowest.
     graph_engine.remember_wormhole_choice(target, boundary, !exits_toward_successor);
 
     let node_budget =
@@ -890,7 +890,7 @@ pub fn view_block_group<'a>(
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if position.is_some() {
-        warn!("Origin positioning not yet supported in GenGraphWidget");
+        warn!("Origin positioning not yet supported in GenGraphController");
     }
 
     bar.finish();

@@ -4,7 +4,9 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::geometry::{ViewportPos, WorldPos, WorldRect};
 
-/// Controller for the Graph widget, managing camera and viewport bounds.
+/// The mapping from world coordinates to terminal cells for one paint: the camera's world offset
+/// and the render area. It is built fresh for every frame (see `graph_painter`), not kept between
+/// frames, and flips Y between the Y-up world and the Y-down terminal.
 #[derive(Clone)]
 pub struct ViewportState {
     /// Camera's current world offset (viewport center in world coordinates).

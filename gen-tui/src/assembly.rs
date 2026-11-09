@@ -1,7 +1,8 @@
 //! Converts a crawled window's cached Sugiyama structure into a layout graph.
 //!
 //! Assembly preserves the layer and within-layer order but leaves sizing, routing, and
-//! compaction to the widget.
+//! compaction to `window_geometry`, which a `WindowScene` runs whenever zoom, node sizes or the
+//! layout mode change.
 
 use std::collections::HashMap;
 
@@ -23,10 +24,11 @@ use crate::{
 /// domain edges collapses into one `LayoutEdge`.
 type EdgeBundles = HashMap<(NodeIndex<u32>, NodeIndex<u32>), (Vec<(NodeIndex, NodeIndex)>, bool)>;
 
-/// The assembled structure of one crawled neighbourhood window.
+/// The assembled structure of one crawled neighborhood window.
 ///
-/// Positions contain only a layer column and within-layer order; the widget turns them into
-/// final geometry after applying current-detail sizes.
+/// Positions contain only a layer column and within-layer order; `LayoutEngine` caches this
+/// per batch, and `WindowGeometry::new` turns it into final geometry after
+/// `build_window_geometry_with_anchors` applies current-detail sizes.
 #[derive(Clone)]
 pub struct AssembledLayout {
     pub graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
@@ -34,7 +36,8 @@ pub struct AssembledLayout {
     pub height: i64,
     /// Collapsed boundary edges, filled by `LayoutEngine` after assembly.
     pub external_edges: Vec<ExternalEdge<NodeIndex<u32>>>,
-    /// Domain edge routes and their rectilinear arrow policy, filled by `LayoutEngine`.
+    /// The source, target and ports of each domain edge, filled by `LayoutEngine`; routing and
+    /// arrow placement read the ports to know which side of each node an edge attaches to.
     pub domain_edges: Vec<PortedEdge<NodeIndex>>,
 }
 

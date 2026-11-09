@@ -275,9 +275,9 @@ pub fn simplify_graph(
     Ok(())
 }
 
-/// Removes the synthetic `NodeRole::Pin(_)` nodes used to render a backward edge as a
-/// full-width loop, once rectilinear edge routing has finished and `simplify_graph` has
-/// already contracted ordinary straight runs (`Pin` is always "critical" there, so it
+/// Removes the synthetic `NodeRole::Pin(_)` nodes (left, right, up and down) that bend an edge or
+/// carry it around the layout, once rectilinear edge routing has finished and `simplify_graph`
+/// has already contracted ordinary straight runs (`Pin` is always "critical" there, so it
 /// survives untouched until this pass runs).
 ///
 /// A pin's two logical connections (to the data node it pins in place, and to the long
@@ -287,8 +287,7 @@ pub fn simplify_graph(
 /// from each pin up to that junction, removing the pin, every straight pass-through
 /// `Routing` node along the way, and the junction itself - splicing the junction's two
 /// other neighbors directly together with an edge carrying the bundle accumulated while
-/// walking from the pin. A no-op for any graph with no backward edges, since no `Pin`
-/// node is ever injected for one.
+/// walking from the pin. A no-op for a graph without pins.
 pub fn prune_pin_stubs(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>) {
     let pins: Vec<NodeIndex> = graph
         .node_indices()

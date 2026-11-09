@@ -208,7 +208,7 @@ fn test_trailing_wormhole_door_keeps_layout_connected() {
 const PARTIAL_BUDGET: usize = 12;
 
 #[test]
-fn subsetting_linear_chain() {
+fn test_subsetting_linear_chain() {
     const LENGTH: usize = 40;
     let graph = TestGraphs::domain_long_chain(LENGTH);
     let first = NodeIndex::new(0);
@@ -242,7 +242,7 @@ fn subsetting_linear_chain() {
 }
 
 #[test]
-fn subsetting_diamond_chain() {
+fn test_subsetting_diamond_chain() {
     const DIAMONDS: usize = 10;
     let graph = TestGraphs::domain_diamond_chain(DIAMONDS);
     let total_nodes = 1 + 3 * DIAMONDS;
@@ -280,7 +280,7 @@ fn subsetting_diamond_chain() {
 }
 
 #[test]
-fn subsetting_strut() {
+fn test_subsetting_strut() {
     const LAYERS: usize = 15;
     const WIDTH: usize = 2;
     let graph = TestGraphs::domain_strut(LAYERS, WIDTH);
@@ -317,7 +317,7 @@ fn subsetting_strut() {
 }
 
 #[test]
-fn subsetting_grid() {
+fn test_subsetting_grid() {
     const ROWS: usize = 6;
     const COLS: usize = 6;
     let (graph, node_at) = TestGraphs::domain_grid(ROWS, COLS);

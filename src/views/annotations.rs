@@ -1055,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_translated_bed_preserves_strand() {
+    fn test_parse_translated_bed_preserves_strand() {
         let node_id = HashId::convert_str("node-1");
         let bed = format!("{node_id}\t5\t8\tfeature-a\t0\t-\n");
         let spans = parse_translated_bed(
@@ -1078,7 +1078,7 @@ mod tests {
     /// should keep every surviving fragment of an annotation that used to cover the
     /// whole thing, with a gap over whatever unrelated sequence was spliced in.
     #[test]
-    fn clip_segments_to_graph_leaves_a_gap_over_an_inserted_block() {
+    fn test_clip_segments_to_graph_leaves_a_gap_over_an_inserted_block() {
         use gen_graph::{GenGraph, GraphNode};
 
         use super::clip_segments_to_graph;
@@ -1228,7 +1228,7 @@ mod tests {
     /// whichever candidate happens to end up on the block group's current path — since
     /// every candidate is a real, visible branch in the graph.
     #[test]
-    fn load_annotations_for_group_finds_every_combinatorial_branch() {
+    fn test_load_annotations_for_group_finds_every_combinatorial_branch() {
         use std::path::PathBuf;
 
         use gen_models::{block_group::BlockGroup, sample::Sample};

@@ -15,13 +15,13 @@ use crate::views::gen_graph_widget::{
 };
 
 /// Whether an end glyph marks where the feature starts or ends, as opposed to the bar that
-/// continues into a neighbouring node.
+/// continues into a neighboring node.
 pub(crate) fn is_cap(glyph: char) -> bool {
     glyph != ANNOTATION_BAR
 }
 
 /// The glyph a piece draws in `column`. A piece one cell wide holds both of its ends in one
-/// cell: a cap always beats the bar that continues into the neighbouring node, and when the cell
+/// cell: a cap always beats the bar that continues into the neighboring node, and when the cell
 /// holds a start and an end cap the directional one stays, since it also tells the strand
 /// (`>` forward, `<` reverse). A feature with no strand shows `|`, since neither `[` nor `]`
 /// alone would tell the reader to look for the other end.
@@ -501,7 +501,7 @@ pub(crate) fn build_layouts_for_detail(
         base_markers.dedup();
         // True annotation ends add ordered columns; continuation boundaries do not.
         let mut events = base_markers.clone();
-        // A piece that continues into a neighbouring piece but stops short of the node's edge,
+        // A piece that continues into a neighboring piece but stops short of the node's edge,
         // such as one exon of a CDS lying inside a node that also holds the next exon, needs
         // columns of its own; only bars reaching the edge run through the continuation.
         for flag in flags {

@@ -403,7 +403,7 @@ mod tests {
 
         /// A fork: `first` in layer 0, then `lower` and `upper` side by side in layer 1.
         /// `upper`'s stop is further left on screen than `lower`'s, so only the cursor's
-        /// neighbour rule decides which branch a stop search follows.
+        /// neighbor rule decides which branch a stop search follows.
         fn fork(first_row: i64) -> FrameIndex<u32> {
             frame_with(vec![
                 (0, WorldRect::from_coords(0, first_row, 8, first_row + 2), 0),

@@ -301,9 +301,9 @@ fn collect_highlight_edges(diff_graph: &DiffGenGraph) -> Vec<(PortedEdge<GraphNo
                 DiffChangeKind::Modified => Color::Yellow,
                 DiffChangeKind::Unchanged => continue,
             };
-            let key = stored_edge_key(source.node, target.node, &diff_edge.edge);
-            if !edges.contains(&(key, color)) {
-                edges.push((key, color));
+            let ported_edge = stored_edge_key(source.node, target.node, &diff_edge.edge);
+            if !edges.contains(&(ported_edge, color)) {
+                edges.push((ported_edge, color));
             }
         }
     }
@@ -405,11 +405,11 @@ mod tests {
         let diff_edges = graph
             .edge_weight(source, target)
             .expect("should hold the edge between the two nodes");
-        let key = stored_edge_key(source.node, target.node, &diff_edges[0].edge);
+        let ported_edge = stored_edge_key(source.node, target.node, &diff_edges[0].edge);
         component
             .highlighted_edges
             .iter()
-            .find(|(highlighted, _)| *highlighted == key)
+            .find(|(highlighted, _)| *highlighted == ported_edge)
             .map(|(_, color)| *color)
     }
 

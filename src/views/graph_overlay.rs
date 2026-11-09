@@ -198,9 +198,9 @@ impl PathMembership {
             }
             if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
                 for graph_edge in on_path_edges {
-                    let key = stored_edge_key(source, target, graph_edge);
-                    if !route.edges.contains(&key) {
-                        route.edges.push(key);
+                    let ported_edge = stored_edge_key(source, target, graph_edge);
+                    if !route.edges.contains(&ported_edge) {
+                        route.edges.push(ported_edge);
                     }
                 }
             }
@@ -248,7 +248,7 @@ pub enum OverlayContent {
     Path(PathMembership),
 }
 
-/// Something painted onto the graph canvas as a colour highlight: an annotation span
+/// Something painted onto the graph canvas as a color highlight: an annotation span
 /// (with or without a label) or the current path.
 #[derive(Clone)]
 pub struct GraphOverlay {
@@ -275,15 +275,15 @@ impl GraphOverlay {
     }
 }
 
-/// Colour an annotation span from a hash of its own id, so a given annotation's colour
+/// Color an annotation span from a hash of its own id, so a given annotation's color
 /// is stable regardless of load order or how many other annotations are in view (only 8
-/// accent colours exist, so repeats across unrelated annotations are expected).
+/// accent colors exist, so repeats across unrelated annotations are expected).
 pub fn stable_span_color(span: &AnnotationSpan) -> Color {
     current_theme()[0x08 + (span.id.0[0] as usize % 8)]
 }
 
 /// Replace every overlay belonging to track `key` with freshly loaded `spans`, each
-/// coloured from its own stable per-id hash.
+/// colored from its own stable per-id hash.
 pub fn replace_track_overlays(
     overlays: &mut Vec<GraphOverlay>,
     key: &str,
@@ -549,7 +549,7 @@ mod tests {
             .graph()
             .nodes()
             .find(|node| engine.batch_of(*node).is_none())
-            .expect("the crawl should have loaded a neighbour outside the first batch");
+            .expect("the crawl should have loaded a neighbor outside the first batch");
         let nodes_before = engine.graph().node_count();
         engine
             .activate_batch_containing(next_anchor, 3)

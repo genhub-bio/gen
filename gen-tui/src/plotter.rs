@@ -1,4 +1,7 @@
-// This module implements graph rendering using the RoutedWindowGraph system.
+//! Plots a `RoutedWindowGraph` into a cell buffer, clipping to the visible area as it goes.
+//!
+//! Rectilinear edges, junction glyphs, arrows and highlights are drawn into the buffer; a curved
+//! layout mode instead returns overlay primitives for `pixel_overlay` to draw at pixel resolution.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
@@ -58,7 +61,7 @@ pub struct PathStyle {
     pub color: Color,
     /// Line weight style for edges and routing nodes
     pub line_style: LineStyle,
-    /// Whether to merge glyphs with base layer or replace them outright
+    /// Whether to merge glyphs with the glyph already drawn in the cell or replace them outright
     pub merge_glyphs: bool,
 }
 
@@ -153,7 +156,7 @@ impl CursorColumns {
 }
 
 /// Domain-side trait bundling node sizing and rendering for a single, fixed
-/// level of detail. A widget or event loop picks which concrete `NodeRenderer`
+/// level of detail. The application picks which concrete `NodeRenderer`
 /// is active (e.g. per zoom level) and borrows it immutably for rendering.
 pub trait NodeRenderer<G>
 where
@@ -414,10 +417,10 @@ fn highlight_glow(
     })
 }
 
-/// Plot a viewport graph with resolved highlights and lowlights.
+/// Plot a routed window graph with resolved highlights and lowlights.
 ///
-/// Returns the overlay primitives of a curved layout mode, which the buffer does not contain; the rectilinear
-/// style draws all of its edges into the buffer and returns none.
+/// Returns the overlay primitives of a curved layout mode, which the buffer does not contain; the
+/// rectilinear layout mode draws all of its edges into the buffer and returns none.
 pub(crate) fn plot_routed_window_graph_with_highlights<V, G>(
     routed_window_graph: &RoutedWindowGraph,
     buffer: &mut WorldBuffer<'_>,
@@ -883,7 +886,7 @@ where
         let Some(route) = route else {
             continue;
         };
-        // A Bezier hairpin carries its arrow on the bend itself.
+        // A curved hairpin carries its arrow on the bend itself.
         if layout_mode.is_curved()
             && edge.source == edge.target
             && edge.ports.source == edge.ports.target
@@ -1647,8 +1650,8 @@ mod curved_highlight_tests {
         }
     }
 
-    /// Two crossing diagonals between routing points: edge 0 runs up, edge 1 runs down, and
-    /// they meet in the middle cells.
+    /// Two plain edges between routing nodes at different coordinates, so each is a diagonal:
+    /// edge 0 runs up, edge 1 runs down, and they cross in the middle cells.
     fn crossing_graph() -> (RoutedWindowGraph, [WorldPos; 4]) {
         let points = [
             WorldPos::new(0, 0),
@@ -1720,7 +1723,7 @@ mod curved_highlight_tests {
     }
 
     #[test]
-    fn test_shapes_list_highlights_last_and_lowlights_first() {
+    fn test_overlay_primitives_list_highlights_last_and_lowlights_first() {
         let (graph, points) = crossing_graph();
         let bold_red = PathStyle::new(Color::Red).with_line_style(crate::plotter::LineStyle::Bold);
         let (buffer, overlay_primitives) = plot(
@@ -1771,13 +1774,14 @@ mod curved_highlight_tests {
     }
 
     #[test]
-    fn test_edge_far_from_the_viewport_builds_no_shapes() {
+    fn test_edge_far_from_the_viewport_builds_no_overlay_primitives() {
         let (_, overlay_primitives) = plot(&edge_along_row(1_000, 1_100), &[], &[]);
         assert!(overlay_primitives.is_empty());
     }
 
     #[test]
-    fn test_edge_crossing_the_viewport_keeps_its_shape_when_both_endpoints_are_off_screen() {
+    fn test_edge_crossing_the_viewport_keeps_its_overlay_primitive_when_both_endpoints_are_off_screen()
+     {
         let (_, overlay_primitives) = plot(&edge_along_row(-1_000, 1_000), &[], &[]);
         assert!(
             overlay_primitives

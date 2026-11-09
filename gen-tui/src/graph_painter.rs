@@ -59,10 +59,10 @@ pub enum HighlightKind<N> {
 
 /// Where the painter should anchor the window it renders, and the hard-zone boundary
 /// `snap_camera` uses to decide when the anchor needs to move. `anchor`/`anchor_fraction`
-/// identify a specific pixel within a specific node (matching `Cursor`'s node + fractional
+/// identify a specific pixel within a specific node (matching `CursorState`'s node + fractional
 /// position semantics); `anchor_screen` is the signed screen position (relative to the
-/// render area's top-left, allowed to go negative or past the far edge) that pixel is pinned
-/// to across window changes.
+/// render area's bottom-left corner with Y growing upward, allowed to go negative or past the
+/// far edge) that pixel is pinned to across window changes.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera<N> {
     pub anchor: N,
@@ -131,8 +131,8 @@ pub(crate) fn snap_camera(
     screen
 }
 
-/// One window's routed, compacted geometry at fixed node sizes and gaps, with the viewport
-/// graph painted from it. Neither depends on the camera, so a view that only pans or moves its
+/// One window's routed, compacted geometry at fixed node sizes and gaps, with the routed window
+/// graph built from it. Neither depends on the camera, so a view that only pans or moves its
 /// cursor keeps painting the same scene at a new offset instead of re-routing the window.
 #[derive(Clone)]
 pub(crate) struct WindowScene {
@@ -186,7 +186,7 @@ impl WindowScene {
     }
 
     /// Place the scene so the camera's anchor pixel lands at `camera.anchor_screen`, paint the
-    /// visible parts into `buf`, and index where everything landed (see
+    /// visible parts into `buffer`, and index where everything landed (see
     /// [`GraphPainter::render`]). `graph` and `visual` must be the ones the scene was built
     /// with.
     pub fn paint<G, V>(
@@ -194,7 +194,7 @@ impl WindowScene {
         graph: &G,
         visual: &V,
         area: Rect,
-        buf: &mut Buffer,
+        buffer: &mut Buffer,
         camera: &Camera<G::NodeId>,
         highlights: &Highlights<G::NodeId>,
     ) -> RenderedWindow<G::NodeId>
@@ -204,7 +204,7 @@ impl WindowScene {
         V: NodeRenderer<G>,
     {
         let offset = anchor_offset(&self.geometry, graph, camera);
-        let overlay_primitives = paint(self, area, buf, offset, graph, visual, highlights);
+        let overlay_primitives = paint(self, area, buffer, offset, graph, visual, highlights);
         RenderedWindow {
             frame: frame_index(&self.geometry, graph, visual, offset, area),
             wormhole: wormhole_index(&self.geometry, graph, offset),
@@ -266,12 +266,12 @@ where
     )
 }
 
-/// Paint the window into `buf`, resolving `highlights` from domain terms to screen positions
+/// Paint the window into `buffer`, resolving `highlights` from domain terms to screen positions
 /// for this call only (nothing is baked into `routed_window_graph` beyond this paint).
 fn paint<G, V>(
     scene: &WindowScene,
     area: Rect,
-    buf: &mut Buffer,
+    buffer: &mut Buffer,
     offset: WorldPos,
     graph: &G,
     visual: &V,
@@ -337,7 +337,7 @@ where
         resolve_node_lowlights(routed_window_graph, graph, &highlights.node_lowlights);
 
     let theme = current_theme();
-    let mut world_buffer = WorldBuffer::new(buf, &viewport_state);
+    let mut world_buffer = WorldBuffer::new(buffer, &viewport_state);
     plot_routed_window_graph_with_highlights(
         routed_window_graph,
         &mut world_buffer,
@@ -406,9 +406,9 @@ fn apply_edge_highlight<G: GraphBase + NodeIndexable>(
         .filter(|ported_edge| (ported_edge.source, ported_edge.target) == (source, target))
         .collect();
     let chosen: Vec<&PortedEdge<NodeIndex>> = match selector {
-        EdgeSelector::Exact(key) => candidates
+        EdgeSelector::Exact(exact) => candidates
             .into_iter()
-            .filter(|ported_edge| ported_edge.ports == key.ports)
+            .filter(|ported_edge| ported_edge.ports == exact.ports)
             .collect(),
         EdgeSelector::Between { .. } => {
             let forward: Vec<&PortedEdge<NodeIndex>> = candidates
@@ -679,8 +679,8 @@ mod tests {
         testing::mocks::{MockDomainGraph, TestGraphs},
     };
 
-    /// Pure ephemeral graph painter: renders one `AssembledLayout` window into a buffer and
-    /// returns the `FrameIndex` describing where everything landed. Never touches
+    /// Pure ephemeral graph painter for tests: renders one `AssembledLayout` window into a buffer
+    /// and returns the `RenderedWindow` describing where everything landed. Never touches
     /// `LayoutEngine` or any cursor/view state - callers own the anchor and the highlight
     /// lists and pass them in fresh every call.
     struct GraphPainter<'a, G, V>
@@ -727,17 +727,17 @@ mod tests {
         }
 
         /// Size every node via `visual`, route and compact the window, place it so the camera's
-        /// anchor pixel lands at `camera.anchor_screen`, paint the visible parts into `buf`, and
-        /// return a `FrameIndex` over every placed Data node (including ones outside `area`),
-        /// alongside a flat list of every placed wormhole (`NodeRole::Wormhole`) stub's screen rect,
-        /// boundary node, and off-screen domain target - kept separate from `FrameIndex` rather
-        /// than folded into it, since `FrameIndex`'s `N` key space is domain node ids only and
-        /// wormhole stubs are synthetic routing nodes with no domain id of their own. The third
-        /// element holds the overlay primitives of the curved style.
+        /// anchor pixel lands at `camera.anchor_screen`, paint the visible parts into `buffer`, and
+        /// return a [`RenderedWindow`]: a `FrameIndex` over every placed Data node (including
+        /// ones outside `area`), a flat list of every placed wormhole (`NodeRole::Wormhole`)
+        /// stub's screen rect, boundary node, and off-screen domain target - kept separate from
+        /// `FrameIndex` since its `N` key space is domain node ids only and wormhole stubs are
+        /// synthetic routing nodes with no domain id of their own - and the overlay primitives
+        /// of a curved layout mode.
         fn render(
             self,
             area: Rect,
-            buf: &mut Buffer,
+            buffer: &mut Buffer,
             camera: &Camera<G::NodeId>,
             highlights: &Highlights<G::NodeId>,
         ) -> RenderedWindow<G::NodeId> {
@@ -748,7 +748,7 @@ mod tests {
                 &self.gaps,
                 self.layout_mode,
             );
-            scene.paint(self.graph, self.visual, area, buf, camera, highlights)
+            scene.paint(self.graph, self.visual, area, buffer, camera, highlights)
         }
     }
 
@@ -778,12 +778,17 @@ mod tests {
         graph.add_node(20);
         let first = NodeIndex::new(<_ as NodeIndexable>::to_index(&graph, 10));
         let second = NodeIndex::new(<_ as NodeIndexable>::to_index(&graph, 20));
-        let mut viewport = RoutedWindowGraph::empty();
-        viewport.node_positions.insert(first, WorldPos::new(0, 0));
-        viewport.node_positions.insert(second, WorldPos::new(8, 0));
+        let mut routed_window_graph = RoutedWindowGraph::empty();
+        routed_window_graph
+            .node_positions
+            .insert(first, WorldPos::new(0, 0));
+        routed_window_graph
+            .node_positions
+            .insert(second, WorldPos::new(8, 0));
 
-        let node_lowlights = resolve_node_lowlights(&viewport, &graph, &[10, 99]);
-        let edge_lowlights = resolve_edge_lowlights(&viewport, &graph, &[(10, 99), (99, 20)]);
+        let node_lowlights = resolve_node_lowlights(&routed_window_graph, &graph, &[10, 99]);
+        let edge_lowlights =
+            resolve_edge_lowlights(&routed_window_graph, &graph, &[(10, 99), (99, 20)]);
 
         assert_eq!(node_lowlights, vec![WorldPos::new(0, 0)]);
         assert!(edge_lowlights.is_empty());
@@ -794,12 +799,14 @@ mod tests {
         let mut graph = MockDomainGraph::new();
         let domain_index = graph.add_node(());
         let position = WorldPos::new(0, 0);
-        let mut viewport = RoutedWindowGraph::empty();
-        viewport.node_positions.insert(domain_index, position);
-        viewport
+        let mut routed_window_graph = RoutedWindowGraph::empty();
+        routed_window_graph
+            .node_positions
+            .insert(domain_index, position);
+        routed_window_graph
             .graph
             .add_edge(position, position, vec![(domain_index, domain_index)]);
-        viewport.domain_edges = [NodeSide::West, NodeSide::East]
+        routed_window_graph.domain_edges = [NodeSide::West, NodeSide::East]
             .map(|side| PortedEdge {
                 source: domain_index,
                 target: domain_index,
@@ -811,7 +818,7 @@ mod tests {
             let mut ordinary = Vec::new();
             let mut hairpins = Vec::new();
             apply_edge_highlight(
-                &viewport,
+                &routed_window_graph,
                 &graph,
                 EdgeSelector::Exact(PortedEdge::new(
                     domain_index,
@@ -938,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn wormhole_index_distinguishes_stubs_with_the_same_target() {
+    fn test_wormhole_index_distinguishes_stubs_with_the_same_target() {
         let mut domain_graph = MockDomainGraph::new();
         let boundary_a = domain_graph.add_node(());
         let boundary_b = domain_graph.add_node(());
@@ -1052,7 +1059,7 @@ mod tests {
         }
 
         #[test]
-        fn test_curved_edges_report_shapes_instead_of_drawing_them() {
+        fn test_curved_edges_report_overlay_primitives_instead_of_drawing_them() {
             let (text, overlay_primitives) = render_text(
                 TestGraphs::domain_complex_dag(),
                 LayoutMode::Curved,
@@ -1176,7 +1183,7 @@ mod tests {
         }
 
         #[test]
-        fn test_bezier_side_ports_clear_widest_node_in_each_layer() {
+        fn test_curved_side_ports_clear_widest_node_in_each_layer() {
             let mut engine = LayoutEngine::new(TestGraphs::domain_extended_diamond());
             let anchor = engine.default_anchor().expect("should have graph nodes");
             let window = engine
@@ -1227,7 +1234,7 @@ mod tests {
         }
 
         #[test]
-        fn test_bezier_dummies_get_side_ports_like_data_nodes() {
+        fn test_curved_dummies_get_side_ports_like_data_nodes() {
             let mut engine = LayoutEngine::new(TestGraphs::domain_skip_layer());
             let anchor = engine.default_anchor().expect("should have graph nodes");
             let window = engine
@@ -1271,7 +1278,7 @@ mod tests {
         }
 
         #[test]
-        fn test_bezier_loopback_pins_keep_their_data_anchor() {
+        fn test_curved_loopback_pins_keep_their_data_anchor() {
             let mut graph = MockDomainGraph::new();
             let nodes: Vec<_> = (0..4).map(|_| graph.add_node(())).collect();
             for pair in nodes.windows(2) {
@@ -1445,7 +1452,7 @@ mod tests {
         }
 
         #[test]
-        fn test_exact_key_lights_only_its_own_parallel_edge() {
+        fn test_exact_selector_lights_only_its_own_parallel_edge() {
             let forward = red_cells(ports_by_edge_index, 2, exact(EdgePorts::default()));
             let detour = red_cells(ports_by_edge_index, 2, exact(EAST_TO_EAST));
 
@@ -1488,7 +1495,7 @@ mod tests {
         }
 
         #[test]
-        fn test_exact_key_for_an_absent_edge_lights_nothing() {
+        fn test_exact_selector_for_an_absent_edge_lights_nothing() {
             let missing = red_cells(ports_by_edge_index, 2, exact(WEST_TO_WEST));
 
             assert!(missing.is_empty());

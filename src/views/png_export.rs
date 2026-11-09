@@ -182,8 +182,8 @@ impl PngRenderer {
     }
 
     /// The rectangle [`Self::crop_to_content`] keeps, in cells of `buffer`. `extra` names cells
-    /// that hold content the buffer itself does not show, such as curved edge shapes, so
-    /// they stay inside the crop.
+    /// that hold content the buffer itself does not show, such as curved edges, so they
+    /// stay inside the crop.
     pub fn content_crop(&self, buffer: &Buffer, extra: Option<Rect>) -> Rect {
         let columns = usize::from(buffer.area.width);
         let content = buffer

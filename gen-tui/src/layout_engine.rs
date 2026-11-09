@@ -60,7 +60,7 @@ static NEXT_WORLD_REVISION: AtomicU64 = AtomicU64::new(0);
 pub struct LoadedWorld<NodeId> {
     batch: BatchId,
     /// Unique to this build of the world. A batch evicted from the cache and rebuilt later gets
-    /// a new revision, since its wormhole doors may prefer different neighbours by then.
+    /// a new revision, since its wormhole doors may prefer different neighbors by then.
     revision: u64,
     anchor: NodeId,
     members: HashSet<NodeId>,
@@ -168,7 +168,7 @@ where
     /// Recently-built worlds, in recency order (front = least recently used).
     world_cache: Vec<LoadedWorld<G::NodeId>>,
     active_batch: Option<BatchId>,
-    /// Which specific off-window neighbour each boundary node's collapsed wormhole door should
+    /// Which specific off-window neighbor each boundary node's collapsed wormhole door should
     /// prefer, per side - set by `remember_wormhole_choice` whenever a door is actually
     /// traveled through, consulted when a batch's world is (re)built. See
     /// `crawl::PreferredWormholeDoors`.
@@ -199,9 +199,10 @@ where
         Self::new_with_source(graph, EagerSource)
     }
 
-    /// Create a new LayoutEngine, rewiring each backward edge `(source, target)` in
-    /// `backward_edges` onto a pair of pin nodes within whichever window(s) it lands in
-    /// fully, so it renders as a loop instead of crashing the (DAG-only) layout pipeline.
+    /// Create a new LayoutEngine that lays out each edge `(source, target)` in `backward_edges`
+    /// as a backward edge within whichever window(s) it lands in fully. Its ports decide how it
+    /// bends, usually around the end of the layout through left and right pins, so it renders as
+    /// a loop instead of crashing the (DAG-only) layout pipeline.
     pub fn new_with_backward_edges(graph: G, backward_edges: &[(G::NodeId, G::NodeId)]) -> Self {
         Self::new_with_source_and_backward_edges(graph, EagerSource, backward_edges)
     }
@@ -272,7 +273,7 @@ where
     }
 
     /// Build worlds for `layout_mode`. Curved edges route sideways edges themselves instead
-    /// of through left and right pins, so a change of style drops the cached worlds and
+    /// of through left and right pins, so a change of layout mode drops the cached worlds and
     /// rebuilds the active one.
     pub(crate) fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
         if layout_mode == self.layout_mode {
@@ -449,7 +450,7 @@ where
             self.build_counts.sugiyama += 1;
         }
         let mut layout = assemble_window(&window).ok_or_else(|| {
-            "assemble_window produced no window for a loaded neighbourhood".to_string()
+            "assemble_window produced no window for a loaded neighborhood".to_string()
         })?;
         #[cfg(test)]
         {
@@ -550,7 +551,7 @@ where
     /// Record that `boundary`'s collapsed wormhole door on the successor side
     /// (`exits_toward_successor == true`) or predecessor side (`false`) was just actually
     /// traveled through via `target`. Consulted the next time a batch's world is built with
-    /// `boundary` on its edge, so re-collapsing its off-window neighbours on that side keeps
+    /// `boundary` on its edge, so re-collapsing its off-window neighbors on that side keeps
     /// landing on this same batch instead of an arbitrary sibling - see
     /// `crawl::PreferredWormholeDoors`. Click-to-teleport calls this for every door it actually
     /// uses; a door's preference otherwise stays whatever the last recorded choice was, or the
@@ -625,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn active_world_retrieval_does_not_repeat_structural_work() {
+    fn test_active_world_retrieval_does_not_repeat_structural_work() {
         let domain_graph = TestGraphs::domain_complex_dag();
         let mut engine = LayoutEngine::new(domain_graph);
         let batch = engine

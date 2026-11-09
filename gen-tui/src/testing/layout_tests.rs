@@ -66,9 +66,9 @@ where
     let mut state = GraphViewState::default();
     state.gaps = target_gaps;
 
-    let result = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let result = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
 
     match result {
@@ -218,7 +218,7 @@ fn make_snapshot_with_backward_edges_at_target_gaps(
 }
 
 #[test]
-fn viewport_visual_regression_simple_chain() {
+fn test_window_visual_regression_simple_chain() {
     let _ = env_logger::try_init();
     // Create a simple chain domain graph: 0 -> 1 -> 2
     let mut domain_graph = MockDomainGraph::new();
@@ -233,7 +233,7 @@ fn viewport_visual_regression_simple_chain() {
 }
 
 #[test]
-fn viewport_visual_regression_diamond() {
+fn test_window_visual_regression_diamond() {
     let _ = env_logger::try_init();
     // Create a diamond domain graph: 0 -> {1, 2} -> 3
     let mut domain_graph = MockDomainGraph::new();
@@ -251,7 +251,7 @@ fn viewport_visual_regression_diamond() {
 }
 
 #[test]
-fn target_gap_combinations_diamond() {
+fn test_target_gap_combinations_diamond() {
     let domain_graph = TestGraphs::domain_diamond();
 
     for target_gaps @ (gap_x, gap_y) in TARGET_GAP_COMBINATIONS {
@@ -261,7 +261,7 @@ fn target_gap_combinations_diamond() {
 }
 
 #[test]
-fn viewport_visual_regression_single_node() {
+fn test_window_visual_regression_single_node() {
     let _ = env_logger::try_init();
     // Create a single node domain graph
     let mut domain_graph = MockDomainGraph::new();
@@ -272,7 +272,7 @@ fn viewport_visual_regression_single_node() {
 }
 
 #[test]
-fn viewport_visual_regression_subcombinatorial_dag() {
+fn test_window_visual_regression_subcombinatorial_dag() {
     let _ = env_logger::try_init();
     // Create a DAG in which two subsequent layers are not fully connected all-to-all.
     // This tests the challenge of handling complex edge routing between layers.
@@ -293,7 +293,7 @@ fn viewport_visual_regression_subcombinatorial_dag() {
 }
 
 #[test]
-fn viewport_visual_regression_complex_dag() {
+fn test_window_visual_regression_complex_dag() {
     let _ = env_logger::try_init();
     // Create the original complex DAG structure matching TestGraphs::complex_dag()
     // This is a hierarchical 9-node DAG with multiple levels and convergence points
@@ -327,7 +327,7 @@ fn viewport_visual_regression_complex_dag() {
 }
 
 #[test]
-fn target_gap_combinations_complex_dag() {
+fn test_target_gap_combinations_complex_dag() {
     let domain_graph = TestGraphs::domain_complex_dag();
 
     for target_gaps @ (gap_x, gap_y) in TARGET_GAP_COMBINATIONS
@@ -353,7 +353,7 @@ fn target_gap_combinations_complex_dag() {
 }
 
 #[test]
-fn viewport_wide_chain_go_to_node() {
+fn test_window_wide_chain_go_to_node() {
     let _ = env_logger::try_init();
     use ratatui::widgets::StatefulWidget as _;
 
@@ -380,9 +380,9 @@ fn viewport_wide_chain_go_to_node() {
     let mut terminal = create_test_terminal(80, 24);
     let mut state = GraphViewState::default();
     // Snapshot 1: default view, anchored at the start of the chain.
-    let _ = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let _ = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
     let start_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("wide_chain_start", start_snapshot);
@@ -390,16 +390,16 @@ fn viewport_wide_chain_go_to_node() {
     // Snapshot 2: jump to the last node to see the tail end, rather than widening the
     // viewport to fit all 20 nodes in one shot.
     state.go_to_node(nodes[19], (0.0, 0.0));
-    let _ = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let _ = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
     let end_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("wide_chain_end", end_snapshot);
 }
 
 #[test]
-fn viewport_long_chain_middle_window_wormholes() {
+fn test_window_long_chain_middle_window_wormholes() {
     // Odd, because each shell around a middle anchor adds one node on each side and the crawl
     // only stops between shells.
     const NODE_BUDGET: usize = 11;
@@ -480,7 +480,7 @@ fn viewport_long_chain_middle_window_wormholes() {
 }
 
 #[test]
-fn viewport_visual_regression_extended_complex_dag() {
+fn test_window_visual_regression_extended_complex_dag() {
     let _ = env_logger::try_init();
     use crate::testing::mocks::TestGraphs;
     let domain_graph = TestGraphs::domain_complex_dag();
@@ -490,7 +490,7 @@ fn viewport_visual_regression_extended_complex_dag() {
 }
 
 #[test]
-fn viewport_visual_regression_extended_diamond() {
+fn test_window_visual_regression_extended_diamond() {
     let _ = env_logger::try_init();
     use crate::testing::mocks::TestGraphs;
     let domain_graph = TestGraphs::domain_extended_diamond();
@@ -536,8 +536,8 @@ fn test_layer_coordinate_alignment_and_ordering() {
                 ..GapPolicy::default()
             },
             |role| match role {
-                NodeRole::Data(domain_idx) => {
-                    NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_idx)
+                NodeRole::Data(domain_index) => {
+                    NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_index)
                 }
                 _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
             },
@@ -553,8 +553,8 @@ fn test_layer_coordinate_alignment_and_ordering() {
     // Group nodes by layer and collect their x-coordinates
     let mut layer_x_coords: Vec<Vec<i64>> = Vec::new();
 
-    for layer_idx in 0..routed_window_graph.layer_count() {
-        if let Some(layer_nodes) = routed_window_graph.get_layer(layer_idx) {
+    for layer_index in 0..routed_window_graph.layer_count() {
+        if let Some(layer_nodes) = routed_window_graph.get_layer(layer_index) {
             let mut x_coords = Vec::new();
 
             for &domain_node in layer_nodes {
@@ -568,14 +568,14 @@ fn test_layer_coordinate_alignment_and_ordering() {
         }
     }
 
-    for (layer_idx, x_coords) in layer_x_coords.iter().enumerate() {
+    for (layer_index, x_coords) in layer_x_coords.iter().enumerate() {
         if !x_coords.is_empty() {
             let first_x = x_coords[0];
             for &x in x_coords {
                 assert_eq!(
                     x, first_x,
                     "Layer {} has nodes with different x-coordinates: expected all to be {}, but found {}",
-                    layer_idx, first_x, x
+                    layer_index, first_x, x
                 );
             }
         }
@@ -605,7 +605,7 @@ fn test_layer_coordinate_alignment_and_ordering() {
 }
 
 #[test]
-fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
+fn test_window_visual_regression_bridge_position_with_variable_node_widths() {
     use crate::{
         layout::VisualDetail,
         testing::mocks::{MockDomainGraph, MockRenderer, TestGraphs, TestRenderers},
@@ -810,7 +810,7 @@ fn test_centered_circular_bubble_keeps_return_edge_straight() {
 }
 
 #[test]
-fn viewport_chain_long_spanning_edge() {
+fn test_window_chain_long_spanning_edge() {
     let _ = env_logger::try_init();
     // A chain with one edge that skips several ranks entirely.
     //
@@ -830,7 +830,7 @@ fn viewport_chain_long_spanning_edge() {
 }
 
 #[test]
-fn viewport_chain_very_long_spanning_edge() {
+fn test_window_chain_very_long_spanning_edge() {
     let _ = env_logger::try_init();
     // A longer chain with one edge that skips most of the graph.
     //
@@ -886,8 +886,8 @@ fn test_skip_layer_edges_carry_bundles() {
                 ..GapPolicy::default()
             },
             |role| match role {
-                NodeRole::Data(domain_idx) => {
-                    NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_idx)
+                NodeRole::Data(domain_index) => {
+                    NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_index)
                 }
                 _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
             },
@@ -897,7 +897,7 @@ fn test_skip_layer_edges_carry_bundles() {
     };
     let routed_window_graph = RoutedWindowGraph::from_window_geometry(&geometry, &domain_edges);
 
-    // Every edge in the assembled viewport graph should carry a bundle back to the domain
+    // Every edge in the assembled routed window graph should carry a bundle back to the domain
     // edge(s) it represents.
     let edges_without_bundles = routed_window_graph
         .graph
@@ -912,7 +912,7 @@ fn test_skip_layer_edges_carry_bundles() {
 }
 
 #[test]
-fn viewport_even_width_node_spacing() {
+fn test_window_even_width_node_spacing() {
     let _ = env_logger::try_init();
     // Test that even-width nodes have proper spacing for edge routing
     use crate::{
@@ -1009,7 +1009,7 @@ fn test_layout_determinism() {
 
 /// Proves crossing-reduction tie handling is deterministic by constructing the same symmetric
 /// graph twice, but inserting edges in a different order (which affects DFS-based init order).
-/// With the tiebreaker in `gen-sugiyama`, these should render identically.
+/// With the tiebreaker in `rust_sugiyama`, these should render identically.
 #[test]
 fn test_layout_determinism_across_edge_insertion_order_symmetric_fan() {
     let _ = env_logger::try_init();
@@ -1433,11 +1433,10 @@ fn test_grid_all_to_all_with_bypass() {
     insta::assert_snapshot!("grid_all_to_all_with_bypass", snapshot);
 }
 
-/// Zoom (disperse/contract adjusts the minimum inter-node distance) must
-/// survive dead-space compression: dispersed layouts keep their wider gaps
-/// uniformly, and contracting returns to the original layout.
+/// Raising `data_data_y` of the `GapPolicy` must survive dead-space compression: rows keep their
+/// wider spacing uniformly, and lowering it again returns to the original layout.
 #[test]
-fn test_grid_disperse_zoom_preserves_spacing() {
+fn test_grid_row_spacing_follows_data_gap_policy() {
     let _ = env_logger::try_init();
 
     use crate::{
@@ -1474,8 +1473,8 @@ fn test_grid_disperse_zoom_preserves_spacing() {
                     ..GapPolicy::default()
                 },
                 |role| match role {
-                    NodeRole::Data(domain_idx) => {
-                        NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_idx)
+                    NodeRole::Data(domain_index) => {
+                        NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_index)
                     }
                     _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
                 },
@@ -1486,11 +1485,11 @@ fn test_grid_disperse_zoom_preserves_spacing() {
         let routed_window_graph = RoutedWindowGraph::from_window_geometry(&geometry, &domain_edges);
         let mut ys: Vec<i64> = row_node_indices
             .iter()
-            .map(|&i| {
+            .map(|&node_index| {
                 routed_window_graph
                     .node_positions
-                    .get(&petgraph::graph::NodeIndex::new(i as usize))
-                    .expect("should include the node in the viewport graph")
+                    .get(&petgraph::graph::NodeIndex::new(node_index as usize))
+                    .expect("should include the node in the routed window graph")
                     .y
             })
             .collect();
@@ -1498,39 +1497,40 @@ fn test_grid_disperse_zoom_preserves_spacing() {
         ys
     };
 
-    let uniform_gaps = |ys: &[i64]| -> Vec<i64> { ys.windows(2).map(|w| w[1] - w[0]).collect() };
+    let uniform_gaps =
+        |ys: &[i64]| -> Vec<i64> { ys.windows(2).map(|pair| pair[1] - pair[0]).collect() };
 
-    // Default gap: rows must be uniformly spaced (no dead space)
+    // Default data-data Y gap: rows must be uniformly spaced (no dead space)
     let default_gap_y = 0;
     let initial_ys = collect_row_ys(&mut engine, default_gap_y);
     let initial_gaps = uniform_gaps(&initial_ys);
     assert!(
-        initial_gaps.iter().all(|&g| g == initial_gaps[0]),
+        initial_gaps.iter().all(|&gap| gap == initial_gaps[0]),
         "Rows must be uniformly spaced at default zoom, got gaps {:?}",
         initial_gaps
     );
 
-    // Disperse: row gaps grow to height + gap_y
-    let dispersed_gap_y = default_gap_y + 4;
-    let dispersed_ys = collect_row_ys(&mut engine, dispersed_gap_y);
-    let dispersed_gaps = uniform_gaps(&dispersed_ys);
+    // Larger data-data Y gap: row gaps grow to height + gap_y
+    let wider_gap_y = default_gap_y + 4;
+    let wider_ys = collect_row_ys(&mut engine, wider_gap_y);
+    let wider_gaps = uniform_gaps(&wider_ys);
     assert!(
-        dispersed_gaps.iter().all(|&g| g == dispersed_gaps[0]),
-        "Rows must stay uniformly spaced when dispersed, got gaps {:?}",
-        dispersed_gaps
+        wider_gaps.iter().all(|&gap| gap == wider_gaps[0]),
+        "Rows must stay uniformly spaced with a larger gap, got gaps {:?}",
+        wider_gaps
     );
     assert!(
-        dispersed_gaps[0] > initial_gaps[0],
-        "Dispersing must increase row spacing: {} -> {}",
+        wider_gaps[0] > initial_gaps[0],
+        "A larger gap must increase row spacing: {} -> {}",
         initial_gaps[0],
-        dispersed_gaps[0]
+        wider_gaps[0]
     );
 
-    // Contract back to the default gap: layout must return to the original
-    let contracted_ys = collect_row_ys(&mut engine, default_gap_y);
+    // Back to the default data-data Y gap: layout must return to the original
+    let restored_ys = collect_row_ys(&mut engine, default_gap_y);
     assert_eq!(
-        contracted_ys, initial_ys,
-        "Contracting back to default gap must restore the original row positions"
+        restored_ys, initial_ys,
+        "Returning to the default gap must restore the original row positions"
     );
 }
 
@@ -1719,9 +1719,9 @@ fn test_large_node_rendering_with_zoom() {
     });
 
     // 6. Snapshot 1: Minimal detail level
-    let _ = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let _ = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
     let minimal_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("variable_detail_chain_minimal", minimal_snapshot);
@@ -1730,9 +1730,9 @@ fn test_large_node_rendering_with_zoom() {
     visual.detail = VisualDetail::Truncated;
 
     // Snapshot 2: Truncated detail level
-    let _ = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let _ = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
     let truncated_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("variable_detail_chain_truncated", truncated_snapshot);
@@ -1741,9 +1741,9 @@ fn test_large_node_rendering_with_zoom() {
     visual.detail = VisualDetail::Full;
 
     // Snapshot 3: Full detail level
-    let _ = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let _ = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
     let full_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("variable_detail_chain_full", full_snapshot);
@@ -1774,7 +1774,7 @@ fn test_large_node_rendering_with_zoom() {
 }
 
 /// Test diamond graph with variable width nodes on parallel branches.
-/// This tests the horizontal chain redistribution with nodes of different sizes.
+/// This tests horizontal compaction of a chain with nodes of different sizes.
 #[test]
 fn test_diamond_variable_width_parallel_nodes() {
     let _ = env_logger::try_init();
@@ -1832,7 +1832,7 @@ fn test_diamond_variable_width_parallel_nodes() {
 }
 
 #[test]
-fn viewport_visual_regression_circular_genome_loop() {
+fn test_window_visual_regression_circular_genome_loop() {
     let _ = env_logger::try_init();
     // a -> b -> c -> d, plus a backward edge d -> a closing the loop, mirroring a
     // circular genome's PATH_END -> PATH_START edge.
@@ -1851,7 +1851,7 @@ fn viewport_visual_regression_circular_genome_loop() {
 }
 
 #[test]
-fn backward_edge_pin_layer_insertion() {
+fn test_backward_edge_pin_layer_insertion() {
     let _ = env_logger::try_init();
     // Linear chain 0→1→2→3→4 with a backward edge (4, 0) closing the loop, exercising the
     // pin/dummy/data interplay in the simplest possible subgraph.
@@ -1868,7 +1868,7 @@ fn backward_edge_pin_layer_insertion() {
 }
 
 #[test]
-fn backward_edge_minimal_triangle() {
+fn test_backward_edge_minimal_triangle() {
     let _ = env_logger::try_init();
     // Smallest possible cycle: 3 nodes, backward edge 2 → 0.
     let mut domain_graph = MockDomainGraph::new();
@@ -1883,7 +1883,7 @@ fn backward_edge_minimal_triangle() {
 }
 
 #[test]
-fn backward_edge_tall_nodes_marks_only_horizontal_runs() {
+fn test_backward_edge_tall_nodes_marks_only_horizontal_runs() {
     let _ = env_logger::try_init();
     // Tall nodes make the bypass's endpoint legs long, but only horizontal runs carry markers.
     let mut domain_graph = MockDomainGraph::new();
@@ -1915,7 +1915,7 @@ fn backward_edge_tall_nodes_marks_only_horizontal_runs() {
 }
 
 #[test]
-fn backward_edge_six_node_cycle() {
+fn test_backward_edge_six_node_cycle() {
     let _ = env_logger::try_init();
     // 6-node cycle mirroring the cycle_no_path.gfa fixture from the view-cycles branch.
     // Forward: 0 → 1 → 2 → 3 → 4 → 5, backward edge 5 → 0.
@@ -1932,7 +1932,7 @@ fn backward_edge_six_node_cycle() {
 }
 
 #[test]
-fn backward_edge_partial_loop() {
+fn test_backward_edge_partial_loop() {
     let _ = env_logger::try_init();
     // Backward edge that doesn't close to the start node.
     // Chain: 0 → 1 → 2 → 3 → 4, backward edge 3 → 1 creates an inner loop.
@@ -1949,7 +1949,7 @@ fn backward_edge_partial_loop() {
 }
 
 #[test]
-fn target_gap_combinations_partial_loopback() {
+fn test_target_gap_combinations_partial_loopback() {
     let mut domain_graph = MockDomainGraph::new();
     let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
     for i in 0..4 {
@@ -1973,7 +1973,7 @@ fn target_gap_combinations_partial_loopback() {
 }
 
 #[test]
-fn backward_edge_diamond_loop() {
+fn test_backward_edge_diamond_loop() {
     let _ = env_logger::try_init();
     // Diamond 0 → {1, 2} → 3 with a backward edge 3 → 0 creating a loop
     // around the entire structure.
@@ -1991,7 +1991,7 @@ fn backward_edge_diamond_loop() {
 }
 
 #[test]
-fn backward_edge_branched_cycle() {
+fn test_backward_edge_branched_cycle() {
     let _ = env_logger::try_init();
     // Main chain with an external branch that merges in mid-cycle.
     // Chain: 0 → 1 → 2 → 3 → 4, branch: 5 → 2, backward edge 4 → 0.
@@ -2009,7 +2009,7 @@ fn backward_edge_branched_cycle() {
 }
 
 #[test]
-fn backward_edge_local_loop() {
+fn test_backward_edge_local_loop() {
     let _ = env_logger::try_init();
     // Long chain 0→1→…→7 with a backward edge 5→2 that only loops over the middle. The
     // bypass should span just the 2→5 region, not the whole graph - contrast with
@@ -2027,7 +2027,7 @@ fn backward_edge_local_loop() {
 }
 
 #[test]
-fn backward_edge_two_independent_local_loops() {
+fn test_backward_edge_two_independent_local_loops() {
     let _ = env_logger::try_init();
     // Two disjoint local cycles on one chain: 2→0 on the left and 7→5 on the right. Each
     // should render as its own compact bypass over its own region, rather than both
@@ -2114,9 +2114,9 @@ fn make_snapshot_pinned(
     let mut engine = LayoutEngine::new_with_backward_edges(domain_graph.clone(), &backward_edges);
 
     let mut state = GraphViewState::default();
-    let result = terminal.draw(|f| {
-        let area = f.area();
-        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    let result = terminal.draw(|frame| {
+        let area = frame.area();
+        GraphView::new(&mut engine, &visual).render(area, frame.buffer_mut(), &mut state);
     });
 
     match result {
@@ -2126,7 +2126,7 @@ fn make_snapshot_pinned(
 }
 
 #[test]
-fn cycle_simple_autodetected() {
+fn test_cycle_simple_autodetected() {
     let _ = env_logger::try_init();
     // A bare 3-cycle with no explicit backward edge: detection finds the loop-closing edge.
     let snapshot = make_snapshot(graph_from_edges(3, &[(0, 1), (1, 2), (2, 0)]), 132, 43);
@@ -2134,7 +2134,7 @@ fn cycle_simple_autodetected() {
 }
 
 #[test]
-fn cycle_self_loop_autodetected() {
+fn test_cycle_self_loop_autodetected() {
     let _ = env_logger::try_init();
     // A single node with a self-loop (0 -> 0): the pins land right next to the node and the
     // loop stays entirely local. Self-loops were a non-goal of the pin work but fall out of
@@ -2144,7 +2144,7 @@ fn cycle_self_loop_autodetected() {
 }
 
 #[test]
-fn cycle_with_chord_autodetected() {
+fn test_cycle_with_chord_autodetected() {
     let _ = env_logger::try_init();
     // An 8-cycle plus a chord (6 -> 3): two backward edges, each scoped to its own span.
     let mut domain_graph = cycle_graph(8);
@@ -2154,7 +2154,7 @@ fn cycle_with_chord_autodetected() {
 }
 
 #[test]
-fn cycle_with_two_chords_autodetected() {
+fn test_cycle_with_two_chords_autodetected() {
     let _ = env_logger::try_init();
     // An 8-cycle plus two chords (6 -> 3, 4 -> 1): three independent backward edges.
     let mut domain_graph = cycle_graph(8);
@@ -2165,7 +2165,7 @@ fn cycle_with_two_chords_autodetected() {
 }
 
 #[test]
-fn cycle_pinned_source() {
+fn test_cycle_pinned_source() {
     let _ = env_logger::try_init();
     // A 12-cycle with node 6 pinned as the source: detection breaks the cycle relative to
     // node 6 rather than at petgraph's default entry point.
@@ -2174,9 +2174,9 @@ fn cycle_pinned_source() {
 }
 
 #[test]
-fn viewport_lattice_window_from_its_root() {
+fn test_window_lattice_window_from_its_root() {
     // A triangular lattice: layer `l` has `l + 1` nodes and (l, i) leads to (l + 1, i) and
-    // (l + 1, i + 1), so neighbouring nodes share one child. From the root every shell is one
+    // (l + 1, i + 1), so neighboring nodes share one child. From the root every shell is one
     // whole layer, and a budget of 21 claims layers 0 to 5.
     const LAYERS: usize = 12;
     const NODE_BUDGET: usize = 21;
@@ -2289,7 +2289,7 @@ fn hairpins_on_self_edges(
 }
 
 #[test]
-fn hairpin_on_the_east_side_of_the_last_node() {
+fn test_hairpin_on_the_east_side_of_the_last_node() {
     let snapshot = make_snapshot_with_ports(
         graph_from_edges(2, &[(0, 1), (1, 1)]),
         hairpins_on_self_edges,
@@ -2300,7 +2300,7 @@ fn hairpin_on_the_east_side_of_the_last_node() {
 }
 
 #[test]
-fn hairpin_on_the_east_side_of_the_middle_node() {
+fn test_hairpin_on_the_east_side_of_the_middle_node() {
     // The hair pin takes the next layer beside the last node, and the router splits the middle
     // node's east side between the edge to that node and the bus to the turnaround.
     let snapshot = make_snapshot_with_ports(
@@ -2313,7 +2313,7 @@ fn hairpin_on_the_east_side_of_the_middle_node() {
 }
 
 #[test]
-fn hairpins_on_the_east_and_west_sides_of_the_ends_of_a_chain() {
+fn test_hairpins_on_the_east_and_west_sides_of_the_ends_of_a_chain() {
     let snapshot = make_snapshot_with_ports(
         graph_from_edges(3, &[(0, 1), (1, 2), (0, 0), (2, 2)]),
         hairpins_on_self_edges,

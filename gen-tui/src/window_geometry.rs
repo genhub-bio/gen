@@ -1,7 +1,11 @@
-//! Builds `WindowGeometry` for a graph window and supplies the single-glyph node marker, plus
-//! the cursor styling helpers shared by the painters. Callers such as the
-//! painter, tests and exports use these to get positioned, compacted nodes without
-//! going through a full controller.
+//! The sizing step between `assembly::assemble_window` and `layout::WindowGeometry::new`.
+//!
+//! It gives every node of an [`AssembledLayout`] the size the current renderer wants, then
+//! hands the graph to `WindowGeometry::new` for coordinates, routing and compaction;
+//! `RoutedWindowGraph::from_window_geometry` consumes the result. It also supplies the
+//! single-glyph node marker and the cursor styling helpers shared by the painters. `WindowScene`,
+//! tests and exports call it to get positioned, compacted nodes without going through a full
+//! controller.
 
 use std::collections::HashSet;
 
@@ -21,13 +25,13 @@ use crate::{
 /// Single-cell glyph a node is drawn as at the lowest zoom level.
 pub const NODE_GLYPH: char = '●';
 
-/// Route and compact an assembled neighbourhood window into renderable geometry.
+/// Route and compact an assembled neighborhood window into renderable geometry.
 ///
-/// This is the widget half of the level-of-detail split: the controller assembles the window
-/// into a `StableGraph<LayoutNode, LayoutEdge>` (see [`crate::assembly::assemble_window`]),
-/// and the widget re-sizes every node at the current
-/// level of detail, then assigns cross coordinates, routes, and compacts it. Sizing is applied
-/// here before coordinate assignment, so the geometry reflects the detail the visual currently
+/// This is the detail-dependent half of the level-of-detail split: `LayoutEngine` assembles
+/// the window once into a `StableGraph<LayoutNode, LayoutEdge>` (see
+/// [`crate::assembly::assemble_window`]), and this re-sizes every node at the current level of
+/// detail, then assigns cross coordinates, routes, and compacts it. Sizing is applied here
+/// before coordinate assignment, so the geometry reflects the detail the visual currently
 /// holds; the assembled neutral sizes are discarded.
 ///
 /// `size_of` supplies the rendered size for each node role, and `is_visible` says which domain
@@ -53,7 +57,8 @@ pub(crate) fn build_window_geometry(
     )
 }
 
-/// Build geometry with a per-node vertical attachment row, shared by layout and rendering.
+/// Build geometry with a per-node vertical attachment row and a layout mode, shared by layout
+/// and rendering.
 pub(crate) fn build_window_geometry_with_anchors(
     assembled: AssembledLayout,
     gaps: &GapPolicy,
@@ -293,7 +298,7 @@ mod tests {
                     assert_eq!(
                         node.size,
                         (5, 3),
-                        "data nodes must be re-sized from the widget's visual, not the \
+                        "data nodes must be re-sized from the renderer's sizes, not the \
                          assembled provisional size"
                     );
                 }

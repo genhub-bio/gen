@@ -1,6 +1,8 @@
 //! Curved edges, the counterpart of the rectilinear router.
 //!
-//! Curved edges keep the Sugiyama layers, dummy nodes and loopback pins, but skip `edge_router`.
+//! Curved edges keep the Sugiyama layers and dummy nodes but skip `edge_router`. Loopback pins
+//! leave the layered layout while it is ordered and come back once compaction is done (see
+//! `loopback_pins`).
 //! The buffer holds only nodes; each edge is reported as an [`OverlayPrimitive`] in buffer cell units,
 //! and the caller draws the primitives at pixel resolution (see `pixel_overlay`).
 

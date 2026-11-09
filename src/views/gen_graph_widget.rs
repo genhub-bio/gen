@@ -46,7 +46,7 @@ use crate::{
     },
 };
 
-/// Ordered `+`/`-` zoom gap-size steps, tightest to loosest, paired with a `NodeRenderer` in
+/// Ordered `+`/`-` zoom steps' gap policies, tightest to loosest, paired with a `NodeRenderer` in
 /// [`build_zoom_levels`] to form the actual zoom table. Graph-agnostic - kept separate from
 /// the renderer so tests can pair the same gap progression with mock renderers.
 ///
@@ -119,7 +119,7 @@ pub const TRUNCATED_ZOOM_LEVEL: usize = 1;
 /// Index of the first `Full` step.
 pub const FULL_ZOOM_LEVEL: usize = 2;
 
-/// A widget/event-loop-owned table of `(renderer, gap sizes)` pairs, one per zoom step.
+/// A widget/event-loop-owned table of `(renderer, gap policy)` pairs, one per zoom step.
 /// `GraphViewState::zoom_index` is an index into this table; nothing about which renderer
 /// is active lives on the widget, the controller, or the renderer itself. [`VisualDetail`]
 /// here is inert per-entry metadata (not renderer state) used only by column-clamping code
@@ -135,11 +135,11 @@ pub type ZoomLevels<'a> = Vec<(
     GapPolicy,
 )>;
 
-/// The five `(VisualDetail, GapPolicy)` gap-size steps paired with fresh renderer instances,
+/// The five `(VisualDetail, GapPolicy)` zoom steps paired with fresh renderer instances,
 /// tightest to loosest - shared by [`build_zoom_levels`] and [`build_send_sync_zoom_levels`].
 /// The truncated and full renderers each get their own instance (sharing one sequence cache
 /// across the three full-detail entries via `Arc`, not cloning it) so a cache warmed at one
-/// gap size stays warm when the user only changes spacing.
+/// gap policy stays warm when the user only changes spacing.
 macro_rules! zoom_entries {
     ($minimal:expr, $truncated:expr, $full:expr) => {
         vec![
@@ -516,7 +516,7 @@ impl SequenceSource for PathSequenceSource {
         if conn.is_none() {
             *conn = Some(
                 get_connection_for_branch(self.db_path.clone(), self.branch.as_deref())
-                    .map_err(|e| SequenceError::Io(e.to_string()))?,
+                    .map_err(|error| SequenceError::Io(error.to_string()))?,
             );
         }
         conn.as_ref()
@@ -575,13 +575,13 @@ fn is_drawn_node(node: &GraphNode) -> bool {
 fn render_start_end_node(buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) -> bool {
     let theme = current_theme();
     if is_start_node(node_id.node_id) {
-        let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
-        buffer.set_string_styled(area.left_center(), label::START, edge_style);
+        let sentinel_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
+        buffer.set_string_styled(area.left_center(), label::START, sentinel_style);
         return true;
     }
     if is_end_node(node_id.node_id) {
-        let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
-        buffer.set_string_styled(area.left_center(), label::END, edge_style);
+        let sentinel_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
+        buffer.set_string_styled(area.left_center(), label::END, sentinel_style);
         return true;
     }
     false
@@ -1249,7 +1249,7 @@ fn join_touching_slices(slices: &[GraphNodeSlice]) -> Vec<GraphNodeSlice> {
 /// (its segments in position order, with touching ones joined by [`join_touching_slices`])
 /// becomes a flag on its own node; the caps are drawn on the first and last piece that is
 /// loaded, which is what `continues_left`/`continues_right` record. When only part of a feature
-/// is loaded those are the edges of the loaded neighbourhood, not the feature's true ends.
+/// is loaded those are the edges of the loaded neighborhood, not the feature's true ends.
 fn annotation_flags_by_node<S: GraphSource<PackedGenGraph>>(
     engine: &LayoutEngine<PackedGenGraph, S>,
     overlays: &[GraphOverlay],
@@ -1757,19 +1757,32 @@ fn locus_label_bounds_mapped(
 
     let last = locus.slices.len() - 1;
 
-    let left_pos = locus.slices.iter().enumerate().find_map(|(i, s)| {
-        let col_raw = if i == 0 { s.start as i64 } else { 0 };
-        block_screen_pos(s.block, col_raw)
-    })?;
+    let left_pos = locus
+        .slices
+        .iter()
+        .enumerate()
+        .find_map(|(slice_index, slice)| {
+            let col_raw = if slice_index == 0 {
+                slice.start as i64
+            } else {
+                0
+            };
+            block_screen_pos(slice.block, col_raw)
+        })?;
 
-    let right_pos = locus.slices.iter().enumerate().rev().find_map(|(i, s)| {
-        let col_raw = if i == last {
-            s.end.saturating_sub(1) as i64
-        } else {
-            s.block.length() - 1
-        };
-        block_screen_pos(s.block, col_raw)
-    })?;
+    let right_pos = locus
+        .slices
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(slice_index, slice)| {
+            let col_raw = if slice_index == last {
+                slice.end.saturating_sub(1) as i64
+            } else {
+                slice.block.length() - 1
+            };
+            block_screen_pos(slice.block, col_raw)
+        })?;
 
     let mut y_min = i64::MAX;
     let mut y_max = i64::MIN;
@@ -1844,7 +1857,7 @@ pub fn highlight_match_range<R>(
 
 /// Light the edges a locus walks across, one per hop between consecutive slices. Each hop names
 /// the stored edge with the walk's strands, so an inversion hop lights the strand-changing edge
-/// and not its forward neighbour, and a walk that repeats a hop around a cycle lights it once.
+/// and not its forward neighbor, and a walk that repeats a hop around a cycle lights it once.
 fn highlight_locus_edges(
     view_state: &mut GraphViewState<GraphNode>,
     graph: &GenGraph,
@@ -1853,10 +1866,10 @@ fn highlight_locus_edges(
 ) {
     let mut lit: HashSet<PortedEdge<GraphNode>> = HashSet::new();
     for (from, to) in locus.slices.iter().zip(locus.slices.iter().skip(1)) {
-        if let Some(key) = walk_hop_edge_key(graph, from, to)
-            && lit.insert(key)
+        if let Some(ported_edge) = walk_hop_edge_key(graph, from, to)
+            && lit.insert(ported_edge)
         {
-            view_state.set_edge_highlight(key, style);
+            view_state.set_edge_highlight(ported_edge, style);
         }
     }
 }
@@ -1993,16 +2006,16 @@ pub fn reapply_overlays<R, S>(
     let graph = engine.graph();
     let loaded = LoadedNodeSlices::new(graph);
 
-    // Only spans drawn at this detail level take part in colouring, the same ones the labels
+    // Only spans drawn at this detail level take part in coloring, the same ones the labels
     // below draw.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
         .filter(|(_, overlay)| overlay_shows_at(overlay, detail_level))
-        .filter_map(|(idx, overlay)| overlay.span().map(|_| idx))
+        .filter_map(|(index, overlay)| overlay.span().map(|_| index))
         .collect();
-    span_indices.sort_by_key(|&idx| {
-        let span = overlays[idx]
+    span_indices.sort_by_key(|&index| {
+        let span = overlays[index]
             .span()
             .expect("filtered to span overlays above");
         -(span
@@ -2019,8 +2032,8 @@ pub fn reapply_overlays<R, S>(
     // chosen; otherwise an automatic span earlier in longest-first order could claim the
     // accent a later pinned span needs.
     let mut prepared: Vec<(usize, HashId, Vec<CellRegion>, Option<Color>)> = Vec::new();
-    for idx in span_indices {
-        let span = overlays[idx]
+    for index in span_indices {
+        let span = overlays[index]
             .span()
             .expect("filtered to span overlays above");
         let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
@@ -2041,11 +2054,11 @@ pub fn reapply_overlays<R, S>(
         if let Some(pinned_color) = pinned {
             occupied.extend(regions.iter().map(|region| (*region, pinned_color)));
         }
-        prepared.push((idx, span.id, regions, pinned));
+        prepared.push((index, span.id, regions, pinned));
     }
-    for (idx, span_id, regions, pinned) in prepared {
+    for (index, span_id, regions, pinned) in prepared {
         if let Some(pinned_color) = pinned {
-            overlays[idx].style.color = pinned_color;
+            overlays[index].style.color = pinned_color;
             continue;
         }
         let used: Vec<Color> = occupied
@@ -2066,7 +2079,7 @@ pub fn reapply_overlays<R, S>(
         let color = if used.contains(&preferred) {
             accents
                 .into_iter()
-                .find(|c| !used.contains(c))
+                .find(|candidate| !used.contains(candidate))
                 .unwrap_or(preferred)
         } else {
             preferred
@@ -2076,7 +2089,7 @@ pub fn reapply_overlays<R, S>(
         for region in regions {
             occupied.push((region, color));
         }
-        overlays[idx].style.color = color;
+        overlays[index].style.color = color;
     }
 
     // A path is resolved against whatever is loaded right now, so a batch the crawl adds
@@ -2195,11 +2208,11 @@ impl AnnotationLabels {
         let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
         let theme = current_theme();
         let loaded = LoadedNodeSlices::new(graph);
-        for (idx, (span, style)) in labeled.iter().enumerate() {
+        for (index, (span, style)) in labeled.iter().enumerate() {
             let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
                 continue;
             };
-            if span_covered_by_later(span, idx, &span_refs) {
+            if span_covered_by_later(span, index, &span_refs) {
                 continue;
             }
             let color = match style.color {
@@ -2226,10 +2239,10 @@ fn overlay_shows_at(overlay: &GraphOverlay, detail_level: VisualDetail) -> bool 
     }
 }
 
-/// Draw `labels` near their spans after the graph has been rendered into `buf`. A label with
+/// Draw `labels` near their spans after the graph has been rendered into `buffer`. A label with
 /// no free cell near its span is left out.
 pub fn draw_annotation_labels(
-    buf: &mut Buffer,
+    buffer: &mut Buffer,
     area: Rect,
     view_state: &GraphViewState<GraphNode>,
     labels: &AnnotationLabels,
@@ -2263,7 +2276,7 @@ pub fn draw_annotation_labels(
             continue;
         };
         draw_label_near_pos(
-            buf,
+            buffer,
             area,
             bounds,
             &label.text,
@@ -2391,7 +2404,7 @@ mod tests {
     }
 
     #[test]
-    fn complex_dag_at_each_zoom_level() {
+    fn test_complex_dag_at_each_zoom_level() {
         let graph = TestGraphs::domain_complex_dag();
 
         for (level, (visual, gaps)) in zoom_snapshot_table().into_iter().enumerate() {
@@ -2446,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn create_gen_graph_engine_handles_multiple_cycles() {
+    fn test_create_gen_graph_engine_handles_multiple_cycles() {
         let gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/gfa/multiple_cycles_no_path.gfa");
         let collection_name = "multiple-cycles".to_string();
@@ -2549,7 +2562,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_zygosity_pruned_edges() {
+    fn test_snapshot_zygosity_pruned_edges() {
         use std::path::PathBuf;
 
         use gen_models::{block_group::BlockGroup, sample::Sample};
@@ -2609,9 +2622,13 @@ mod tests {
 
         let mut terminal = create_test_terminal(132, 43);
         terminal
-            .draw(|f| {
-                let area = f.area();
-                GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut view_state);
+            .draw(|frame| {
+                let area = frame.area();
+                GraphView::new(&mut engine, &visual).render(
+                    area,
+                    frame.buffer_mut(),
+                    &mut view_state,
+                );
             })
             .unwrap();
         insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
@@ -2623,9 +2640,13 @@ mod tests {
             BlockGroup::get_current_path(conn, &reference_block_group.id, None).unwrap();
         centered.set(Some(PathMembership::load(conn, &reference_path.id, None)));
         terminal
-            .draw(|f| {
-                let area = f.area();
-                GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut view_state);
+            .draw(|frame| {
+                let area = frame.area();
+                GraphView::new(&mut engine, &visual).render(
+                    area,
+                    frame.buffer_mut(),
+                    &mut view_state,
+                );
             })
             .unwrap();
         insta::assert_snapshot!(
@@ -2671,22 +2692,26 @@ mod tests {
 
         let mut terminal = create_test_terminal(132, 43);
         terminal
-            .draw(|f| {
-                let area = f.area();
-                GraphView::new(&mut engine, visual).render(area, f.buffer_mut(), &mut view_state);
+            .draw(|frame| {
+                let area = frame.area();
+                GraphView::new(&mut engine, visual).render(
+                    area,
+                    frame.buffer_mut(),
+                    &mut view_state,
+                );
             })
             .unwrap();
         terminal.backend().to_string()
     }
 
     #[test]
-    fn snapshot_gfa_cycle_no_path() {
+    fn test_snapshot_gfa_cycle_no_path() {
         let snapshot = render_gfa_snapshot("fixtures/gfa/cycle_no_path.gfa", "cycle_no_path");
         insta::assert_snapshot!("gfa_cycle_no_path", snapshot);
     }
 
     #[test]
-    fn snapshot_gfa_cycle_with_path() {
+    fn test_snapshot_gfa_cycle_with_path() {
         let snapshot = render_gfa_snapshot("fixtures/gfa/cycle_with_path.gfa", "cycle_with_path");
         insta::assert_snapshot!("gfa_cycle_with_path", snapshot);
     }
@@ -3758,7 +3783,7 @@ mod tests {
     /// multi-node span whose cap only shows on its last node, and overlapping features
     /// that pack into a second lane.
     #[test]
-    fn snapshot_annotated_full_detail() {
+    fn test_snapshot_annotated_full_detail() {
         let node = |name: &str, length: i64| GraphNode {
             node_id: HashId::convert_str(name),
             sequence_start: 0,
@@ -3840,14 +3865,14 @@ mod tests {
             );
             let visual = &zoom_levels[view_state.zoom_index].1;
             terminal
-                .draw(|f| {
+                .draw(|frame| {
                     GraphView::new(&mut engine, visual).render(
                         area,
-                        f.buffer_mut(),
+                        frame.buffer_mut(),
                         &mut view_state,
                     );
 
-                    draw_annotation_labels(f.buffer_mut(), area, &view_state, &labels);
+                    draw_annotation_labels(frame.buffer_mut(), area, &view_state, &labels);
                 })
                 .unwrap();
         }

@@ -168,7 +168,7 @@ pub enum PinSide {
 
 impl PinSide {
     /// Whether the pin turns an edge around the end of the layout, as opposed to bending it
-    /// between two neighbouring layers.
+    /// between two neighboring layers.
     pub(crate) const fn is_loopback(self) -> bool {
         matches!(self, Self::Left | Self::Right)
     }
@@ -214,7 +214,10 @@ pub struct LayoutNode {
     #[serde(default)]
     pub vertical_anchor: VerticalAnchor,
     pub size: (u64, u64),
-    /// Layer information from Sugiyama algorithm. Only valid for Data nodes.
+    /// The Sugiyama layer column this node was assembled into. Every node assembled from a
+    /// window's structure has one - data, routing, pin, hair pin and wormhole nodes alike.
+    /// Junctions reset it to `None`, nodes added later (hair pin expansions) never have one, and
+    /// compaction re-snaps the layer of Data nodes to the nearest anchor column.
     pub layer: Option<i32>,
     /// Fixed horizontal offset of a curved side port from its layer's center column.
     #[serde(default)]
@@ -284,7 +287,9 @@ impl LayoutNode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LayoutEdge {
     pub bundle: Vec<(NodeIndex, NodeIndex)>,
-    /// Whether this is the reversed main span of a backward-edge loop.
+    /// Whether this edge spans from a left pin to a right pin, the leg of a bend that goes around
+    /// the end of the layout. That is the reversed main span of a backward edge, and also the
+    /// span of a forward west-to-east edge or a self edge.
     pub(crate) is_pin_span: bool,
 }
 
@@ -310,7 +315,7 @@ impl Default for LayoutEdge {
     }
 }
 
-/// Final geometry for one assembled neighbourhood window at a specific zoom level.
+/// Final geometry for one assembled neighborhood window at a specific zoom level.
 ///
 /// The graph is undirected to allow bidirectional edge routing, with final coordinates mapped
 /// to its nodes.
@@ -512,10 +517,10 @@ fn scoot_hair_pins(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u
 
 /// Replace each hair pin with routing nodes that make its loop, so the shape is drawn by the
 /// ordinary rules for routes and no mode draws a node of its own. The loop is two rows tall: the
-/// route leaves the neighbour on the top row, which is the row of the bus, runs across the pin and
+/// route leaves the neighbor on the top row, which is the row of the bus, runs across the pin and
 /// down at the far end, and comes back along the bottom row. The bus keeps its single edge to an
 /// entry on the pin's near side. In the terminal the return rises to that entry; in the curve and
-/// line modes it is an S-curve back to that neighbour, and the far end is a bend that starts and
+/// line modes it is an S-curve back to that neighbor, and the far end is a bend that starts and
 /// ends flat.
 fn expand_hair_pins(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
@@ -558,7 +563,7 @@ fn expand_hair_pins(
         let far_top = routing_node(far_x, row);
         let far_bottom = routing_node(far_x, row - 1);
         let near_bottom = routing_node(near_x, row - 1);
-        // The curve modes return to the neighbour the bus reached, so the S-curve ends where the
+        // The curve modes return to the neighbor the bus reached, so the S-curve ends where the
         // hair pin was joined to the layout. The terminal's router needs the return to end on the
         // bus at the entry.
         let return_end = if layout_mode.is_curved() {
@@ -755,7 +760,7 @@ impl WindowGeometry {
         // Assembly places rows at their size-independent within-layer ordinals. The edge router
         // reacts only to y, so assign real-size-aware cross coordinates before routing. This pass
         // only needs a small structural gap, not the caller's actual zoom target: compaction below
-        // is the sole place either target gap is enforced.
+        // is the sole place the six gaps of the `GapPolicy` are enforced.
         // A curved drawing has no loopback pins in its layered layout: the ends that need one get a
         // routing node beside their node instead, and the pin returns once compaction is done.
         let sideways = if layout_mode.is_curved() {
@@ -772,7 +777,7 @@ impl WindowGeometry {
         if layout_mode.is_curved() {
             pad_curved_data_nodes(&mut layout_graph);
         }
-        // A Bezier drawing turns a hairpin into an arc beside its node. The layered layout cannot
+        // A curved layout turns a hairpin into an arc beside its node. The layered layout cannot
         // carry a loop on one node, so the loop joins the node's side port to itself once the
         // ports exist, which lets compaction, drawing and highlighting treat it as an edge.
         if layout_mode.is_curved() {
@@ -945,12 +950,12 @@ pub struct WindowStructure {
     /// Per-layer vertex ordering from crossing minimization. The outer index is the layer;
     /// the inner order is the within-layer ordering. Entries index `vertex_graph`.
     pub(crate) vertex_layers: Vec<Vec<NodeIndex<u32>>>,
-    /// Which `vertex_graph` edges render a backward edge's `left_pin -> right_pin` main span
-    /// (see `WindowGraph::pin_span_edges`), keyed by each edge's `(source, target)`
+    /// Which `vertex_graph` edges render the `left_pin -> right_pin` span of a bend around the
+    /// end of the layout (see `WindowGraph::pin_span_edges`), keyed by each edge's `(source, target)`
     /// endpoints. Resolved once in `WindowStructureBuilder::build_structure` by walking
     /// `WindowGraph::pin_span_edges` through any dummy-vertex chain Sugiyama inserted for
     /// that edge, so `assemble_window` can carry the flag straight into `LayoutEdge` without
-    /// re-deriving it later. Empty for a graph with no backward edges.
+    /// re-deriving it later. Empty for a graph without such bends.
     pub(crate) pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)>,
 }
 
@@ -980,7 +985,7 @@ impl WindowStructure {
 /// A builder for the size-independent Sugiyama structure of a crawled window's layout graph.
 ///
 /// The cached layer framework is reused across zoom levels so the relative orientation of nodes
-/// remains stable while the widget computes window geometry at the current detail.
+/// remains stable while `WindowGeometry::new` computes window geometry at the current detail.
 #[derive(Debug)]
 pub(crate) struct WindowStructureBuilder<'a> {
     window_graph: &'a StableDiGraph<WindowNode, WindowEdge, u32>,
@@ -1032,7 +1037,7 @@ impl<'a> WindowStructureBuilder<'a> {
     }
 
     /// Supply pairs of data nodes whose layers must stay in the given order while Sugiyama runs.
-    /// Pinned routes use them to keep their endpoints' ranks fixed; the pairs add no edge to the
+    /// Edges bent by pins use them to keep their endpoints' ranks fixed; the pairs add no edge to the
     /// structure, and the dummies Sugiyama routes along them are dropped from the layers.
     pub(crate) fn with_ordering_edges(
         mut self,

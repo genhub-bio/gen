@@ -98,7 +98,7 @@ pub struct Tick {
     pub column: i64,
     pub label: String,
     /// The column the label starts at, which is under the tick unless it was shifted to clear
-    /// a neighbour or the edge of the view.
+    /// a neighbor or the edge of the view.
     pub label_start: i64,
 }
 
@@ -402,15 +402,15 @@ fn roundness(position: i64) -> i64 {
     2 * zeros + i64::from(rest % 5 == 0)
 }
 
-/// The first column of a label of `width` cells under `column`: centred when it fits in
+/// The first column of a label of `width` cells under `column`: centered when it fits in
 /// `bounds`, otherwise shifted to stay inside.
 fn label_start(column: i64, width: i64, bounds: (i64, i64)) -> i64 {
-    let centred = column - width / 2;
+    let centered = column - width / 2;
     let latest = (bounds.1 - width).max(bounds.0);
-    centred.clamp(bounds.0, latest)
+    centered.clamp(bounds.0, latest)
 }
 
-/// Place the labels of `candidates` roundest first. Each takes the first of centred,
+/// Place the labels of `candidates` roundest first. Each takes the first of centered,
 /// left-aligned or right-aligned that leaves [`LABEL_GAP`] blank cells to the labels already
 /// placed and stays in view, and is dropped if none does.
 fn place_labels(mut candidates: Vec<Tick>, visible_columns: (i64, i64)) -> Vec<Tick> {

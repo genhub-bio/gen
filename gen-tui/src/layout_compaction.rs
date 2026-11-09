@@ -26,7 +26,7 @@ use crate::{
     layout::{LayoutEdge, LayoutNode, NodeRole},
 };
 
-/// Cells of horizontal run an curved edge gets per row of vertical drop. A row is about
+/// Cells of horizontal run a curved edge gets per row of vertical drop. A row is about
 /// twice as tall as a cell is wide, so two cells per row keeps edges near 45 degrees as drawn.
 /// Compaction widens the gap between two layers until their steepest edge fits, so a dense layer
 /// does not turn its edges into near-vertical strokes that overprint each other.
@@ -67,7 +67,7 @@ pub(crate) fn base_step(width_i: i64, width_j: i64) -> i64 {
 }
 
 /// Compute the cells occupied by a node along one axis, matching the
-/// asymmetric extents of `BigRect::from_center_and_size`: even sizes extend
+/// asymmetric extents of `WorldRect::from_center_and_size`: even sizes extend
 /// one cell further in the positive direction.
 fn occupied_extent(center: i64, size: i64) -> Interval {
     Interval {
@@ -187,10 +187,10 @@ impl UnionFind {
     }
 
     fn union(&mut self, a: usize, b: usize) {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra != rb {
-            self.parent[ra] = rb;
+        let root_a = self.find(a);
+        let root_b = self.find(b);
+        if root_a != root_b {
+            self.parent[root_a] = root_b;
         }
     }
 }
@@ -297,9 +297,9 @@ pub(crate) fn compact_layout_with_vertical_placement(
     const MAX_ROUNDS: usize = 4;
     let incoming_positions: HashMap<NodeIndex, (i64, i64)> = graph
         .node_indices()
-        .map(|node_idx| {
-            let pos = graph[node_idx].pos;
-            (node_idx, (pos.x, pos.y))
+        .map(|node_index| {
+            let pos = graph[node_index].pos;
+            (node_index, (pos.x, pos.y))
         })
         .collect();
     let mut previous: Option<Vec<(i64, i64)>> = None;
@@ -321,7 +321,10 @@ pub(crate) fn compact_layout_with_vertical_placement(
             apply_axis(graph, Axis::Y, &solution);
         }
 
-        let current: Vec<(i64, i64)> = graph.node_weights().map(|n| (n.pos.x, n.pos.y)).collect();
+        let current: Vec<(i64, i64)> = graph
+            .node_weights()
+            .map(|node| (node.pos.x, node.pos.y))
+            .collect();
         if previous.as_ref() == Some(&current) {
             break;
         }
@@ -369,23 +372,23 @@ fn solve_axis(
     let dense_of: HashMap<NodeIndex, usize> = nodes
         .iter()
         .enumerate()
-        .map(|(dense, &idx)| (idx, dense))
+        .map(|(dense, &node_index)| (node_index, dense))
         .collect();
 
     // Group nodes connected by axis-aligned edges (equal coordinate on the
     // solved axis) into rigid segments.
-    let mut uf = UnionFind::new(nodes.len());
+    let mut union_find = UnionFind::new(nodes.len());
     for edge in graph.edge_references() {
         let source = &graph[edge.source()];
         let target = &graph[edge.target()];
         if axis.pos(source) == axis.pos(target) {
-            uf.union(dense_of[&edge.source()], dense_of[&edge.target()]);
+            union_find.union(dense_of[&edge.source()], dense_of[&edge.target()]);
         }
     }
     if axis == Axis::Y {
         for (dense, &index) in nodes.iter().enumerate() {
             if let Some(anchor) = graph[index].padding_anchor {
-                uf.union(dense, dense_of[&anchor]);
+                union_find.union(dense, dense_of[&anchor]);
             }
         }
     }
@@ -393,11 +396,11 @@ fn solve_axis(
     let curved_columns = layout_mode.is_curved() && axis == Axis::X;
     if curved_columns {
         let mut first_in_column: HashMap<i64, usize> = HashMap::new();
-        for (dense, &node_idx) in nodes.iter().enumerate() {
+        for (dense, &node_index) in nodes.iter().enumerate() {
             let first = *first_in_column
-                .entry(graph[node_idx].pos.x)
+                .entry(graph[node_index].pos.x)
                 .or_insert(dense);
-            uf.union(first, dense);
+            union_find.union(first, dense);
         }
     }
 
@@ -406,18 +409,18 @@ fn solve_axis(
     let mut seg_of: HashMap<NodeIndex, usize> = HashMap::new();
     let mut segments: Vec<AxisSegment> = Vec::new();
     let mut obstacles: Vec<Obstacle> = Vec::new();
-    for (dense, &node_idx) in nodes.iter().enumerate() {
-        let root = uf.find(dense);
+    for (dense, &node_index) in nodes.iter().enumerate() {
+        let root = union_find.find(dense);
         let seg_id = *seg_id_of_root.entry(root).or_insert_with(|| {
             segments.push(AxisSegment {
-                pos: axis.pos(&graph[node_idx]),
+                pos: axis.pos(&graph[node_index]),
             });
             segments.len() - 1
         });
-        seg_of.insert(node_idx, seg_id);
+        seg_of.insert(node_index, seg_id);
 
-        let node = &graph[node_idx];
-        let incoming_pos = incoming_positions[&node_idx];
+        let node = &graph[node_index];
+        let incoming_pos = incoming_positions[&node_index];
         obstacles.push(Obstacle {
             seg_id,
             axis_pos: axis.pos(node),
@@ -451,11 +454,11 @@ fn solve_axis(
             end: a.start.max(b.start) - 1,
         };
         if line.start <= line.end {
-            let seg = seg_of[&edge.source()];
+            let segment_id = seg_of[&edge.source()];
             let incoming_pos = incoming_positions[&edge.source()];
             obstacles.push(Obstacle {
-                seg_id: seg,
-                axis_pos: segments[seg].pos,
+                seg_id: segment_id,
+                axis_pos: segments[segment_id].pos,
                 incoming_axis_pos: match axis {
                     Axis::X => incoming_pos.0,
                     Axis::Y => incoming_pos.1,
@@ -710,7 +713,7 @@ fn pack_toward_anchor(
 /// Groups only prune candidate pairs; callers must still test direct overlap within a group.
 fn overlap_groups<T>(items: &[T], perp: impl Fn(&T) -> Interval) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by_key(|&i| perp(&items[i]).start);
+    order.sort_by_key(|&item_index| perp(&items[item_index]).start);
 
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
@@ -740,7 +743,7 @@ fn collision_constraints(
     preserve_incoming_y_gaps: bool,
 ) -> Vec<Constraint> {
     let mut constraints = Vec::new();
-    for group in overlap_groups(obstacles, |o| o.perp) {
+    for group in overlap_groups(obstacles, |obstacle| obstacle.perp) {
         for (rank, &i) in group.iter().enumerate() {
             for &j in &group[rank + 1..] {
                 // A stable total order (axis position, then index) on every pair,
@@ -796,29 +799,29 @@ fn snap_wormholes_to_neighbor(
 ) {
     let wormhole_indices: Vec<NodeIndex> = graph
         .node_indices()
-        .filter(|&idx| matches!(graph[idx].role, NodeRole::Wormhole(_)))
+        .filter(|&node_index| matches!(graph[node_index].role, NodeRole::Wormhole(_)))
         .collect();
-    for wormhole_idx in wormhole_indices {
-        let Some(neighbor_idx) = graph.neighbors(wormhole_idx).next() else {
+    for wormhole_index in wormhole_indices {
+        let Some(neighbor_index) = graph.neighbors(wormhole_index).next() else {
             continue;
         };
         let distance = transform_distance(
             gaps.data_routing_x,
-            incoming_positions[&wormhole_idx].0,
-            incoming_positions[&neighbor_idx].0,
+            incoming_positions[&wormhole_index].0,
+            incoming_positions[&neighbor_index].0,
             base_step(
-                Axis::X.size(&graph[wormhole_idx]),
-                Axis::X.size(&graph[neighbor_idx]),
+                Axis::X.size(&graph[wormhole_index]),
+                Axis::X.size(&graph[neighbor_index]),
             ),
             true,
         );
-        let neighbor_x = graph[neighbor_idx].pos.x;
-        let side = if graph[wormhole_idx].pos.x <= neighbor_x {
+        let neighbor_x = graph[neighbor_index].pos.x;
+        let side = if graph[wormhole_index].pos.x <= neighbor_x {
             -1
         } else {
             1
         };
-        graph[wormhole_idx].pos.x = neighbor_x + side * distance;
+        graph[wormhole_index].pos.x = neighbor_x + side * distance;
     }
 }
 
@@ -828,10 +831,10 @@ fn apply_axis(
     axis: Axis,
     solution: &AxisSolution,
 ) {
-    for node_idx in graph.node_indices().collect::<Vec<_>>() {
-        let seg = solution.seg_of[&node_idx];
-        let value = solution.placement.centered[&seg];
-        axis.set_pos(&mut graph[node_idx], value);
+    for node_index in graph.node_indices().collect::<Vec<_>>() {
+        let segment = solution.seg_of[&node_index];
+        let value = solution.placement.centered[&segment];
+        axis.set_pos(&mut graph[node_index], value);
     }
 }
 
@@ -845,13 +848,14 @@ fn snap_layers_to_anchor_columns(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     solution: &AxisSolution,
 ) {
-    let has_slack = |seg: usize| solution.placement.low[&seg] != solution.placement.high[&seg];
+    let has_slack =
+        |segment: usize| solution.placement.low[&segment] != solution.placement.high[&segment];
 
     let mut anchors: Vec<(i64, i32)> = graph
         .node_indices()
-        .filter(|idx| !has_slack(solution.seg_of[idx]))
-        .filter_map(|idx| {
-            let node = &graph[idx];
+        .filter(|node_index| !has_slack(solution.seg_of[node_index]))
+        .filter_map(|node_index| {
+            let node = &graph[node_index];
             match node.role {
                 NodeRole::Data(_) => node.layer.map(|layer| (node.pos.x, layer)),
                 _ => None,
@@ -863,11 +867,11 @@ fn snap_layers_to_anchor_columns(
     }
     anchors.sort_unstable();
 
-    for node_idx in graph.node_indices().collect::<Vec<_>>() {
-        if !has_slack(solution.seg_of[&node_idx]) {
+    for node_index in graph.node_indices().collect::<Vec<_>>() {
+        if !has_slack(solution.seg_of[&node_index]) {
             continue;
         }
-        let node = &mut graph[node_idx];
+        let node = &mut graph[node_index];
         if !matches!(node.role, NodeRole::Data(_)) || node.layer.is_none() {
             continue;
         }
@@ -1016,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn iterative_rounds_reuse_the_incoming_baseline() {
+    fn test_iterative_rounds_reuse_the_incoming_baseline() {
         let gaps = GapPolicy {
             data_data_x: |gap| gap.saturating_mul(2),
             ..GapPolicy::default()
@@ -1071,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn unconnected_wormhole_counts_as_data_for_gap_policy() {
+    fn test_unconnected_wormhole_counts_as_data_for_gap_policy() {
         let gaps = GapPolicy {
             data_data_x: |_| 2,
             data_routing_x: |_| 0,
@@ -1093,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn connected_wormhole_stays_within_data_routing_x_of_routing_neighbor() {
+    fn test_connected_wormhole_stays_within_data_routing_x_of_routing_neighbor() {
         let gaps = GapPolicy {
             data_routing_x: |_| 1,
             routing_routing_x: |gap| gap,
@@ -1159,7 +1163,7 @@ mod tests {
     ///
     /// Solved x positions: the corner columns are pinned by W through A/B —
     /// both A/B and W are data nodes, so their pair gets the data-data X
-    /// floor (2) on top of base_step(1,21)=11, landing W's column 13 away on
+    /// gap (1 in the default policy) on top of base_step(1,21)=11, landing W's column 12 away on
     /// each side — while D (routing-to-data, no floor) floats in [4, 21] and
     /// must be centered at 12.
     #[test]
@@ -1270,7 +1274,7 @@ mod tests {
 
     /// A diamond whose two middle-layer branches have very different heights. The size-aware
     /// cross-coordinate assignment must (a) separate the branches by their real-height minimum,
-    /// not a unit-size gap, and (b) centre the shared source and sink on the midpoint between the
+    /// not a unit-size gap, and (b) center the shared source and sink on the midpoint between the
     /// branches. A uniform-height diamond cannot distinguish this from a size-blind pass, which is
     /// why the branches here are 5x9 and 5x3.
     #[test]
@@ -1296,7 +1300,7 @@ mod tests {
         let branch_gap = graph[short].pos.y - graph[tall].pos.y;
         assert_eq!(branch_gap, base_step(9, 3) + 1);
 
-        // The source and sink centre on the midpoint between the two branches, and on each other.
+        // The source and sink center on the midpoint between the two branches, and on each other.
         // The true midpoint (0 + 7) / 2 = 3.5 is a half cell; round the same way the assignment
         // does rather than truncating, since the branch gap here is odd by construction.
         let midpoint = ((graph[tall].pos.y + graph[short].pos.y) as f64 / 2.0).round() as i64;

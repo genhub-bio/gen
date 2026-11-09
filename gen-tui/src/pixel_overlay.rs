@@ -31,8 +31,8 @@ use crate::{
     window_geometry::NODE_GLYPH,
 };
 
-// Rasterize beyond each band before cropping, so antialiasing at the clip edge cannot
-// change coverage on the rows we actually write.
+/// Pixels (before scaling) rasterized beyond each band before cropping, so antialiasing at the
+/// clip edge cannot change coverage on the rows that are written.
 const BAND_PADDING: u32 = 2;
 
 /// Glow rings are one pixel wide and fade like a Gaussian of this sigma, in pixels.
@@ -75,7 +75,7 @@ fn glow_opacity(peak: f32, ring: usize) -> f32 {
 const DASH_CELLS: f32 = 0.6;
 const GAP_CELLS: f32 = 0.4;
 
-/// The cells of a buffer whose pixels the layer must leave clear: those with text, or with a
+/// The cells of a buffer whose pixels the overlay must leave clear: those with text, or with a
 /// background other than the canvas.
 struct CellMask {
     columns: usize,
@@ -183,13 +183,13 @@ impl PixelOverlay {
         }
     }
 
-    /// Identifies what the layer draws: equal digests mean equal pictures, so a caller that
+    /// Identifies what the overlay draws: equal digests mean equal pictures, so a caller that
     /// already showed one need not draw it again.
     pub const fn digest(&self) -> u64 {
         self.digest
     }
 
-    /// Whether the layer draws nothing.
+    /// Whether the overlay draws nothing.
     pub fn is_empty(&self) -> bool {
         self.visible.is_empty()
     }
@@ -229,13 +229,13 @@ impl PixelOverlay {
         Pixmap::new(width as u32, rows as u32 + 2 * padding)
     }
 
-    /// Composite the layer onto `pixels`, the RGB rows of the image starting at image row `top`,
+    /// Composite the overlay onto `pixels`, the RGB rows of the image starting at image row `top`,
     /// using `scratch` from [`Self::band_pixmap`]. Bands may arrive in any order.
     pub fn composite_band(&self, pixels: &mut [u8], top: usize, scratch: &mut Pixmap) {
         draw_paths(pixels, top, (self.paths(), &self.mask), scratch);
     }
 
-    /// The whole layer as a transparent pixmap, or `None` when nothing is drawn. Pixels are
+    /// The whole overlay as a transparent pixmap, or `None` when nothing is drawn. Pixels are
     /// premultiplied RGBA. Horizontal strips are drawn on separate threads.
     pub fn rasterize(&self, columns: u16, rows: u16) -> Option<Pixmap> {
         let strips = available_parallelism()
@@ -279,14 +279,20 @@ impl PixelOverlay {
             return;
         };
         let transform = Transform::from_translate(0.0, -(top as f32));
-        for edge in paths {
-            let bounds = edge.path.bounds();
-            if bounds.bottom() + edge.reach < top as f32
-                || bounds.top() - edge.reach > (top + rows) as f32
+        for prepared_path in paths {
+            let bounds = prepared_path.path.bounds();
+            if bounds.bottom() + prepared_path.reach < top as f32
+                || bounds.top() - prepared_path.reach > (top + rows) as f32
             {
                 continue;
             }
-            strip.fill_path(&edge.path, &edge.paint, FillRule::Winding, transform, None);
+            strip.fill_path(
+                &prepared_path.path,
+                &prepared_path.paint,
+                FillRule::Winding,
+                transform,
+                None,
+            );
         }
         for (row, bytes) in block.chunks_exact_mut(row_bytes).enumerate() {
             self.mask.clear_row(bytes, top + row);
@@ -429,7 +435,7 @@ struct PixelOverlayPath {
 // Build geometry once per export. Each band clips the original path, rather than splitting
 // curves, so tangents and dash phase remain continuous across PNG rows.
 fn prepare_paths(
-    lines: &[OverlayPrimitive],
+    overlay_primitives: &[OverlayPrimitive],
     origin: (u16, u16),
     config: RasterConfig,
 ) -> Vec<PixelOverlayPath> {
@@ -452,21 +458,21 @@ fn prepare_paths(
         )
     };
     let mut paths = Vec::new();
-    for edge in lines {
-        if let OverlayPrimitive::Arrow(mark) = edge {
+    for primitive in overlay_primitives {
+        if let OverlayPrimitive::Arrow(mark) = primitive {
             push_arrow(mark, point(mark.center), config, &mut paths);
             continue;
         }
-        if let OverlayPrimitive::NodeGlow(glow) = edge {
+        if let OverlayPrimitive::NodeGlow(glow) = primitive {
             push_node_glow(glow, point, config, &mut paths);
             continue;
         }
-        if let OverlayPrimitive::SymbolGlow(glow) = edge {
+        if let OverlayPrimitive::SymbolGlow(glow) = primitive {
             push_symbol_glow(glow, point(glow.center), config, &mut paths);
             continue;
         }
         let mut builder = PathBuilder::new();
-        let (color, line_style) = match edge {
+        let (color, line_style) = match primitive {
             OverlayPrimitive::Line(line) => {
                 let from = point(line.from);
                 let to = point(line.to);
@@ -916,7 +922,7 @@ pub fn overlay_primitives_bounds(
     let cell = |value: f64, limit: u16| value.floor().clamp(0.0, f64::from(limit)) as u16;
     overlay_primitives
         .iter()
-        .flat_map(|edge| match edge {
+        .flat_map(|primitive| match primitive {
             OverlayPrimitive::Line(line) => vec![line.from, line.to],
             // The control points of a loop that bulges far can lie well outside the curve, so
             // the curve's own points bound it, not its control polygon.
@@ -950,10 +956,10 @@ fn draw_paths(
     let band_rows = pixels.len() / (3 * pixmap.width() as usize);
     let band_padding = (pixmap.height() as usize - band_rows) / 2;
     let transform = Transform::from_translate(0.0, band_padding as f32 - top as f32);
-    for edge in paths {
-        let bounds = edge.path.bounds();
+    for prepared_path in paths {
+        let bounds = prepared_path.path.bounds();
         // Include the widest highlight stroke and its antialias fringe in the band test.
-        let padding = edge.reach;
+        let padding = prepared_path.reach;
         if bounds.bottom() + padding < top as f32
             || bounds.top() - padding > (top + pixmap.height() as usize) as f32
         {
@@ -961,7 +967,13 @@ fn draw_paths(
         }
         // Fill a precomputed stroke outline instead of using the hairline fast path, whose
         // clipping can change cubic coverage between bands. Dashing and stroking happen once.
-        pixmap.fill_path(&edge.path, &edge.paint, FillRule::Winding, transform, None);
+        pixmap.fill_path(
+            &prepared_path.path,
+            &prepared_path.paint,
+            FillRule::Winding,
+            transform,
+            None,
+        );
     }
     let row_bytes = pixmap.width() as usize * 4;
     for row in 0..band_rows {
@@ -1181,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deferred_straight_edges_are_not_dropped() {
+    fn test_deferred_straight_segments_are_not_dropped() {
         let edge = OverlayPrimitive::Line(crate::curved::StraightSegment {
             from: (1.0, 1.0),
             to: (8.0, 1.0),
@@ -1197,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bezier_shape_and_coverage_are_antialiased() {
+    fn test_bezier_curve_and_coverage_are_antialiased() {
         let curve = curve(
             (10.0, 20.0),
             (25.0, 2.0),
@@ -1410,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cells_with_text_or_a_node_background_are_cut_out_of_the_layer() {
+    fn test_cells_with_text_or_a_node_background_are_cut_out_of_the_overlay() {
         let config = RasterConfig {
             cell_width: 4,
             cell_height: 8,
@@ -1484,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shapes_outside_the_view_are_not_prepared() {
+    fn test_overlay_primitives_outside_the_view_are_not_prepared() {
         let config = RasterConfig::default();
         let buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
         let inside = OverlayPrimitive::Bezier(curve(
@@ -1550,7 +1562,8 @@ mod tests {
     }
 
     #[test]
-    fn test_digest_changes_with_the_shapes_and_the_cut_out_but_not_with_hidden_shapes() {
+    fn test_digest_changes_with_the_overlay_primitives_and_the_cut_out_but_not_with_hidden_primitives()
+     {
         let config = RasterConfig::default();
         let buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
         let primitive = OverlayPrimitive::Bezier(curve(

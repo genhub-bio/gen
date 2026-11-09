@@ -127,8 +127,8 @@ impl<T> BigRect<T> {
     where
         T: Ord + Copy + Serialize + DeserializeOwned,
     {
-        // Regardless of which corners are passed in, we store
-        // the bottom left and top right corners.
+        // Regardless of which corners are passed in, we store the bottom-left (min) and
+        // top-right (max) corners, with Y up.
         let min = Point::new(a.x.min(b.x), a.y.min(b.y));
         let max = Point::new(a.x.max(b.x), a.y.max(b.y));
         BigRect { min, max }
@@ -243,7 +243,8 @@ where
         }
     }
 
-    /// All four corners in [min, top_right, max, bottom_left] order.
+    /// All four corners in [bottom_left, bottom_right, top_right, top_left] order, with Y up, so
+    /// `min` is the bottom-left corner (as in `from_corners`) and `max` the top-right.
     pub fn corners(&self) -> [Point<T>; 4] {
         [
             self.min,

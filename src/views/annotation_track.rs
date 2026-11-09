@@ -137,11 +137,14 @@ pub fn graph_locus_from_annotation_span(
 /// segments share a single non-ambiguous strand.
 pub fn span_label_text(span: &AnnotationSpan) -> String {
     let strand = match span.segments.first() {
-        Some(seg)
-            if !Strand::is_ambiguous(seg.strand)
-                && span.segments.iter().all(|s| s.strand == seg.strand) =>
+        Some(segment)
+            if !Strand::is_ambiguous(segment.strand)
+                && span
+                    .segments
+                    .iter()
+                    .all(|other| other.strand == segment.strand) =>
         {
-            Some(seg.strand)
+            Some(segment.strand)
         }
         _ => None,
     };
@@ -217,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn annotation_span_from_graph_locus_preserves_name_and_coordinates() {
+    fn test_annotation_span_from_graph_locus_preserves_name_and_coordinates() {
         let node = make_node("n1", 100, 200);
         let locus = GraphLocus {
             slices: vec![GraphNodeSlice {
@@ -230,15 +233,15 @@ mod tests {
         let span = annotation_span_from_graph_locus(&locus, "my_gene");
         assert_eq!(span.name, "my_gene");
         assert_eq!(span.segments.len(), 1);
-        let seg = &span.segments[0];
-        assert_eq!(seg.node_id, node.node_id);
-        assert_eq!(seg.range.start, 105); // sequence_start + slice.start
-        assert_eq!(seg.range.end, 115); // sequence_start + slice.end
-        assert_eq!(seg.strand, Strand::Forward);
+        let segment = &span.segments[0];
+        assert_eq!(segment.node_id, node.node_id);
+        assert_eq!(segment.range.start, 105); // sequence_start + slice.start
+        assert_eq!(segment.range.end, 115); // sequence_start + slice.end
+        assert_eq!(segment.strand, Strand::Forward);
     }
 
     #[test]
-    fn graph_locus_from_annotation_span_inverts_to_annotation_span() {
+    fn test_graph_locus_from_annotation_span_inverts_to_annotation_span() {
         let node = make_node("n1", 100, 200);
         let graph = make_graph(&[node]);
         let locus = GraphLocus {
@@ -293,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_locus_from_annotation_span_returns_none_for_empty_span() {
+    fn test_graph_locus_from_annotation_span_returns_none_for_empty_span() {
         let graph = make_graph(&[]);
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
@@ -304,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_locus_from_annotation_span_returns_none_when_node_missing_from_graph() {
+    fn test_graph_locus_from_annotation_span_returns_none_when_node_missing_from_graph() {
         let node = make_node("n1", 0, 100);
         let graph = make_graph(&[]); // node not in graph
         let locus = GraphLocus {
@@ -325,7 +328,7 @@ mod tests {
     /// specific fragment its range overlaps, not to whichever fragment a naive
     /// `node_id`-keyed lookup happens to keep.
     #[test]
-    fn graph_locus_from_annotation_span_resolves_each_segment_to_its_own_fragment() {
+    fn test_graph_locus_from_annotation_span_resolves_each_segment_to_its_own_fragment() {
         let node_id = HashId::convert_str("split-node");
         let left_fragment = GraphNode {
             node_id,
@@ -401,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn span_label_text_appends_forward_arrow() {
+    fn test_span_label_text_appends_forward_arrow() {
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "my_gene".into(),
@@ -411,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn span_label_text_prepends_reverse_arrow() {
+    fn test_span_label_text_prepends_reverse_arrow() {
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "my_gene".into(),
@@ -421,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn span_label_text_omits_arrow_when_segments_disagree_on_strand() {
+    fn test_span_label_text_omits_arrow_when_segments_disagree_on_strand() {
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "my_gene".into(),
@@ -434,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn span_label_text_omits_arrow_for_empty_segments() {
+    fn test_span_label_text_omits_arrow_for_empty_segments() {
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "my_gene".into(),
@@ -444,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn span_is_single_node_true_for_one_segment() {
+    fn test_span_is_single_node_true_for_one_segment() {
         let node = make_node("n1", 0, 10);
         let graph = make_graph(&[node]);
         let span = AnnotationSpan {
@@ -456,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn span_is_single_node_true_when_all_segments_share_node() {
+    fn test_span_is_single_node_true_when_all_segments_share_node() {
         let node = make_node("n1", 0, 20);
         let graph = make_graph(&[node]);
         let span = AnnotationSpan {
@@ -471,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn span_is_single_node_false_when_segments_span_multiple_nodes() {
+    fn test_span_is_single_node_false_when_segments_span_multiple_nodes() {
         let node_1 = make_node("n1", 0, 10);
         let node_2 = make_node("n2", 0, 10);
         let graph = make_graph(&[node_1, node_2]);
@@ -487,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn span_is_single_node_true_for_empty_segments() {
+    fn test_span_is_single_node_true_for_empty_segments() {
         let graph = make_graph(&[]);
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),

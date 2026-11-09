@@ -38,7 +38,7 @@ pub fn load_annotation_group_entries(
     let sample_order = std::iter::once(block_group.sample_name.clone())
         .chain(ancestor_samples.iter().cloned())
         .enumerate()
-        .map(|(idx, sample_name)| (sample_name, idx))
+        .map(|(index, sample_name)| (sample_name, index))
         .collect::<HashMap<_, _>>();
     let ancestor_block_groups_by_sample = if ancestor_samples.is_empty() {
         HashMap::new()
@@ -155,7 +155,7 @@ mod tests {
     use crate::test_helpers::setup_gen;
 
     #[test]
-    fn loads_current_parent_and_ancestor_annotation_groups() {
+    fn test_loads_current_parent_and_ancestor_annotation_groups() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let _ = Collection::create(conn, "/test");

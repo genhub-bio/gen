@@ -39,9 +39,9 @@ pub(crate) type EdgePortsFn<G> = fn(&G, &<G as GraphBase>::EdgeId) -> EdgePorts;
 /// The domain direction in which a collapsed wormhole door leaves its in-window boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalEdgeSide {
-    /// The off-window target is an incoming neighbour of the boundary node.
+    /// The off-window target is an incoming neighbor of the boundary node.
     Predecessor,
-    /// The off-window target is an outgoing neighbour of the boundary node.
+    /// The off-window target is an outgoing neighbor of the boundary node.
     Successor,
 }
 
@@ -54,14 +54,14 @@ pub struct ExternalEdge<NodeId> {
     pub boundary: NodeId,
     /// The chosen off-window node used for navigation.
     pub target: NodeId,
-    /// Every off-window neighbour represented by this collapsed door.
+    /// Every off-window neighbor represented by this collapsed door.
     pub(crate) all_collapsed: Vec<NodeId>,
     /// The domain direction from `boundary` toward the represented nodes.
     pub side: ExternalEdgeSide,
 }
 
 impl<NodeId> ExternalEdge<NodeId> {
-    /// Construct a door representing missing incoming neighbours.
+    /// Construct a door representing missing incoming neighbors.
     pub fn predecessor(boundary: NodeId, target: NodeId, all_collapsed: Vec<NodeId>) -> Self {
         Self {
             boundary,
@@ -71,7 +71,7 @@ impl<NodeId> ExternalEdge<NodeId> {
         }
     }
 
-    /// Construct a door representing missing outgoing neighbours.
+    /// Construct a door representing missing outgoing neighbors.
     pub fn successor(boundary: NodeId, target: NodeId, all_collapsed: Vec<NodeId>) -> Self {
         Self {
             boundary,
@@ -130,7 +130,7 @@ where
 /// A size-independent window selected by [`neighborhood`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuralSubgraph<NodeId> {
-    /// The anchor the window is centred on.
+    /// The anchor the window is centered on.
     pub anchor: NodeId,
     /// The windowed nodes, sorted by domain index - purely for deterministic, repeatable
     /// window construction; `build_window_graph` only ever reads `node_id` from these in
@@ -205,7 +205,7 @@ where
     // a lazily-loaded graph never guarantees.
     let mut members: Vec<G::NodeId> = selected.into_iter().collect();
     members.sort();
-    // Every member's neighbours are read to find in-window edges and boundary doors, so none
+    // Every member's neighbors are read to find in-window edges and boundary doors, so none
     // of them may stay frontier, whichever ones the crawl itself went past (a zero-budget crawl
     // never looks past its own seed).
     cursor.complete(&members)?;
@@ -229,7 +229,7 @@ where
     let selected: HashSet<G::NodeId> = members.iter().copied().collect();
     let nodes = members;
 
-    // Domain edges with both endpoints inside the window. Walking the outgoing neighbours of
+    // Domain edges with both endpoints inside the window. Walking the outgoing neighbors of
     // the selected nodes keeps this bounded by the window rather than the whole graph.
     // Backward edges ride along naturally: the domain graph still carries them, and both
     // endpoints being in the window is enough to include them.
@@ -372,7 +372,7 @@ where
 /// reads correctly when they lie in path order. Hinted nodes are ordered by their hints
 /// whatever cycles the edges form, so an edge running against the hints is drawn as a backward
 /// edge instead of cycle removal choosing which edge of a cycle to flip. `layout_mode` decides
-/// whether left and right pins join the Sugiyama input: the curved styles leave them out.
+/// whether left and right pins join the Sugiyama input: the curved layout mode leaves them out.
 pub(crate) fn build_window_graph_with_order<G>(
     neighborhood: &StructuralSubgraph<G::NodeId>,
     graph: &G,
@@ -388,9 +388,9 @@ where
     let mut node_to_local: HashMap<G::NodeId, NodeIndex<u32>> = HashMap::new();
 
     for &node_id in &neighborhood.nodes {
-        let domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
-        let local_idx = window_graph.add_node(WindowNode::Data(domain_idx));
-        node_to_local.insert(node_id, local_idx);
+        let domain_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
+        let local_index = window_graph.add_node(WindowNode::Data(domain_index));
+        node_to_local.insert(node_id, local_index);
     }
     let to_domain =
         |node_id: G::NodeId| NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
@@ -620,7 +620,7 @@ pub(crate) const SHELL_CUTOFF_FACTOR: usize = 10;
 
 /// Grow breadth-first shells around `anchor` until the batch holds at least `node_budget` nodes
 /// or the graph is exhausted. Each shell is loaded on both sides in one request to the source
-/// and expands into its neighbours in both directions, so the window grows evenly by distance
+/// and expands into its neighbors in both directions, so the window grows evenly by distance
 /// from `anchor`: forward-reached nodes find reconverging branches and backward-reached nodes
 /// find sibling branches. A shell is taken whole unless that would pass
 /// [`SHELL_CUTOFF_FACTOR`] times the budget; then predecessors and successors are taken in turn
@@ -702,7 +702,7 @@ mod tests {
         DiGraphMap::from_edges(
             edges
                 .iter()
-                .map(|(s, t)| (TestNode(*s as i64), TestNode(*t as i64))),
+                .map(|(source, target)| (TestNode(*source as i64), TestNode(*target as i64))),
         )
     }
 
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn build_window_graph_with_backward_edge_fully_inside_adds_pins() {
+    fn test_build_window_graph_with_backward_edge_fully_inside_adds_pins() {
         // Linear chain 0 -> 1 -> 2 -> 3 with a backward edge 3 -> 0 closing the loop,
         // exercised with an explicit backward-edge list (mirrors the GFA-import path).
         let edges = vec![(0, 1), (1, 2), (2, 3)];
@@ -751,7 +751,12 @@ mod tests {
         let pin_count = window
             .graph
             .node_indices()
-            .filter(|&idx| matches!(window.graph.node_weight(idx), Some(WindowNode::Pin(_))))
+            .filter(|&node_index| {
+                matches!(
+                    window.graph.node_weight(node_index),
+                    Some(WindowNode::Pin(_))
+                )
+            })
             .count();
         assert_eq!(
             pin_count, 2,
@@ -774,9 +779,9 @@ mod tests {
             window
                 .graph
                 .node_indices()
-                .find(|&idx| {
+                .find(|&node_index| {
                     matches!(
-                        window.graph.node_weight(idx),
+                        window.graph.node_weight(node_index),
                         Some(WindowNode::Data(found)) if *found == domain
                     )
                 })
@@ -931,11 +936,11 @@ mod tests {
     }
 
     #[test]
-    fn build_window_graph_with_backward_edge_partially_inside_skips_pins() {
+    fn test_build_window_graph_with_backward_edge_partially_inside_skips_pins() {
         // Same chain and backward edge, but a node budget of 1 crawls only the anchor
         // itself - the backward edge's other endpoint (node 3) is outside the window, so
         // it must not be pinned: a backward edge only gets a pin pair when both endpoints
-        // are in-window. The anchor's one real off-window neighbour (node 1, via the
+        // are in-window. The anchor's one real off-window neighbor (node 1, via the
         // ordinary edge 0->1 - this test's graph has no actual 3->0 edge, only a
         // caller-declared `explicit_backward_edges` label) becomes a real wormhole node.
         let edges = vec![(0, 1), (1, 2), (2, 3)];
@@ -969,7 +974,7 @@ mod tests {
             window.graph.node_count(),
             2,
             "no pin nodes should be added for a partially-windowed backward edge, but the \
-             anchor's one real off-window neighbour still gets a wormhole node"
+             anchor's one real off-window neighbor still gets a wormhole node"
         );
         assert!(
             window.graph.node_weights().any(
@@ -993,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn build_window_graph_detects_local_cycle_without_explicit_backward_edges() {
+    fn test_build_window_graph_detects_local_cycle_without_explicit_backward_edges() {
         // Same chain and backward edge as above, but with no explicit backward-edge list -
         // this is the auto-detect path, which must find and pin the loop purely from the
         // window's own crawled nodes/edges (no whole-graph pass involved).
@@ -1014,7 +1019,12 @@ mod tests {
         let pin_count = window
             .graph
             .node_indices()
-            .filter(|&idx| matches!(window.graph.node_weight(idx), Some(WindowNode::Pin(_))))
+            .filter(|&node_index| {
+                matches!(
+                    window.graph.node_weight(node_index),
+                    Some(WindowNode::Pin(_))
+                )
+            })
             .count();
         assert_eq!(
             pin_count, 2,
@@ -1168,10 +1178,10 @@ mod tests {
             (TestNode(0), TestNode(1)),
             vec![EdgePorts::default(), WEST_WEST, EAST_EAST],
         );
-        let (window, pinned) =
+        let (window, ported_edges) =
             build_window_graph(&subgraph, &graph, None).expect("should build the window");
         assert_eq!(pin_sides(&window), vec![PinSide::Left, PinSide::Right]);
-        assert_eq!(pinned.len(), 3);
+        assert_eq!(ported_edges.len(), 3);
     }
 
     #[test]
@@ -1194,12 +1204,12 @@ mod tests {
             .edge_ports
             .insert((TestNode(1), TestNode(0)), vec![WEST_EAST]);
         subgraph.edges.push((TestNode(1), TestNode(0)));
-        let (window, pinned) =
+        let (window, ported_edges) =
             build_window_graph(&subgraph, &graph, None).expect("should build the window");
         let mut sides = pin_sides(&window);
         sides.sort_by_key(|side| matches!(side, PinSide::Down));
         assert_eq!(sides, vec![PinSide::Up, PinSide::Down]);
-        assert_eq!(pinned.len(), 2);
+        assert_eq!(ported_edges.len(), 2);
         assert_eq!(window.graph.edge_count(), 4);
     }
 
@@ -1373,9 +1383,9 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_captures_whole_graph_when_budget_is_generous() {
+    fn test_neighborhood_captures_whole_graph_when_budget_is_generous() {
         // Fork/join: 1 and 2 share a layer. Budget covers the entire (tiny) graph, so every
-        // node's full neighbourhood is captured and no boundary doors are needed at all.
+        // node's full neighborhood is captured and no boundary doors are needed at all.
         let mut graph = make_test_graph(vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
 
         let subgraph = neighborhood(
@@ -1399,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_unknown_anchor_errors() {
+    fn test_neighborhood_unknown_anchor_errors() {
         let mut graph = make_test_graph(vec![(0, 1)]);
         assert!(
             neighborhood(
@@ -1414,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_shared_successor_stays_real_with_one_boundary_door() {
+    fn test_neighborhood_shared_successor_stays_real_with_one_boundary_door() {
         // A1 and A2 converge on B, followed by C and then D. From A1 with a budget of three,
         // the second shell {A2, C} is taken whole and D falls outside.
         let mut graph = make_test_graph(vec![(0, 1), (2, 1), (1, 3), (3, 4)]);
@@ -1455,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_stops_at_claimed_nodes_and_shows_them_as_doors() {
+    fn test_neighborhood_stops_at_claimed_nodes_and_shows_them_as_doors() {
         // 0 -> 1 -> 2 -> 3 with 1 already claimed by another batch: a crawl from 2 must not take
         // 1 back, however generous its budget, and 1 becomes the door home.
         let mut graph = make_test_graph(vec![(0, 1), (1, 2), (2, 3)]);
@@ -1481,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_hub_collapses_many_missing_neighbours_into_one_door() {
+    fn test_neighborhood_hub_collapses_many_missing_neighbors_into_one_door() {
         // Collapse five off-window successors into one deterministic door.
         let mut graph = make_test_graph(vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
 
@@ -1509,13 +1519,13 @@ mod tests {
                     TestNode(5)
                 ],
             )],
-            "5 missing outgoing neighbours should collapse to exactly one door, carrying every \
+            "5 missing outgoing neighbors should collapse to exactly one door, carrying every \
              one of them so the rendered stub's edge can represent them all"
         );
     }
 
     #[test]
-    fn neighborhood_hub_door_prefers_a_still_valid_target() {
+    fn test_neighborhood_hub_door_prefers_a_still_valid_target() {
         // Same hub as above, but with a preference already recorded for node 4 - simulating a
         // door that was actually traveled through in an earlier build (see
         // `LayoutEngine::remember_wormhole_choice`). The collapsed door should keep pointing at
@@ -1550,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_never_disconnects_a_downstream_branch() {
+    fn test_neighborhood_never_disconnects_a_downstream_branch() {
         // R -> M -> {1, 2, ...}; anchor M's first shell is wider than the cutoff, so it is cut to
         // R and the lowest successors, leaving the rest of the downstream branches outside.
         const BUDGET: usize = 2;
@@ -1602,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_visits_a_rejoining_branch_exactly_once() {
+    fn test_neighborhood_visits_a_rejoining_branch_exactly_once() {
         // Diamond: 0 -> {1, 2} -> 3. Treated as undirected, 3 is reachable from both 1 and 2 in
         // the same shell - it must be selected once, not duplicated or re-queued (which would
         // either double-count it or, on a graph with an actual longer cycle, loop forever).

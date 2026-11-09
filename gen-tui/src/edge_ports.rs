@@ -69,22 +69,22 @@ pub enum EdgeSelector<N> {
 impl<N: Copy> EdgeSelector<N> {
     pub const fn source(&self) -> N {
         match self {
-            Self::Exact(key) => key.source,
+            Self::Exact(ported_edge) => ported_edge.source,
             Self::Between { source, .. } => *source,
         }
     }
 
     pub const fn target(&self) -> N {
         match self {
-            Self::Exact(key) => key.target,
+            Self::Exact(ported_edge) => ported_edge.target,
             Self::Between { target, .. } => *target,
         }
     }
 }
 
 impl<N> From<PortedEdge<N>> for EdgeSelector<N> {
-    fn from(key: PortedEdge<N>) -> Self {
-        Self::Exact(key)
+    fn from(ported_edge: PortedEdge<N>) -> Self {
+        Self::Exact(ported_edge)
     }
 }
 

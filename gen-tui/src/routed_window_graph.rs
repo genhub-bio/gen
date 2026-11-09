@@ -1,3 +1,14 @@
+//! The routed form of a window: every node and edge of its geometry, keyed by world position.
+//!
+//! This is the last stage of the window pipeline. `crawl::build_window_graph` crawls the domain
+//! graph into a [`WindowGraph`](crate::window_graph::WindowGraph) (domain nodes, pins and
+//! wormholes, no coordinates), `assembly::assemble_window` turns that into an
+//! [`AssembledLayout`](crate::assembly::AssembledLayout), and `layout::WindowGeometry::new`
+//! gives it coordinates and routes its edges once node sizes are known.
+//! [`RoutedWindowGraph::from_window_geometry`] then keys the whole routed window by
+//! [`WorldPos`], the form the plotter and the navigator read. Clipping to the visible area
+//! happens while plotting, so panning reuses one `RoutedWindowGraph`.
+
 use std::collections::{HashMap, HashSet};
 
 use log::debug;
@@ -35,10 +46,10 @@ pub struct RoutedWindowGraph {
     /// plotter can mark every curved route and the selected rectilinear routes.
     pub domain_edges: Vec<PortedEdge<NodeIndex>>,
 
-    /// World position pairs whose edge is a backward edge's `left_pin -> right_pin` main
-    /// span (`LayoutEdge::is_pin_span`), keyed by both `(source, target)` orderings so a
-    /// lookup doesn't need to know which ordering `graph.all_edges()` happened to store.
-    /// Preserves the main-span classification from the routed geometry.
+    /// World position pairs whose edge is the `left_pin -> right_pin` span of a bend that goes
+    /// around the end of the layout (`LayoutEdge::is_pin_span`), keyed by both `(source,
+    /// target)` orderings so a lookup doesn't need to know which ordering `graph.all_edges()`
+    /// happened to store. Preserves the span classification from the routed geometry.
     pub pin_span_edges: HashSet<(WorldPos, WorldPos)>,
 }
 
@@ -115,7 +126,7 @@ impl RoutedWindowGraph {
     /// Build layers by grouping Data nodes by their Sugiyama rank.
     ///
     /// Nodes in the same layer belong to the same logical rank and should navigate together
-    /// vertically — even when redistribution has given them different visual x-coordinates.
+    /// vertically — even when compaction has given them different visual x-coordinates.
     /// Groups are ordered left-to-right by their minimum world x, giving a globally
     /// consistent layer index.
     fn build_layers_from_coordinates(&mut self) {
@@ -154,7 +165,7 @@ impl RoutedWindowGraph {
             .collect();
     }
 
-    /// Add node to the viewport graph.
+    /// Add node to the routed window graph.
     /// HashMap and UnGraphMap handle duplicate insertions gracefully (replace/ignore).
     fn merge_node(&mut self, world_pos: WorldPos, layout_node: LayoutNode) -> Result<(), String> {
         // Update domain to world mapping for data nodes
@@ -167,7 +178,7 @@ impl RoutedWindowGraph {
         Ok(())
     }
 
-    /// Merge edge into the viewport graph.
+    /// Merge edge into the routed window graph.
     /// Adds edge pairs to existing bundle with deduplication, or creates new edge.
     fn merge_edge(
         &mut self,
@@ -193,12 +204,12 @@ impl RoutedWindowGraph {
         self.graph.add_edge(source, target, combined_bundle);
     }
 
-    /// Get all nodes in the viewport graph
+    /// Get all nodes in the routed window graph
     pub fn nodes(&self) -> impl Iterator<Item = (&WorldPos, &LayoutNode)> {
         self.node_data_by_pos.iter()
     }
 
-    /// Get all edges in the viewport graph
+    /// Get all edges in the routed window graph
     pub fn edges(
         &self,
     ) -> impl Iterator<Item = (WorldPos, WorldPos, &Vec<(NodeIndex, NodeIndex)>)> + '_ {

@@ -1472,7 +1472,7 @@ fn render_png_bytes<'py>(
 ) -> PyResult<Bound<'py, PyBytes>> {
     let scale = validated_png_scale(scale)?;
     let controller = &mut widget.active()?.controller;
-    let previous_style = controller.view_state().layout_mode;
+    let previous_layout_mode = controller.view_state().layout_mode;
     let previous_placement = controller.scale_placement();
     controller.view_state_mut().layout_mode = LayoutMode::Curved;
     controller.set_scale_placement(if full_viewport {
@@ -1495,7 +1495,7 @@ fn render_png_bytes<'py>(
         widget.render_graph_buffer(cols, rows)
     };
     let controller = &mut widget.active()?.controller;
-    controller.view_state_mut().layout_mode = previous_style;
+    controller.view_state_mut().layout_mode = previous_layout_mode;
     controller.set_scale_placement(previous_placement);
     let buffer = buffer_result?;
     let mut bytes = Vec::new();

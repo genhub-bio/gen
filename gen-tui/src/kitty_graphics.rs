@@ -135,8 +135,8 @@ enum StripOutput {
 /// Remembers what the terminal shows so unchanged work is not redone or sent again.
 #[derive(Default)]
 pub struct KittyPixelOverlay {
-    /// What the layer drew last, so identical input skips the raster altogether.
-    last_input: Option<u64>,
+    /// Digest of the overlay drawn last, so an unchanged picture skips the raster altogether.
+    last_digest: Option<u64>,
     /// What the terminal holds for each strip, so a strip whose pixels did not change is not
     /// sent again even when the frame around it did.
     strips: Vec<StripState>,
@@ -157,10 +157,10 @@ impl KittyPixelOverlay {
         if pixel_overlay.is_empty() {
             return self.clear(output);
         }
-        if self.last_input == Some(pixel_overlay.digest()) {
+        if self.last_digest == Some(pixel_overlay.digest()) {
             return Ok(());
         }
-        self.last_input = Some(pixel_overlay.digest());
+        self.last_digest = Some(pixel_overlay.digest());
         let (columns, rows) = (buffer.area.width, buffer.area.height);
         let Some(pixmap) = pixel_overlay.rasterize(columns, rows) else {
             return self.clear(output);
@@ -191,7 +191,7 @@ impl KittyPixelOverlay {
     }
 
     pub fn clear(&mut self, output: &mut impl Write) -> io::Result<()> {
-        self.last_input = None;
+        self.last_digest = None;
         let shown = !self.strips.is_empty();
         for (index, state) in self.strips.drain(..).enumerate() {
             if state != StripState::Empty {

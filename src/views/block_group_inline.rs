@@ -160,6 +160,30 @@ fn run_inline_event_loop<B: Backend>(
     }
 }
 
+/// Build the controller the inline widget draws. The plot stays in the scrollback, which cannot
+/// hold the Kitty overlay that curved edges are drawn on, so the controller never offers them and
+/// `s` does nothing. The full viewer sets this again for itself when `f` hands it the controller.
+fn inline_controller(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    block_group_id: &HashId,
+    history_ref: Option<&str>,
+) -> io::Result<GenGraphController> {
+    let mut controller = GraphDatabase::for_connection(conn, workspace)
+        .and_then(|database| {
+            GenGraphController::for_block_group(
+                database,
+                block_group_id,
+                history_ref.map(String::from),
+            )
+        })
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    controller.set_curved_edges_available(false);
+    // The inline widget follows the keyboard cursor from the start.
+    controller.view_state_mut().show_cursor();
+    Ok(controller)
+}
+
 /// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
 ///
 /// The widget appears inline in the terminal without taking over the entire screen. Like the
@@ -170,7 +194,6 @@ fn run_inline_event_loop<B: Backend>(
 /// * Arrow keys: Navigate cursor between nodes and pan the view
 /// * +/-: Zoom in/out (Minimal → Truncated → Full)
 /// * p: Toggle the highlight of the last of `paths`
-/// * s: Cycle between routed, straight, and curved layout modes
 /// * f: Switch to the full-screen viewer
 /// * q/Enter/Esc: Exit the widget
 ///
@@ -186,17 +209,7 @@ pub fn show_inline_block_group_widget<'a>(
     height: u16,
     history_ref: Option<&'a str>,
 ) -> io::Result<InlineOutcome> {
-    let mut controller = GraphDatabase::for_connection(conn, workspace)
-        .and_then(|database| {
-            GenGraphController::for_block_group(
-                database,
-                &block_group_id,
-                history_ref.map(String::from),
-            )
-        })
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    // The inline widget follows the keyboard cursor from the start.
-    controller.view_state_mut().show_cursor();
+    let mut controller = inline_controller(conn, workspace, &block_group_id, history_ref)?;
     for path in paths {
         controller.add_path(&path);
     }
@@ -557,6 +570,7 @@ mod tests {
     use gen_diff::graph::{DiffChange, DiffChangeKind, DiffGraphEdge, DiffGraphNode};
     use gen_graph::GraphEdge;
     use gen_models::db::get_connection;
+    use gen_tui::LayoutMode;
     use petgraph::Direction::Incoming;
     use ratatui::backend::TestBackend;
 
@@ -707,6 +721,23 @@ mod tests {
             .next()
             .expect("should have a predecessor");
         assert_ne!(engine.batch_of(predecessor), cursor_batch);
+    }
+
+    #[test]
+    fn test_inline_s_key_keeps_the_rectilinear_layout_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["x", "y", "z"]);
+        let conn = get_connection(&db_path).unwrap();
+        let workspace = Workspace::from_current_dir();
+        let mut controller = inline_controller(&conn, &workspace, &block_group_id, None)
+            .expect("should build the inline controller");
+        assert!(!controller.curved_edges_available());
+        assert_eq!(controller.layout_mode(), LayoutMode::Rectilinear);
+
+        let press = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut controller, press), KeyOutcome::Ignore);
+        assert_eq!(controller.layout_mode(), LayoutMode::Rectilinear);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The graph state and behaviour shared by the inline widget and the full-screen viewer.
+//! The graph state and behavior shared by the inline widget and the full-screen viewer.
 //!
 //! Both viewers draw the same graph widget from one [`GenGraphController`]; they differ only in
 //! what surrounds it (a border and a help line inline, the collection explorer, search bar,
@@ -144,7 +144,7 @@ pub struct GenGraphController {
     annotation_starts: AnnotationStarts,
     /// The node-local sequence offset the cursor and camera were last aimed at, kept because a
     /// coarser zoom level draws several offsets in one cell (the ellipsis of a truncated node)
-    /// or moves the cursor onto a neighbouring base, so the column alone can't say where to
+    /// or moves the cursor onto a neighboring base, so the column alone can't say where to
     /// land when zooming back in. Set by `go_to_coordinate` and zooming, and only trusted
     /// while the cursor or camera is still on the column it maps to.
     focus_offset: Option<(GraphNode, i64)>,
@@ -313,8 +313,9 @@ impl GenGraphController {
         self.view_state.layout_mode
     }
 
-    /// Whether the curved layout mode can be shown. A terminal needs the Kitty graphics protocol
-    /// for it; a PNG always can. Defaults to true.
+    /// Whether the curved layout mode can be shown. Curved edges are overlay primitives that
+    /// need pixels: a terminal shows them through the Kitty graphics protocol and a PNG export
+    /// always can, but a plot kept in the scrollback has neither. Defaults to true.
     pub fn set_curved_edges_available(&mut self, available: bool) {
         self.curved_edges_available = available;
         if !available && self.view_state.layout_mode.is_curved() {
@@ -328,7 +329,7 @@ impl GenGraphController {
     }
 
     /// Switch between rectilinear and curved edges. Returns false, changing nothing, when the
-    /// curved style is not available.
+    /// curved layout mode is not available.
     pub fn toggle_curved_edges(&mut self) -> bool {
         self.view_state.layout_mode = match self.view_state.layout_mode {
             LayoutMode::Rectilinear if self.curved_edges_available => LayoutMode::Curved,
@@ -381,8 +382,9 @@ impl GenGraphController {
 
     /// The terminal row the scale's line is drawn on, given the area the graph was drawn in
     /// and what `buf` holds there. Under the content, the scale clears everything drawn in the
-    /// graph: nodes, annotation names, edges in the buffer and the curves deferred to the PNG
-    /// renderer, which loop well below the lowest node.
+    /// graph: nodes, annotation names, edges in the buffer and the curves among the overlay
+    /// primitives (drawn by the Kitty overlay or the PNG export), which loop well below the
+    /// lowest node.
     fn scale_line_row(&self, buf: &Buffer, area: Rect, graph_area: Rect) -> u16 {
         let last_graph_row = graph_area.y + graph_area.height - 1;
         match self.scale_placement {
@@ -399,20 +401,20 @@ impl GenGraphController {
                     .map_or(last_graph_row, |(_, row)| row);
                 let lowest_content_row = lowest_node_row
                     .max(lowest_buffer_row(buf, graph_area))
-                    .max(self.lowest_deferred_edge_row(graph_area));
+                    .max(self.lowest_overlay_row(graph_area));
                 lowest_content_row.min(last_graph_row) + SCALE_CONTENT_GAP + 1
             }
         }
     }
 
-    /// The lowest terminal row of `graph_area` that a curve deferred to the PNG renderer reaches
+    /// The lowest terminal row of `graph_area` that an overlay primitive reaches
     /// (control points included, so a loop is never cut short), or the top row without any.
-    fn lowest_deferred_edge_row(&self, graph_area: Rect) -> u16 {
+    fn lowest_overlay_row(&self, graph_area: Rect) -> u16 {
         let last_row = f64::from(graph_area.y + graph_area.height - 1);
         self.view_state
             .overlay_primitives
             .iter()
-            .flat_map(|edge| match edge {
+            .flat_map(|primitive| match primitive {
                 OverlayPrimitive::Line(line) => vec![line.from.1, line.to.1],
                 OverlayPrimitive::Bezier(curve) => {
                     vec![curve.from.1, curve.control1.1, curve.control2.1, curve.to.1]
@@ -684,10 +686,11 @@ impl GenGraphController {
         }
     }
 
-    /// Move the camera by a drag of `dx` by `dy` cells, following the pointer one to one.
-    pub fn pan(&mut self, dx: i16, dy: i16) {
+    /// Move the camera by a drag of `delta_x` by `delta_y` cells, following the pointer one to
+    /// one.
+    pub fn pan(&mut self, delta_x: i16, delta_y: i16) {
         self.focus_offset = None;
-        self.view_state.move_by_terminal(dx, dy);
+        self.view_state.move_by_terminal(delta_x, delta_y);
         self.view_state.rebase_camera_to_closest_node();
     }
 
@@ -705,7 +708,7 @@ impl GenGraphController {
         }
     }
 
-    /// Show `coordinate` of node `node_id` at the current detail level, centred when `center` is
+    /// Show `coordinate` of node `node_id` at the current detail level, centered when `center` is
     /// set and otherwise against the left edge, with the cursor on it. The block holding it is
     /// located even where the crawl hasn't reached yet, and the batch around it opened. Fails
     /// when the block group lacks that position, or when edits cut it off from the start of a
@@ -1032,17 +1035,17 @@ impl GenGraphController {
         self.render_to_buffer(frame.buffer_mut(), area, style);
     }
 
-    /// Draw one finished frame into `buf` for a viewer that draws on request rather than in an
+    /// Draw one finished frame into `buffer` for a viewer that draws on request rather than in an
     /// event loop (the notebook and R widgets): bring the loaded graph up to date, draw, and
     /// draw again if drawing crawled in more of the graph, so the frame never shows stale
     /// dimming or annotations.
-    pub fn render_settled(&mut self, buf: &mut Buffer, area: Rect, style: Style) -> WorldSync {
+    pub fn render_settled(&mut self, buffer: &mut Buffer, area: Rect, style: Style) -> WorldSync {
         let before = self.sync_active_world();
-        self.render_to_buffer(buf, area, style);
+        self.render_to_buffer(buffer, area, style);
         let after = self.sync_active_world();
         if after.changed {
-            Clear.render(area, buf);
-            self.render_to_buffer(buf, area, style);
+            Clear.render(area, buffer);
+            self.render_to_buffer(buffer, area, style);
         }
         WorldSync {
             changed: before.changed || after.changed,
@@ -1050,8 +1053,8 @@ impl GenGraphController {
         }
     }
 
-    /// Draw the graph and its annotation names into `area` of `buf`.
-    pub fn render_to_buffer(&mut self, buf: &mut Buffer, full_area: Rect, style: Style) {
+    /// Draw the graph and its annotation names into `area` of `buffer`.
+    pub fn render_to_buffer(&mut self, buffer: &mut Buffer, full_area: Rect, style: Style) {
         let scale_rows = self.scale_rows(full_area.height);
         let area = Rect {
             height: full_area.height - scale_rows,
@@ -1084,7 +1087,7 @@ impl GenGraphController {
 
         let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
         let view = GraphView::new(&mut self.engine, active_renderer).style(style);
-        StatefulWidget::render(view, area, buf, &mut self.view_state);
+        StatefulWidget::render(view, area, buffer, &mut self.view_state);
 
         // Resolve the search and path labels against the graph as drawn, which may have just
         // grown.
@@ -1101,7 +1104,7 @@ impl GenGraphController {
                     .with_compact_layout(self.node_annotations.clone());
             self.labelled_overlay_inputs = Some(label_inputs);
         }
-        draw_annotation_labels(buf, area, &self.view_state, &self.annotation_labels);
+        draw_annotation_labels(buffer, area, &self.view_state, &self.annotation_labels);
         if scale_rows > 0 {
             // The rows under the graph are outside the area the graph view styles, so give them
             // the same canvas background.
@@ -1110,14 +1113,18 @@ impl GenGraphController {
                 height: scale_rows,
                 ..full_area
             };
-            buf.set_style(scale_area, style);
+            buffer.set_style(scale_area, style);
             let scale = PathScale::from_frame(
                 &self.view_state.frame,
                 &self.aligned_path,
                 &self.zoom_levels[self.view_state.zoom_index].1,
                 area,
             );
-            scale.draw(buf, full_area, self.scale_line_row(buf, full_area, area));
+            scale.draw(
+                buffer,
+                full_area,
+                self.scale_line_row(buffer, full_area, area),
+            );
         }
     }
 
@@ -1130,12 +1137,12 @@ impl GenGraphController {
     }
 }
 
-/// The lowest row of `area` in `buf` holding a visible glyph, or the top row of an empty area.
-fn lowest_buffer_row(buf: &Buffer, area: Rect) -> u16 {
+/// The lowest row of `area` in `buffer` holding a visible glyph, or the top row of an empty area.
+fn lowest_buffer_row(buffer: &Buffer, area: Rect) -> u16 {
     (area.y..area.y + area.height)
         .rev()
         .find(|&row| {
-            (area.x..area.x + area.width).any(|column| buf[(column, row)].symbol().trim() != "")
+            (area.x..area.x + area.width).any(|column| buffer[(column, row)].symbol().trim() != "")
         })
         .unwrap_or(area.y)
 }
@@ -1359,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scale_under_the_content_clears_deferred_curves() {
+    fn test_scale_under_the_content_clears_overlay_curves() {
         let directory = tempfile::tempdir().expect("should create a temporary directory");
         let database_path = directory.path().join("graph.db");
         let (block_group_id, edge_ids) =
@@ -1453,12 +1460,12 @@ mod tests {
             controller.handle_key(press(KeyCode::Char('p'))),
             GraphKeyOutcome::Ignore
         );
-        for style in [LayoutMode::Curved, LayoutMode::Rectilinear] {
+        for layout_mode in [LayoutMode::Curved, LayoutMode::Rectilinear] {
             assert_eq!(
                 controller.handle_key(press(KeyCode::Char('s'))),
                 GraphKeyOutcome::Redraw
             );
-            assert_eq!(controller.view_state.layout_mode, style);
+            assert_eq!(controller.view_state.layout_mode, layout_mode);
         }
         assert_eq!(
             controller.handle_key(press(KeyCode::Char('d'))),

@@ -194,7 +194,7 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
             .map(|node| node.id)
     }
 
-    /// The neighbouring placed node in `direction`, considering every placed node (not just
+    /// The neighboring placed node in `direction`, considering every placed node (not just
     /// the visible subset) so navigation can reach nodes just outside the viewport.
     /// `Left`/`Right` pick the nearest node in the nearest adjacent layer in that direction;
     /// `Up`/`Down` pick the nearest node within the same layer.

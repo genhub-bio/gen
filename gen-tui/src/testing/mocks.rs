@@ -1,4 +1,4 @@
-// Standardized mock objects for consistent testing across the widget system
+//! Standardized mock objects for consistent testing across the layout and rendering pipeline.
 
 use std::collections::HashMap;
 
@@ -298,8 +298,8 @@ impl TestGraphs {
         graph
     }
 
-    /// A `rows` by `cols` grid where node `(row, col)` connects to its right neighbour
-    /// `(row, col + 1)` and its down neighbour `(row + 1, col)` when in bounds - a DAG (required
+    /// A `rows` by `cols` grid where node `(row, col)` connects to its right neighbor
+    /// `(row, col + 1)` and its down neighbor `(row + 1, col)` when in bounds - a DAG (required
     /// by the Sugiyama-based layout pipeline) that still gives every interior node the 4
     /// connections (2 in, 2 out) of an ordinary undirected grid. Returns the graph plus a
     /// `(row, col) -> NodeIndex` lookup so callers can pick a specific anchor (a corner, the
@@ -369,7 +369,7 @@ impl<G: GraphBase> MockRenderer<G> for FixedNodeSizer {
     }
 }
 
-// Full renderer for direct use as a controller's renderer (renders a plain glyph; used
+// Full renderer for direct use as a view's renderer (renders a plain glyph; used
 // by tests that measure layout rather than rendered output).
 impl<G: GraphBase> NodeRenderer<G> for FixedNodeSizer {
     fn get_node_size(&self, _node: &G::NodeId) -> (u64, u64) {

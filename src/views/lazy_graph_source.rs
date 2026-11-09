@@ -874,7 +874,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_expand_frontier_pulls_in_a_node_neighbourhood_from_sql() {
+    fn test_expand_frontier_pulls_in_a_node_neighborhood_from_sql() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("graph.db");
         let block_group_id = setup_chain_block_group(&db_path);
@@ -894,7 +894,7 @@ pub(crate) mod tests {
         assert!(!source.is_frontier(anchor, Direction::Incoming));
         assert!(
             source.is_frontier(graph_node("z"), Direction::Outgoing),
-            "completing y should stop at its own neighbours"
+            "completing y should stop at its own neighbors"
         );
     }
 
