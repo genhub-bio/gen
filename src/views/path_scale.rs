@@ -16,7 +16,11 @@
 use core::cmp::Reverse;
 
 use gen_graph::{GraphNode, PackedGenGraph};
-use gen_tui::{frame_index::FrameIndex, plotter::NodeRenderer, theme::current_theme};
+use gen_tui::{
+    frame_index::FrameIndex,
+    plotter::{ColumnRun, NodeRenderer},
+    theme::current_theme,
+};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use crate::views::gen_graph_widget::AlignedPath;
@@ -36,6 +40,12 @@ const COLUMNS_PER_LABEL: i64 = 32;
 
 /// The most labels a view aims for, so that a wide view stays uncrowded.
 const MOST_LABELS: usize = 6;
+
+/// How many candidate ticks per column of view a step may offer before the search for a finer
+/// step stops. One label needs several columns, so a step that already puts a few candidates
+/// in every column has offered every place a label could go, and finer steps would only
+/// format millions of positions that fall in the same few columns.
+const CANDIDATES_PER_COLUMN: i64 = 4;
 
 /// The scale line: dots between marks and a pipe under each label. Edges are drawn with
 /// box-drawing glyphs, so the scale is not mistaken for part of the graph.
@@ -124,24 +134,44 @@ impl PathScale {
     ) -> Self {
         let mut segments: Vec<AxisSegment> = frame
             .visible_ids()
-            .filter_map(|node| {
-                let domain_start = aligned_path.path_position(&node)?;
+            .flat_map(|node| {
+                let Some(domain_start) = aligned_path.path_position(&node) else {
+                    return Vec::new();
+                };
                 let length = node.sequence_end - node.sequence_start;
-                let rect = frame.rect_of(node)?;
+                let Some(rect) = frame.rect_of(node) else {
+                    return Vec::new();
+                };
                 let left = rect.left() + i64::from(area.x);
                 // A renderer that doesn't override `map_column` returns the raw offset, which
                 // can run past the cells the node is drawn in.
                 let last_column = rect.right() - rect.left();
-                let column_of =
-                    |offset: i64| renderer.map_column(&node, offset).clamp(0, last_column);
-                let range_start = left + column_of(0);
-                let range_end = left + column_of(length - 1) + 1;
-                (length > 0 && range_end > range_start).then_some(AxisSegment {
-                    domain_start,
-                    domain_end: domain_start + length,
-                    range_start,
-                    range_end,
-                })
+                let clamp_column = |column: i64| column.clamp(0, last_column);
+                // A renderer that compresses stretches of the node into single cells says
+                // where each stretch is drawn; otherwise the bases map evenly between the
+                // columns of the first and last base.
+                let runs = renderer.column_runs(&node).unwrap_or_else(|| {
+                    vec![ColumnRun {
+                        raw_start: 0,
+                        raw_end: length,
+                        column_start: renderer.map_column(&node, 0),
+                        column_end: renderer.map_column(&node, length - 1) + 1,
+                    }]
+                });
+                runs.into_iter()
+                    .filter_map(|run| {
+                        let range_start = left + clamp_column(run.column_start);
+                        let range_end = left + clamp_column(run.column_end - 1) + 1;
+                        (run.raw_end > run.raw_start && range_end > range_start).then_some(
+                            AxisSegment {
+                                domain_start: domain_start + run.raw_start,
+                                domain_end: domain_start + run.raw_end,
+                                range_start,
+                                range_end,
+                            },
+                        )
+                    })
+                    .collect()
             })
             .collect();
         segments.sort_by_key(|segment| segment.range_start);
@@ -234,25 +264,61 @@ fn multiples_in(start: i64, end: i64, step: i64) -> impl Iterator<Item = i64> {
     (first..end).step_by(step as usize)
 }
 
-/// The ticks of `segments` on multiples of `step` that are in view.
+/// The stretch of `segment`'s domain whose columns may be in `visible_columns`, widened by one
+/// position on each side so that rounding never cuts off a tick that is in view.
+fn visible_domain(segment: &AxisSegment, visible_columns: (i64, i64)) -> Option<(i64, i64)> {
+    let first_column = visible_columns.0.max(segment.range_start);
+    let last_column = visible_columns.1.min(segment.range_end);
+    if first_column >= last_column {
+        return None;
+    }
+    let positions_per_column = segment.domain_length() as f64 / segment.range_length() as f64;
+    let start = segment.domain_start
+        + ((first_column - segment.range_start) as f64 * positions_per_column).floor() as i64
+        - 1;
+    let end = segment.domain_start
+        + ((last_column - segment.range_start) as f64 * positions_per_column).ceil() as i64
+        + 1;
+    Some((start.max(segment.domain_start), end.min(segment.domain_end)))
+}
+
+/// How many multiples of `step` lie in the visible stretch of `segments`.
+fn candidate_count(segments: &[AxisSegment], step: i64, visible_columns: (i64, i64)) -> i64 {
+    segments
+        .iter()
+        .filter_map(|segment| visible_domain(segment, visible_columns))
+        .map(|(start, end)| multiples_in(start, end, step).count() as i64)
+        .sum()
+}
+
+/// The ticks of `segments` on multiples of `step` that are in view. Only positions whose column
+/// is in view are labelled, because formatting the text is what costs.
 fn ticks_at_step(segments: &[AxisSegment], step: i64, visible_columns: (i64, i64)) -> Vec<Tick> {
     segments
         .iter()
-        .flat_map(|segment| {
-            multiples_in(segment.domain_start, segment.domain_end, step).map(|position| Tick {
-                position,
-                column: segment.column_of(position),
-                label: format_position(position, step),
-                label_start: 0,
-            })
+        .filter_map(|segment| {
+            let (start, end) = visible_domain(segment, visible_columns)?;
+            Some((segment, start, end))
         })
-        .filter(|tick| tick.column >= visible_columns.0 && tick.column < visible_columns.1)
+        .flat_map(|(segment, start, end)| {
+            multiples_in(start, end, step)
+                .map(|position| (position, segment.column_of(position)))
+                .filter(|(_, column)| *column >= visible_columns.0 && *column < visible_columns.1)
+                .map(|(position, column)| Tick {
+                    position,
+                    column,
+                    label: format_position(position, step),
+                    label_start: 0,
+                })
+        })
         .collect()
 }
 
 /// Pick the label step for the whole axis and place its labels. Steps are tried from coarse
 /// to fine, and the first that places as many labels as the width of the view calls for wins;
-/// failing that, the step that placed the most. 1-2-5 steps jump by two to two and a half
+/// failing that, the step that placed the most. The search also ends once a step offers more
+/// candidates than [`CANDIDATES_PER_COLUMN`] allows, which keeps a long sequence squeezed into
+/// a few columns from being walked position by position. 1-2-5 steps jump by two to two and a half
 /// times, so a view can land above the number it aimed for.
 fn choose_labels(segments: &[AxisSegment], visible_columns: (i64, i64)) -> (i64, Vec<Tick>) {
     let wanted = (((visible_columns.1 - visible_columns.0) / COLUMNS_PER_LABEL).max(2) as usize)
@@ -261,7 +327,11 @@ fn choose_labels(segments: &[AxisSegment], visible_columns: (i64, i64)) -> (i64,
     let coarsest = largest.map_or(1, |end| 10_i64.pow(end.max(1).ilog10() + 1));
     let mut step = coarsest;
     let mut best: (i64, Vec<Tick>) = (step, Vec::new());
+    let most_candidates = (visible_columns.1 - visible_columns.0).max(1) * CANDIDATES_PER_COLUMN;
     loop {
+        if candidate_count(segments, step, visible_columns) > most_candidates {
+            return best;
+        }
         let placed = place_labels(
             ticks_at_step(segments, step, visible_columns),
             visible_columns,
@@ -499,5 +569,56 @@ mod tests {
         assert_eq!(buffer[(6, 0)].symbol(), " ");
         assert_eq!(buffer[(2, 0)].symbol(), ".");
         assert_eq!(buffer[(9, 0)].symbol(), ".");
+    }
+
+    #[test]
+    fn test_a_long_sequence_in_few_columns_stops_at_a_coarse_step() {
+        let segments = vec![segment((0, 51_304_566), (0, 3))];
+
+        let (step, ticks) = super::choose_labels(&segments, (0, 200));
+
+        assert!(step >= 10_000, "should not descend to step {step}");
+        assert!(!ticks.is_empty(), "should still label the axis");
+        assert!(
+            super::candidate_count(&segments, 1, (0, 200)) > 200 * super::CANDIDATES_PER_COLUMN,
+            "step 1 should be refused as too many candidates"
+        );
+    }
+
+    #[test]
+    fn test_ticks_cover_only_the_visible_part_of_a_long_sequence() {
+        let segments = vec![segment((0, 51_304_566), (0, 51_304_566))];
+
+        let ticks = super::ticks_at_step(&segments, 10, (25_000_000, 25_000_100));
+
+        assert_eq!(ticks.len(), 10);
+        assert!(
+            ticks
+                .iter()
+                .all(|tick| (25_000_000..25_000_100).contains(&tick.position))
+        );
+    }
+
+    #[test]
+    fn test_a_compressed_stretch_keeps_its_ticks_in_its_own_cell() {
+        // A first base, a 16 Mb run drawn as one cell, and the base after it, as a compact
+        // view draws a long node.
+        let segments = vec![
+            segment((0, 1), (0, 1)),
+            segment((1, 16_000_000), (1, 2)),
+            segment((16_000_000, 16_000_001), (2, 3)),
+        ];
+
+        let scale = PathScale::new(segments, (0, 10));
+
+        assert!(!scale.ticks.is_empty(), "should label the axis");
+        for tick in &scale.ticks {
+            let expected = match tick.position {
+                0 => 0,
+                16_000_000 => 2,
+                _ => 1,
+            };
+            assert_eq!(tick.column, expected, "tick at {}", tick.position);
+        }
     }
 }

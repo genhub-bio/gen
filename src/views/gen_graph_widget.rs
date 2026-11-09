@@ -18,7 +18,7 @@ use gen_tui::{
     graph_widget::NODE_GLYPH,
     layout::{VerticalAnchor, VisualDetail},
     layout_engine::{BatchId, LayoutEngine},
-    plotter::{CursorColumns, NodeRenderer, PathStyle},
+    plotter::{ColumnRun, CursorColumns, NodeRenderer, PathStyle},
     theme::current_theme,
     viewport_state::WorldBuffer,
 };
@@ -348,6 +348,10 @@ where
         self.inner.raw_column(node, column)
     }
 
+    fn column_runs(&self, node: &GraphNode) -> Option<Vec<ColumnRun>> {
+        self.inner.column_runs(node)
+    }
+
     fn is_aligned(&self, node: &GraphNode) -> bool {
         self.aligned_path.is_aligned(node)
     }
@@ -674,6 +678,12 @@ impl<S: SequenceSource> NodeRenderer<PackedGenGraph> for GenGraphTruncatedRender
             .map_or(column, |layer| layer.compact(node).raw_column(column))
     }
 
+    fn column_runs(&self, node: &GraphNode) -> Option<Vec<ColumnRun>> {
+        self.layer
+            .as_ref()
+            .map(|layer| layer.compact(node).column_runs())
+    }
+
     fn cursor_columns(&self, node: &GraphNode) -> Option<CursorColumns> {
         self.layer.as_ref().map(|layer| {
             let layout = layer.compact(node);
@@ -717,10 +727,22 @@ impl<S: SequenceSource> NodeRenderer<PackedGenGraph> for GenGraphTruncatedRender
         for column in sequence_start..=sequence_end {
             buffer.set_char_styled(WorldPos::new(column, node_row), '…', body_style);
         }
-        let mut bases = sequence.as_deref().unwrap_or_default().chars();
+        let sequence_text = sequence.as_deref().unwrap_or_default();
+        // Skipped stretches can span millions of bases, so ASCII sequences are indexed directly
+        // instead of walking their characters.
+        let is_ascii = sequence_text.is_ascii();
+        let mut bases = sequence_text.chars();
         let mut next_raw = 0;
         for (raw, column) in layout.events.iter().zip(&layout.columns) {
-            let base = bases.nth((*raw - next_raw) as usize).unwrap_or('.');
+            let base = if is_ascii {
+                sequence_text
+                    .as_bytes()
+                    .get(*raw as usize)
+                    .map(|byte| char::from(*byte))
+            } else {
+                bases.nth((*raw - next_raw) as usize)
+            }
+            .unwrap_or('.');
             next_raw = raw + 1;
             buffer.set_char_styled(
                 WorldPos::new(area.min.x + layout.left_padding + column, node_row),

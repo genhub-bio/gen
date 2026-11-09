@@ -84,6 +84,16 @@ impl PathStyle {
     }
 }
 
+/// A stretch of a node's raw offsets and the columns it is drawn in. A stretch drawn as one
+/// cell, such as an omitted run of bases, has `column_end == column_start + 1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnRun {
+    pub raw_start: i64,
+    pub raw_end: i64,
+    pub column_start: i64,
+    pub column_end: i64,
+}
+
 /// Sequence columns available to the cursor, excluding decorative padding and omitted runs.
 #[derive(Clone, Debug)]
 pub enum CursorColumns {
@@ -163,6 +173,15 @@ where
     /// Map a displayed column back to a raw node-local coordinate.
     fn raw_column(&self, _node: &G::NodeId, column: i64) -> i64 {
         column
+    }
+
+    /// How the node's raw offsets are spread over its columns, in offset order, when the
+    /// renderer compresses some stretches into a single cell. `None` means the offsets map
+    /// evenly from `map_column`'s first to last column, so a scale along the node can
+    /// interpolate. A renderer that compresses must answer, or such a scale misplaces every
+    /// position that follows a compressed stretch.
+    fn column_runs(&self, _node: &G::NodeId) -> Option<Vec<ColumnRun>> {
+        None
     }
 
     /// Get default dimensions for dummy/routing nodes
@@ -251,6 +270,10 @@ where
         (**self).raw_column(node, column)
     }
 
+    fn column_runs(&self, node: &G::NodeId) -> Option<Vec<ColumnRun>> {
+        (**self).column_runs(node)
+    }
+
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
         (**self).render_node(buffer, area, node_id);
     }
@@ -304,6 +327,10 @@ where
 
     fn raw_column(&self, node: &G::NodeId, column: i64) -> i64 {
         (**self).raw_column(node, column)
+    }
+
+    fn column_runs(&self, node: &G::NodeId) -> Option<Vec<ColumnRun>> {
+        (**self).column_runs(node)
     }
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {

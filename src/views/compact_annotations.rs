@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gen_core::{HashId, Strand};
 use gen_graph::GraphNode;
+use gen_tui::plotter::ColumnRun;
 use ratatui::style::Color;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -164,6 +165,33 @@ impl NodeAnnotationLayout {
             self.columns[index - 1] + 1
         };
         self.left_padding + column
+    }
+
+    /// Each retained base in its own column and each skipped run in the one cell drawn for it,
+    /// in offset order, so a scale can place positions where the bases are drawn.
+    pub fn column_runs(&self) -> Vec<ColumnRun> {
+        let mut runs = Vec::with_capacity(self.events.len() * 2);
+        for (index, (&event, &column)) in self.events.iter().zip(&self.columns).enumerate() {
+            if index > 0 {
+                let previous = self.events[index - 1];
+                if event - previous > 1 {
+                    let skipped_column = self.left_padding + self.columns[index - 1] + 1;
+                    runs.push(ColumnRun {
+                        raw_start: previous + 1,
+                        raw_end: event,
+                        column_start: skipped_column,
+                        column_end: skipped_column + 1,
+                    });
+                }
+            }
+            runs.push(ColumnRun {
+                raw_start: event,
+                raw_end: event + 1,
+                column_start: self.left_padding + column,
+                column_end: self.left_padding + column + 1,
+            });
+        }
+        runs
     }
 
     pub fn raw_column(&self, column: i64) -> i64 {
@@ -1496,6 +1524,29 @@ mod tests {
                 let layouts = layouts_with_centered_nodes(&flags, &[first, second]);
                 assert_eq!(row_of(&layouts[&second], "A", 1), 0, "pair {index}");
             }
+        }
+    }
+
+    #[test]
+    fn test_column_runs_give_each_skipped_stretch_one_cell() {
+        let layout = NodeAnnotationLayout::empty(1_000);
+
+        let runs = layout.column_runs();
+
+        let spans: Vec<_> = runs
+            .iter()
+            .map(|run| (run.raw_start, run.raw_end, run.column_start, run.column_end))
+            .collect();
+        assert_eq!(spans, [(0, 1, 0, 1), (1, 999, 1, 2), (999, 1_000, 2, 3)]);
+    }
+
+    #[test]
+    fn test_column_runs_agree_with_map_column() {
+        let layout = NodeAnnotationLayout::empty(1_000);
+
+        for run in layout.column_runs() {
+            assert_eq!(layout.map_column(run.raw_start), run.column_start);
+            assert_eq!(layout.map_column(run.raw_end - 1), run.column_end - 1);
         }
     }
 }
