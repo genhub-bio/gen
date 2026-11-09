@@ -10,6 +10,8 @@ use gen_models::{
     operations::{Defaults as ModelDefaults, OperationSummary, commit_operation_summary},
 };
 
+use crate::views::png_export::{DEFAULT_SCALE, MAX_SCALE};
+
 pub mod cache;
 pub mod checkout;
 pub mod cli_context;
@@ -161,9 +163,9 @@ pub enum Commands {
         /// (close to a 300 dpi print) and 4 is 384 dpi
         #[arg(
             long,
-            default_value_t = gen_tui::DEFAULT_SCALE as u8,
+            default_value_t = DEFAULT_SCALE as u8,
             requires = "png",
-            value_parser = clap::value_parser!(u8).range(1..=gen_tui::MAX_SCALE as i64)
+            value_parser = clap::value_parser!(u8).range(1..=MAX_SCALE as i64)
         )]
         png_scale: u8,
     },
@@ -560,6 +562,7 @@ mod tests {
     use gen_diff::operations::DiffRange;
 
     use super::{Cli, Commands, parse_diff_revisions};
+    use crate::views::png_export::DEFAULT_SCALE;
 
     #[test]
     fn test_import_and_update_variants_accept_commit_messages() {
@@ -746,7 +749,7 @@ mod tests {
         assert_eq!(png, Some(PathBuf::from("plot.png")));
         assert_eq!(
             (png_columns, png_rows, png_scale),
-            (80, 300, gen_tui::DEFAULT_SCALE as u8)
+            (80, 300, DEFAULT_SCALE as u8)
         );
         assert!(Cli::try_parse_from(["gen", "view", "--png-rows", "10"]).is_err());
         assert!(Cli::try_parse_from(["gen", "view", "--png-scale", "2"]).is_err());

@@ -1,27 +1,35 @@
 //! Rasterizes a Ratatui `Buffer` to a PNG so graph plots can be produced without a terminal or
 //! notebook frontend (the CLI `--png` flag and the Python `save_png` methods).
 //!
-//! Pixels are produced one terminal row at a time and streamed into a single PNG, so pixel-buffer memory is
-//! independent of image height (the input cell buffer still covers the whole view). The font, glyph cache and row-band allocation persist across
-//! exports. Glyphs are single-width and clipped to their cell: no shaping, fallback fonts or
-//! bold/italic faces.
+//! The viewer places every node exactly as it does in a terminal but leaves curved edges out of
+//! the buffer and reports them as overlay primitives (see `LayoutMode::Curved`). The text is
+//! rasterized here, and the primitives are rasterized by the same `PixelOverlay` a terminal shows
+//! through the Kitty graphics protocol, composited band by band as the image streams out.
+//!
+//! Pixels are produced one terminal row at a time and streamed into a single PNG, so pixel-buffer
+//! memory is independent of image height (the input cell buffer still covers the whole view). The
+//! font, glyph cache and row-band allocation persist across exports. Glyphs are single-width and
+//! clipped to their cell: no shaping, fallback fonts or bold/italic faces.
 
 use core::mem::swap;
 use std::{
     collections::HashMap,
-    io::{Error as IoError, Write},
+    io::{self, Error as IoError, Write},
 };
 
 use fontdue::{Font, FontSettings, Metrics};
+use gen_tui::{
+    OverlayPrimitive, RasterConfig, color_to_rgb,
+    pixel_overlay::{PixelOverlay, overlay_primitives_bounds, prepare_node_highlight_cells},
+};
 use png::{BitDepth, ColorType, Compression, Encoder, EncodingError, PixelDimensions, Unit};
 use ratatui::{
     buffer::{Buffer, Cell},
     layout::{Margin, Rect},
-    style::{Color, Modifier},
+    style::Modifier,
 };
 use thiserror::Error;
-
-use crate::theme::current_theme;
+use tiny_skia::Pixmap;
 
 /// Blank cells kept around the content by [`PngRenderer::crop_to_content`].
 pub const CROP_MARGIN: u16 = 1;
@@ -36,7 +44,7 @@ pub const DEFAULT_SCALE: usize = 2;
 /// Pixels per meter at the logical 96 dpi, which a scale of one declares in the PNG header.
 const LOGICAL_PIXELS_PER_METER: u32 = 3780;
 
-const FONT_BYTES: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+const FONT_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Regular.ttf");
 
 #[derive(Debug, Error)]
 pub enum PngExportError {
@@ -48,61 +56,6 @@ pub enum PngExportError {
     Png(#[from] EncodingError),
     #[error("output failed: {0}")]
     Io(#[from] IoError),
-}
-
-/// Pixel cell dimensions, scale and colors shared by PNG export and terminal graphics. Sizes are
-/// in pixels of the rendered image. [`Self::with_scale`] derives a sharper config from a
-/// logical one: the same grid of cells with every length multiplied, so a browser can show the
-/// image at its logical size and use the extra pixels on high-density screens.
-#[derive(Clone, Copy, Debug)]
-pub struct RasterConfig {
-    pub cell_width: usize,
-    pub cell_height: usize,
-    /// How many image pixels draw one logical pixel. Strokes, paddings and offsets that are a
-    /// fixed number of logical pixels are multiplied by it.
-    pub scale: usize,
-    /// Used for cells whose foreground is `Color::Reset`.
-    pub foreground: [u8; 3],
-    /// Used for cells whose background is `Color::Reset`, and to fill the canvas.
-    pub background: [u8; 3],
-}
-
-impl Default for RasterConfig {
-    /// An 11x21 pixel cell with the current theme's text and canvas colors.
-    fn default() -> Self {
-        let theme = current_theme();
-        Self {
-            cell_width: 11,
-            cell_height: 21,
-            scale: 1,
-            foreground: color_to_rgb(theme[0x05], [255; 3]),
-            background: color_to_rgb(theme[0x00], [0; 3]),
-        }
-    }
-}
-
-impl RasterConfig {
-    /// This config drawn at `scale` image pixels per logical pixel, so a scale of 2 writes an
-    /// image twice as wide and tall with the same cell grid. A scale of 0 is treated as 1.
-    /// The PNG declares 96 dpi times the scale, so 2 is 192 dpi and 3 is 288 dpi, close to a
-    /// 300 dpi print.
-    pub fn with_scale(self, scale: usize) -> Self {
-        let scale = scale.max(1);
-        let (cell_width, cell_height) = self.logical_cell_size();
-        Self {
-            cell_width: cell_width * scale,
-            cell_height: cell_height * scale,
-            scale,
-            ..self
-        }
-    }
-
-    /// The cell size in logical pixels, which does not change with the scale. A viewer maps
-    /// pointer positions to cells with it.
-    pub fn logical_cell_size(&self) -> (usize, usize) {
-        let scale = self.scale.max(1);
-        (self.cell_width / scale, self.cell_height / scale)
-    }
 }
 
 struct CachedGlyph {
@@ -155,27 +108,14 @@ impl PngRenderer {
         })
     }
 
-    /// Stream a complete PNG of `buffer` into `output`. Use a file for large plots; a `Vec`
-    /// retains the whole encoded image.
+    /// Stream a complete PNG of `buffer` into `output`, with `overlay` (curved edges and other
+    /// pixel primitives of the buffer's cells) drawn behind node backgrounds and text, as in the
+    /// terminal. Use a file for large plots; a `Vec` retains the whole encoded image.
     pub fn write_png<W: Write>(
         &mut self,
         buffer: &Buffer,
+        overlay: Option<&PixelOverlay>,
         output: &mut W,
-    ) -> Result<(), PngExportError> {
-        self.write_png_with_overlay(buffer, output, |_, _, _| {})
-    }
-
-    /// Like [`Self::write_png`], but hands each canvas-colored band to `overlay` before cells
-    /// are drawn, so a caller can draw behind node backgrounds and text (the edges of a curved
-    /// graph) without this module
-    /// knowing what is drawn. `overlay` receives the band's RGB pixels, the image width in
-    /// pixels, and the image row of the band's first pixel; the band's height is
-    /// `pixels.len() / (3 * width)`, and bands arrive top to bottom.
-    pub fn write_png_with_overlay<W: Write>(
-        &mut self,
-        buffer: &Buffer,
-        output: &mut W,
-        mut overlay: impl FnMut(&mut [u8], usize, usize),
     ) -> Result<(), PngExportError> {
         let columns = usize::from(buffer.area.width);
         let rows = usize::from(buffer.area.height);
@@ -186,6 +126,15 @@ impl PngRenderer {
         }
         let width = columns * self.config.cell_width;
         self.band.resize(width * self.config.cell_height * 3, 0);
+        let mut overlay_band = match overlay.filter(|overlay| !overlay.is_empty()) {
+            Some(overlay) => {
+                let scratch = overlay.band_pixmap(width, self.config.cell_height).ok_or(
+                    PngExportError::InvalidInput("could not allocate PNG edge band"),
+                )?;
+                Some((overlay, scratch))
+            }
+            None => None,
+        };
 
         let mut encoder = Encoder::new(
             &mut *output,
@@ -211,7 +160,7 @@ impl PngRenderer {
                     row,
                     width,
                     row_index * self.config.cell_height,
-                    &mut overlay,
+                    overlay_band.as_mut(),
                 );
                 stream.write_all(&self.band)?;
             }
@@ -283,13 +232,15 @@ impl PngRenderer {
         row: &[Cell],
         width: usize,
         top: usize,
-        overlay: &mut impl FnMut(&mut [u8], usize, usize),
+        overlay_band: Option<&mut (&PixelOverlay, Pixmap)>,
     ) {
         let config = self.config;
         for pixel in self.band.as_chunks_mut::<3>().0 {
             *pixel = config.background;
         }
-        overlay(&mut self.band, width, top);
+        if let Some((overlay, scratch)) = overlay_band {
+            overlay.composite_band(&mut self.band, top, scratch);
+        }
         // Node backgrounds and glyphs cover edge crossings, as they do in the terminal.
         for (column, cell) in row.iter().enumerate() {
             let (_, background) = cell_colors(cell, config);
@@ -377,6 +328,9 @@ impl PngRenderer {
 /// whose box-drawing strokes sit half a pixel off the middle row of the cell. Two vertical lines
 /// span the cell; a horizontal line on the middle pixel row runs from the line nearer the
 /// edges to the cell's open side. Returns whether `character` was one of them.
+///
+/// These glyphs are produced by gen-tui's plotter to mark where a path starts and ends, so the
+/// characters matched here must stay in sync with it.
 fn draw_sentinel_glyph(
     pixels: &mut [u8],
     row_width: usize,
@@ -442,40 +396,69 @@ fn cell_colors(cell: &Cell, config: RasterConfig) -> ([u8; 3], [u8; 3]) {
     colors
 }
 
-/// The RGB value a terminal color is drawn with, or `default` for `Color::Reset` and colors
-/// the exporter has no value for.
-pub fn color_to_rgb(color: Color, default: [u8; 3]) -> [u8; 3] {
-    match color {
-        Color::Reset => default,
-        Color::Black => [0, 0, 0],
-        Color::Red => [205, 49, 49],
-        Color::Green => [13, 188, 121],
-        Color::Yellow => [229, 229, 16],
-        Color::Blue => [36, 114, 200],
-        Color::Magenta => [188, 63, 188],
-        Color::Cyan => [17, 168, 205],
-        Color::Gray => [229, 229, 229],
-        Color::DarkGray => [102, 102, 102],
-        Color::LightRed => [241, 76, 76],
-        Color::LightGreen => [35, 209, 139],
-        Color::LightYellow => [245, 245, 67],
-        Color::LightBlue => [59, 142, 234],
-        Color::LightMagenta => [214, 112, 214],
-        Color::LightCyan => [41, 184, 219],
-        Color::White => [255, 255, 255],
-        Color::Rgb(red, green, blue) => [red, green, blue],
-        Color::Indexed(_) => default,
-    }
+/// Write `buffer` as a PNG cropped to its content, with `overlay_primitives` (in cells of `buffer`) drawn
+/// over its blank cells. Every length is multiplied by `scale` image pixels per logical pixel, so
+/// a scale of 2 gives the same picture on twice as many pixels.
+pub fn write_cropped_png(
+    buffer: &Buffer,
+    overlay_primitives: &[OverlayPrimitive],
+    scale: usize,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    write_png_inner(buffer, overlay_primitives, scale, output, true)
+}
+
+/// Write a full viewport PNG without trimming its terminal-cell geometry.
+pub fn write_uncropped_png(
+    buffer: &Buffer,
+    overlay_primitives: &[OverlayPrimitive],
+    scale: usize,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    write_png_inner(buffer, overlay_primitives, scale, output, false)
+}
+
+fn write_png_inner(
+    buffer: &Buffer,
+    overlay_primitives: &[OverlayPrimitive],
+    scale: usize,
+    output: &mut impl Write,
+    crop_to_content: bool,
+) -> io::Result<()> {
+    let config = RasterConfig::default().with_scale(scale);
+    let mut renderer = PngRenderer::new(config).map_err(io::Error::other)?;
+    let crop = if crop_to_content {
+        renderer.content_crop(
+            buffer,
+            overlay_primitives_bounds(overlay_primitives, buffer.area),
+        )
+    } else {
+        buffer.area
+    };
+    let mut cropped = PngRenderer::crop(buffer, crop);
+    let origin = (crop.x, crop.y);
+    prepare_node_highlight_cells(&mut cropped, overlay_primitives, origin, config);
+    let overlay = PixelOverlay::new(overlay_primitives, &cropped, origin, config);
+    renderer
+        .write_png(&cropped, Some(&overlay), output)
+        .map_err(io::Error::other)
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
+    use gen_tui::{BezierCurve, LineStyle};
     use png::Decoder;
-    use ratatui::{layout::Rect, style::Style};
+    use ratatui::{
+        layout::Rect,
+        style::{Color, Style},
+    };
 
-    use super::{Buffer, Color, PngRenderer, RasterConfig};
+    use super::{
+        Buffer, OverlayPrimitive, PixelOverlay, PngRenderer, RasterConfig, write_cropped_png,
+        write_uncropped_png,
+    };
 
     fn small_config() -> RasterConfig {
         RasterConfig {
@@ -484,6 +467,23 @@ mod tests {
             scale: 1,
             foreground: [255; 3],
             background: [0; 3],
+        }
+    }
+
+    fn curve(
+        from: (f64, f64),
+        control1: (f64, f64),
+        control2: (f64, f64),
+        to: (f64, f64),
+        line_style: LineStyle,
+    ) -> BezierCurve {
+        BezierCurve {
+            from,
+            control1,
+            control2,
+            to,
+            color: Color::Red,
+            line_style,
         }
     }
 
@@ -508,7 +508,7 @@ mod tests {
             Style::default().bg(Color::Rgb(10, 20, 30)),
         );
         let mut bytes = Vec::new();
-        renderer.write_png(&buffer, &mut bytes).unwrap();
+        renderer.write_png(&buffer, None, &mut bytes).unwrap();
         let (width, height, pixels) = decode(&bytes);
         assert_eq!((width, height), (24, 24));
         assert_eq!(&pixels[0..3], &[0, 0, 0]);
@@ -553,12 +553,8 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
         buffer.set_string(0, 0, character, Style::default().fg(Color::White));
         let mut bytes = Vec::new();
-        renderer.write_png(&buffer, &mut bytes).unwrap();
-        decode(&bytes)
-            .2
-            .chunks_exact(3)
-            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
-            .collect()
+        renderer.write_png(&buffer, None, &mut bytes).unwrap();
+        decode(&bytes).2.as_chunks::<3>().0.to_vec()
     }
 
     #[test]
@@ -618,26 +614,47 @@ mod tests {
 
     #[test]
     fn test_overlay_is_behind_node_backgrounds_and_glyphs() {
-        let mut renderer = PngRenderer::new(small_config()).expect("should load font");
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 2, 1));
+        let config = small_config();
+        let mut renderer = PngRenderer::new(config).expect("should load font");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
         buffer.set_string(0, 0, "M", Style::default().fg(Color::White));
         buffer[(1, 0)].set_bg(Color::Rgb(17, 23, 31));
+        let line = [OverlayPrimitive::Bezier(curve(
+            (0.0, 0.5),
+            (1.0, 0.5),
+            (2.0, 0.5),
+            (3.0, 0.5),
+            LineStyle::Bold,
+        ))];
+        let overlay = PixelOverlay::new(&line, &buffer, (0, 0), config);
         let mut bytes = Vec::new();
         renderer
-            .write_png_with_overlay(&buffer, &mut bytes, |pixels, _, _| {
-                pixels.fill(0);
-            })
+            .write_png(&buffer, Some(&overlay), &mut bytes)
             .expect("should render text above overlay");
         let pixels = decode(&bytes).2;
-        assert!(pixels.iter().any(|&value| value > 31));
-        assert_eq!(&pixels[8 * 3..9 * 3], &[17, 23, 31]);
+        let cell_pixels = |column: usize| {
+            (0..12)
+                .flat_map(|row| {
+                    let start = (row * 24 + column * 8) * 3;
+                    pixels[start..start + 8 * 3].as_chunks::<3>().0.to_vec()
+                })
+                .collect::<Vec<_>>()
+        };
+        let is_edge_red = |pixel: &[u8; 3]| pixel[0] > pixel[1] + 50;
+        assert!(cell_pixels(2).iter().any(is_edge_red));
+        assert!(cell_pixels(1).iter().all(|pixel| *pixel == [17, 23, 31]));
+        assert!(
+            cell_pixels(0)
+                .iter()
+                .any(|pixel| pixel[0] > 200 && pixel[1] > 200)
+        );
     }
 
     #[test]
     fn test_empty_buffer_is_rejected() {
         let mut renderer = PngRenderer::new(small_config()).unwrap();
         let buffer = Buffer::empty(Rect::new(0, 0, 0, 0));
-        assert!(renderer.write_png(&buffer, &mut Vec::new()).is_err());
+        assert!(renderer.write_png(&buffer, None, &mut Vec::new()).is_err());
     }
 
     #[test]
@@ -648,7 +665,7 @@ mod tests {
         let mut renderer = PngRenderer::new(config).unwrap();
         let buffer = Buffer::empty(Rect::new(0, 0, 3, 2));
         let mut bytes = Vec::new();
-        renderer.write_png(&buffer, &mut bytes).unwrap();
+        renderer.write_png(&buffer, None, &mut bytes).unwrap();
         let (width, height, _) = decode(&bytes);
         assert_eq!((width, height), (48, 48));
     }
@@ -659,7 +676,7 @@ mod tests {
             let mut renderer = PngRenderer::new(small_config().with_scale(scale)).unwrap();
             let buffer = Buffer::empty(Rect::new(0, 0, 2, 2));
             let mut bytes = Vec::new();
-            renderer.write_png(&buffer, &mut bytes).unwrap();
+            renderer.write_png(&buffer, None, &mut bytes).unwrap();
             let reader = Decoder::new(bytes.as_slice()).read_info().unwrap();
             let dimensions = reader
                 .info()
@@ -698,12 +715,8 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
         buffer.set_string(0, 0, character, Style::default().fg(Color::White));
         let mut bytes = Vec::new();
-        renderer.write_png(&buffer, &mut bytes).unwrap();
-        let pixels = decode(&bytes)
-            .2
-            .chunks_exact(3)
-            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
-            .collect();
+        renderer.write_png(&buffer, None, &mut bytes).unwrap();
+        let pixels = decode(&bytes).2.as_chunks::<3>().0.to_vec();
         (config.cell_width, config.cell_height, pixels)
     }
 
@@ -726,5 +739,62 @@ mod tests {
         assert!(!lit(11, 5) && !lit(12, 5));
         assert!((15..width).all(|column| lit(column, 20) && lit(column, 21)));
         assert!(!lit(15, 19) && !lit(15, 22));
+    }
+
+    #[test]
+    fn test_png_with_bezier_is_cropped_around_the_curve_not_its_control_points() {
+        let area = Rect::new(0, 0, 40, 20);
+        let buffer = Buffer::empty(area);
+        let curves = [OverlayPrimitive::Bezier(curve(
+            (5.0, 10.0),
+            (20.0, 1.0),
+            (30.0, 1.0),
+            (35.0, 10.0),
+            LineStyle::Normal,
+        ))];
+        let mut bytes = Vec::new();
+        write_cropped_png(&buffer, &curves, 1, &mut bytes).expect("should write the png");
+        let (width, height) = png_dimensions(&bytes);
+        let config = RasterConfig::default();
+        assert_eq!(width as usize, (35 - 5 + 1 + 2) * config.cell_width);
+        // The curve peaks at y = 3.25, three quarters of the way to its handles at y = 1.
+        assert_eq!(height as usize, (10 - 3 + 1 + 2) * config.cell_height);
+    }
+
+    #[test]
+    fn test_full_viewport_png_preserves_cell_dimensions() {
+        let area = Rect::new(0, 0, 40, 20);
+        let buffer = Buffer::empty(area);
+        let mut bytes = Vec::new();
+        write_uncropped_png(&buffer, &[], 1, &mut bytes)
+            .expect("should write the full viewport png");
+        let (width, height) = png_dimensions(&bytes);
+        let config = RasterConfig::default();
+        assert_eq!(width as usize, 40 * config.cell_width);
+        assert_eq!(height as usize, 20 * config.cell_height);
+    }
+
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        let reader = Decoder::new(bytes).read_info().expect("should read header");
+        (reader.info().width, reader.info().height)
+    }
+
+    #[test]
+    fn test_png_with_lines_at_scale_two_doubles_the_pixels() {
+        let area = Rect::new(0, 0, 40, 20);
+        let buffer = Buffer::empty(area);
+        let curves = [OverlayPrimitive::Bezier(curve(
+            (5.0, 10.0),
+            (20.0, 1.0),
+            (30.0, 1.0),
+            (35.0, 10.0),
+            LineStyle::Bold,
+        ))];
+        let mut normal = Vec::new();
+        write_cropped_png(&buffer, &curves, 1, &mut normal).expect("should write the png");
+        let mut doubled = Vec::new();
+        write_cropped_png(&buffer, &curves, 2, &mut doubled).expect("should write the scaled png");
+        let (width, height) = png_dimensions(&normal);
+        assert_eq!(png_dimensions(&doubled), (width * 2, height * 2));
     }
 }

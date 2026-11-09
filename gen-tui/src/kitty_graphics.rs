@@ -24,7 +24,7 @@ use flate2::{Compression, write::ZlibEncoder};
 use ratatui::buffer::Buffer;
 use tiny_skia::Pixmap;
 
-use crate::{curved::OverlayPrimitive, pixel_overlay::PixelOverlay, png_export::RasterConfig};
+use crate::{curved::OverlayPrimitive, pixel_overlay::PixelOverlay, raster_config::RasterConfig};
 
 const IMAGE_ID: u32 = 0x6765_6e31;
 const PLACEMENT_ID: u32 = 1;

@@ -7,7 +7,6 @@ use r#gen::views::{
     annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
     annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
     annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
-    curved_png::{write_png_with_edges, write_png_with_edges_full_viewport},
     gen_graph_controller::{ClickOutcome, GenGraphController},
     graph_database::GraphDatabase,
     graph_overlay::{
@@ -15,6 +14,7 @@ use r#gen::views::{
         set_path_overlay,
     },
     path_scale::ScalePlacement,
+    png_export::{MAX_SCALE, write_cropped_png, write_uncropped_png},
 };
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, Workspace, is_terminal, range::Range};
@@ -1453,12 +1453,12 @@ impl PyGraphController {
 
 /// Reject a pixel scale the exporter should not be asked for.
 fn validated_png_scale(scale: usize) -> PyResult<usize> {
-    if (1..=gen_tui::MAX_SCALE).contains(&scale) {
+    if (1..=MAX_SCALE).contains(&scale) {
         Ok(scale)
     } else {
         Err(PyValueError::new_err(format!(
             "scale must be between 1 and {}, got {scale}",
-            gen_tui::MAX_SCALE
+            MAX_SCALE
         )))
     }
 }
@@ -1500,14 +1500,9 @@ fn render_png_bytes<'py>(
     let buffer = buffer_result?;
     let mut bytes = Vec::new();
     let write_result = if full_viewport {
-        write_png_with_edges_full_viewport(
-            &buffer,
-            controller.overlay_primitives(),
-            scale,
-            &mut bytes,
-        )
+        write_uncropped_png(&buffer, controller.overlay_primitives(), scale, &mut bytes)
     } else {
-        write_png_with_edges(&buffer, controller.overlay_primitives(), scale, &mut bytes)
+        write_cropped_png(&buffer, controller.overlay_primitives(), scale, &mut bytes)
     };
     write_result.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(PyBytes::new(py, &bytes))
@@ -1817,7 +1812,7 @@ mod tests {
                 png_dimensions(viewport.as_bytes()),
                 (60 * 11 * 2, 12 * 21 * 2)
             );
-            for scale in [0, gen_tui::MAX_SCALE + 1] {
+            for scale in [0, MAX_SCALE + 1] {
                 let error = controller
                     .render_png(python, 60, 12, scale)
                     .expect_err("should reject the scale");

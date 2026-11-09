@@ -27,7 +27,6 @@ use crate::views::{
     block_group::{
         active_neighborhood_coordinate_window, discard_pending_input, expand_query_window,
     },
-    curved_png::write_png_with_edges,
     diff_graph::{DiffLegend, apply_diff_highlights, build_diff_graph_component, handle_diff_key},
     gen_graph_controller::{GenGraphController, GraphKeyOutcome},
     gen_graph_widget::{ZoomLevels, create_gen_graph_engine},
@@ -35,6 +34,7 @@ use crate::views::{
     graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, has_path_overlay},
     helpers::style_text,
     path_scale::ScalePlacement,
+    png_export::write_cropped_png,
 };
 
 #[derive(Debug)]
@@ -412,7 +412,7 @@ pub fn write_block_group_png(
         Clear.render(area, &mut buffer);
         draw_flags_under_nodes(&mut controller, &mut buffer, area);
     }
-    write_png_with_edges(&buffer, controller.overlay_primitives(), size.scale, output)
+    write_cropped_png(&buffer, controller.overlay_primitives(), size.scale, output)
 }
 
 /// Write a PNG of a sample diff using the standard added/removed highlights.
@@ -432,7 +432,7 @@ pub fn write_diff_graph_png(
     view_state.layout_mode = gen_tui::LayoutMode::Curved;
     let view = GraphView::new(&mut engine, &zoom_levels[view_state.zoom_index].1);
     StatefulWidget::render(view, area, &mut buffer, &mut view_state);
-    write_png_with_edges(&buffer, &view_state.overlay_primitives, size.scale, output)
+    write_cropped_png(&buffer, &view_state.overlay_primitives, size.scale, output)
 }
 
 fn draw_flags_under_nodes(controller: &mut GenGraphController, buffer: &mut Buffer, area: Rect) {

@@ -27,7 +27,7 @@ use tiny_skia::{
 use crate::{
     curved::{ArrowMark, BezierCurve, NodeGlow, OverlayPrimitive, SymbolGlow},
     plotter::LineStyle,
-    png_export::{RasterConfig, color_to_rgb},
+    raster_config::{RasterConfig, color_to_rgb},
     window_geometry::NODE_GLYPH,
 };
 
@@ -1022,7 +1022,7 @@ mod tests {
         ArrowMark, BAND_PADDING, BezierCurve, CellMask, OverlayPrimitive, PixelOverlay,
         SYMBOL_RADIUS, SymbolGlow, arrow_horizontal_span, draw_paths, prepare_paths,
     };
-    use crate::{plotter::LineStyle, png_export::RasterConfig};
+    use crate::{plotter::LineStyle, raster_config::RasterConfig};
 
     fn curve(
         from: (f64, f64),

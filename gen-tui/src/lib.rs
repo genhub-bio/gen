@@ -24,7 +24,7 @@ pub mod navigator;
 pub mod pinning;
 pub mod pixel_overlay;
 pub mod plotter;
-pub mod png_export;
+pub mod raster_config;
 pub mod routed_window_graph;
 pub mod testing;
 pub mod theme;
@@ -40,7 +40,5 @@ pub use geometry::WorldPos;
 pub use graph_view::{GraphView, GraphViewState};
 pub use layout::{LayoutEdge, LayoutNode, NodeRole, PinSide, VerticalAnchor, VisualDetail};
 pub use plotter::{CursorColumns, LineStyle, PathStyle};
-pub use png_export::{
-    DEFAULT_SCALE, MAX_SCALE, PngExportError, PngRenderer, RasterConfig, color_to_rgb,
-};
+pub use raster_config::{RasterConfig, color_to_rgb};
 pub use theme::{Theme, current_theme, set_theme};
