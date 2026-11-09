@@ -14,13 +14,13 @@ use gen_tui::{graph_view::GraphView, theme::current_theme};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{List, ListItem},
+    widgets::{List, ListItem, Paragraph},
 };
 
 use crate::views::{
     diff_graph::{
-        DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
-        change_label_for_block_group,
+        DiffGraphComponent, DiffLegend, apply_diff_highlights, block_group_label,
+        build_diff_graph_component, change_label_for_block_group, handle_diff_key,
     },
     gen_graph_widget::create_gen_graph_engine,
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
@@ -115,7 +115,11 @@ pub fn view_diff(
         terminal.draw(|f| {
             let outer = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
                 .split(f.area());
 
             let main = Layout::default()
@@ -167,7 +171,13 @@ pub fn view_diff(
             } else {
                 "*←→↑↓* pan | *+/-* zoom | *tab* list | *esc* leave | *q* quit"
             };
-            render_status_bar(f, outer[1], panel_messages);
+            f.render_widget(
+                Paragraph::new(
+                    DiffLegend::changes().line(current_component.render.has_modified_marks()),
+                ),
+                outer[1],
+            );
+            render_status_bar(f, outer[2], panel_messages);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))?
@@ -228,7 +238,7 @@ pub fn view_diff(
                     _ => {}
                 }
             } else {
-                let _ = graph_view_state.handle_key_event(key);
+                handle_diff_key(&mut graph_view_state, &graph_zoom_levels, key);
             }
         }
     }
@@ -242,6 +252,7 @@ pub fn view_diff_graph(
     workspace: &Workspace,
     diff_graph: &DiffGenGraph,
     title: String,
+    legend: &DiffLegend,
 ) -> Result<(), io::Error> {
     let component = build_diff_graph_component(diff_graph, title);
     let (mut graph_engine, zoom_levels, mut view_state) =
@@ -254,7 +265,11 @@ pub fn view_diff_graph(
         terminal.draw(|frame| {
             let areas = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
                 .split(frame.area());
             let block = panel_block(
                 component.title.clone(),
@@ -268,7 +283,11 @@ pub fn view_diff_graph(
             let view = GraphView::new(&mut graph_engine, renderer)
                 .style(Style::default().bg(current_theme()[0x00]));
             frame.render_stateful_widget(view, canvas, &mut view_state);
-            render_status_bar(frame, areas[1], "*←→↑↓* pan | *+/-* zoom | *q/esc* quit");
+            frame.render_widget(
+                Paragraph::new(legend.line(component.has_modified_marks())),
+                areas[1],
+            );
+            render_status_bar(frame, areas[2], "*←→↑↓* pan | *+/-* zoom | *q/esc* quit");
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))?
@@ -277,7 +296,7 @@ pub fn view_diff_graph(
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 break;
             }
-            let _ = view_state.handle_key_event(key);
+            handle_diff_key(&mut view_state, &zoom_levels, key);
         }
     }
     Ok(())

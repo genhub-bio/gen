@@ -62,7 +62,7 @@ the interactive widget freely.
   add `show_labels()` when you need the names.
 - Also on both widgets: `clear_highlights()`, `show_path()`, `hide_path()`,
   `show_track(name)`, `hide_track(name)`, `.tracks`, `hide_all_tracks()`,
-  `handle_click(col, row)`, and `save_png(path, cols=None, rows=None)` to write the view to a PNG
+  `handle_click(col, row)`, and `save_png(path, cols=None, rows=None, scale=None)` to write the view to a PNG
   (no Jupyter needed; `gen view <graph> --sample <s> --png out.png` does the same from the CLI).
   Persist annotations through the graph API
   (`graph.add_annotation`, see `design.md`); highlights are ephemeral.
@@ -87,6 +87,8 @@ viewport size; larger values show more content without padding the image. It ren
 view as the widget, so pass `show_history=True` to `plot()` first if the image should include
 dimmed alternates and dashed edges. `save_png` returns `None`; finish navigation before calling it.
 Use `graph.plot(interactive=False, rows=30, cols=120)` for an image in memory without a file.
+Pass `scale=2` (or `--png-scale 2` on the CLI) for a sharper image when it will be shown on a
+high-density screen or scaled down in a document.
 From the shell, `gen view <graph> --sample <s> --png out.png` does the same. Keep the text frame
 for answers in chat.
 

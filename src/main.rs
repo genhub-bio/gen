@@ -30,10 +30,11 @@ use r#gen::{
     views::{
         block_group::{BlockGroupViewOptions, view_block_group},
         block_group_inline::{
-            InlineOutcome, PlotSize, show_inline_block_group_widget, write_block_group_png,
-            write_diff_graph_png,
+            InlineOutcome, PlotSize, show_inline_block_group_widget, show_inline_diff_graph_widget,
+            write_block_group_png, write_diff_graph_png,
         },
         diff::{view_diff, view_diff_graph},
+        diff_graph::DiffLegend,
         operations::view_operations,
         patch::view_patch,
         tui_runtime::install_global_panic_hook,
@@ -300,6 +301,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             png,
             png_columns,
             png_rows,
+            png_scale,
         }) => {
             let collection_name = &resolve_initial_collection(
                 graph_conn,
@@ -330,13 +332,31 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         PlotSize {
                             columns: png_columns,
                             rows: png_rows,
+                            scale: usize::from(png_scale),
                         },
                         &mut file,
                     )?;
                     println!("Wrote {}", png_path.display());
                     return Ok(());
                 }
-                view_diff_graph(graph_conn, &workspace, &diff.graph, title)?;
+                let legend = DiffLegend::between(&query_name, &base_name);
+                if full {
+                    view_diff_graph(graph_conn, &workspace, &diff.graph, title, &legend)?;
+                } else {
+                    match show_inline_diff_graph_widget(
+                        graph_conn,
+                        &workspace,
+                        &diff.graph,
+                        &legend,
+                        clamp_inline_view_height(height),
+                    ) {
+                        Ok(true) => {
+                            view_diff_graph(graph_conn, &workspace, &diff.graph, title, &legend)?
+                        }
+                        Ok(false) => {}
+                        Err(error) => eprintln!("Error showing inline widget: {error}"),
+                    }
+                }
                 return Ok(());
             }
 
@@ -365,6 +385,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     PlotSize {
                         columns: png_columns,
                         rows: png_rows,
+                        scale: usize::from(png_scale),
                     },
                     &mut file,
                 )?;

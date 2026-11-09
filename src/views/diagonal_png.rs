@@ -42,6 +42,12 @@ const SYMBOL_RADIUS: f32 = 0.4;
 /// to show around the glyph without reaching the symbols next to it.
 const SYMBOL_GLOW_MARGIN: f32 = 1.0;
 
+/// How far past a path's bounds a stroke or its antialias fringe can still touch a band, in
+/// pixels at `scale`.
+fn band_reach(scale: f32) -> f32 {
+    (EDGE_GLOW_REACH + 1.0) * scale
+}
+
 /// Opacity of the halo at `ring` pixels beyond the lit shape's edge (the ring's center is half
 /// a pixel further): `peak * exp(-d^2 / (2 * sigma^2))`, evaluated once per ring rather than per
 /// pixel.
@@ -55,31 +61,35 @@ const DASH_CELLS: f32 = 0.6;
 const GAP_CELLS: f32 = 0.4;
 
 /// Write `buffer` as a PNG cropped to its content, with `lines` (in cells of `buffer`) drawn
-/// behind its glyphs.
+/// behind its glyphs. Every length is multiplied by `scale` image pixels per logical pixel, so a
+/// scale of 2 gives the same picture on twice as many pixels.
 pub fn write_png_with_lines(
     buffer: &Buffer,
     lines: &[DeferredEdge],
+    scale: usize,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    write_png_with_lines_inner(buffer, lines, output, true)
+    write_png_with_lines_inner(buffer, lines, scale, output, true)
 }
 
 /// Write a full viewport PNG without trimming its terminal-cell geometry.
 pub fn write_png_with_lines_full_viewport(
     buffer: &Buffer,
     lines: &[DeferredEdge],
+    scale: usize,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    write_png_with_lines_inner(buffer, lines, output, false)
+    write_png_with_lines_inner(buffer, lines, scale, output, false)
 }
 
 fn write_png_with_lines_inner(
     buffer: &Buffer,
     lines: &[DeferredEdge],
+    scale: usize,
     output: &mut impl Write,
     crop_to_content: bool,
 ) -> io::Result<()> {
-    let config = PngConfig::default();
+    let config = PngConfig::default().with_scale(scale);
     let mut renderer = PngRenderer::new(config).map_err(io::Error::other)?;
     let crop = if crop_to_content {
         renderer.content_crop(buffer, lines_bounds(lines, buffer.area))
@@ -134,7 +144,8 @@ fn write_png_with_lines_inner(
             .map_err(io::Error::other);
     }
     let width = usize::from(cropped.area.width) * config.cell_width;
-    let mut pixmap = Pixmap::new(width as u32, config.cell_height as u32 + 2 * BAND_PADDING)
+    let band_padding = BAND_PADDING * config.scale as u32;
+    let mut pixmap = Pixmap::new(width as u32, config.cell_height as u32 + 2 * band_padding)
         .ok_or_else(|| io::Error::other("could not allocate PNG edge band"))?;
     renderer
         .write_png_with_overlay(&cropped, output, |pixels, _, top| {
@@ -146,6 +157,8 @@ fn write_png_with_lines_inner(
 struct EdgePath {
     path: Path,
     paint: Paint<'static>,
+    /// Farthest the stroke reaches from the path's bounds, in pixels, for band culling.
+    reach: f32,
 }
 
 // Build geometry once per export. Each band clips the original path, rather than splitting
@@ -153,7 +166,14 @@ struct EdgePath {
 fn prepare_paths(lines: &[DeferredEdge], origin: (u16, u16), config: PngConfig) -> Vec<EdgePath> {
     // A cell's center falls on a pixel center only when its size is odd; an even size needs half
     // a pixel to put one-pixel strokes on the middle pixel row or column, like the text glyphs.
-    let center_offset = |size: usize| if size.is_multiple_of(2) { 0.5 } else { 0.0 };
+    // A stroke that is an even number of pixels wide is centered on a pixel boundary already.
+    let center_offset = |size: usize| {
+        if size.is_multiple_of(2) && config.scale % 2 == 1 {
+            0.5
+        } else {
+            0.0
+        }
+    };
     let point = |(x, y): (f64, f64)| {
         (
             (x - f64::from(origin.0)) as f32 * config.cell_width as f32
@@ -363,8 +383,9 @@ fn push_arrow(mark: &ArrowMark, center: (f32, f32), config: PngConfig, paths: &m
         base.0 + perpendicular.0 * half_width,
         base.1 + perpendicular.1 * half_width,
     );
+    let scale = config.scale as f32;
     let stroke = Stroke {
-        width: ARROW_STROKE_WIDTH,
+        width: ARROW_STROKE_WIDTH * scale,
         line_cap: LineCap::Round,
         miter_limit: ARROW_MITER_LIMIT,
         ..Stroke::default()
@@ -383,6 +404,7 @@ fn push_arrow(mark: &ArrowMark, center: (f32, f32), config: PngConfig, paths: &m
     paths.push(EdgePath {
         path: outline,
         paint,
+        reach: band_reach(scale),
     });
 }
 
@@ -404,14 +426,15 @@ fn push_node_glow(
     );
     let (left, top) = point(glow.top_left);
     let (right, bottom) = point(glow.bottom_right);
+    let scale = config.scale as f32;
     for ring in 0..GLOW_RINGS {
         let opacity = (glow_opacity(GLOW_PEAK, ring) * 255.0).round() as u8;
         let stroke = Stroke {
-            width: 1.0,
+            width: scale,
             line_cap: LineCap::Butt,
             ..Stroke::default()
         };
-        let distance = ring as f32 + 0.5;
+        let distance = (ring as f32 + 0.5) * scale;
         let mut builder = PathBuilder::new();
         let (x0, x1) = (
             left - if glow.clip_left { 0.0 } else { distance },
@@ -471,6 +494,7 @@ fn push_node_glow(
         paths.push(EdgePath {
             path: outline,
             paint,
+            reach: band_reach(scale),
         });
     }
 }
@@ -486,9 +510,10 @@ fn push_symbol_glow(
 ) {
     let light_theme = luminance(config.background) > luminance(config.foreground);
     let color = color_to_rgb(glow.color, config.foreground);
-    let core_radius = SYMBOL_RADIUS * config.cell_width as f32 + SYMBOL_GLOW_MARGIN;
-    for (width, opacity, brightness) in edge_highlight_layers() {
-        let radius = core_radius + (width - EDGE_CORE_WIDTH) / 2.0;
+    let scale = config.scale as f32;
+    let core_radius = SYMBOL_RADIUS * config.cell_width as f32 + SYMBOL_GLOW_MARGIN * scale;
+    for (width, opacity, brightness) in edge_highlight_layers(scale) {
+        let radius = core_radius + (width - EDGE_CORE_WIDTH * scale) / 2.0;
         let Some(disc) = PathBuilder::from_circle(center.0, center.1, radius)
             .and_then(|circle| flatten_path(&circle))
         else {
@@ -498,14 +523,18 @@ fn push_symbol_glow(
         let mut paint = Paint::default();
         paint.set_color_rgba8(color[0], color[1], color[2], opacity);
         paint.anti_alias = true;
-        paths.push(EdgePath { path: disc, paint });
+        paths.push(EdgePath {
+            path: disc,
+            paint,
+            reach: band_reach(scale),
+        });
     }
 }
 
 /// Strokes of a highlighted edge as (width, opacity, brightness), widest first. The halo rings
 /// are nested strokes that overlap, so each stroke's opacity is chosen such that the composite
 /// at ring k equals the Gaussian target: (1 - target_k) = (1 - target_{k+1}) * (1 - opacity_k).
-fn edge_highlight_layers() -> Vec<(f32, u8, f32)> {
+fn edge_highlight_layers(scale: f32) -> Vec<(f32, u8, f32)> {
     let mut layers = Vec::with_capacity(GLOW_RINGS + 1);
     for ring in (0..GLOW_RINGS).rev() {
         let target = glow_opacity(GLOW_PEAK, ring);
@@ -515,10 +544,10 @@ fn edge_highlight_layers() -> Vec<(f32, u8, f32)> {
             0.0
         };
         let opacity = 1.0 - (1.0 - target) / (1.0 - outer);
-        let width = EDGE_CORE_WIDTH + 2.0 * (ring + 1) as f32;
+        let width = (EDGE_CORE_WIDTH + 2.0 * (ring + 1) as f32) * scale;
         layers.push((width, (opacity * 255.0).round() as u8, GLOW_BRIGHTNESS));
     }
-    layers.push((EDGE_CORE_WIDTH, 255, EDGE_CORE_BRIGHTNESS));
+    layers.push((EDGE_CORE_WIDTH * scale, 255, EDGE_CORE_BRIGHTNESS));
     layers
 }
 
@@ -530,6 +559,7 @@ fn prepare_strokes(
     paths: &mut Vec<EdgePath>,
 ) {
     let light_theme = luminance(config.background) > luminance(config.foreground);
+    let scale = config.scale as f32;
     if line_style == LineStyle::Dashed {
         let dash = tiny_skia::StrokeDash::new(
             vec![
@@ -545,16 +575,16 @@ fn prepare_strokes(
         path = dashed;
     }
     let layers = if line_style == LineStyle::Bold {
-        edge_highlight_layers()
+        edge_highlight_layers(scale)
     } else {
-        vec![(1.0, 255, 0.0)]
+        vec![(scale, 255, 0.0)]
     };
     for (width, opacity, brightness) in layers {
         let stroke = Stroke {
             width,
             // Stop halo layers at the endpoint's tangent plane so adjoining segments
             // do not composite translucent caps over one another.
-            line_cap: if line_style == LineStyle::Bold && width > EDGE_CORE_WIDTH {
+            line_cap: if line_style == LineStyle::Bold && width > EDGE_CORE_WIDTH * scale {
                 LineCap::Butt
             } else {
                 LineCap::Round
@@ -574,6 +604,7 @@ fn prepare_strokes(
         paths.push(EdgePath {
             path: outline,
             paint,
+            reach: band_reach(scale),
         });
     }
 }
@@ -628,11 +659,14 @@ fn lines_bounds(lines: &[DeferredEdge], area: Rect) -> Option<Rect> {
 
 fn draw_paths(pixels: &mut [u8], top: usize, paths: &[EdgePath], pixmap: &mut Pixmap) {
     pixmap.data_mut().fill(0);
-    let transform = Transform::from_translate(0.0, BAND_PADDING as f32 - top as f32);
+    // The pixmap has the same padding above and below the band's rows.
+    let band_rows = pixels.len() / (3 * pixmap.width() as usize);
+    let band_padding = (pixmap.height() as usize - band_rows) / 2;
+    let transform = Transform::from_translate(0.0, band_padding as f32 - top as f32);
     for edge in paths {
         let bounds = edge.path.bounds();
         // Include the widest highlight stroke and its antialias fringe in the band test.
-        let padding = EDGE_GLOW_REACH + 1.0;
+        let padding = edge.reach;
         if bounds.bottom() + padding < top as f32
             || bounds.top() - padding > (top + pixmap.height() as usize) as f32
         {
@@ -649,7 +683,7 @@ fn draw_paths(pixels: &mut [u8], top: usize, paths: &[EdgePath], pixmap: &mut Pi
             .as_chunks::<4>()
             .0
             .iter()
-            .skip(pixmap.width() as usize * BAND_PADDING as usize),
+            .skip(pixmap.width() as usize * band_padding),
     ) {
         let alpha = u32::from(rgba[3]);
         if alpha == 0 {
@@ -1018,7 +1052,7 @@ mod tests {
             LineStyle::Normal,
         ))];
         let mut bytes = Vec::new();
-        write_png_with_lines(&buffer, &curves, &mut bytes).expect("should write the png");
+        write_png_with_lines(&buffer, &curves, 1, &mut bytes).expect("should write the png");
         let dimension = |start: usize| {
             u32::from_be_bytes(
                 bytes[start..start + 4]
@@ -1037,7 +1071,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 20);
         let buffer = Buffer::empty(area);
         let mut bytes = Vec::new();
-        write_png_with_lines_full_viewport(&buffer, &[], &mut bytes)
+        write_png_with_lines_full_viewport(&buffer, &[], 1, &mut bytes)
             .expect("should write the full viewport png");
         let dimension = |start: usize| {
             u32::from_be_bytes(
@@ -1097,5 +1131,63 @@ mod tests {
         let (forward_left, forward_right) = render(true);
         let (reverse_left, reverse_right) = render(false);
         assert!((forward_left + reverse_right - (forward_right + reverse_left)).abs() < 1e-3);
+    }
+
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        let read = |start: usize| {
+            u32::from_be_bytes(
+                bytes[start..start + 4]
+                    .try_into()
+                    .expect("should have a header"),
+            )
+        };
+        (read(16), read(20))
+    }
+
+    #[test]
+    fn test_png_with_lines_at_scale_two_doubles_the_pixels() {
+        let area = Rect::new(0, 0, 40, 20);
+        let buffer = Buffer::empty(area);
+        let curves = [DeferredEdge::Bezier(curve(
+            (5.0, 10.0),
+            (20.0, 1.0),
+            (30.0, 1.0),
+            (35.0, 10.0),
+            LineStyle::Bold,
+        ))];
+        let mut normal = Vec::new();
+        write_png_with_lines(&buffer, &curves, 1, &mut normal).expect("should write the png");
+        let mut doubled = Vec::new();
+        write_png_with_lines(&buffer, &curves, 2, &mut doubled)
+            .expect("should write the scaled png");
+        let (width, height) = png_dimensions(&normal);
+        assert_eq!(png_dimensions(&doubled), (width * 2, height * 2));
+    }
+
+    #[test]
+    fn test_edge_strokes_are_as_thick_as_the_scale() {
+        let horizontal = curve(
+            (1.0, 2.5),
+            (2.0, 2.5),
+            (5.0, 2.5),
+            (6.0, 2.5),
+            LineStyle::Normal,
+        );
+        for scale in [1_usize, 2, 3] {
+            let config = PngConfig {
+                background: [0; 3],
+                ..PngConfig::default()
+            }
+            .with_scale(scale);
+            let pixels = draw_with_config(300, 300, 0, &[horizontal], config);
+            let x = 3 * config.cell_width;
+            let lit_rows = (0..300)
+                .filter(|&y| pixels[(y * 300 + x) * 3] > 200)
+                .count();
+            assert_eq!(
+                lit_rows, scale,
+                "fully lit rows of a stroke at scale {scale}"
+            );
+        }
     }
 }

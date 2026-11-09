@@ -43,9 +43,16 @@ Changes since the latest release, `v0.3.1`.
 
 ### Widgets
 
+- `SequenceGraph.plot()` and `Sample.plot()` accept `go_to=target` for initial navigation in interactive, text, and static presentations.
+- Native PNG exports share the CLI Bézier renderer, use 12 × 22 pixel cells, and retain streaming pixel bands. Cycle arrows follow curved edges.
+
+- `save_png(path)` now returns `None`, and omitted `cols` and `rows` use the widget's viewport size instead of a 600 by 300 cell canvas.
 - `GraphWidget` and `TextGraphWidget` are no longer exported from `gen`. Widgets are only returned by `plot()`.
 - `dir(gen)` lists only the public names.
 - Every navigation method returns the widget so calls can be chained: `zoom_in`, `zoom_out`, `scroll_*`, `next_page`, `prev_page`, `go_to`, `show`, `show_path`, `refresh` and the clear/hide methods. They previously returned `None`.
+- `go_to` and `show` leave the cursor on their target, drawn as an accent-colored cell with an arrow above it. `hide_cursor()` and `show_cursor()` turn it off and on, e.g. before `save_png`.
+- `show` highlights in one theme accent color instead of rotating colors between calls. Zooming keeps the cursor and camera on the same sequence offset.
+- Plots open at normal zoom with annotation names hidden, so long names don't stretch the nodes. `show_labels()` and `hide_labels()` toggle them and return the widget. Zoom now steps through minimal, normal without names, normal with names, then full sequence, which always names every annotation.
 - Annotation track methods are renamed:
   - `add_annotation_track` is replaced by `show_track(name)`.
   - `remove_annotation_track` is replaced by `hide_track(name)`.
@@ -93,6 +100,10 @@ Changes since the latest release, `v0.3.1`.
 
 ### Other additions
 
+- `SequenceGraph.plot(interactive=False)` returns a displayable PNG in memory without writing a file; `Sample.plot(interactive=False)` renders its first graph. Static plots default to a 400x24-cell canvas instead of the interactive widget's 60x12, and cropping then trims the unused margin.
+- `plot()` widgets gain `save_png(path, cols=, rows=, scale=)`, which writes the current view to a PNG without the `jupyter` extra.
+- `SequenceGraph.plot()` and `Sample.plot()` accept `scale=` (1 to 8, default 2) to draw PNGs on that many image pixels per logical pixel. The interactive widget shows a scaled PNG at its logical size, so the default is sharp on high-density screens, and `save_png` takes a `scale=` override. PNGs declare 96 dpi times the scale in their header. `gen view --png` has a matching `--png-scale` (default 2).
+- With `align_path=True`, widgets draw a position scale for the aligned path: on the last rows of the view in interactive and text widgets, and two rows under the lowest node in PNGs. One 1-2-5 label step is chosen for the whole view, so the scale follows the node spacing in the truncated and minimal views too.
 - `Repository(path, committer=, email=)` and `clone()` set the committer identity.
 - `gen.clone` reuses an untouched initialized workspace.
 - `Branch.head`, `Operation.id` and `Operation.parent_id` are new properties.

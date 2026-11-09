@@ -30,7 +30,7 @@ class AnnotationFileTests(RepositoryTestCase):
         self.repository.import_annotations(str(FIXTURES / "simple.gff"), name="genes")
 
     def plot_widget(self):
-        return GraphWidget(self.graph.plot()._controller)
+        return GraphWidget(self.graph.plot().show_labels()._controller)
 
     def test_annotations_list_file_features_by_name(self):
         by_name = {annotation.name: annotation for annotation in self.graph.annotations}
@@ -116,13 +116,13 @@ class IndexedAnnotationFileTests(RepositoryTestCase):
 
     @unittest.skipIf(GraphWidget is None, "requires gen[jupyter]")
     def test_widget_loads_indexed_file_for_the_viewport(self):
-        widget = GraphWidget(self.graph.plot()._controller)
+        widget = GraphWidget(self.graph.plot().show_labels()._controller)
 
         self.assertIn(DRAWN_FEATURE, frame_text(widget))
 
     @unittest.skipIf(GraphWidget is None, "requires gen[jupyter]")
     def test_hidden_indexed_track_is_not_reloaded_by_rendering(self):
-        widget = GraphWidget(self.graph.plot()._controller)
+        widget = GraphWidget(self.graph.plot().show_labels()._controller)
 
         widget.hide_track("genes")
 

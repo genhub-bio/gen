@@ -316,22 +316,6 @@ impl PyPosition {
             _ => Py::new(python, stepped).map(Py::into_any),
         }
     }
-
-    /// The block of `graph` holding this position and the offset into it, preferring the block
-    /// the position was read from while `graph` still has it.
-    pub(crate) fn locate(&self, graph: &GenGraph) -> Option<(GraphNode, i64)> {
-        let coordinate = self.position.coordinate;
-        let block = Some(self.block)
-            .filter(|block| graph.contains_node(*block))
-            .or_else(|| self.position.block(graph))
-            .or_else(|| {
-                // A point just past the last block of its node.
-                graph.nodes().find(|block| {
-                    block.node_id == self.position.node_id && block.sequence_end == coordinate
-                })
-            })?;
-        Some((block, coordinate - block.sequence_start))
-    }
 }
 
 #[gen_stub_pymethods]

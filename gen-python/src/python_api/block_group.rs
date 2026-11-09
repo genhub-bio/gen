@@ -19,11 +19,12 @@ use r#gen::{
     },
     views::{
         annotation_files::load_annotation_file_entries,
+        annotation_track::annotation_segments_from_graph_locus,
         annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
     },
 };
-use gen_annotations::projection::{AnnotationSegment, annotation_segments};
-use gen_core::{Strand, is_end_node, is_start_node, range::Range};
+use gen_annotations::projection::annotation_segments;
+use gen_core::{Strand, is_end_node, is_start_node};
 use gen_graph::GraphNode;
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
@@ -50,7 +51,7 @@ use super::{
     graph_read::{current_graph, locus_from_region, shortest_route},
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
-    jupyter_widget::{PyGraphController, build_widget},
+    jupyter_widget::{PlotOptions, PyGraphController, WidgetOptions, build_widget},
     locus::GraphLocusExt as _,
     position::{PyPosition, positions_of},
     repository::run_context_operation_write,
@@ -260,24 +261,33 @@ impl PySequenceGraph {
         }
     }
 
-    /// Plot this sequence graph as an interactive Jupyter widget.
+    /// Plot this sequence graph as an interactive widget or a static PNG.
     ///
-    /// Displays the widget immediately and returns it for further use.
-    /// Outside of an IPython/Jupyter environment the display call is silently
-    /// skipped and only the widget is returned.
+    /// By default, returns a widget for navigation and display. Outside a
+    /// Jupyter kernel, this is a text widget that needs no browser.
+    ///
+    /// Call ``save_png(path)`` on the returned widget to write the current view
+    /// to a PNG file instead; this needs no Jupyter dependencies.
+    /// Set ``interactive=False`` to return a displayable PNG without writing a file.
     ///
     /// Raises ``RuntimeError`` if this sequence graph was not created via a
     /// ``Repository``.
     ///
     /// Parameters
     /// rows : int, optional
-    ///     Initial viewport height in terminal rows.
+    ///     Initial viewport height in terminal rows. Defaults to 12 for an
+    ///     interactive widget and 24 for a static PNG.
     /// cols : int, optional
-    ///     Initial viewport width in terminal columns.
-    /// detail : {"normal", "full", "minimal"}, optional
-    ///     Initial level of node detail.  ``"normal"`` (default) shows
-    ///     truncated labels; ``"full"`` shows complete labels; ``"minimal"``
-    ///     shows the smallest representation.
+    ///     Initial viewport width in terminal columns. Defaults to 60 for an
+    ///     interactive widget and 400 for a static PNG. Because a static PNG is
+    ///     cropped to its content, the wider canvas captures more of the graph
+    ///     without adding blank margins.
+    /// detail : {"minimal", "normal", "labels", "full"}, optional
+    ///     Initial level of node detail.  ``"minimal"`` shows the smallest
+    ///     representation; ``"normal"`` shows truncated nodes with annotation names
+    ///     hidden; ``"labels"`` shows truncated nodes with annotation names;
+    ///     ``"full"`` shows complete sequences.  When omitted, the graph opens at
+    ///     ``"normal"``.
     /// colors : callable | dict | list, optional
     ///     Controls how annotation group entries are coloured when they are
     ///     auto-loaded from the repository.
@@ -294,7 +304,23 @@ impl PySequenceGraph {
     ///     Keep retired edit-site and pruned edges in the graph, dimmed,
     ///     instead of removing them along with the nodes only they reach.
     ///     Defaults to ``False``.
-    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false))]
+    /// align_path : bool, optional
+    ///     Lay the current path out as one straight row, with variation branching
+    ///     above and below it and annotation rows growing downward from the sequence.
+    ///     The current path is the one the viewer is following; it is not necessarily
+    ///     the reference path. Defaults to ``True``; without a path, no nodes
+    ///     are pinned to a row.
+    /// interactive : bool, optional
+    ///     Return a static PNG when ``False``; defaults to ``True``.
+    /// go_to : Position | SuperPosition | Locus | Annotation, optional
+    ///     Navigate to this target before rendering, including for static PNGs.
+    /// scale : int, optional
+    ///     Image pixels drawn per logical pixel, from 1 to 8. A scale of 2 renders the
+    ///     widget's PNGs on twice as many pixels and shows them at the same size, which
+    ///     is sharper on high-density screens. The PNG is labeled 96 dpi times the scale:
+    ///     1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi (close to a 300 dpi print) and 4 is
+    ///     384 dpi. Defaults to 2.
+    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false, align_path=true, interactive=true, *, go_to=None, scale=2))]
     fn plot(
         slf: &Bound<'_, PySequenceGraph>,
         rows: Option<u32>,
@@ -302,14 +328,37 @@ impl PySequenceGraph {
         detail: Option<&str>,
         colors: Option<Py<PyAny>>,
         show_history: bool,
+        align_path: bool,
+        interactive: bool,
+        #[gen_stub(override_type(type_repr = "Position | SuperPosition | Locus | Annotation | None", imports = ()))]
+        go_to: Option<Py<PyAny>>,
+        scale: usize,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow(), show_history)?;
+        let mut ctrl = PyGraphController::for_sequence_graph(
+            &slf.borrow(),
+            PlotOptions {
+                show_history,
+                align_path,
+            },
+        )?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
         let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols, colors)
+        build_widget(
+            py,
+            ctrl,
+            WidgetOptions {
+                rows,
+                cols,
+                colors,
+                interactive,
+                go_to,
+                scale,
+            },
+            &[slf.borrow().clone()],
+        )
     }
 
     /// Search for exact occurrences of `query` in this sequence graph.
@@ -801,18 +850,7 @@ impl PySequenceGraph {
             ));
         }
         let context = self.require_context("add_annotation()")?;
-        let annotation_segments: Vec<AnnotationSegment> = target_locus
-            .slices
-            .iter()
-            .map(|slice| AnnotationSegment {
-                node_id: slice.block.node_id,
-                range: Range {
-                    start: slice.block.sequence_start + slice.start as i64,
-                    end: slice.block.sequence_start + slice.end as i64,
-                },
-                strand: slice.strand,
-            })
-            .collect();
+        let annotation_segments = annotation_segments_from_graph_locus(&target_locus);
 
         run_context_operation_write(
             context,

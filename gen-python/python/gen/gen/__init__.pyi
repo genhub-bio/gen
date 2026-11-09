@@ -1000,20 +1000,32 @@ class Sample:
         cols: typing.Optional[builtins.int] = None,
         colors: typing.Optional[typing.Any] = None,
         show_history: builtins.bool = False,
+        align_path: builtins.bool = True,
+        interactive: builtins.bool = True,
+        *,
+        go_to: Position | SuperPosition | Locus | Annotation | None = None,
+        scale: builtins.int = 1,
     ) -> typing.Any:
         r"""
-        Plot this sample as an interactive Jupyter widget that pages through
-        each of its sequence graphs.
+        Plot this sample as an interactive widget that pages through its sequence graphs.
+        A static PNG shows the first graph.
 
-        Displays the widget immediately and returns it for further use.
-        Outside of an IPython/Jupyter environment the display call is silently
-        skipped and only the widget is returned.
+        By default, returns a widget for navigation and display. Outside a
+        Jupyter kernel, this is a text widget that needs no browser.
+
+        Call ``save_png(path)`` on the returned widget to write the current view
+        to a PNG file instead; this needs no Jupyter dependencies.
+        Set ``interactive=False`` to return a displayable PNG without writing a file.
 
         Parameters
         rows : int, optional
-            Initial viewport height in terminal rows.
+            Initial viewport height in terminal rows. Defaults to 12 for an
+            interactive widget and 24 for a static PNG.
         cols : int, optional
-            Initial viewport width in terminal columns.
+            Initial viewport width in terminal columns. Defaults to 60 for an
+            interactive widget and 400 for a static PNG. Because a static PNG is
+            cropped to its content, the wider canvas captures more of the graph
+            without adding blank margins.
         colors : callable | dict | list, optional
             Controls how annotation group entries are coloured when they are
             auto-loaded from the repository. See ``Repository.plot`` for details.
@@ -1021,6 +1033,20 @@ class Sample:
             Keep retired edit-site and pruned edges in the graph, dimmed,
             instead of removing them along with the nodes only they reach.
             Defaults to ``False``.
+        align_path : bool, optional
+            Lay the current path out as one straight row, with variation branching
+            above and below it and annotation rows growing downward from the sequence.
+            The current path is the one the viewer is following; it is not necessarily
+            the reference path. Defaults to ``True``; without a path, no nodes
+            are pinned to a row.
+        interactive : bool, optional
+            Return a static PNG of the first graph when ``False``; defaults to ``True``.
+        go_to : Position | SuperPosition | Locus | Annotation, optional
+            Navigate to this target before rendering, including for static PNGs.
+        scale : int, optional
+            Image pixels drawn per logical pixel, from 1 to 8. A scale of 2 renders the
+            widget's PNGs on twice as many pixels and shows them at the same size, which
+            is sharper on high-density screens. Defaults to 1.
         """
     def __repr__(self) -> builtins.str: ...
     def copy(
@@ -1152,26 +1178,40 @@ class SequenceGraph:
         detail: typing.Optional[builtins.str] = None,
         colors: typing.Optional[typing.Any] = None,
         show_history: builtins.bool = False,
+        align_path: builtins.bool = True,
+        interactive: builtins.bool = True,
+        *,
+        go_to: Position | SuperPosition | Locus | Annotation | None = None,
+        scale: builtins.int = 2,
     ) -> typing.Any:
         r"""
-        Plot this sequence graph as an interactive Jupyter widget.
+        Plot this sequence graph as an interactive widget or a static PNG.
 
-        Displays the widget immediately and returns it for further use.
-        Outside of an IPython/Jupyter environment the display call is silently
-        skipped and only the widget is returned.
+        By default, returns a widget for navigation and display. Outside a
+        Jupyter kernel, this is a text widget that needs no browser.
+
+        Call ``save_png(path)`` on the returned widget to write the current view
+        to a PNG file instead; this needs no Jupyter dependencies.
+        Set ``interactive=False`` to return a displayable PNG without writing a file.
 
         Raises ``RuntimeError`` if this sequence graph was not created via a
         ``Repository``.
 
         Parameters
         rows : int, optional
-            Initial viewport height in terminal rows.
+            Initial viewport height in terminal rows. Defaults to 12 for an
+            interactive widget and 24 for a static PNG.
         cols : int, optional
-            Initial viewport width in terminal columns.
-        detail : {"normal", "full", "minimal"}, optional
-            Initial level of node detail.  ``"normal"`` (default) shows
-            truncated labels; ``"full"`` shows complete labels; ``"minimal"``
-            shows the smallest representation.
+            Initial viewport width in terminal columns. Defaults to 60 for an
+            interactive widget and 400 for a static PNG. Because a static PNG is
+            cropped to its content, the wider canvas captures more of the graph
+            without adding blank margins.
+        detail : {"minimal", "normal", "labels", "full"}, optional
+            Initial level of node detail.  ``"minimal"`` shows the smallest
+            representation; ``"normal"`` shows truncated nodes with annotation names
+            hidden; ``"labels"`` shows truncated nodes with annotation names;
+            ``"full"`` shows complete sequences.  When omitted, the graph opens at
+            ``"normal"``.
         colors : callable | dict | list, optional
             Controls how annotation group entries are coloured when they are
             auto-loaded from the repository.
@@ -1188,6 +1228,22 @@ class SequenceGraph:
             Keep retired edit-site and pruned edges in the graph, dimmed,
             instead of removing them along with the nodes only they reach.
             Defaults to ``False``.
+        align_path : bool, optional
+            Lay the current path out as one straight row, with variation branching
+            above and below it and annotation rows growing downward from the sequence.
+            The current path is the one the viewer is following; it is not necessarily
+            the reference path. Defaults to ``True``; without a path, no nodes
+            are pinned to a row.
+        interactive : bool, optional
+            Return a static PNG when ``False``; defaults to ``True``.
+        go_to : Position | SuperPosition | Locus | Annotation, optional
+            Navigate to this target before rendering, including for static PNGs.
+        scale : int, optional
+            Image pixels drawn per logical pixel, from 1 to 8. A scale of 2 renders the
+            widget's PNGs on twice as many pixels and shows them at the same size, which
+            is sharper on high-density screens. The PNG is labeled 96 dpi times the scale:
+            1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi (close to a 300 dpi print) and 4 is
+            384 dpi. Defaults to 2.
         """
     def search(
         self, query: builtins.str, sequence_kind: builtins.str = "dna"

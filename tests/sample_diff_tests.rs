@@ -4,7 +4,7 @@ use r#gen::{
     imports::fasta::import_fasta,
     test_helpers::{TestContext, setup_gen},
     updates::{sequence::update_with_sequence, vcf::update_with_vcf},
-    views::diff_graph::build_diff_graph_component,
+    views::{diff_graph::build_diff_graph_component, gen_graph_widget::stored_edge_key},
 };
 use gen_diff::{
     graph::DiffChangeKind,
@@ -198,6 +198,63 @@ fn test_reversing_query_and_base_marks_unknown_insertion_added() {
         changed_sequences(&context, &diff, DiffChangeKind::Removed).is_empty(),
         "unknown should not remove sequence relative to foo"
     );
+}
+
+/// Every edge that touches a node only one side has must be lit like that node, so a removed
+/// node is flanked by red edges and an added node by green ones.
+fn assert_edges_flanking_changed_nodes_match(diff: &SampleDiff, expected_changed: usize) {
+    let component = build_diff_graph_component(&diff.graph, String::new());
+    let mut checked = 0;
+    for (source, target, diff_edges) in diff.graph.all_edges() {
+        let expected = [source.change.kind, target.change.kind]
+            .into_iter()
+            .find_map(|kind| match kind {
+                DiffChangeKind::Added => Some(Color::Green),
+                DiffChangeKind::Removed => Some(Color::Red),
+                _ => None,
+            });
+        let Some(expected) = expected else {
+            continue;
+        };
+        for diff_edge in diff_edges {
+            let key = stored_edge_key(source.node, target.node, &diff_edge.edge);
+            let color = component
+                .highlighted_edges
+                .iter()
+                .find(|(highlighted, _)| *highlighted == key)
+                .map(|(_, color)| *color);
+            assert_eq!(
+                color,
+                Some(expected),
+                "edge {:?}..{:?} -> {:?}..{:?} touches a changed node",
+                source.node.sequence_start,
+                source.node.sequence_end,
+                target.node.sequence_start,
+                target.node.sequence_end,
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= expected_changed,
+        "the diff should have edges flanking changed nodes, found {checked}"
+    );
+}
+
+#[test]
+fn test_edges_flanking_removed_and_added_nodes_take_their_color() {
+    // Unknown deletes a base from the reference (a re-cut of the reference node) and inserts
+    // AGA, so the diff has a removed slice and an added node.
+    let (_context, diff) = simple_vcf_sample_diff("unknown", "reference");
+
+    assert_edges_flanking_changed_nodes_match(&diff, 6);
+}
+
+#[test]
+fn test_edges_flanking_changed_nodes_take_their_color_when_query_and_base_swap() {
+    let (_context, diff) = simple_vcf_sample_diff("reference", "unknown");
+
+    assert_edges_flanking_changed_nodes_match(&diff, 6);
 }
 
 /// Imports the simple reference, applies `(parent, child, region, sequence)`

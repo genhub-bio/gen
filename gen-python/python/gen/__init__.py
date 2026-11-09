@@ -1,5 +1,6 @@
 """Python bindings to the Gen version control system."""
 
+import os as _os
 from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _version
 
@@ -35,7 +36,7 @@ from .gen import (
 # happen to be installed.
 from .text_widget import TextGraphWidget, _in_jupyter_kernel
 
-if _in_jupyter_kernel():
+if _in_jupyter_kernel() and _os.environ.get("GEN_NOTEBOOK_TEXT_OUTPUT") != "1":
     try:
         from .jupyter_widget import GraphWidget, freeze_all_widgets
     except ImportError:

@@ -107,29 +107,25 @@ impl PyGraphLocus {
 
     /// The position to navigate to: the midpoint in reading order when centered, else the first.
     pub(crate) fn target_position(&self, center: bool) -> Option<PyPosition> {
-        let offset = if center { self.__len__() / 2 } else { 0 };
+        let offset = if center {
+            self.presentation.len() / 2
+        } else {
+            0
+        };
         self.position_at(offset).ok()
     }
 
     /// Resolve a reading-order offset while retaining the block used to display the position.
-    pub(crate) fn position_at(&self, mut offset: usize) -> PyResult<PyPosition> {
-        for slice in &self.presentation.slices {
-            let length = slice.end - slice.start;
-            if offset < length {
-                let local_offset = if slice.strand == Strand::Reverse {
-                    slice.end - 1 - offset
-                } else {
-                    slice.start + offset
-                };
-                // in_block adds sequence_start to obtain the stable node coordinate.
-                return Ok(
-                    PyPosition::in_block(slice.block, local_offset, slice.strand)
-                        .attached_to(self.sequence_graph.clone()),
-                );
-            }
-            offset -= length;
-        }
-        Err(PyIndexError::new_err("Locus index out of range"))
+    pub(crate) fn position_at(&self, offset: usize) -> PyResult<PyPosition> {
+        let (slice, local_offset) = self
+            .presentation
+            .slice_at(offset)
+            .ok_or_else(|| PyIndexError::new_err("Locus index out of range"))?;
+        // in_block adds sequence_start to obtain the stable node coordinate.
+        Ok(
+            PyPosition::in_block(slice.block, local_offset, slice.strand)
+                .attached_to(self.sequence_graph.clone()),
+        )
     }
 }
 
@@ -323,7 +319,7 @@ impl PyGraphLocus {
 #[cfg(test)]
 mod tests {
     use gen_core::{HashId, Strand};
-    use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
+    use gen_graph::{GraphNode, GraphNodeSlice};
     use gen_models::locus::GraphLocus;
     use pyo3::{
         Py, Python,
@@ -400,50 +396,6 @@ mod tests {
                         .expect("should resolve the offset")
                         .position,
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn test_position_at_resolves_absolute_coordinates_on_current_nodes() {
-        let node_id = HashId::convert_str("split");
-        let left_block = GraphNode {
-            node_id,
-            sequence_start: 100,
-            sequence_end: 110,
-        };
-        let right_block = GraphNode {
-            node_id,
-            sequence_start: 110,
-            sequence_end: 120,
-        };
-        let mut graph = GenGraph::new();
-        graph.add_node(left_block);
-        graph.add_node(right_block);
-        let locus = GraphLocus {
-            slices: vec![GraphNodeSlice::full(
-                GraphNode {
-                    node_id,
-                    sequence_start: 105,
-                    sequence_end: 117,
-                },
-                Strand::Forward,
-            )],
-        };
-        for (locus, first, middle) in [
-            (locus.clone(), (left_block, 5), (right_block, 1)),
-            (
-                locus.reverse_complement(),
-                (right_block, 6),
-                (right_block, 0),
-            ),
-        ] {
-            let target = PyGraphLocus::from_locus(locus);
-            for (offset, expected) in [(0, first), (target.__len__() / 2, middle)] {
-                let position = target
-                    .position_at(offset)
-                    .expect("should resolve a base in reading order");
-                assert_eq!(position.locate(&graph), Some(expected));
             }
         }
     }

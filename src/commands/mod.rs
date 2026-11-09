@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use gen_core::DoltHashId;
 use gen_diff::operations::DiffRange;
@@ -122,16 +124,18 @@ pub enum Commands {
         /// Read graph state from a historical ref instead of the current checkout
         #[arg(long = "ref")]
         history_ref: Option<String>,
-        /// Optional sample to open directly. If omitted, choose it in the UI.
+        /// Name of the sample to open directly. If omitted, choose it in the UI.
         #[arg(short, long, conflicts_with_all = ["query", "base"])]
         sample: Option<String>,
-        /// Query whose graph changes should be shown relative to the base
+        /// Name of the sample to compare against the base. Needs the graph name and --base.
+        /// Green marks what only this sample has
         #[arg(long, requires = "base")]
         query: Option<String>,
-        /// Base against which the query is compared
+        /// Name of the sample the query is compared against. Red marks what only this sample
+        /// has; shared sequence is drawn plain
         #[arg(long, requires = "query")]
         base: Option<String>,
-        /// Look for the sample in a specific collection
+        /// Look for the sample (or the query and base samples) in a specific collection
         #[arg(short, long)]
         collection: Option<String>,
         /// Position as "node id:coordinate" to center the graph on
@@ -143,6 +147,25 @@ pub enum Commands {
         /// Number of terminal rows for the inline graph view
         #[arg(long, default_value_t = 16)]
         height: u16,
+        /// Write the graph to a PNG file instead of opening a viewer. Needs a graph and sample (or --query and --base).
+        #[arg(long, value_name = "PATH")]
+        png: Option<PathBuf>,
+        /// Width of the PNG plot in terminal columns (11 pixels each at scale 1)
+        #[arg(long, default_value_t = 600, requires = "png")]
+        png_columns: u16,
+        /// Height of the PNG plot in terminal rows (21 pixels each at scale 1)
+        #[arg(long, default_value_t = 300, requires = "png")]
+        png_rows: u16,
+        /// Pixels drawn per logical pixel, so 2 writes a sharper image on twice as many pixels.
+        /// The image is labeled 96 dpi times the scale: 1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi
+        /// (close to a 300 dpi print) and 4 is 384 dpi
+        #[arg(
+            long,
+            default_value_t = gen_tui::DEFAULT_SCALE as u8,
+            requires = "png",
+            value_parser = clap::value_parser!(u8).range(1..=gen_tui::MAX_SCALE as i64)
+        )]
+        png_scale: u8,
     },
     /// Show a diff of operations and render the consolidated graph
     #[command(name = "view-diff", arg_required_else_help(true))]
@@ -456,10 +479,10 @@ pub enum Commands {
         /// The name of the collection to diff
         #[arg(short = 'c', long)]
         collection: Option<String>,
-        /// Query whose contents are compared against the base
+        /// Name of the sample whose contents are compared against the base
         #[arg(long, visible_alias = "sample1")]
         query: String,
-        /// Base used as the comparison reference
+        /// Name of the sample used as the comparison reference
         #[arg(long, visible_alias = "sample2")]
         base: String,
         /// The name of the output GFA file
@@ -531,6 +554,8 @@ pub fn get_default_collection(conn: &ConfigConnection) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
     use gen_diff::operations::DiffRange;
 
@@ -692,6 +717,48 @@ mod tests {
         assert_eq!(graph.as_deref(), Some("m123"));
         assert_eq!(query.as_deref(), Some("foo"));
         assert_eq!(base.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn test_view_png_options_parse() {
+        let cli = Cli::try_parse_from([
+            "gen",
+            "view",
+            "m123",
+            "--sample",
+            "s1",
+            "--png",
+            "plot.png",
+            "--png-columns",
+            "80",
+        ])
+        .expect("should parse png export options");
+        let Some(Commands::View {
+            png,
+            png_columns,
+            png_rows,
+            png_scale,
+            ..
+        }) = cli.command
+        else {
+            panic!("should parse view command");
+        };
+        assert_eq!(png, Some(PathBuf::from("plot.png")));
+        assert_eq!(
+            (png_columns, png_rows, png_scale),
+            (80, 300, gen_tui::DEFAULT_SCALE as u8)
+        );
+        assert!(Cli::try_parse_from(["gen", "view", "--png-rows", "10"]).is_err());
+        assert!(Cli::try_parse_from(["gen", "view", "--png-scale", "2"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gen", "view", "--png", "plot.png", "--png-scale", "0"]).is_err()
+        );
+        let scaled = Cli::try_parse_from(["gen", "view", "--png", "plot.png", "--png-scale", "3"])
+            .expect("should parse png scale");
+        let Some(Commands::View { png_scale, .. }) = scaled.command else {
+            panic!("should parse view command");
+        };
+        assert_eq!(png_scale, 3);
     }
 
     #[test]

@@ -11,7 +11,7 @@ repos:
     hooks:
       - id: notebook-text-output
         name: Rebuild example notebooks with text graphs
-        entry: .venv/bin/python gen-python/scripts/freeze_notebooks.py --if-graphical
+        entry: .venv/bin/python gen-python/scripts/freeze_notebooks.py
         language: system
         stages: [pre-push]
         files: ^gen-python/examples/.*\.ipynb$

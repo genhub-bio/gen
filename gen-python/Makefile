@@ -17,7 +17,7 @@ help:
 	@echo "                        installed extension's public API (tests/*.py)"
 	@echo "  notebook-clear-output Clear outputs from example notebooks in place"
 	@echo "  notebook-test         Build via the root Makefile's 'python' target, then run notebook tests"
-	@echo "  notebook-freeze       Execute example notebooks in a real browser and freeze widgets to static PNGs"
+	@echo "  notebook-freeze       Execute example notebooks with text graph output, clearing any that take over 5 minutes"
 	@echo "  stubs                 Regenerate the Python type stubs from the Rust annotations"
 	@echo "  stubs-check           Fail if the committed stubs are stale (leaves files untouched)"
 	@echo "  test                  Run all tests (bindings-test + api-test + notebook-test)"
@@ -57,14 +57,9 @@ notebook-test:
 	$(MAKE) -C .. python
 	$(VENV_PYTEST) --nbmake --nbmake-timeout=120 examples/
 
-# Renders widget outputs as static PNGs by driving a real Jupyter server through a
-# headless browser, so GitHub can display the notebooks without live JS. Run this
-# (and commit the result) only when preparing example notebooks for viewing; use
-# notebook-clear-output beforehand for routine commits so diffs stay small.
+# Execute example notebooks with text graph output. Pass NOTEBOOKS to select files.
 notebook-freeze:
-	$(VENV_PIP) show playwright >/dev/null 2>&1 || $(VENV_PIP) install playwright
-	$(VENV_PLAYWRIGHT) install --with-deps chromium
-	$(MAKE) -C .. jupyter
-	$(VENV_PYTHON) scripts/freeze_notebooks.py
+	$(MAKE) -C .. python
+	$(VENV_PYTHON) scripts/freeze_notebooks.py $(NOTEBOOKS)
 
 test: notebook-clear-output bindings-test api-test notebook-test

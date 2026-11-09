@@ -1,16 +1,26 @@
 import { makeGridMetrics } from "./grid";
 import { paintFrame, Frame } from "./renderer";
-import { attachInteraction } from "./interaction";
+import { attachInteraction, HitRegion } from "./interaction";
 
 declare const INTERACTIVE: boolean;
 
 interface AnywidgetModel {
   get(key: "frame"): Frame;
+  get(key: "viewport_png"): ArrayBuffer | Uint8Array | DataView | number[];
+  get(key: "cell_width"): number;
+  get(key: "cell_height"): number;
+  get(key: "scale"): number;
+  get(key: "background_color"): string;
+  get(key: "hit_regions"): HitRegion[];
   get(key: "page_count"): number;
   get(key: "page_index"): number;
-  on(event: "change:frame", callback: () => void): void;
+  get(key: "cols"): number;
+  on(event: "change:viewport_png", callback: () => void): void;
   on(event: "change:page_index", callback: () => void): void;
-  on(event: "msg:custom", callback: (msg: { type: string; data?: string }) => void): void;
+  on(event: "change:hit_regions", callback: () => void): void;
+  on(event: "change:background_color", callback: () => void): void;
+  on(event: "msg:custom", callback: (msg: { type: string }) => void): void;
+  off(event: string, callback: (...args: never[]) => void): void;
   send(msg: Record<string, unknown>): void;
 }
 
@@ -20,29 +30,78 @@ interface RenderContext {
 }
 
 function render({ model, el }: RenderContext): { destroy(): void } | void {
-  const scratch = document.createElement("canvas");
-  const scratchCtx = scratch.getContext("2d")!;
-  const grid = makeGridMetrics(scratchCtx);
-
   el.style.overflowX = "auto";
 
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
 
-  const canvas = document.createElement("canvas");
-  canvas.style.cssText = `display: block; cursor: ${INTERACTIVE ? "grab" : "default"}; box-shadow: inset 0 0 0 2px #45475a;`;
+  // R still supplies the earlier JSON frame and keeps its browser canvas painter
+  // until its widget bridge moves to the native PNG traits.
+  if (!INTERACTIVE) {
+    const scratch = document.createElement("canvas");
+    const grid = makeGridMetrics(scratch.getContext("2d")!);
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "display: block; cursor: default; box-shadow: inset 0 0 0 2px #45475a;";
+    wrapper.appendChild(canvas);
+    el.appendChild(wrapper);
+    paintFrame(canvas.getContext("2d")!, canvas, grid, model.get("frame"));
+    return;
+  }
 
-  wrapper.appendChild(canvas);
+  wrapper.style.overflow = "hidden";
+  const updateBackground = () => { wrapper.style.backgroundColor = model.get("background_color"); };
+  updateBackground();
+  model.on("change:background_color", updateBackground);
+
+  const image = document.createElement("img");
+  image.style.cssText = `display: block; cursor: ${INTERACTIVE ? "grab" : "default"};`;
+  image.draggable = false;
+  wrapper.appendChild(image);
   el.appendChild(wrapper);
 
-  const ctx = canvas.getContext("2d")!;
-
-  paintFrame(ctx, canvas, grid, model.get("frame"));
+  let objectUrl: string | null = null;
+  let pendingObjectUrl: string | null = null;
+  let imageRevision = 0;
+  let resetPanPreview: (() => void) | null = null;
+  function updateImage(): void {
+    const bytes = model.get("viewport_png");
+    const data = bytes instanceof ArrayBuffer
+      ? new Uint8Array(bytes)
+      : bytes instanceof DataView
+        ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+        : bytes instanceof Uint8Array
+          ? bytes
+          : new Uint8Array(bytes);
+    const png = new Uint8Array(data.byteLength);
+    png.set(data);
+    if (png.byteLength === 0) return;
+    const revision = ++imageRevision;
+    if (pendingObjectUrl) URL.revokeObjectURL(pendingObjectUrl);
+    pendingObjectUrl = URL.createObjectURL(new Blob([png.buffer], { type: "image/png" }));
+    const nextUrl = pendingObjectUrl;
+    const decodedImage = new Image();
+    decodedImage.src = nextUrl;
+    void decodedImage.decode().then(() => {
+      if (revision !== imageRevision) return;
+      const previousUrl = objectUrl;
+      image.src = nextUrl;
+      objectUrl = nextUrl;
+      pendingObjectUrl = null;
+      // A scaled PNG has `scale` image pixels per CSS pixel; show it at its logical size.
+      const scale = Math.max(1, model.get("scale") || 1);
+      image.style.width = `${decodedImage.naturalWidth / scale}px`;
+      image.style.height = `${decodedImage.naturalHeight / scale}px`;
+      resetPanPreview?.();
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+    }).catch(() => {
+      if (revision === imageRevision) pendingObjectUrl = null;
+      URL.revokeObjectURL(nextUrl);
+    });
+  }
+  updateImage();
 
   if (INTERACTIVE) {
-    let nodeCells = new Set<string>();
     let frozen = false;
-    let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
 
     const sharedBtnStyle = [
       "box-sizing: border-box",
@@ -185,62 +244,75 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
 
     wrapper.appendChild(pageIndicator);
 
+    // Step by 80% of the viewport so a strip of the old view stays visible and
+    // the user keeps their bearings. Negative dx moves the camera downstream
+    // (drag semantics, see Python _move_by).
+    const PAN_STEP_FRACTION = 0.8;
+    function makeScrollBtn(side: "left" | "right"): HTMLButtonElement {
+      const points = side === "left" ? "15 18 9 12 15 6" : "9 18 15 12 9 6";
+      const btn = makeBtn(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="${points}" /></svg>`,
+        side === "left" ? "Scroll left (80% of the view)" : "Scroll right (80% of the view)",
+        () => {
+          const step = Math.max(1, Math.round((model.get("cols") ?? 0) * PAN_STEP_FRACTION));
+          interaction.panBy(side === "left" ? step : -step, 0);
+        },
+      );
+      btn.style.cssText += `; position: absolute; top: 50%; ${side}: 8px; transform: translateY(-50%); z-index: 1;`;
+      return btn;
+    }
+    const scrollLeftBtn = makeScrollBtn("left");
+    const scrollRightBtn = makeScrollBtn("right");
+    wrapper.appendChild(scrollLeftBtn);
+    wrapper.appendChild(scrollRightBtn);
+
     btnContainer.appendChild(zoomOutBtn);
     btnContainer.appendChild(zoomInBtn);
     btnContainer.appendChild(freezeBtn);
     wrapper.appendChild(btnContainer);
 
-    function captureHiRes(): { dataUrl: string; width: number; height: number } {
-      const dpr = window.devicePixelRatio || 1;
-      const hiResGrid = makeGridMetrics(scratchCtx, dpr);
-      const offscreen = document.createElement("canvas");
-      const offCtx = offscreen.getContext("2d")!;
-      paintFrame(offCtx, offscreen, hiResGrid, model.get("frame"));
-      return { dataUrl: offscreen.toDataURL("image/png"), width: canvas.width, height: canvas.height };
-    }
-
-    function sendSnapshot(): void {
-      const { dataUrl, width, height } = captureHiRes();
-      model.send({ type: "snapshot", data: dataUrl, width, height });
-    }
-
-    function scheduleSnapshot(): void {
-      if (snapshotTimer) clearTimeout(snapshotTimer);
-      snapshotTimer = setTimeout(sendSnapshot, 1000);
-    }
-
-    function repaint(frame: Frame): void {
-      nodeCells = paintFrame(ctx, canvas, grid, frame);
-    }
-
-    repaint(model.get("frame"));
-    model.on("change:frame", () => { repaint(model.get("frame")); scheduleSnapshot(); });
+    const onPngChange = () => updateImage();
+    model.on("change:viewport_png", onPngChange);
 
     function doFreeze(): void {
-      if (snapshotTimer) { clearTimeout(snapshotTimer); snapshotTimer = null; }
       frozen = true;
       btnContainer.style.display = "none";
+      scrollLeftBtn.style.display = "none";
+      scrollRightBtn.style.display = "none";
       pageIndicator.style.display = "none";
-      canvas.style.cursor = "default";
-      canvas.style.boxShadow = "none";
-      const { dataUrl, width, height } = captureHiRes();
-      const img = document.createElement("img");
-      img.src = dataUrl;
-      img.style.cssText = `display:block;cursor:default;width:${width}px;height:${height}px`;
-      wrapper.replaceChild(img, canvas);
-      model.send({ type: "freeze", data: dataUrl, width, height });
+      image.style.cursor = "default";
+      model.send({ type: "freeze" });
     }
 
-    model.on("msg:custom", (msg) => {
+    const onCustomMessage = (msg: { type: string }) => {
       if (msg.type === "freeze") doFreeze();
-    });
+      if (msg.type === "pan_done") {
+        interaction.finishPan();
+        // If a new image is still decoding it will clear the preview itself;
+        // otherwise (e.g. the pan was clamped and nothing changed) clear it now.
+        if (!pendingObjectUrl) interaction.resetPreview();
+      }
+    };
+    model.on("msg:custom", onCustomMessage);
 
-    const detachInteraction = attachInteraction(canvas, model, grid, () => nodeCells, () => frozen);
+    const interaction = attachInteraction(
+      image,
+      model,
+      () => ({ cellWidth: model.get("cell_width"), cellHeight: model.get("cell_height"), hitRegions: model.get("hit_regions") }),
+      () => frozen,
+    );
+    resetPanPreview = interaction.resetPreview;
 
     return {
       destroy() {
-        if (snapshotTimer) clearTimeout(snapshotTimer);
-        detachInteraction();
+        interaction.detach();
+        imageRevision += 1;
+        model.off("change:viewport_png", onPngChange);
+        model.off("change:background_color", updateBackground);
+        model.off("msg:custom", onCustomMessage);
+        model.off("change:page_index", updatePageLabel);
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        if (pendingObjectUrl) URL.revokeObjectURL(pendingObjectUrl);
       },
     };
   }

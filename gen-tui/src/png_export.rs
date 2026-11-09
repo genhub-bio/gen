@@ -13,7 +13,7 @@ use std::{
 };
 
 use fontdue::{Font, FontSettings, Metrics};
-use png::{BitDepth, ColorType, Compression, Encoder, EncodingError};
+use png::{BitDepth, ColorType, Compression, Encoder, EncodingError, PixelDimensions, Unit};
 use ratatui::{
     buffer::{Buffer, Cell},
     layout::{Margin, Rect},
@@ -25,6 +25,16 @@ use crate::theme::current_theme;
 
 /// Blank cells kept around the content by [`PngRenderer::crop_to_content`].
 pub const CROP_MARGIN: u16 = 1;
+
+/// Largest pixel scale callers should accept: an image grows with the square of its scale.
+pub const MAX_SCALE: usize = 8;
+
+/// Scale callers draw at unless asked otherwise: twice the logical pixels stay sharp on
+/// high-density screens, and the logical size is the same.
+pub const DEFAULT_SCALE: usize = 2;
+
+/// Pixels per meter at the logical 96 dpi, which a scale of one declares in the PNG header.
+const LOGICAL_PIXELS_PER_METER: u32 = 3780;
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 
@@ -40,10 +50,16 @@ pub enum PngExportError {
     Io(#[from] IoError),
 }
 
+/// Sizes are in pixels of the written image. [`Self::with_scale`] derives a sharper config from a
+/// logical one: the same grid of cells with every length multiplied, so a browser can show the
+/// image at its logical size and use the extra pixels on high-density screens.
 #[derive(Clone, Copy, Debug)]
 pub struct PngConfig {
     pub cell_width: usize,
     pub cell_height: usize,
+    /// How many image pixels draw one logical pixel. Strokes, paddings and offsets that are a
+    /// fixed number of logical pixels are multiplied by it.
+    pub scale: usize,
     /// Used for cells whose foreground is `Color::Reset`.
     pub foreground: [u8; 3],
     /// Used for cells whose background is `Color::Reset`, and to fill the canvas.
@@ -57,9 +73,34 @@ impl Default for PngConfig {
         Self {
             cell_width: 11,
             cell_height: 21,
+            scale: 1,
             foreground: color_to_rgb(theme[0x05], [255; 3]),
             background: color_to_rgb(theme[0x00], [0; 3]),
         }
+    }
+}
+
+impl PngConfig {
+    /// This config drawn at `scale` image pixels per logical pixel, so a scale of 2 writes an
+    /// image twice as wide and tall with the same cell grid. A scale of 0 is treated as 1.
+    /// The PNG declares 96 dpi times the scale, so 2 is 192 dpi and 3 is 288 dpi, close to a
+    /// 300 dpi print.
+    pub fn with_scale(self, scale: usize) -> Self {
+        let scale = scale.max(1);
+        let (cell_width, cell_height) = self.logical_cell_size();
+        Self {
+            cell_width: cell_width * scale,
+            cell_height: cell_height * scale,
+            scale,
+            ..self
+        }
+    }
+
+    /// The cell size in logical pixels, which does not change with the scale. A viewer maps
+    /// pointer positions to cells with it.
+    pub fn logical_cell_size(&self) -> (usize, usize) {
+        let scale = self.scale.max(1);
+        (self.cell_width / scale, self.cell_height / scale)
     }
 }
 
@@ -91,7 +132,8 @@ impl PngRenderer {
                 .ok_or(PngExportError::InvalidInput(
                     "font has no horizontal metrics",
                 ))?;
-        let text_size = ((config.cell_width as f32 - 3.0).max(1.0) * PROBE_SIZE
+        let text_padding = 3.0 * config.scale.max(1) as f32;
+        let text_size = ((config.cell_width as f32 - text_padding).max(1.0) * PROBE_SIZE
             / font.metrics('M', PROBE_SIZE).advance_width)
             .min(config.cell_height as f32 * PROBE_SIZE / (probe_line.ascent - probe_line.descent));
         let line = font
@@ -152,6 +194,13 @@ impl PngRenderer {
         encoder.set_color(ColorType::Rgb);
         encoder.set_depth(BitDepth::Eight);
         encoder.set_compression(Compression::Fast);
+        // Declare the density so viewers that honor it show the image at its logical size.
+        let pixels_per_meter = LOGICAL_PIXELS_PER_METER * self.config.scale as u32;
+        encoder.set_pixel_dims(Some(PixelDimensions {
+            xppu: pixels_per_meter,
+            yppu: pixels_per_meter,
+            unit: Unit::Meter,
+        }));
         let mut writer = encoder.write_header()?;
         {
             // One stream spans all bands so compression is not restarted per row.
@@ -311,8 +360,11 @@ impl PngRenderer {
                 fill_rect(
                     &mut self.band,
                     width,
-                    (cell_x, config.cell_height.saturating_sub(2)),
-                    (config.cell_width, 1),
+                    (
+                        cell_x,
+                        config.cell_height.saturating_sub(2 * config.scale.max(1)),
+                    ),
+                    (config.cell_width, config.scale.max(1)),
                     foreground,
                 );
             }
@@ -332,22 +384,30 @@ fn draw_sentinel_glyph(
     color: [u8; 3],
 ) -> bool {
     let (width, height) = (config.cell_width, config.cell_height);
+    let thickness = config.scale.max(1);
     let middle_column = width / 2;
-    let (near, far) = (middle_column - 1, middle_column + 1);
-    let middle_row = height / 2;
+    let (near, far) = (middle_column - thickness, middle_column + thickness);
+    // Keep the horizontal line on a whole logical pixel row so it is not split across two.
+    let middle_row = height / 2 / thickness * thickness;
     let stub = match character {
-        '╟' => (far + 1, width - far - 1),
+        '╟' => (far + thickness, width - far - thickness),
         '╢' => (0, near),
         _ => return false,
     };
     for line in [near, far] {
-        fill_rect(pixels, row_width, (cell_x + line, 0), (1, height), color);
+        fill_rect(
+            pixels,
+            row_width,
+            (cell_x + line, 0),
+            (thickness, height),
+            color,
+        );
     }
     fill_rect(
         pixels,
         row_width,
         (cell_x + stub.0, middle_row),
-        (stub.1, 1),
+        (stub.1, thickness),
         color,
     );
     true
@@ -420,6 +480,7 @@ mod tests {
         PngConfig {
             cell_width: 8,
             cell_height: 12,
+            scale: 1,
             foreground: [255; 3],
             background: [0; 3],
         }
@@ -483,6 +544,7 @@ mod tests {
         let config = PngConfig {
             cell_width: 11,
             cell_height: 21,
+            scale: 1,
             foreground: [255; 3],
             background: [0; 3],
         };
@@ -575,5 +637,93 @@ mod tests {
         let mut renderer = PngRenderer::new(small_config()).unwrap();
         let buffer = Buffer::empty(Rect::new(0, 0, 0, 0));
         assert!(renderer.write_png(&buffer, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn test_scale_two_doubles_the_image_and_keeps_the_cell_grid() {
+        let config = small_config().with_scale(2);
+        assert_eq!((config.cell_width, config.cell_height), (16, 24));
+        assert_eq!(config.logical_cell_size(), (8, 12));
+        let mut renderer = PngRenderer::new(config).unwrap();
+        let buffer = Buffer::empty(Rect::new(0, 0, 3, 2));
+        let mut bytes = Vec::new();
+        renderer.write_png(&buffer, &mut bytes).unwrap();
+        let (width, height, _) = decode(&bytes);
+        assert_eq!((width, height), (48, 48));
+    }
+
+    #[test]
+    fn test_png_declares_96_dpi_times_the_scale() {
+        for scale in [1, 2, 3] {
+            let mut renderer = PngRenderer::new(small_config().with_scale(scale)).unwrap();
+            let buffer = Buffer::empty(Rect::new(0, 0, 2, 2));
+            let mut bytes = Vec::new();
+            renderer.write_png(&buffer, &mut bytes).unwrap();
+            let reader = Decoder::new(bytes.as_slice()).read_info().unwrap();
+            let dimensions = reader
+                .info()
+                .pixel_dims
+                .expect("should declare the pixel density");
+            let pixels_per_meter = 3780 * scale as u32;
+            assert_eq!(
+                (dimensions.xppu, dimensions.yppu),
+                (pixels_per_meter, pixels_per_meter),
+                "a scale of {scale} should declare {} dpi",
+                96 * scale
+            );
+            assert_eq!(dimensions.unit, png::Unit::Meter);
+        }
+    }
+
+    #[test]
+    fn test_with_scale_rescales_from_the_logical_cell_size() {
+        let config = small_config().with_scale(3).with_scale(2);
+        assert_eq!((config.cell_width, config.cell_height), (16, 24));
+        let reset = config.with_scale(0);
+        assert_eq!(
+            (reset.cell_width, reset.cell_height, reset.scale),
+            (8, 12, 1)
+        );
+    }
+
+    fn scaled_cell_pixels(character: &str, scale: usize) -> (usize, usize, Vec<[u8; 3]>) {
+        let config = PngConfig {
+            foreground: [255; 3],
+            background: [0; 3],
+            ..PngConfig::default()
+        }
+        .with_scale(scale);
+        let mut renderer = PngRenderer::new(config).unwrap();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buffer.set_string(0, 0, character, Style::default().fg(Color::White));
+        let mut bytes = Vec::new();
+        renderer.write_png(&buffer, &mut bytes).unwrap();
+        let pixels = decode(&bytes)
+            .2
+            .chunks_exact(3)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect();
+        (config.cell_width, config.cell_height, pixels)
+    }
+
+    #[test]
+    fn test_glyph_cell_is_not_blank_at_scale_two() {
+        let (width, height, pixels) = scaled_cell_pixels("M", 2);
+        assert_eq!((width, height), (22, 42));
+        assert!(pixels.iter().any(|pixel| pixel[0] > 128));
+        let lit_in_column =
+            |column: usize| (0..height).any(|row| pixels[row * width + column][0] > 64);
+        assert!(!lit_in_column(0) && !lit_in_column(width - 1));
+    }
+
+    #[test]
+    fn test_sentinel_lines_are_two_pixels_thick_at_scale_two() {
+        let (width, height, pixels) = scaled_cell_pixels("╟", 2);
+        let lit = |column: usize, row: usize| pixels[row * width + column][0] > 200;
+        assert!((0..height).all(|row| (9..11).all(|column| lit(column, row))));
+        assert!((0..height).all(|row| (13..15).all(|column| lit(column, row))));
+        assert!(!lit(11, 5) && !lit(12, 5));
+        assert!((15..width).all(|column| lit(column, 20) && lit(column, 21)));
+        assert!(!lit(15, 19) && !lit(15, 22));
     }
 }

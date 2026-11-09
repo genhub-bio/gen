@@ -134,6 +134,11 @@ key can be set through the environment variable `GENHUB_API_KEY`. If this variab
 is not set, the extension falls back to the same login process the CLI uses. See 
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
+For a self-contained graph with two branching regions and twelve overlapping
+annotations, open [complex_annotations.ipynb](examples/complex_annotations.ipynb)
+and run all cells using the project's Python environment.
+The notebook creates a temporary repository and displays the existing `GraphWidget`.
+The graph, annotations, and widget remain available for further exploration.
 
 ## Sequence editing
 
@@ -255,6 +260,37 @@ sequence = child[0]
 inserted = sequence.replace(annotation, "ACGT")
 sequence.add_annotation(inserted, "mutation")
 ```
+At full detail, the widget uses the CLI's annotation display: packed directional
+bars beneath nodes. `widget.show(annotation)` navigates to and highlights that annotation.
+Both full and compact detail center annotation names inside their arrows when they fit
+between the endpoint glyphs, or immediately to the left otherwise. Arrows and names
+move together when packed into rows. Nodes reserve transparent horizontal padding where
+labels overhang. Nodes attach edges on their top sequence row, with annotations growing
+downward and no blank padding above, whether or not a path is aligned. By default,
+`align_path=True` lays the current path out as one straight row with variation branching
+above and below it. The current path is the one the viewer follows, not necessarily the
+reference path. An aligned path also gets a position scale: a line of ticks and labels (0-based
+bases along the path) on the last rows of the view, or two rows under the lowest node in a PNG.
+The scale is not linear, since nodes take more or fewer columns than they have bases.
+`plot(align_path=False)` leaves the path unpinned and draws no scale.
+Labels never stretch the sequence. A name that does not fit inside its flag sits just
+left of it, and a flag cut off by the edge of the view keeps its name in the visible part
+of the flag. Annotation names are always drawn by the nodes themselves; only search and
+path highlights get floating labels. Annotation colors apply to bars and labels;
+sequence characters keep their normal colors unless `widget.show()` highlights a
+selected locus, annotation, Position, or SuperPosition. A Position highlights one
+base; a SuperPosition highlights each of its positions and navigates to the leftmost.
+
+Compact detail retains enough nucleotides at each end of a labeled annotation segment
+to fit its name between the arrow caps, with one period (`.`) for the skipped middle.
+If the sequence is too short for the name, the label goes to the left. Other annotation
+endpoints remain visible even inside a skipped middle. Each period occupies one cell;
+it never expands with label length. Full detail shows every nucleotide. In both views,
+annotation tails use brackets (`[` or `]`), directed heads use `<` or `>`, and
+undirected annotations use brackets at both ends. Unannotated long nodes retain only
+their two endpoint bases (`N.N`). Annotation endpoints align with the corresponding
+displayed bases, and the cursor visits only displayed nucleotides, skipping periods
+and padding.
 
 ## Annotation files
 
@@ -397,9 +433,31 @@ only the frame in a fenced code block.
   pan the viewport by one screenful within the current graph. Distinct from
   `next_page`/`prev_page` — don't confuse "page" (sample pagination) with
   "scroll" (viewport panning).
-- `widget.zoom_in()` / `widget.zoom_out()`: step the detail/zoom level.
+- `widget.zoom_in()` / `widget.zoom_out()`: step the detail/zoom level: minimal, normal with
+  annotation names hidden, normal with names shown, then full sequence.
+- `widget.show_labels()` / `widget.hide_labels()`: show or hide annotation names at normal
+  zoom. Plots open with names hidden so long names don't stretch the nodes; zooming in once
+  shows them too, and the full-sequence view always names every annotation. Both return the
+  widget.
 - All of the above mutate the widget in place and re-render; print
   `repr(widget)` afterward to see the effect.
+- `widget.save_png("plot.png", cols=120, rows=30)`: write the current view to
+  a PNG. Works without `gen[jupyter]`; each omitted dimension uses the widget's
+  current viewport size. Set either dimension independently to capture more of
+  the graph. Dimensions are measured in terminal cells (11 by 21 pixels each, times
+  `scale`). Blank rows and columns are trimmed, leaving a one-cell margin. Pass
+  `scale=2` for a sharper image on twice as many pixels; `sg.plot(scale=2)` sets it for
+  the widget and its in-memory PNGs.
+- `sg.plot(go_to=target)` / `sample.plot(go_to=target)`: navigate before displaying.
+  Accepts the same `Position`, `SuperPosition`, `Locus`, and `Annotation` targets as
+  `widget.go_to()`, for interactive, text, and static plots. For example,
+  `sg.plot(interactive=False, go_to=sg.region("chr1:900-920"))`.
+- `sg.plot(interactive=False, rows=30, cols=120)`: return an in-memory PNG image
+  that displays as the last expression in a notebook cell, without writing a file.
+  `rows` and `cols` set its render canvas; blank space is trimmed as with `save_png`.
+  `sample.plot(interactive=False)` renders its first sequence graph; its `go_to`
+  target should belong to that graph. PNG exports use smooth curves, while the
+  interactive/text views retain their terminal edge style.
 
 ```python
 import gen

@@ -7,8 +7,14 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use gen_core::{HashId, Workspace};
 use gen_diff::graph::DiffGenGraph;
+use gen_graph::{GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
-use gen_tui::{LineStyle, graph_view::GraphView, plotter::PathStyle};
+use gen_tui::{
+    LineStyle,
+    graph_view::{GraphView, GraphViewState},
+    layout_engine::LayoutEngine,
+    plotter::PathStyle,
+};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     prelude::*,
@@ -22,9 +28,9 @@ use crate::views::{
         active_neighborhood_coordinate_window, discard_pending_input, expand_query_window,
     },
     diagonal_png::write_png_with_lines,
-    diff_graph::{apply_diff_highlights, build_diff_graph_component},
+    diff_graph::{DiffLegend, apply_diff_highlights, build_diff_graph_component, handle_diff_key},
     gen_graph_controller::{GenGraphController, GraphKeyOutcome},
-    gen_graph_widget::create_gen_graph_engine,
+    gen_graph_widget::{ZoomLevels, create_gen_graph_engine},
     graph_database::GraphDatabase,
     graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, has_path_overlay},
     helpers::style_text,
@@ -210,20 +216,7 @@ pub fn show_inline_block_group_widget<'a>(
             let viewport_area = terminal.get_frame().area();
 
             terminal.draw(|frame| render_final(frame, &mut controller))?;
-
-            // For inline viewports, we need to manually restore terminal state
-            // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
-
-            // Position cursor at the end of the viewport BEFORE restoring terminal mode
-            let target_line = viewport_area.y + viewport_area.height;
-            let _ =
-                crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line));
-
-            // Now restore terminal modes manually (show cursor, disable raw mode)
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-            let _ = crossterm::terminal::disable_raw_mode();
-
-            std::io::Write::flush(&mut std::io::stdout()).ok();
+            leave_inline_terminal(viewport_area);
 
             if upgrade_requested {
                 Ok(InlineOutcome::OpenFullViewer(Box::new(controller)))
@@ -238,11 +231,151 @@ pub fn show_inline_block_group_widget<'a>(
     }
 }
 
+/// Hand the terminal back after an inline widget, leaving its last frame in the scrollback.
+fn leave_inline_terminal(viewport_area: Rect) {
+    // For inline viewports, we need to manually restore terminal state
+    // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
+
+    // Position cursor at the end of the viewport BEFORE restoring terminal mode
+    let target_line = viewport_area.y + viewport_area.height;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line));
+
+    // Now restore terminal modes manually (show cursor, disable raw mode)
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+    let _ = crossterm::terminal::disable_raw_mode();
+
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+}
+
+/// A sample diff held in memory with its layout engine, the way the full-screen diff viewer
+/// holds it. A diff graph is not stored in a block group, so it has no lazy crawl to drive.
+struct InlineDiffView<'a> {
+    engine: LayoutEngine<PackedGenGraph>,
+    zoom_levels: ZoomLevels<'a>,
+    view_state: GraphViewState<GraphNode>,
+    legend: Line<'static>,
+}
+
+impl<'a> InlineDiffView<'a> {
+    fn new(
+        conn: &'a GraphConnection,
+        workspace: &'a Workspace,
+        diff_graph: &DiffGenGraph,
+        legend: &DiffLegend,
+    ) -> Self {
+        let component = build_diff_graph_component(diff_graph, String::new());
+        let (engine, zoom_levels, mut view_state) =
+            create_gen_graph_engine(component.graph.clone(), (conn, workspace));
+        apply_diff_highlights(&mut view_state, &component);
+        // The inline widget follows the keyboard cursor from the start.
+        view_state.show_cursor();
+        Self {
+            engine,
+            zoom_levels,
+            view_state,
+            legend: legend.line(component.has_modified_marks()),
+        }
+    }
+
+    /// Draw the graph on the terminal's own background, like the inline block-group widget, so
+    /// the plot sits in the scrollback instead of looking like a separate screen.
+    fn render(&mut self, frame: &mut Frame, area: Rect) {
+        let renderer = &self.zoom_levels[self.view_state.zoom_index].1;
+        let view = GraphView::new(&mut self.engine, renderer).style(Style::default());
+        frame.render_stateful_widget(view, area, &mut self.view_state);
+    }
+
+    /// Draw the diff inside a border with the controls line below it.
+    fn render_inline(&mut self, frame: &mut Frame) {
+        let main_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(2)])
+            .split(frame.area());
+        let block = Block::default().borders(Borders::ALL);
+        let inner_area = block.inner(main_layout[0]);
+        frame.render_widget(block, main_layout[0]);
+        self.render(frame, inner_area);
+        draw_diff_controls_help(frame, main_layout[1], &self.legend);
+    }
+
+    /// Draw the final plot without the border or cursor, for the scrollback.
+    fn render_final(&mut self, frame: &mut Frame) {
+        let area = frame.area().offset(ratatui::layout::Offset { x: 0, y: -1 });
+        self.view_state.hide_cursor();
+        self.render(frame, area);
+    }
+}
+
+/// Run the diff widget until the user exits, returning whether they asked for the full viewer.
+fn run_inline_diff_event_loop<B: Backend>(
+    terminal: &mut Terminal<B>,
+    view: &mut InlineDiffView<'_>,
+    events: &mut impl EventSource,
+) -> Result<bool, B::Error> {
+    terminal.draw(|frame| view.render_inline(frame))?;
+    loop {
+        // Rendering is event-driven: block until the next input event wakes us.
+        let Some(event) = events.poll_next(Duration::from_secs(3600)) else {
+            continue;
+        };
+        if let AppEvent::KeyPress(key) = event {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return Ok(false),
+                KeyCode::Char('f') => return Ok(true),
+                _ => handle_diff_key(&mut view.view_state, &view.zoom_levels, key),
+            }
+        }
+        terminal.draw(|frame| view.render_inline(frame))?;
+    }
+}
+
+/// Display an inline sample diff using the standard added/removed highlights.
+///
+/// The widget appears inline in the terminal without taking over the entire screen. Use the
+/// arrow keys to navigate, +/- to zoom, `f` to ask for the full-screen diff viewer and
+/// q/Enter/Esc to exit.
+///
+/// # Returns
+/// * `Ok(true)` if the user requested the full-screen view
+/// * `Ok(false)` if completed successfully and exited
+pub fn show_inline_diff_graph_widget(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    diff_graph: &DiffGenGraph,
+    legend: &DiffLegend,
+    height: u16,
+) -> io::Result<bool> {
+    let mut view = InlineDiffView::new(conn, workspace, diff_graph, legend);
+    let terminal_result = panic::catch_unwind(|| {
+        ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(height),
+        })
+    });
+
+    match terminal_result {
+        Ok(mut terminal) => {
+            let upgrade_requested =
+                run_inline_diff_event_loop(&mut terminal, &mut view, &mut CrosstermEventSource)?;
+            let viewport_area = terminal.get_frame().area();
+            terminal.draw(|frame| view.render_final(frame))?;
+            leave_inline_terminal(viewport_area);
+            Ok(upgrade_requested)
+        }
+        Err(_) => {
+            eprintln!("Interactive terminal not available, omitting visualization.");
+            Ok(false)
+        }
+    }
+}
+
 /// Size of a rendered plot in terminal cells; the PNG is this many cells at the exporter's cell size.
 #[derive(Debug, Clone, Copy)]
 pub struct PlotSize {
     pub columns: u16,
     pub rows: u16,
+    /// Image pixels per logical pixel. A scale of 2 writes the same plot on twice as many
+    /// pixels, which stays sharp on high-density screens.
+    pub scale: usize,
 }
 
 /// Write a PNG of a `BlockGroup`'s graph, with annotations, without needing a terminal.
@@ -281,7 +414,7 @@ pub fn write_block_group_png(
         Clear.render(area, &mut buffer);
         draw_flags_under_nodes(&mut controller, &mut buffer, area);
     }
-    write_png_with_lines(&buffer, controller.diagonal_lines(), output)
+    write_png_with_lines(&buffer, controller.diagonal_lines(), size.scale, output)
 }
 
 /// Write a PNG of a sample diff using the standard added/removed highlights.
@@ -301,7 +434,7 @@ pub fn write_diff_graph_png(
     view_state.edge_style = gen_tui::EdgeStyle::Bezier(gen_tui::DiagonalDrawing::Deferred);
     let view = GraphView::new(&mut engine, &zoom_levels[view_state.zoom_index].1);
     StatefulWidget::render(view, area, &mut buffer, &mut view_state);
-    write_png_with_lines(&buffer, &view_state.diagonal_lines, output)
+    write_png_with_lines(&buffer, &view_state.diagonal_lines, size.scale, output)
 }
 
 fn draw_flags_under_nodes(controller: &mut GenGraphController, buffer: &mut Buffer, area: Rect) {
@@ -405,19 +538,39 @@ fn draw_controls_help(frame: &mut Frame, area: Rect, controller: &GenGraphContro
     );
 }
 
+/// The controls line with the diff's color legend on the line below it.
+fn draw_diff_controls_help(frame: &mut Frame, area: Rect, legend: &Line<'static>) {
+    let key_style = Style::default().fg(Color::Yellow).bold();
+    let text_style = Style::default().fg(Color::Yellow);
+    let controls = style_text(
+        "*←↓↑→/hjkl* nav | *+/-* zoom | *f* full window | *q* exit",
+        text_style,
+        key_style,
+    );
+    frame.render_widget(Paragraph::new(vec![controls.into(), legend.clone()]), area);
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
     use crossterm::event::KeyModifiers;
+    use gen_core::{DoltHashId, Strand};
+    use gen_diff::graph::{DiffChange, DiffChangeKind, DiffGraphEdge, DiffGraphNode};
+    use gen_graph::GraphEdge;
     use gen_models::db::get_connection;
     use petgraph::Direction::Incoming;
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::views::{
-        gen_graph_widget::TRUNCATED_ZOOM_LEVEL,
-        lazy_graph_source::tests::{setup_circular_block_group, setup_labelled_chain_block_group},
+    use crate::{
+        test_helpers::setup_gen,
+        views::{
+            gen_graph_widget::TRUNCATED_ZOOM_LEVEL,
+            lazy_graph_source::tests::{
+                setup_circular_block_group, setup_labelled_chain_block_group,
+            },
+        },
     };
 
     /// Replays a fixed list of key presses, then exits. The whole remaining script counts as
@@ -659,11 +812,252 @@ mod tests {
             PlotSize {
                 columns: 40,
                 rows: 10,
+                scale: 1,
             },
             &mut bytes,
         )
         .unwrap();
 
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        let read = |range: core::ops::Range<usize>| {
+            u32::from_be_bytes(bytes[range].try_into().expect("should read four bytes"))
+        };
+        (read(16..20), read(20..24))
+    }
+
+    #[test]
+    fn test_write_block_group_png_at_scale_two_doubles_the_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["ACGT", "TTGA"]);
+        let conn = get_connection(&db_path).unwrap();
+        let workspace = Workspace::from_current_dir();
+        let write = |scale: usize| {
+            let mut bytes = Vec::new();
+            write_block_group_png(
+                &conn,
+                &workspace,
+                block_group_id,
+                None,
+                PlotSize {
+                    columns: 40,
+                    rows: 10,
+                    scale,
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            png_dimensions(&bytes)
+        };
+
+        let (width, height) = write(1);
+        assert_eq!(write(2), (width * 2, height * 2));
+    }
+
+    fn added_chain_diff() -> DiffGenGraph {
+        let node = |id: i64, start: i64, end: i64| DiffGraphNode {
+            node: GraphNode {
+                node_id: HashId::pad_str(id),
+                sequence_start: start,
+                sequence_end: end,
+            },
+            change: DiffChange::new(DiffChangeKind::Added, Some(DoltHashId([100; 20]))),
+        };
+        let mut graph = DiffGenGraph::new();
+        graph.add_edge(
+            node(1, 0, 4),
+            node(2, 4, 8),
+            vec![DiffGraphEdge {
+                edge: GraphEdge {
+                    edge_id: HashId::pad_str(10),
+                    source_strand: Strand::Forward,
+                    target_strand: Strand::Forward,
+                    chromosome_index: 0,
+                    phased: 0,
+                    created_on: 0,
+                },
+                change: DiffChange::new(DiffChangeKind::Added, Some(DoltHashId([100; 20]))),
+            }],
+        );
+        graph
+    }
+
+    fn run_diff_script(keys: Vec<KeyCode>) -> bool {
+        let context = setup_gen();
+        let mut view = InlineDiffView::new(
+            context.graph().conn(),
+            context.workspace(),
+            &added_chain_diff(),
+            &DiffLegend::between("query", "base"),
+        );
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+        run_inline_diff_event_loop(&mut terminal, &mut view, &mut ScriptedEvents(keys.into()))
+            .expect("should run the inline diff event loop")
+    }
+
+    #[test]
+    fn test_inline_diff_exit_keys_close_and_f_asks_for_the_full_viewer() {
+        assert!(!run_diff_script(vec![KeyCode::Char('q')]));
+        assert!(!run_diff_script(vec![KeyCode::Right, KeyCode::Esc]));
+        assert!(run_diff_script(vec![KeyCode::Right, KeyCode::Char('f')]));
+    }
+
+    #[test]
+    fn test_inline_diff_draws_added_nodes_with_the_added_highlight() {
+        let context = setup_gen();
+        let mut view = InlineDiffView::new(
+            context.graph().conn(),
+            context.workspace(),
+            &added_chain_diff(),
+            &DiffLegend::between("query", "base"),
+        );
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+
+        terminal
+            .draw(|frame| view.render_inline(frame))
+            .expect("should draw the diff");
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer.content().iter().any(|cell| cell.fg == Color::Green),
+            "added nodes and edges should be drawn in the added color"
+        );
+        assert_eq!(
+            buffer[(0, 0)].symbol(),
+            "┌",
+            "the inline frame has a border"
+        );
+    }
+
+    #[test]
+    fn test_inline_diff_final_render_has_no_border_or_cursor() {
+        let context = setup_gen();
+        let mut view = InlineDiffView::new(
+            context.graph().conn(),
+            context.workspace(),
+            &added_chain_diff(),
+            &DiffLegend::between("query", "base"),
+        );
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+
+        terminal
+            .draw(|frame| view.render_final(frame))
+            .expect("should draw the final diff");
+
+        assert_ne!(terminal.backend().buffer()[(0, 0)].symbol(), "┌");
+        assert!(!view.view_state.is_cursor_visible());
+    }
+
+    #[test]
+    fn test_inline_diff_zoom_keys_change_the_zoom_level_and_the_drawing() {
+        let context = setup_gen();
+        let mut view = InlineDiffView::new(
+            context.graph().conn(),
+            context.workspace(),
+            &added_chain_diff(),
+            &DiffLegend::between("query", "base"),
+        );
+        let mut terminal =
+            Terminal::new(TestBackend::new(60, 12)).expect("should create a test terminal");
+        terminal
+            .draw(|frame| view.render_inline(frame))
+            .expect("should draw the diff");
+        let start = view.view_state.zoom_index;
+        let before = terminal.backend().buffer().clone();
+
+        run_inline_diff_event_loop(
+            &mut terminal,
+            &mut view,
+            &mut ScriptedEvents(VecDeque::from([KeyCode::Char('+'), KeyCode::Char('+')])),
+        )
+        .expect("should run the inline diff event loop");
+
+        assert_eq!(
+            view.view_state.zoom_index,
+            start + 2,
+            "each + zooms in one level"
+        );
+        assert_ne!(
+            terminal.backend().buffer(),
+            &before,
+            "zooming in changes how the diff is drawn"
+        );
+
+        run_inline_diff_event_loop(
+            &mut terminal,
+            &mut view,
+            &mut ScriptedEvents(VecDeque::from([KeyCode::Char('-')])),
+        )
+        .expect("should run the inline diff event loop");
+        assert_eq!(view.view_state.zoom_index, start + 1);
+    }
+
+    #[test]
+    fn test_inline_diff_names_what_the_colors_mean_in_the_help_lines() {
+        let context = setup_gen();
+        let mut view = InlineDiffView::new(
+            context.graph().conn(),
+            context.workspace(),
+            &added_chain_diff(),
+            &DiffLegend::between("unknown", "reference"),
+        );
+        let mut terminal =
+            Terminal::new(TestBackend::new(70, 12)).expect("should create a test terminal");
+
+        terminal
+            .draw(|frame| view.render_inline(frame))
+            .expect("should draw the diff");
+
+        let buffer = terminal.backend().buffer();
+        let row_text = |row: u16| -> String {
+            (0..70)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect()
+        };
+        let title = row_text(0);
+        let legend = row_text(11);
+        assert!(
+            !title.contains("green"),
+            "the frame title should not carry the legend, got {title:?}"
+        );
+        assert!(
+            legend.contains("green = only in unknown")
+                && legend.contains("red = only in reference"),
+            "the last help line should explain the colors, got {legend:?}"
+        );
+    }
+
+    #[test]
+    fn test_inline_diff_keeps_the_terminal_background() {
+        let context = setup_gen();
+        let mut view = InlineDiffView::new(
+            context.graph().conn(),
+            context.workspace(),
+            &added_chain_diff(),
+            &DiffLegend::changes(),
+        );
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+
+        terminal
+            .draw(|frame| view.render_inline(frame))
+            .expect("should draw the diff");
+
+        let theme_background = gen_tui::theme::current_theme()[0x00];
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| cell.bg != theme_background),
+            "the inline plot should not paint the theme background over the terminal's own"
+        );
     }
 }

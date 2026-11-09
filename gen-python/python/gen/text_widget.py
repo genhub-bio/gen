@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Self
 
 from .ascii_render import frame_text
+from .png_image import PngImage
 
 
 def _in_jupyter_kernel() -> bool:
@@ -33,8 +35,9 @@ _TEXT_FALLBACK_HINT = (
     "# library of sequences: read it left to right, where nodes are sequence fragments\n"
     "# and solid edges are the ways fragments can be joined into full paths. A node\n"
     "# shows its complete sequence, a truncated one with an ellipsis where sequence is\n"
-    "# omitted, or (most minimal view) just a filled circle. Omit these # lines when\n"
-    "# showing the graph to a user; paste the frame in a code fence.\n"
+    "# omitted, or (most minimal view) just a filled circle. For an image file instead\n"
+    '# of text, call widget.save_png("plot.png"). Omit these # lines when showing the\n'
+    "# graph to a user; paste the frame in a code fence.\n"
 )
 
 # Text fallback output can occur many times in one notebook or agent session.
@@ -48,7 +51,9 @@ def _text_fallback_hint() -> str:
     """Return the one-time explanation for the first displayed text frame."""
     global _text_fallback_hint_shown
 
-    if _text_fallback_hint_shown:
+    # A notebook frozen with text plots chose text on purpose, so a hint to install the
+    # widget would only mislead its readers.
+    if os.environ.get("GEN_NOTEBOOK_TEXT_OUTPUT") == "1" or _text_fallback_hint_shown:
         return ""
     _text_fallback_hint_shown = True
     return _INSTALL_HINT if _in_jupyter_kernel() else _TEXT_FALLBACK_HINT
@@ -61,14 +66,18 @@ class TextGraphWidget:
     remains useful in notebooks, terminals, and environments used by AI agents.
     """
 
-    def __init__(self, controller, *, colors=None, **kwargs):
+    def __init__(self, controller, *, colors=None, sequence_graphs=(), **kwargs):
         self._controller = controller
+        self._sequence_graphs = sequence_graphs
+        self._colors = colors
         self.cols = kwargs.get("cols", 60)
         self.rows = kwargs.get("rows", 12)
+        # Image pixels per logical pixel in the PNGs this widget writes.
+        self.scale = kwargs.get("scale", 2)
         self.page_count = controller.page_count
         self.page_index = 0
         self.frame = {}
-        self._load_initial_annotations(colors)
+        self._load_initial_annotations()
         self._render()
 
     def __repr__(self) -> str:
@@ -77,39 +86,41 @@ class TextGraphWidget:
             self.frame, self.page_count, self.page_index
         )
 
-    def _load_initial_annotations(self, colors) -> None:
+    def _load_initial_annotations(self) -> None:
         """Apply the same annotation loading policy as the interactive widget."""
         if self._controller.annotations_loaded:
             return
-        if colors is None:
+        if self._colors is None:
             self._controller.trigger_auto_load()
             return
 
-        if callable(colors):
-            color_fn = colors
-        elif isinstance(colors, dict):
+        if callable(self._colors):
+            color_fn = self._colors
+        elif isinstance(self._colors, dict):
 
             def color_fn(annotation):
-                return colors.get(annotation.name)
+                return self._colors.get(annotation.name)
 
-        elif isinstance(colors, list):
-            if not colors:
+        elif isinstance(self._colors, list):
+            if not self._colors:
                 raise ValueError("colors list must not be empty")
             assigned = {}
 
             def color_fn(annotation):
                 key = str(annotation.id)
                 if key not in assigned:
-                    assigned[key] = colors[len(assigned) % len(colors)]
+                    assigned[key] = self._colors[len(assigned) % len(self._colors)]
                 return assigned[key]
         else:
             raise TypeError(
-                f"colors must be a callable, dict, or list; got {type(colors).__name__}"
+                f"colors must be a callable, dict, or list; got {type(self._colors).__name__}"
             )
 
         color_map = {
             str(annotation.id): color_fn(annotation)
-            for annotation in self._controller.annotations
+            for annotation in self._sequence_graphs[
+                self._controller.page_index
+            ].annotations
         }
         self._controller.load_annotation_groups_with_colors(color_map)
 
@@ -127,6 +138,22 @@ class TextGraphWidget:
     def zoom_out(self) -> Self:
         """Step one zoom level out and refresh the text output."""
         self._controller.zoom_out()
+        self._render()
+        return self
+
+    def show_labels(self) -> Self:
+        """Show annotation names in the normal-zoom view.
+
+        Plots open with names hidden, so annotations draw as bars and long names don't
+        stretch the nodes. Zooming in once also shows them, and the view with the full
+        sequence always names every annotation."""
+        self._controller.set_labels_shown(True)
+        self._render()
+        return self
+
+    def hide_labels(self) -> Self:
+        """Hide annotation names in the normal-zoom view, leaving only the bars."""
+        self._controller.set_labels_shown(False)
         self._render()
         return self
 
@@ -156,6 +183,9 @@ class TextGraphWidget:
 
     def go_to(self, target, *, center: bool = False) -> Self:
         """Instantly move the camera to a graph position, locus, or annotation.
+
+        The cursor is drawn on the target; call :meth:`hide_cursor` to leave it out of
+        saved images.
 
         Parameters
         ----------
@@ -201,16 +231,13 @@ class TextGraphWidget:
         target:
             A ``Locus`` returned by ``repo.search()``, an ``Annotation``
             object (e.g. from ``sequence_graph.annotations``), or a
-            ``Position``/``SuperPosition`` (centers on the position, or the
-            first position of a superposition; a position is a single point,
-            so nothing is highlighted).
+            ``Position``/``SuperPosition`` (highlights each named base and
+            navigates to the leftmost position).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
-            (``"#ff8800"``).  When omitted the next unused theme accent
-            colour is chosen automatically.  Ignored for a
-            ``Position``/``SuperPosition`` target, which has nothing to
-            highlight.
+            (``"#ff8800"``).  When omitted the theme's highlight accent
+            is used, the same colour on every call.
         center:
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
@@ -226,6 +253,7 @@ class TextGraphWidget:
             widget.show(records[0])
 
             widget.show(matches[0].start())
+
         """
         from gen import Annotation, Position, SuperPosition  # noqa: PLC0415
 
@@ -233,26 +261,74 @@ class TextGraphWidget:
             self._controller.go_to_annotation_obj(target, center)
             self._controller.highlight_annotation_obj(target, color)
         elif isinstance(target, SuperPosition):
-            self._controller.go_to_pos(target.positions[0], center)
+            self._controller.show_positions(target.positions, color, center)
         elif isinstance(target, Position):
-            self._controller.go_to_pos(target, center)
+            self._controller.show_positions([target], color, center)
         else:
             self._controller.go_to_locus(target, center)
             self._controller.highlight_match(target, color)
+        self._controller.set_cursor_hidden(True)
         self._render()
         return self
 
     def next_page(self) -> Self:
         """Advance to the next sequence graph and refresh the text output."""
         self._controller.next_page()
+        self._load_initial_annotations()
         self._render()
         return self
 
     def prev_page(self) -> Self:
         """Return to the previous sequence graph and refresh the text output."""
         self._controller.prev_page()
+        self._load_initial_annotations()
         self._render()
         return self
+
+    def _render_png(
+        self,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+        scale: int | None = None,
+    ) -> PngImage:
+        scale = self.scale if scale is None else scale
+        data = self._controller.render_png(
+            self.cols if cols is None else cols,
+            self.rows if rows is None else rows,
+            scale,
+        )
+        return PngImage(data, scale)
+
+    def save_png(
+        self,
+        path: str | os.PathLike,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+        scale: int | None = None,
+    ) -> None:
+        """Write the current view of the graph to a PNG file.
+
+        Needs no Jupyter dependencies. Each terminal cell becomes 11x21 pixels times
+        ``scale``, and blank rows and columns around the graph are trimmed, leaving a
+        one-cell margin.
+
+        Parameters
+        ----------
+        path:
+            Destination file.
+        cols, rows:
+            Size of the render canvas in terminal cells before trimming. Each omitted
+            dimension uses the widget's current viewport size. Specify larger values
+            to capture more of the graph; blank space is trimmed afterward.
+        scale:
+            Image pixels per logical pixel, from 1 to 8. A scale of 2 writes the same
+            picture on twice as many pixels. Defaults to the widget's scale.
+        """
+        image = self._render_png(cols=cols, rows=rows, scale=scale)
+        with open(path, "wb") as handle:
+            handle.write(image.data)
 
     def refresh(self) -> Self:
         """Refresh the text output from the current controller state."""
@@ -272,6 +348,18 @@ class TextGraphWidget:
         :meth:`show_path` are left untouched.
         """
         self._controller.clear_highlights()
+        self._render()
+        return self
+
+    def hide_cursor(self) -> Self:
+        """Keep the cursor out of the view, for a clean image, until :meth:`show_cursor`."""
+        self._controller.set_cursor_hidden(True)
+        self._render()
+        return self
+
+    def show_cursor(self) -> Self:
+        """Draw the cursor again after :meth:`hide_cursor`."""
+        self._controller.set_cursor_hidden(False)
         self._render()
         return self
 

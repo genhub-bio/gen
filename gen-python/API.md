@@ -236,17 +236,34 @@ of the public Python API.
 
 ## 9. Plot and navigate
 
-`graph.plot(...)` and `sample.plot(...)` generate a visual representation of the graph and return a
-widget that you can interact with through methods such as `go_to()`, `show()`, zoom, scrolling,
+`graph.plot(...)` and `sample.plot(...)` generate a visual representation of the graph. By default
+they return a widget that you can interact with through methods such as `go_to()`, `show()`, zoom, scrolling,
 highlight controls, and annotation-track visibility. Install the `jupyter` extra with
 `pip install gen[jupyter]` to use the interactive notebook widget. In other Python environments,
 plotting returns a text widget with navigation controls. Plot options include viewport size,
-annotation colors, graph detail, and whether to show edit history.
+annotation colors, graph detail, whether to show edit history (`show_history`), and whether to lay the current path
+out as one straight row (`align_path`, on by default; `align_path=False` restores the centered layout).
+
+`plot(go_to=target)` navigates before returning an interactive/text widget or static PNG,
+using the same target types as widget navigation.
 
 Widgets support `go_to(target, center=False)` and `show(target, color=None, center=False)` for
-positions, loci, annotations, or supported region targets. They also expose zoom, scrolling,
-page navigation, refresh, highlight clearing, path visibility, and annotation-track controls such
+positions, loci, annotations, or supported region targets. Both leave the cursor on the target,
+and `show` highlights it in the theme's highlight color unless `color` is given. They also expose zoom (minimal, normal with annotation names hidden, normal with names shown, full sequence), `show_labels()` and `hide_labels()` for annotation names at normal zoom (plots open with names hidden; the full-sequence view always shows them), scrolling,
+page navigation, refresh, highlight clearing, cursor visibility (`hide_cursor()`, `show_cursor()`), path visibility, and annotation-track controls such
 as `show_track(name)`, `hide_track(name)`, `hide_all_tracks()`, and `tracks`.
+`save_png(path, cols=None, rows=None, scale=None)` writes the current view to a PNG file and works without
+the `jupyter` extra. Each omitted dimension uses the widget's current viewport size; either can
+be increased independently to capture more of the graph. Blank space is trimmed to a one-cell
+margin. PNG cells measure 11 × 21 pixels times `scale` (1 to 8, default the widget's scale, which
+`plot(scale=...)` sets and which defaults to 2), with smooth Bézier edges. A scaled PNG has the same layout on more pixels,
+and notebooks and the interactive widget show it at its logical size, which is sharper on
+high-density screens.
+`plot(interactive=False)` instead returns a displayable PNG in memory without writing a
+file, using the plot dimensions as its render canvas and the same trimming. When `cols` or `rows`
+is omitted it defaults to a 400x24-cell canvas (the interactive widget defaults to 60x12): the
+wider canvas captures more graph, and trimming removes the unused margin. For a sample, it
+renders the first sequence graph.
 
 ## 10. Common value types
 

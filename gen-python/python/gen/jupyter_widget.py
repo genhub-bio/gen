@@ -2,18 +2,19 @@
 
 Architecture
 ------------
-- Native Rust (GraphController) owns all state, performs layout, renders into
-  a ratatui Buffer, and serialises the result to a RenderedFrame JSON string.
-- Python (GraphWidget) is a thin bridge: it holds the Rust controller,
-  requests frames, and syncs them to the frontend via the `frame` traitlet.
-- The frontend (static/jupyter_widget.js) is a dumb canvas painter that also sends
-  mouse events back as custom messages.
+- Native Rust (GraphController) owns all state, performs layout, and renders
+  the viewport to a PNG plus hit regions.
+- Python (GraphWidget) holds the Rust controller and syncs its PNG and cell
+  geometry to the frontend.
+- The frontend displays that PNG and sends mouse events back as custom messages.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 import pathlib
 import warnings
 from typing import Self
@@ -87,8 +88,20 @@ class GraphWidget(anywidget.AnyWidget):
 
     # ── Traitlets synced with the frontend ────────────────────────────────────
 
-    # The rendered frame.  Updated on every render call.
-    frame: dict = traitlets.Dict({}).tag(sync=True)
+    # Keep the text fallback in Python; the Jupyter browser receives the PNG.
+    frame: dict = traitlets.Dict({})
+
+    # Native PNG bytes preserve the renderer's cell geometry and graph details.
+    # Anywidget sends synced bytes as a Jupyter binary buffer, not base64 JSON.
+    viewport_png: bytes = traitlets.Bytes(b"").tag(sync=True)
+    # Cell size in PNG pixels: the logical cell size times ``scale``.
+    cell_width: int = traitlets.Int(12).tag(sync=True)
+    cell_height: int = traitlets.Int(22).tag(sync=True)
+    # Image pixels per logical pixel. The frontend shows the PNG at its natural size divided
+    # by this, so a scale of 2 stays the same size and is sharper on high-density screens.
+    scale: int = traitlets.Int(2).tag(sync=True)
+    background_color: str = traitlets.Unicode("#000000").tag(sync=True)
+    hit_regions: list[dict] = traitlets.List(trait=traitlets.Dict()).tag(sync=True)
 
     # Viewport size in terminal cells.  The frontend can resize these.
     cols: int = traitlets.Int(DEFAULT_COLS).tag(sync=True)
@@ -102,7 +115,7 @@ class GraphWidget(anywidget.AnyWidget):
     # pager indicator.
     page_index: int = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, controller, *, colors=None, **kwargs):
+    def __init__(self, controller, *, colors=None, sequence_graphs=(), **kwargs):
         """
         Parameters
         ----------
@@ -123,18 +136,19 @@ class GraphWidget(anywidget.AnyWidget):
         kwargs.setdefault("page_count", controller.page_count)
         super().__init__(**kwargs)
         self._controller = controller
+        self._sequence_graphs = sequence_graphs
+        self._colors = colors
         self._frozen = False
-        self._static_png: str = ""
         self._display_handle = None
 
         # Re-render when the viewport size changes.
-        self.observe(self._on_resize, names=["cols", "rows"])
+        self.observe(self._on_resize, names=["cols", "rows", "scale"])
 
         # Handle custom messages from the frontend (keyboard / mouse).
         self.on_msg(self._on_frontend_msg)
 
         # Load annotation groups (skipped if controller is a clone with groups already loaded).
-        self._load_initial_annotations(colors)
+        self._load_initial_annotations()
 
         # Initial render.
         self._render()
@@ -163,7 +177,13 @@ class GraphWidget(anywidget.AnyWidget):
         from IPython.display import display
 
         cloned_ctrl = self._controller.clone_controller()
-        snapshot = type(self)(cloned_ctrl, cols=self.cols, rows=self.rows)
+        snapshot = type(self)(
+            cloned_ctrl,
+            cols=self.cols,
+            rows=self.rows,
+            colors=self._colors,
+            sequence_graphs=self._sequence_graphs,
+        )
         data = {
             "text/plain": repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
@@ -176,7 +196,7 @@ class GraphWidget(anywidget.AnyWidget):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _load_initial_annotations(self, colors) -> None:
+    def _load_initial_annotations(self) -> None:
         """Load annotation groups from the repository, applying the colors mapping.
 
         Skips if the controller already has groups loaded (e.g. it is a clone).
@@ -184,12 +204,12 @@ class GraphWidget(anywidget.AnyWidget):
         if self._controller.annotations_loaded:
             return
 
-        if colors is None:
+        if self._colors is None:
             self._controller.trigger_auto_load()
             return
 
-        color_fn = self._build_color_fn(colors)
-        annotations = self._controller.annotations
+        color_fn = self._build_color_fn(self._colors)
+        annotations = self._sequence_graphs[self._controller.page_index].annotations
         color_map = {str(ann.id): color_fn(ann) for ann in annotations}
         self._controller.load_annotation_groups_with_colors(color_map)
 
@@ -220,10 +240,56 @@ class GraphWidget(anywidget.AnyWidget):
         )
 
     def _render(self) -> None:
-        """Ask Rust to render a frame and push it to the frontend."""
+        """Ask Rust for the browser frame and its pixel-aligned PNG fallback."""
         frame_json = self._controller.render_frame(self.cols, self.rows)
         self.frame = json.loads(frame_json)
+        logical_width, logical_height = self._controller.png_cell_size()
+        self.cell_width = logical_width * self.scale
+        self.cell_height = logical_height * self.scale
+        self.background_color = self._controller.png_background_color()
+        self.viewport_png = self._controller.render_png_viewport(
+            self.cols, self.rows, self.scale
+        )
+        self.hit_regions = json.loads(
+            self._controller.render_hit_regions(self.cols, self.rows)
+        )
         self.page_index = self._controller.page_index
+
+    def save_png(
+        self,
+        path: str | os.PathLike,
+        *,
+        cols: int | None = None,
+        rows: int | None = None,
+        scale: int | None = None,
+    ) -> None:
+        """Write the current view of the graph to a PNG file.
+
+        Needs no Jupyter dependencies. Each terminal cell becomes 11x21 pixels times
+        ``scale``, and blank rows and columns around the graph are trimmed, leaving a
+        one-cell margin.
+
+        Parameters
+        ----------
+        path:
+            Destination file.
+        cols, rows:
+            Size of the render canvas in terminal cells before trimming. Each omitted
+            dimension uses the widget's current viewport size. Specify larger values
+            to capture more of the graph; blank space is trimmed afterward.
+        scale:
+            Image pixels per logical pixel, from 1 to 8. A scale of 2 writes the same
+            picture on twice as many pixels. The PNG is labeled 96 dpi times the scale:
+            1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi (close to a 300 dpi print) and 4 is
+            384 dpi. Defaults to the widget's scale.
+        """
+        data = self._controller.render_png(
+            self.cols if cols is None else cols,
+            self.rows if rows is None else rows,
+            self.scale if scale is None else scale,
+        )
+        with open(path, "wb") as handle:
+            handle.write(data)
 
     def _on_resize(self, change) -> None:
         # change is required by the traitlets observe protocol but we only need
@@ -231,7 +297,7 @@ class GraphWidget(anywidget.AnyWidget):
         self._render()
 
     def _freeze(self) -> None:
-        """Ask the frontend to replace the live canvas with a static PNG.
+        """Ask the frontend to replace the live image with a static PNG.
 
         Only meaningful on the actual displayed clone (``_display_handle is
         not None``): unlike the zoom/pan/page commands, which mutate the
@@ -241,7 +307,7 @@ class GraphWidget(anywidget.AnyWidget):
         ``_ipython_display_``), so this is kept internal and reached only
         through ``freeze_all_widgets()``, which already holds the actual
         displayed instances. Once the frontend confirms, the canvas is
-        swapped for a plain ``<img>`` and the widget is closed, since a
+        retained as a plain ``<img>`` and the widget is closed, since a
         frozen widget can no longer be interacted with anyway.
         """
         if self._frozen:
@@ -254,35 +320,16 @@ class GraphWidget(anywidget.AnyWidget):
         # all the information we need is in msg.
         msg_type = msg.get("type")
 
-        if msg_type == "snapshot":
-            data_url = msg.get("data", "")
-            self._static_png = data_url
-            if self._display_handle is not None and data_url.startswith(
-                "data:image/png;base64,"
-            ):
-                b64 = data_url.split(",", 1)[1]
-                self._display_handle.update(
-                    {
-                        "application/vnd.jupyter.widget-view+json": {
-                            "version_major": 2,
-                            "version_minor": 0,
-                            "model_id": self._model_id,
-                        },
-                        "image/png": b64,
-                        "text/plain": repr(self),
-                    },
-                    raw=True,
-                )
-            return
-
         if msg_type == "freeze":
-            data_url = msg.get("data", "")
-            self._static_png = data_url
+            png = self.viewport_png
+            data_url = self._png_data_url(png)
             ascii_repr = repr(self)
             self._frozen = True
-            if self._display_handle is not None:
-                w, h = msg.get("width"), msg.get("height")
-                size = f";width:{w}px;height:{h}px" if w and h else ""
+            if self._display_handle is not None and data_url:
+                # The frozen image keeps its logical size, however many pixels draw it.
+                width = self.cell_width * self.cols // self.scale
+                height = self.cell_height * self.rows // self.scale
+                size = f";width:{width}px;height:{height}px"
                 self._display_handle.update(
                     {
                         "text/html": (
@@ -311,7 +358,12 @@ class GraphWidget(anywidget.AnyWidget):
             return
 
         if msg_type == "pan":
-            self._move_by(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+            # Always acknowledge, even on failure, so the frontend ends its pan
+            # preview instead of waiting forever on a render that raised.
+            try:
+                self._move_by(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+            finally:
+                self.send({"type": "pan_done"})
             return
 
         if msg_type == "page":
@@ -320,6 +372,13 @@ class GraphWidget(anywidget.AnyWidget):
             else:
                 self.prev_page()
             return
+
+    @staticmethod
+    def _png_data_url(png: bytes) -> str:
+        """Encode an existing Rust viewport PNG for static notebook output."""
+        if not png:
+            return ""
+        return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
     # ── Public command API ────────────────────────────────────────────────────
 
@@ -344,6 +403,26 @@ class GraphWidget(anywidget.AnyWidget):
         if self._frozen:
             return self
         self._controller.zoom_out()
+        self._render()
+        return self
+
+    def show_labels(self) -> Self:
+        """Show annotation names in the normal-zoom view.
+
+        Plots open with names hidden, so annotations draw as bars and long names don't
+        stretch the nodes. Zooming in once also shows them, and the view with the full
+        sequence always names every annotation."""
+        if self._frozen:
+            return self
+        self._controller.set_labels_shown(True)
+        self._render()
+        return self
+
+    def hide_labels(self) -> Self:
+        """Hide annotation names in the normal-zoom view, leaving only the bars."""
+        if self._frozen:
+            return self
+        self._controller.set_labels_shown(False)
         self._render()
         return self
 
@@ -390,6 +469,7 @@ class GraphWidget(anywidget.AnyWidget):
         if self._frozen:
             return self
         self._controller.next_page()
+        self._load_initial_annotations()
         self._render()
         return self
 
@@ -398,11 +478,15 @@ class GraphWidget(anywidget.AnyWidget):
         if self._frozen:
             return self
         self._controller.prev_page()
+        self._load_initial_annotations()
         self._render()
         return self
 
     def go_to(self, target, *, center: bool = False) -> Self:
         """Instantly move the camera to a graph position, locus, or annotation.
+
+        The cursor is drawn on the target; call :meth:`hide_cursor` to leave it out of
+        saved images.
 
         Parameters
         ----------
@@ -450,16 +534,13 @@ class GraphWidget(anywidget.AnyWidget):
         target:
             A ``Locus`` returned by ``repo.search()``, an ``Annotation``
             object (e.g. from ``sequence_graph.annotations``), or a
-            ``Position``/``SuperPosition`` (centers on the position, or the
-            first position of a superposition; a position is a single point,
-            so nothing is highlighted).
+            ``Position``/``SuperPosition`` (highlights each named base and
+            navigates to the leftmost position).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
-            (``"#ff8800"``).  When omitted the next unused theme accent
-            colour is chosen automatically.  Ignored for a
-            ``Position``/``SuperPosition`` target, which has nothing to
-            highlight.
+            (``"#ff8800"``).  When omitted the theme's highlight accent
+            is used, the same colour on every call.
         center:
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
@@ -484,12 +565,13 @@ class GraphWidget(anywidget.AnyWidget):
             self._controller.go_to_annotation_obj(target, center)
             self._controller.highlight_annotation_obj(target, color)
         elif isinstance(target, SuperPosition):
-            self._controller.go_to_pos(target.positions[0], center)
+            self._controller.show_positions(target.positions, color, center)
         elif isinstance(target, Position):
-            self._controller.go_to_pos(target, center)
+            self._controller.show_positions([target], color, center)
         else:
             self._controller.go_to_locus(target, center)
             self._controller.highlight_match(target, color)
+        self._controller.set_cursor_hidden(True)
         self._render()
         return self
 
@@ -502,6 +584,25 @@ class GraphWidget(anywidget.AnyWidget):
         if self._frozen:
             return self
         self._controller.clear_highlights()
+        self._render()
+        return self
+
+    def hide_cursor(self) -> Self:
+        """Keep the cursor out of the view, for a clean image, until :meth:`show_cursor`.
+
+        ``show`` hides the cursor automatically; ``go_to`` leaves it on its target.
+        """
+        if self._frozen:
+            return self
+        self._controller.set_cursor_hidden(True)
+        self._render()
+        return self
+
+    def show_cursor(self) -> Self:
+        """Draw the cursor again after :meth:`hide_cursor`."""
+        if self._frozen:
+            return self
+        self._controller.set_cursor_hidden(False)
         self._render()
         return self
 

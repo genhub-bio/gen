@@ -165,9 +165,11 @@ Compare one sequence graph between two samples with:
 gen view <graph> --query <query> --base <base>
 ```
 
-The base establishes the reference for the comparison. For example,
-`gen view m123 --query foo --base unknown` shows how `foo` differs from
-`unknown`. A sequence present only in the query is shown as an addition in
+`--query` and `--base` are sample names, looked up in the collection given by
+`--collection` (or the current one). The base establishes the reference for the comparison. For
+example, `gen view m123 --query foo --base unknown` shows how the sample `foo` differs from the
+sample `unknown`. The viewers print this legend in their help lines. Yellow (modified) only
+appears when comparing operations with `gen view-diff`, never between two samples. A sequence present only in the query is shown as an addition in
 green, while a sequence present only in the base is shown as a removal in red.
 Add `--full` to open the comparison in the full-screen viewer.
 
@@ -192,8 +194,12 @@ gen view <graph> --query <query> --base <base> --png diff.png
 The plot is drawn without a terminal, including annotations, then trimmed of
 blank rows and columns, leaving a one-cell margin. `--png-columns` (default 600)
 and `--png-rows` (default 300) set the canvas size in terminal cells before
-trimming, each 13 by 28 pixels, so a larger value shows more of the graph. The default canvas is large enough to
-capture most graphs whole.
+trimming, each 11 by 21 pixels at the default scale, so a larger value shows more of the graph.
+The default canvas is large enough to capture most graphs whole. `--png-scale` (default 2, up to
+8) draws every pixel as that many pixels square, so `--png-scale 2` writes the same picture on twice as
+many pixels, which stays sharp when a document or screen shows it at its logical size. The PNG
+is labeled with a density of 96 dpi times the scale, so viewers that honor it show the logical
+size: scale 1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi (close to a 300 dpi print) and 4 is 384 dpi.
 
 ## Revision diff
 

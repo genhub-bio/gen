@@ -22,7 +22,24 @@ class WidgetEditingTests(RepositoryTestCase):
 
     def test_show_accepts_a_superposition(self):
         alternative = self.graph.replace(self.locus, "TTTT", stack=True)
-        arm_ends = gen.SuperPosition(self.locus.end(), alternative.end())
+        positions = gen.SuperPosition(alternative.end(), self.locus.start())
+        self.widget = self.graph.plot(rows=16, cols=90, detail="full").hide_cursor()
 
-        self.widget.show(arm_ends)
-        self.widget.show(arm_ends, center=True)
+        self.widget.show(positions, color="cyan", center=True)
+        highlighted = [
+            cell
+            for cell in self.widget.frame["cells"]
+            if cell.get("bg") == "#00cccc" and cell["text"] in "ACGT"
+        ]
+        self.assertEqual(len(highlighted), 2)
+        self.assertEqual({cell["text"] for cell in highlighted}, {"G", "T"})
+        leftmost_column = min(cell["x"] for cell in highlighted)
+
+        self.widget.clear_highlights()
+        self.widget.show(self.locus.start(), color="cyan", center=True)
+        [start_cell] = [
+            cell
+            for cell in self.widget.frame["cells"]
+            if cell.get("bg") == "#00cccc" and cell["text"] == "G"
+        ]
+        self.assertEqual(leftmost_column, start_cell["x"])

@@ -39,6 +39,7 @@ use crate::python_api::{
 /// to expose them to the user.
 #[pymodule]
 pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    ::r#gen::theme::init_theme();
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBranch>()?;
     m.add_class::<PyOperation>()?;

@@ -38,5 +38,7 @@ pub use geometry::WorldPos;
 pub use graph_view::{GraphView, GraphViewState};
 pub use layout::{LayoutEdge, LayoutNode, NodeRole, PinSide, VerticalAnchor, VisualDetail};
 pub use plotter::{CursorColumns, LineStyle, PathStyle};
-pub use png_export::{PngConfig, PngExportError, PngRenderer, color_to_rgb};
+pub use png_export::{
+    DEFAULT_SCALE, MAX_SCALE, PngConfig, PngExportError, PngRenderer, color_to_rgb,
+};
 pub use theme::{Theme, current_theme, set_theme};
