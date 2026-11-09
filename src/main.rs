@@ -28,7 +28,9 @@ use r#gen::{
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::{BlockGroupViewOptions, view_block_group},
+        block_group::{
+            BlockGroupLookup, BlockGroupViewOptions, find_block_group, view_block_group,
+        },
         block_group_inline::{
             InlineOutcome, PlotSize, show_inline_block_group_widget, show_inline_diff_graph_widget,
             write_block_group_png, write_diff_graph_png,
@@ -364,18 +366,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) else {
                     return Err(anyhow!("--png needs a graph name and --sample").into());
                 };
-                let block_group = BlockGroup::get_by_name(
+                let block_group = find_block_group(
                     graph_conn,
-                    collection_name,
-                    sample_name,
-                    name,
-                    history_ref.as_deref(),
-                )
-                .map_err(|_| {
-                    anyhow!(
-                        "No block group found with name {name:?} and sample {sample_name:?} in collection {collection_name}"
-                    )
-                })?;
+                    &BlockGroupLookup {
+                        collection_name,
+                        sample_name,
+                        name,
+                        history_ref: history_ref.as_deref(),
+                    },
+                )?;
                 let mut file = BufWriter::new(File::create(&png_path)?);
                 write_block_group_png(
                     graph_conn,
@@ -395,57 +394,49 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
             if !full && let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) {
                 // Use the inline widget by default if a graph is specified
-                let block_group = BlockGroup::get_by_name(
+                let block_group = find_block_group(
                     graph_conn,
-                    collection_name,
-                    sample_name,
-                    name,
-                    history_ref.as_deref(),
-                );
+                    &BlockGroupLookup {
+                        collection_name,
+                        sample_name,
+                        name,
+                        history_ref: history_ref.as_deref(),
+                    },
+                )?;
 
-                match block_group {
-                    Ok(bg) => {
-                        let current_path = BlockGroup::get_current_path(
+                let current_path = BlockGroup::get_current_path(
+                    graph_conn,
+                    &block_group.id,
+                    history_ref.as_deref(),
+                )?;
+                match show_inline_block_group_widget(
+                    graph_conn,
+                    &workspace,
+                    block_group.id,
+                    vec![current_path],
+                    clamp_inline_view_height(height),
+                    history_ref.as_deref(),
+                ) {
+                    Ok(InlineOutcome::OpenFullViewer(controller)) => {
+                        // User requested upgrade to full TUI, which keeps drawing the
+                        // inline widget's graph
+                        view_block_group(
                             graph_conn,
-                            &bg.id,
-                            history_ref.as_deref(),
-                        )?;
-                        match show_inline_block_group_widget(
-                            graph_conn,
+                            config_conn,
                             &workspace,
-                            bg.id,
-                            vec![current_path],
-                            clamp_inline_view_height(height),
-                            history_ref.as_deref(),
-                        ) {
-                            Ok(InlineOutcome::OpenFullViewer(controller)) => {
-                                // User requested upgrade to full TUI, which keeps drawing the
-                                // inline widget's graph
-                                view_block_group(
-                                    graph_conn,
-                                    config_conn,
-                                    &workspace,
-                                    BlockGroupViewOptions {
-                                        name: graph,
-                                        sample_name: sample,
-                                        collection_name,
-                                        position,
-                                        history_ref: history_ref.as_deref(),
-                                        controller: Some(controller),
-                                    },
-                                )?;
-                            }
-                            Ok(InlineOutcome::Closed) => {}
-                            Err(e) => {
-                                eprintln!("Error showing inline widget: {}", e);
-                            }
-                        }
+                            BlockGroupViewOptions {
+                                name: graph,
+                                sample_name: sample,
+                                collection_name,
+                                position,
+                                history_ref: history_ref.as_deref(),
+                                controller: Some(controller),
+                            },
+                        )?;
                     }
-                    Err(_) => {
-                        eprintln!(
-                            "No block group found with name {:?} and sample {:?} in collection {}",
-                            name, sample_name, collection_name
-                        );
+                    Ok(InlineOutcome::Closed) => {}
+                    Err(e) => {
+                        eprintln!("Error showing inline widget: {}", e);
                     }
                 }
             } else {

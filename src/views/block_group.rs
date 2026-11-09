@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    fmt,
     io::Write,
     time::{Duration, Instant},
 };
@@ -815,6 +816,69 @@ fn starting_controller(
     Ok(controller)
 }
 
+/// Where a user-typed graph name should be found.
+pub struct BlockGroupLookup<'a> {
+    pub collection_name: &'a str,
+    pub sample_name: &'a str,
+    pub name: &'a str,
+    pub history_ref: Option<&'a str>,
+}
+
+/// A graph name typed on the command line that matches nothing; the message lists the graphs
+/// that do exist so a collection name given in place of a graph name is easy to spot.
+#[derive(Debug)]
+pub struct MissingBlockGroupError {
+    message: String,
+}
+
+impl fmt::Display for MissingBlockGroupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for MissingBlockGroupError {}
+
+/// Looks up the graph a user asked to view, turning a miss into an error that names the graph,
+/// sample and collection and lists the graphs available for that sample and collection.
+pub fn find_block_group(
+    conn: &GraphConnection,
+    lookup: &BlockGroupLookup<'_>,
+) -> Result<BlockGroup, MissingBlockGroupError> {
+    let BlockGroupLookup {
+        collection_name,
+        sample_name,
+        name,
+        history_ref,
+    } = *lookup;
+    BlockGroup::get_by_name(conn, collection_name, sample_name, name, history_ref).map_err(|_| {
+        let mut message = format!(
+            "No graph named {name:?} for sample {sample_name:?} in collection {collection_name:?}."
+        );
+        let mut available: Vec<String> = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .with_ref(history_ref)
+            .load()
+            .map(|block_groups| {
+                block_groups
+                    .into_iter()
+                    .map(|block_group| block_group.name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        available.sort();
+        available.dedup();
+        if !available.is_empty() {
+            message.push_str(&format!(
+                " Graphs available for that sample and collection: {}.",
+                available.join(", ")
+            ));
+        }
+        MissingBlockGroupError { message }
+    })
+}
+
 pub fn view_block_group<'a>(
     conn: &'a GraphConnection,
     config_conn: &gen_models::db::ConfigConnection,
@@ -840,15 +904,15 @@ pub fn view_block_group<'a>(
     }
 
     let selected = match (name, sample_name.as_ref()) {
-        (Some(name), Some(sample_name)) => Some(
-            BlockGroup::get_by_name(conn, collection_name, sample_name, &name, history_ref)
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "No block group found with name {:?} and sample {:?} in collection {} ",
-                        name, sample_name, collection_name
-                    )
-                }),
-        ),
+        (Some(name), Some(sample_name)) => Some(find_block_group(
+            conn,
+            &BlockGroupLookup {
+                collection_name,
+                sample_name,
+                name: &name,
+                history_ref,
+            },
+        )?),
         _ => None,
     };
     // The graph, its view, dimming and overlays; drawn into the canvas area each frame.
@@ -2211,9 +2275,9 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, style::Style};
 
     use super::{
-        REGION_SEARCH_DEBOUNCE, RegionSearchInputAction, RegionSearchState, focus_region_search,
-        is_current_search_generation, is_region_search_command, starting_controller,
-        teleport_through_wormhole,
+        BlockGroupLookup, REGION_SEARCH_DEBOUNCE, RegionSearchInputAction, RegionSearchState,
+        find_block_group, focus_region_search, is_current_search_generation,
+        is_region_search_command, starting_controller, teleport_through_wormhole,
     };
     use crate::views::{
         gen_graph_controller::GenGraphController,
@@ -2624,5 +2688,35 @@ mod tests {
         assert!(full.engine().graph().node_count() <= 2);
         assert_eq!(full.engine().active_batch(), None);
         assert!(full.overlays().is_empty());
+    }
+
+    #[test]
+    fn test_find_block_group_reports_available_graphs_on_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        setup_labelled_chain_block_group(&db_path, &["a", "b"]);
+        let conn = get_connection(&db_path).unwrap();
+
+        let lookup = BlockGroupLookup {
+            collection_name: "test",
+            sample_name: "test",
+            name: "chr1",
+            history_ref: None,
+        };
+        assert_eq!(find_block_group(&conn, &lookup).unwrap().name, "chr1");
+
+        let error = find_block_group(
+            &conn,
+            &BlockGroupLookup {
+                name: "test",
+                ..lookup
+            },
+        )
+        .expect_err("a collection name is not a graph name");
+        assert_eq!(
+            error.to_string(),
+            "No graph named \"test\" for sample \"test\" in collection \"test\". \
+             Graphs available for that sample and collection: chr1."
+        );
     }
 }
