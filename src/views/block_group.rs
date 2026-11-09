@@ -2,12 +2,17 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
-    io::Write,
+    io::{self, Write},
     time::{Duration, Instant},
 };
 
-use crossterm::event::{
-    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+use crossterm::{
+    event::{
+        self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
+    },
+    queue,
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
@@ -43,6 +48,7 @@ use crate::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
+        input_coalescing::coalesce_movement_events,
         lazy_graph_source::{EagerOrProjectedSource, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
@@ -879,6 +885,26 @@ pub fn find_block_group(
     })
 }
 
+/// Send overlay escapes to the terminal and flush them. Without the flush, the escapes that
+/// delete the curve images sit in the backend's buffer until the next frame draws, so
+/// switching back to the rectilinear layout would leave the curves on screen.
+fn write_overlay_escapes(output: &mut impl Write, escapes: &[u8]) -> io::Result<()> {
+    if escapes.is_empty() {
+        return Ok(());
+    }
+    output.write_all(escapes)?;
+    output.flush()
+}
+
+/// Close the synchronized update opened before a curved frame and flush it, so the terminal
+/// presents the cells and the curves together. Terminals bound how long they hold a
+/// synchronized update and show whatever has arrived when it runs out, so the frame's
+/// work between the two markers has to stay short.
+fn end_synchronized_update(output: &mut impl Write) -> io::Result<()> {
+    queue!(output, EndSynchronizedUpdate)?;
+    output.flush()
+}
+
 pub fn view_block_group<'a>(
     conn: &'a GraphConnection,
     config_conn: &gen_models::db::ConfigConnection,
@@ -1021,9 +1047,22 @@ pub fn view_block_group<'a>(
     // is drawn, then discarded.
     let mut entered_door = false;
     loop {
-        // Drain ALL pending input events before doing any work
+        // Drain ALL pending input events before doing any work. Key repeats that piled up
+        // during a slow frame are trimmed so the camera does not jump to catch up.
+        let mut queued_events = Vec::new();
         while !entered_door && crossterm::event::poll(Duration::from_millis(0))? {
-            let input_event = event::read()?;
+            queued_events.push(event::read()?);
+        }
+        let queued_events = coalesce_movement_events(
+            queued_events,
+            focus_zone == FocusZone::Canvas && !search_state.focused,
+        );
+        for input_event in queued_events.events {
+            // A door's world is loaded before any input after it is read, so the rest of the
+            // batch goes unapplied.
+            if entered_door {
+                break;
+            }
             if !matches!(
                 input_event,
                 event::Event::Mouse(MouseEvent {
@@ -1731,8 +1770,15 @@ pub fn view_block_group<'a>(
         }
         needs_redraw = false;
 
+        // Curved edges are separate images sent after the cells; the terminal holds both back
+        // until the frame is complete so it never shows new cells with the old curves.
+        let synchronized = curved_layout_available && controller.layout_mode().is_curved();
+        if synchronized {
+            queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        }
+
         // Draw the UI
-        let completed_frame = terminal.draw(|frame| {
+        let draw_result = terminal.draw(|frame| {
             let status_bar_height: u16 = 1;
 
             // The outer layout is a vertical split between the main area, optional message bar, and status bar
@@ -2126,23 +2172,36 @@ pub fn view_block_group<'a>(
                 // Reset the layout change flag
                 tui_layout_change = false;
             }
-        })?;
+        });
 
         // Edges drawn through the Kitty graphics protocol go out after the cells, as one image.
-        if curved_layout_available {
-            let mut escapes = Vec::new();
-            if controller.layout_mode().is_curved() {
-                kitty_overlay.update(
-                    &mut escapes,
-                    completed_frame.buffer,
-                    controller.graph_area(),
-                    controller.overlay_primitives(),
-                )?;
-            } else {
-                kitty_overlay.clear(&mut escapes)?;
+        let overlay_result = match draw_result {
+            Ok(completed_frame) if curved_layout_available => {
+                let mut escapes = Vec::new();
+                let presented = if controller.layout_mode().is_curved() {
+                    kitty_overlay.update(
+                        &mut escapes,
+                        completed_frame.buffer,
+                        controller.graph_area(),
+                        controller.overlay_primitives(),
+                    )
+                } else {
+                    kitty_overlay.clear(&mut escapes)
+                };
+                presented.and_then(|()| write_overlay_escapes(terminal.backend_mut(), &escapes))
             }
-            terminal.backend_mut().write_all(&escapes)?;
-        }
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        // The closing marker goes out on every path, or the terminal would hold the screen
+        // until its own timeout.
+        let ended = if synchronized {
+            end_synchronized_update(terminal.backend_mut())
+        } else {
+            Ok(())
+        };
+        overlay_result?;
+        ended?;
 
         // The render just above may have claimed a new world, growing the graph and needing
         // that batch's annotation groups; if anything drawn changed, the frame is redrawn
@@ -2254,7 +2313,7 @@ pub fn view_block_group<'a>(
     if curved_layout_available {
         let mut escapes = Vec::new();
         kitty_overlay.clear(&mut escapes)?;
-        terminal.backend_mut().write_all(&escapes)?;
+        write_overlay_escapes(terminal.backend_mut(), &escapes)?;
     }
     Ok(())
 }

@@ -18,6 +18,7 @@ pub mod graph_overlay;
 pub mod graph_session;
 pub mod helpers;
 pub mod inline_label_placement;
+mod input_coalescing;
 pub(crate) mod junction_projection;
 pub mod lazy_graph_source;
 pub mod messages;
