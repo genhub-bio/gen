@@ -1,6 +1,6 @@
 ---
 source: src/views/gen_graph_widget.rs
-expression: "render_annotated_variant_fixture(\"hbb_reference_centering\", \"hbb_region.fa\",\n\"hbb_region.gff3\", \"hbb_variants.vcf\", \"HG00096\", 2600,)"
+expression: "render_annotated_variant_fixture(\"hbb_region\", \"hbb_region.fa\",\n\"hbb_region.gff3\", \"hbb_variants.vcf\", \"HG00096\", 2600,)"
 ---
 "                                                                                                                                            "
 "                                                                                                                                            "
@@ -25,8 +25,8 @@ expression: "render_annotated_variant_fixture(\"hbb_reference_centering\", \"hbb
 "                     │   │           │   │           │   │            ↓                   │   │                   │   │       │   │       │ "
 "GCAA…TTAG…AGGAG…CAGA─╯╌G╌╰─ATAT…ACTT─┴─A─┴─TCCC…CAAG─╯╌C╌╰─GTCC…CCTGAA…GCAGC…CTGCCC…GTCAG─╯╌A╌╰─TGCACC…T…AATGT…AA─╯╌G╌╰─TT…TC─╯╌G╌╰─GT…AA─┴─"
 "═HBB exon 3═══]                                                 <HBB exon 2] <HBB exon 1═   ═   ══HBB exon 1═]                              "
-"═══════HBB══════════   ═   ═══HBB═══   ═   ═══HBB═══   ═   ═════════════HBB══════════════   ═   ═══════HBB═══════   ═   ═HBB═   ═   ═HBB═   "
 "═════HBB-201════════   ═   ═HBB-201═   ═   ═HBB-201═   ═   ═══════════HBB-201════════════   ═   ═══HBB-201═══]                              "
+"═══════HBB══════════   ═   ═══HBB═══   ═   ═══HBB═══   ═   ═════════════HBB══════════════   ═   ═══════HBB═══════   ═   ═HBB═   ═   ═HBB═   "
 "     <HBB CDS══                                                 ══HBB CDS═══ ══HBB CDS═══   ═   ═══════]                                    "
 "                                                                                                                                            "
 "                                                                                                                                            "

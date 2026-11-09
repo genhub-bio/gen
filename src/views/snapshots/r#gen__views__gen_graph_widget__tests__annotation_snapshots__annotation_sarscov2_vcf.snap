@@ -1,6 +1,6 @@
 ---
 source: src/views/gen_graph_widget.rs
-expression: "render_annotated_variant_fixture(\"sarscov2_reference_centering\",\n\"NC_045512.2.fa\", \"NC_045512.2.gff3\", \"lineages.vcf\", \"Delta\", 27650,)"
+expression: "render_annotated_variant_fixture(\"sarscov2_genome\", \"NC_045512.2.fa\",\n\"NC_045512.2.gff3\", \"lineages.vcf\", \"Delta\", 27650,)"
 ---
 "                                                                                                                                            "
 "                                                                                                                                            "
@@ -24,11 +24,11 @@ expression: "render_annotated_variant_fixture(\"sarscov2_reference_centering\",\
 "                                                      ╭─C─╮                        ╭─T─╮                                                    "
 "                                                      │   │            ↓           │   │                                                    "
 "AATGGCTT…ACAGTAA…ATGTTTCA…TGATTAA…ATGAAAAT…GCCAGATCAG─╯╌T╌╰─TTCACCTAAAC…AAAAGAAAGA─╯╌C╌╰─AGAATGATTGA…CGCCTAA…ATGAAATT…CATCTAA…ATGTCTGA…GGCAA"
-"YP_009724393.1═> [YP_009724394.1> [═YP_009724395.1═══   ═   ════YP_009724395.1════   ═   ══════>             [YP_009724396.1> [════════N════"
 "═══════════════NC_045512.2:1..29903══════════════════   ═   ═NC_045512.2:1..29903═   ═   ══════════════════NC_045512.2:1..29903═════════════"
-"══════M════════> [═════ORF6═════> [══════ORF7a═══════   ═   ════════ORF7a═════════   ═   ═ORF7a>             [═════ORF8═════> [═YP_009724397"
-"                                                                                            [════ORF7b═════>                                "
+"══════M════════> [═════ORF6═════> [══════ORF7a═══════   ═   ════════ORF7a═════════   ═   ═ORF7a>             [YP_009724396.1> [════════N════"
+"YP_009724393.1═> [YP_009724394.1> [═YP_009724395.1═══   ═   ════YP_009724395.1════   ═   ══════>             [═════ORF8═════> [═YP_009724397"
 "                                                                                            [YP_009725318.1>                                "
+"                                                                                            [════ORF7b═════>                                "
 "                                                                                                                                            "
 "                                                                                                                                            "
 "                                                                                                                                            "

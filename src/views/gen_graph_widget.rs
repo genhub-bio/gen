@@ -4253,7 +4253,7 @@ mod tests {
             insta::assert_snapshot!(
                 "annotation_hbb_vcf",
                 render_annotated_variant_fixture(
-                    "hbb_reference_centering",
+                    "hbb_region",
                     "hbb_region.fa",
                     "hbb_region.gff3",
                     "hbb_variants.vcf",
@@ -4268,7 +4268,7 @@ mod tests {
             insta::assert_snapshot!(
                 "annotation_sarscov2_vcf",
                 render_annotated_variant_fixture(
-                    "sarscov2_reference_centering",
+                    "sarscov2_genome",
                     "NC_045512.2.fa",
                     "NC_045512.2.gff3",
                     "lineages.vcf",
