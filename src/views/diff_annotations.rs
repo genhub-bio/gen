@@ -13,7 +13,7 @@ use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
     graph_view::GraphViewState, layout::VisualDetail, layout_compaction::GapPolicy,
-    layout_engine::LayoutEngine, plotter::NodeRenderer,
+    layout_engine::LayoutEngine, node_renderer::NodeRenderer,
 };
 use log::warn;
 
@@ -217,7 +217,7 @@ mod tests {
         operations::commit_operation_summary,
         sample::Sample,
     };
-    use gen_tui::{LineStyle, graph_view::GraphView, plotter::PathStyle};
+    use gen_tui::{LineStyle, graph_view::GraphView, highlight_style::PathStyle};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::StatefulWidget};
 
     use super::*;

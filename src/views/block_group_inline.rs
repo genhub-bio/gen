@@ -11,7 +11,6 @@ use gen_graph::{GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_view::{GraphView, GraphViewState},
-    highlight_style::PathStyle,
     layout_engine::{BatchId, LayoutEngine},
 };
 use ratatui::{
