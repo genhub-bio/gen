@@ -2,18 +2,18 @@ use std::collections::{HashMap, HashSet};
 
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
-use super::LayoutError;
+use super::RoutingError;
 use crate::layout::{LayoutEdge, LayoutNode, NodeRole};
 
 /// Port directions for a node (North, East, South, West)
-pub type PortDirections = (bool, bool, bool, bool);
+pub type CompassConnections = (bool, bool, bool, bool);
 
 /// An edge's preserved domain-edge bundle and `is_pin_span` flag (see `LayoutEdge`).
 pub(crate) type BundledLeg = (Vec<(NodeIndex, NodeIndex)>, bool);
 
 /// A simplified/spliced edge's `BundledLeg`, keyed by its endpoints.
 pub(crate) type BundledLegEdges = HashMap<(NodeIndex, NodeIndex), BundledLeg>;
-type PortsByNode = HashMap<NodeIndex, PortDirections>;
+type PortsByNode = HashMap<NodeIndex, CompassConnections>;
 type PinSplice = (NodeIndex, NodeIndex, Vec<(NodeIndex, NodeIndex)>, bool);
 
 pub fn assign_ports(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> PortsByNode {
@@ -55,7 +55,7 @@ pub fn assign_ports(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> 
 /// Asserts that all edges in a straight segment have identical bundles.
 pub fn simplify_graph(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
-) -> Result<(), LayoutError> {
+) -> Result<(), RoutingError> {
     if graph.edge_count() == 0 {
         return Ok(());
     }
@@ -63,8 +63,8 @@ pub fn simplify_graph(
     let ports_map = assign_ports(graph);
 
     // Define straight orientations (these get contracted)
-    const STRAIGHT_VERTICAL: PortDirections = (true, false, true, false);
-    const STRAIGHT_HORIZONTAL: PortDirections = (false, true, false, true);
+    const STRAIGHT_VERTICAL: CompassConnections = (true, false, true, false);
+    const STRAIGHT_HORIZONTAL: CompassConnections = (false, true, false, true);
 
     // 1. Identify and add all critical nodes (not on a collinear segment)
     let mut critical_nodes = HashSet::new();
@@ -78,7 +78,7 @@ pub fn simplify_graph(
 
         // Critical nodes are: non-straight routing nodes, or any Data/Pin nodes.
         // Pin nodes are always critical (never contracted here) so they survive until
-        // `prune_pin_stubs` runs and removes them explicitly. A hair pin is never removed.
+        // `prune_pin_stubs` runs and removes them explicitly. A hairpin node is never removed.
         let is_critical = match &node.role {
             NodeRole::Data(_) | NodeRole::Pin(_) | NodeRole::HairPin(_) => true,
             NodeRole::Routing | NodeRole::Wormhole(_) => {

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, hash_map};
 
-use super::{LayoutError, NodeData};
+use super::{NodeData, RoutingError};
 
 #[derive(Clone, Debug)]
 pub struct TempGraph {
@@ -26,21 +26,21 @@ impl TempGraph {
         self.nodes_by_index.insert(node_id, node);
     }
 
-    pub fn update_node(&mut self, node_id: u64, node: NodeData) -> Result<(), LayoutError> {
+    pub fn update_node(&mut self, node_id: u64, node: NodeData) -> Result<(), RoutingError> {
         if !self.nodes_by_index.contains_key(&node_id) {
-            return Err(LayoutError::NodeNotFound(node_id));
+            return Err(RoutingError::NodeNotFound(node_id));
         }
         self.nodes_by_index.insert(node_id, node);
 
         Ok(())
     }
 
-    pub fn add_edge(&mut self, source: u64, target: u64) -> Result<(), LayoutError> {
+    pub fn add_edge(&mut self, source: u64, target: u64) -> Result<(), RoutingError> {
         if !self.nodes_by_index.contains_key(&source) {
-            return Err(LayoutError::NodeNotFound(source));
+            return Err(RoutingError::NodeNotFound(source));
         }
         if !self.nodes_by_index.contains_key(&target) {
-            return Err(LayoutError::NodeNotFound(target));
+            return Err(RoutingError::NodeNotFound(target));
         }
         self.neighbors.entry(source).or_default().insert(target);
 

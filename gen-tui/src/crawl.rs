@@ -21,7 +21,7 @@ use crate::{
     layout::{PinSide, WindowStructureBuilder},
     pinning::{
         LegEnd, OrderingConstraint, PinPlan, ordering_constraint, plan_curved_bends, plan_hairpin,
-        plan_hairpin_arc, plan_sideways_bends, plan_vertical_bends,
+        plan_hairpin_arc, plan_horizontal_bends, plan_vertical_bends,
     },
     window_graph::{WindowEdge, WindowGraph, WindowNode},
 };
@@ -38,7 +38,7 @@ pub(crate) type EdgePortsFn<G> = fn(&G, &<G as GraphBase>::EdgeId) -> EdgePorts;
 
 /// The domain direction in which a collapsed wormhole door leaves its in-window boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExternalEdgeSide {
+pub enum DoorDirection {
     /// The off-window target is an incoming neighbor of the boundary node.
     Predecessor,
     /// The off-window target is an outgoing neighbor of the boundary node.
@@ -49,7 +49,7 @@ pub enum ExternalEdgeSide {
 /// every off-window domain node it represents, and the direction in which it leaves the
 /// loaded window.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalEdge<NodeId> {
+pub struct WormholeDoor<NodeId> {
     /// The domain node inside the loaded window.
     pub boundary: NodeId,
     /// The chosen off-window node used for navigation.
@@ -57,17 +57,17 @@ pub struct ExternalEdge<NodeId> {
     /// Every off-window neighbor represented by this collapsed door.
     pub(crate) all_collapsed: Vec<NodeId>,
     /// The domain direction from `boundary` toward the represented nodes.
-    pub side: ExternalEdgeSide,
+    pub side: DoorDirection,
 }
 
-impl<NodeId> ExternalEdge<NodeId> {
+impl<NodeId> WormholeDoor<NodeId> {
     /// Construct a door representing missing incoming neighbors.
     pub fn predecessor(boundary: NodeId, target: NodeId, all_collapsed: Vec<NodeId>) -> Self {
         Self {
             boundary,
             target,
             all_collapsed,
-            side: ExternalEdgeSide::Predecessor,
+            side: DoorDirection::Predecessor,
         }
     }
 
@@ -77,7 +77,7 @@ impl<NodeId> ExternalEdge<NodeId> {
             boundary,
             target,
             all_collapsed,
-            side: ExternalEdgeSide::Successor,
+            side: DoorDirection::Successor,
         }
     }
 }
@@ -143,7 +143,7 @@ pub struct StructuralSubgraph<NodeId> {
     /// `StructuralSubgraph::assign_edge_ports`.
     pub edge_ports: BTreeMap<(NodeId, NodeId), Vec<EdgePorts>>,
     /// Boundary edges collapsed to one wormhole door per node and direction.
-    pub external_edges: Vec<ExternalEdge<NodeId>>,
+    pub wormhole_doors: Vec<WormholeDoor<NodeId>>,
 }
 
 /// Select up to `node_budget` nodes around `anchor`, including internal and boundary edges.
@@ -246,7 +246,7 @@ where
 
     // Collapse each side of a boundary node to one door. Reuse a valid preferred target;
     // otherwise choose the lowest domain index for deterministic navigation.
-    let mut external_edges: Vec<ExternalEdge<G::NodeId>> = Vec::new();
+    let mut wormhole_doors: Vec<WormholeDoor<G::NodeId>> = Vec::new();
     for &node_id in &nodes {
         for (direction, exits_toward_successor) in
             [(Direction::Outgoing, true), (Direction::Incoming, false)]
@@ -270,11 +270,11 @@ where
                 _ => candidates[0],
             };
             let side = if exits_toward_successor {
-                ExternalEdgeSide::Successor
+                DoorDirection::Successor
             } else {
-                ExternalEdgeSide::Predecessor
+                DoorDirection::Predecessor
             };
-            external_edges.push(ExternalEdge {
+            wormhole_doors.push(WormholeDoor {
                 boundary: node_id,
                 target,
                 all_collapsed: candidates,
@@ -282,14 +282,14 @@ where
             });
         }
     }
-    external_edges.sort_by_key(|edge| (edge.boundary, edge.target));
+    wormhole_doors.sort_by_key(|edge| (edge.boundary, edge.target));
 
     StructuralSubgraph {
         anchor,
         nodes,
         edges,
         edge_ports: BTreeMap::new(),
-        external_edges,
+        wormhole_doors,
     }
 }
 
@@ -332,7 +332,7 @@ impl<NodeId: Copy + Eq + Hash + Ord> StructuralSubgraph<NodeId> {
 }
 
 /// One domain edge as the window sees it.
-struct DomainEdge<NodeId> {
+struct DeclaredEdge<NodeId> {
     source: NodeId,
     target: NodeId,
     ports: EdgePorts,
@@ -344,10 +344,10 @@ struct DomainEdge<NodeId> {
 ///
 /// Nodes are first ordered by the edges that ask for an order (cycle removal breaks any cycle
 /// among them). Each edge is then drawn directly when its sides agree with that order, and
-/// otherwise routed through left and right pins (see `plan_sideways_bends`). Every pin joins
+/// otherwise routed through left and right pins (see `plan_horizontal_bends`). Every pin joins
 /// the Sugiyama input, along with a temporary edge between the endpoints of each pinned route
 /// that keeps their ranks in the chosen order; the builder removes it once layers are known.
-/// Boundary edges become ranked wormhole nodes. `explicit_backward_edges` names node pairs to
+/// Boundary edges become layered wormhole nodes. `explicit_backward_edges` names node pairs to
 /// treat as backward whatever the ordering says.
 pub fn build_window_graph<G>(
     neighborhood: &StructuralSubgraph<G::NodeId>,
@@ -404,13 +404,13 @@ where
         })
         .collect();
 
-    let mut declared_edges: Vec<DomainEdge<G::NodeId>> = Vec::new();
+    let mut declared_edges: Vec<DeclaredEdge<G::NodeId>> = Vec::new();
     for &(source, target) in &neighborhood.edges {
         if forced_pairs.contains(&(source, target)) {
             continue;
         }
         for ports in neighborhood.ports_of(source, target) {
-            declared_edges.push(DomainEdge {
+            declared_edges.push(DeclaredEdge {
                 source,
                 target,
                 ports,
@@ -420,7 +420,7 @@ where
     }
     // A caller's explicit backward edge is looped even when the domain graph lacks it.
     for &(source, target) in &forced_pairs {
-        declared_edges.push(DomainEdge {
+        declared_edges.push(DeclaredEdge {
             source,
             target,
             ports: EdgePorts::default(),
@@ -453,7 +453,7 @@ where
     for pair in hinted_nodes.windows(2) {
         ordering_graph.add_edge(pair[0].1, pair[1].1, ());
     }
-    let against_hints = |edge: &DomainEdge<G::NodeId>| {
+    let against_hints = |edge: &DeclaredEdge<G::NodeId>| {
         matches!(
             (hints.get(&edge.source), hints.get(&edge.target)),
             (Some(source_hint), Some(target_hint)) if target_hint < source_hint
@@ -507,7 +507,7 @@ where
                     edge.source == edge.target,
                 )
             } else {
-                plan_sideways_bends(edge.ports, target_follows_source)
+                plan_horizontal_bends(edge.ports, target_follows_source)
             }
         })
         .collect();
@@ -532,8 +532,8 @@ where
         let bend_pin = plan
             .bend_pin
             .map(|side| window_graph.add_node(WindowNode::Pin(side)));
-        let hair_pin = plan
-            .hair_pin
+        let hairpin_node = plan
+            .hairpin_side
             .map(|side| window_graph.add_node(WindowNode::HairPin(side)));
         let resolve = |end: LegEnd| match end {
             LegEnd::Source => node_to_local[&edge.source],
@@ -541,7 +541,9 @@ where
             LegEnd::LeftPin => left_pin.expect("should have added the left pin the plan names"),
             LegEnd::RightPin => right_pin.expect("should have added the right pin the plan names"),
             LegEnd::BendPin => bend_pin.expect("should have added the bend pin the plan names"),
-            LegEnd::HairPin => hair_pin.expect("should have added the hair pin the plan names"),
+            LegEnd::HairPin => {
+                hairpin_node.expect("should have added the hairpin node the plan names")
+            }
         };
         for leg in &plan.legs {
             let (from, to) = (resolve(leg.from), resolve(leg.to));
@@ -575,8 +577,8 @@ where
         });
     }
 
-    // Add each collapsed door as a ranked node on the correct side of its boundary.
-    for door in &neighborhood.external_edges {
+    // Add each collapsed door as a node in the correct layer, on the correct side of its boundary.
+    for door in &neighborhood.wormhole_doors {
         let boundary_domain = NodeIndex::new(<G as NodeIndexable>::to_index(graph, door.boundary));
         let target_domain = NodeIndex::new(<G as NodeIndexable>::to_index(graph, door.target));
         let Some(&boundary_local) = node_to_local.get(&door.boundary) else {
@@ -587,10 +589,10 @@ where
             let collapsed_domain = NodeIndex::new(<G as NodeIndexable>::to_index(graph, collapsed));
             let bundle = (boundary_domain, collapsed_domain);
             match door.side {
-                ExternalEdgeSide::Successor => {
+                DoorDirection::Successor => {
                     window_graph.add_edge(boundary_local, wormhole_local, Some(bundle));
                 }
-                ExternalEdgeSide::Predecessor => {
+                DoorDirection::Predecessor => {
                     window_graph.add_edge(wormhole_local, boundary_local, Some(bundle));
                 }
             }
@@ -831,7 +833,7 @@ mod tests {
                 .map(|&(source, target)| (TestNode(source.into()), TestNode(target.into())))
                 .collect(),
             edge_ports: BTreeMap::new(),
-            external_edges: Vec::new(),
+            wormhole_doors: Vec::new(),
         };
         let (window, _) =
             build_window_graph(&subgraph, &graph, None).expect("should build the pinned window");
@@ -923,7 +925,7 @@ mod tests {
                 .into_iter()
                 .map(|pair| (pair, vec![EdgePorts::new(NodeSide::West, NodeSide::East)]))
                 .collect(),
-            external_edges: Vec::new(),
+            wormhole_doors: Vec::new(),
         };
         let (window, _) =
             build_window_graph(&subgraph, &graph, None).expect("should build the window");
@@ -990,7 +992,7 @@ mod tests {
         );
         assert!(
             subgraph
-                .external_edges
+                .wormhole_doors
                 .iter()
                 .any(|edge| (edge.boundary, edge.target) == (TestNode(0), TestNode(1))),
             "the crawl's own boundary edge should still surface in the structural query output"
@@ -1074,7 +1076,7 @@ mod tests {
         sides
     }
 
-    fn hair_pin_sides(window: &WindowGraph) -> Vec<NodeSide> {
+    fn hairpin_node_sides(window: &WindowGraph) -> Vec<NodeSide> {
         window
             .graph
             .node_weights()
@@ -1098,10 +1100,10 @@ mod tests {
     }
 
     #[test]
-    fn test_east_to_east_edge_from_a_node_to_itself_adds_one_hair_pin() {
+    fn test_east_to_east_edge_from_a_node_to_itself_adds_one_hairpin_node() {
         let (window, _) = window_with_ports(EAST_EAST, (1, 1));
         assert!(pin_sides(&window).is_empty());
-        assert_eq!(hair_pin_sides(&window), vec![NodeSide::East]);
+        assert_eq!(hairpin_node_sides(&window), vec![NodeSide::East]);
         let assembled = assemble_window(&window).expect("should assemble the window");
         assert!(
             assembled
@@ -1112,20 +1114,20 @@ mod tests {
     }
 
     #[test]
-    fn test_hair_pin_has_one_edge_labelled_with_the_edge_it_stands_for() {
+    fn test_hairpin_node_has_one_edge_labelled_with_the_edge_it_stands_for() {
         for ports in [EAST_EAST, WEST_WEST] {
             let (window, _) = window_with_ports(ports, (1, 1));
-            let hair_pin = window
+            let hairpin_node = window
                 .graph
                 .node_indices()
                 .find(|&index| matches!(window.graph[index], WindowNode::HairPin(_)))
-                .expect("should add a hair pin");
+                .expect("should add a hairpin node");
             let touching: Vec<_> = window
                 .graph
                 .edge_indices()
                 .filter(|&edge| {
                     let (source, target) = window.graph.edge_endpoints(edge).expect("should exist");
-                    source == hair_pin || target == hair_pin
+                    source == hairpin_node || target == hairpin_node
                 })
                 .collect();
             assert_eq!(touching.len(), 1, "one edge, so ranking is not disturbed");
@@ -1137,9 +1139,9 @@ mod tests {
     }
 
     #[test]
-    fn test_west_to_west_edge_from_a_node_to_itself_adds_one_hair_pin() {
+    fn test_west_to_west_edge_from_a_node_to_itself_adds_one_hairpin_node() {
         let (window, _) = window_with_ports(WEST_WEST, (1, 1));
-        assert_eq!(hair_pin_sides(&window), vec![NodeSide::West]);
+        assert_eq!(hairpin_node_sides(&window), vec![NodeSide::West]);
     }
 
     #[test]
@@ -1266,7 +1268,7 @@ mod tests {
         );
         assert_eq!(
             subgraph
-                .external_edges
+                .wormhole_doors
                 .iter()
                 .map(|edge| (edge.boundary, edge.target))
                 .collect::<HashSet<_>>(),
@@ -1312,7 +1314,7 @@ mod tests {
         );
         assert_eq!(
             subgraph
-                .external_edges
+                .wormhole_doors
                 .iter()
                 .map(|edge| (edge.boundary, edge.target))
                 .collect::<HashSet<_>>(),
@@ -1373,7 +1375,7 @@ mod tests {
         );
         assert_eq!(
             subgraph
-                .external_edges
+                .wormhole_doors
                 .iter()
                 .map(|edge| (edge.boundary, edge.target))
                 .collect::<Vec<_>>(),
@@ -1403,7 +1405,7 @@ mod tests {
             HashSet::from([TestNode(0), TestNode(1), TestNode(2), TestNode(3)]),
             "the whole 4-node graph should fit the budget"
         );
-        assert!(subgraph.external_edges.is_empty());
+        assert!(subgraph.wormhole_doors.is_empty());
         assert!(subgraph.nodes.contains(&TestNode(1)));
         assert!(subgraph.nodes.contains(&TestNode(2)));
     }
@@ -1454,8 +1456,8 @@ mod tests {
             "both A1's and A2's real edges into B should survive as ordinary window edges"
         );
         assert_eq!(
-            subgraph.external_edges,
-            vec![ExternalEdge::successor(
+            subgraph.wormhole_doors,
+            vec![WormholeDoor::successor(
                 TestNode(3),
                 TestNode(4),
                 vec![TestNode(4)]
@@ -1481,8 +1483,8 @@ mod tests {
 
         assert_eq!(subgraph.nodes, vec![TestNode(2), TestNode(3)]);
         assert_eq!(
-            subgraph.external_edges,
-            vec![ExternalEdge::predecessor(
+            subgraph.wormhole_doors,
+            vec![WormholeDoor::predecessor(
                 TestNode(2),
                 TestNode(1),
                 vec![TestNode(1)]
@@ -1507,8 +1509,8 @@ mod tests {
         let windowed: HashSet<TestNode> = subgraph.nodes.iter().copied().collect();
         assert_eq!(windowed, HashSet::from([TestNode(0)]));
         assert_eq!(
-            subgraph.external_edges,
-            vec![ExternalEdge::successor(
+            subgraph.wormhole_doors,
+            vec![WormholeDoor::successor(
                 TestNode(0),
                 TestNode(1),
                 vec![
@@ -1543,8 +1545,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            subgraph.external_edges,
-            vec![ExternalEdge::successor(
+            subgraph.wormhole_doors,
+            vec![WormholeDoor::successor(
                 TestNode(0),
                 TestNode(4),
                 vec![
@@ -1757,7 +1759,7 @@ mod tests {
                 .map(|&(source, target)| (TestNode(source.into()), TestNode(target.into())))
                 .collect(),
             edge_ports: BTreeMap::new(),
-            external_edges: Vec::new(),
+            wormhole_doors: Vec::new(),
         };
         let (window, _) =
             build_window_graph_with_order(&subgraph, &graph, None, hint, LayoutMode::default())

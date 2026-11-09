@@ -7,7 +7,7 @@ use std::{
 
 use itertools::Itertools;
 
-use super::{LayoutError, NodeData, temp_graph::TempGraph};
+use super::{NodeData, RoutingError, temp_graph::TempGraph};
 
 #[derive(Clone, Debug)]
 struct JogScore {
@@ -90,7 +90,7 @@ impl GraphBuilder<'_> {
         }
     }
 
-    fn build_graph(&self) -> Result<TempGraph, LayoutError> {
+    fn build_graph(&self) -> Result<TempGraph, RoutingError> {
         let mut graph = TempGraph::new();
 
         let edge_nodes = self
@@ -129,7 +129,7 @@ impl GraphBuilder<'_> {
 // points. The y-axis points upwards to match the canvas coordinate system (not
 // the screen coordinates).
 #[derive(Clone, Debug)]
-pub struct Router {
+pub struct ChannelRouter {
     pub bottom_pin_list: Vec<u64>,
     pub top_pin_list: Vec<u64>,
     pub minimum_jog_length: i64,
@@ -139,7 +139,7 @@ pub struct Router {
     pub channel_width: i64,
 }
 
-impl Router {
+impl ChannelRouter {
     pub fn new(
         bottom_pin_list: Vec<u64>,
         top_pin_list: Vec<u64>,
@@ -150,7 +150,7 @@ impl Router {
         let channel_length = bottom_pin_list.len().max(top_pin_list.len()) as i64;
 
         // Create a temporary router to compute density
-        let temp_router = Router {
+        let temp_router = ChannelRouter {
             bottom_pin_list: bottom_pin_list.clone(),
             top_pin_list: top_pin_list.clone(),
             minimum_jog_length,
@@ -168,7 +168,7 @@ impl Router {
             std::cmp::max(1, temp_router.compute_density())
         };
 
-        Router {
+        ChannelRouter {
             bottom_pin_list,
             top_pin_list,
             minimum_jog_length,
@@ -781,7 +781,10 @@ impl Router {
                     let jog_pair = (cmp::min(y1, y2), cmp::max(y1, y2));
                     for (v_y1, v_y2, v_net) in &existing_verticals {
                         if *v_net != net
-                            && Router::overlaps(vec![(*jog_pair.0, *jog_pair.1), (*v_y1, *v_y2)])
+                            && ChannelRouter::overlaps(vec![
+                                (*jog_pair.0, *jog_pair.1),
+                                (*v_y1, *v_y2),
+                            ])
                         {
                             valid = false;
                             break;
@@ -1048,7 +1051,7 @@ impl Router {
         tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
         from_side: Option<&str>,
         graph_builder: &mut GraphBuilder,
-    ) -> Result<(), LayoutError> {
+    ) -> Result<(), RoutingError> {
         // Insert an accessible track as close to the middle as possible.
         let mid_track = ((self.channel_width as f64) / 2.0).round() as i64 + 1;
 
@@ -1085,7 +1088,7 @@ impl Router {
                 // or the middle, whichever comes first. New track is inserted AT this position.
                 new_track = new_track_candidate_top;
             } else {
-                return Err(LayoutError::InvalidSide(from_side.to_string()));
+                return Err(RoutingError::InvalidSide(from_side.to_string()));
             }
         } else {
             new_track = mid_track;
@@ -1374,7 +1377,7 @@ impl Router {
 
     Returns:
      */
-    pub fn route(&mut self) -> Result<TempGraph, LayoutError> {
+    pub fn route(&mut self) -> Result<TempGraph, RoutingError> {
         // Route the nets, returns a graph representing the routed nets, with
         // nodes at grid points and edges corresponding to horizontal and
         // vertical wire segments.
@@ -1457,7 +1460,7 @@ mod tests {
 
     #[test]
     fn test_all_tracks() {
-        let test_router = Router::new(
+        let test_router = ChannelRouter::new(
             vec![1, 2, 3],
             vec![3, 2, 1],
             Some(5), // explicit channel width
@@ -1470,7 +1473,7 @@ mod tests {
 
     #[test]
     fn test_occupied_tracks() {
-        let test_router = Router::new(
+        let test_router = ChannelRouter::new(
             vec![1, 2, 3],
             vec![3, 2, 1],
             Some(5), // explicit channel width
@@ -1490,7 +1493,7 @@ mod tests {
         ]);
         assert_eq!(
             HashSet::from([1, 3]),
-            Router::split_nets(&tracks_by_net)
+            ChannelRouter::split_nets(&tracks_by_net)
                 .into_iter()
                 .collect::<HashSet<u64>>()
         );
@@ -1498,7 +1501,7 @@ mod tests {
 
     #[test]
     fn test_vertical_wiring() {
-        let test_router = Router::new(
+        let test_router = ChannelRouter::new(
             vec![1, 2, 3],
             vec![3, 2, 1],
             Some(5), // explicit channel width
@@ -1527,7 +1530,7 @@ mod tests {
         );
 
         // # Add a vertical wire
-        let test_router2 = Router::new(
+        let test_router2 = ChannelRouter::new(
             vec![1, 2, 3],
             vec![3, 2, 1],
             Some(5), // explicit channel width
@@ -1545,7 +1548,7 @@ mod tests {
     #[test]
     fn test_next_pin() {
         // Setup: top and bottom pin lists with multiple pins for net 1
-        let mut test_router = Router::new(
+        let mut test_router = ChannelRouter::new(
             vec![0, 1, 0, 1],
             vec![1, 0, 1, 0],
             Some(5), // explicit channel width
@@ -1564,7 +1567,7 @@ mod tests {
     #[test]
     fn test_connect_pins() {
         // Case 1: Only top pin present, should assign to a free track and add vertical wire
-        let mut test_router = Router::new(
+        let mut test_router = ChannelRouter::new(
             vec![0],
             vec![1],
             Some(3), // explicit channel width
@@ -1605,7 +1608,7 @@ mod tests {
         assert!(found_top_wire);
 
         // Case 2: Only bottom pin present, should assign to a free track and add vertical wire
-        test_router = Router::new(
+        test_router = ChannelRouter::new(
             vec![2],
             vec![0],
             Some(3), // explicit channel width
@@ -1634,7 +1637,7 @@ mod tests {
         assert!(found);
 
         // Case 3: Both pins present, both nets different, should assign both
-        test_router = Router::new(
+        test_router = ChannelRouter::new(
             vec![2],
             vec![1],
             Some(3), // explicit channel width
@@ -1651,7 +1654,7 @@ mod tests {
         assert_eq!(1, net2_result.len());
 
         // Case 4: Both pins present, same net, all tracks occupied, should add vertical wire from top to bottom
-        test_router = Router::new(
+        test_router = ChannelRouter::new(
             vec![3],
             vec![3],
             Some(1), // explicit channel width (minimum)
@@ -1700,7 +1703,7 @@ mod tests {
         ];
 
         for (bottom, top) in pin_list_pairs {
-            let mut test_router = Router::new(
+            let mut test_router = ChannelRouter::new(
                 bottom,
                 top,
                 Some(4), // explicit channel width
@@ -1714,7 +1717,7 @@ mod tests {
 
     #[test]
     fn test_simplify_linear_paths() {
-        let test_router = Router::new(
+        let test_router = ChannelRouter::new(
             vec![1, 0, 0],
             vec![0, 0, 1],
             Some(4), // explicit channel width
@@ -1767,7 +1770,7 @@ mod tests {
 
     #[test]
     fn test_is_straight_line() {
-        let test_router = Router::new(
+        let test_router = ChannelRouter::new(
             vec![],
             vec![],
             Some(4), // explicit channel width

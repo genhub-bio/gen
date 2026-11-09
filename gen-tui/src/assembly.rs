@@ -13,7 +13,7 @@ use petgraph::{
 };
 
 use crate::{
-    crawl::ExternalEdge,
+    crawl::WormholeDoor,
     edge_ports::PortedEdge,
     geometry::LocalPos,
     layout::{LayoutEdge, LayoutNode, NodeRole},
@@ -35,7 +35,7 @@ pub struct AssembledLayout {
     pub width: i64,
     pub height: i64,
     /// Collapsed boundary edges, filled by `LayoutEngine` after assembly.
-    pub external_edges: Vec<ExternalEdge<NodeIndex<u32>>>,
+    pub wormhole_doors: Vec<WormholeDoor<NodeIndex<u32>>>,
     /// The source, target and ports of each domain edge, filled by `LayoutEngine`; routing and
     /// arrow placement read the ports to know which side of each node an edge attaches to.
     pub domain_edges: Vec<PortedEdge<NodeIndex>>,
@@ -66,7 +66,7 @@ pub fn assemble_window(window: &WindowGraph) -> Option<AssembledLayout> {
             graph,
             width: 0,
             height: 0,
-            external_edges: Vec::new(),
+            wormhole_doors: Vec::new(),
             domain_edges: Vec::new(),
         });
     };
@@ -148,7 +148,7 @@ pub fn assemble_window(window: &WindowGraph) -> Option<AssembledLayout> {
         graph,
         width,
         height,
-        external_edges: Vec::new(),
+        wormhole_doors: Vec::new(),
         domain_edges: Vec::new(),
     })
 }

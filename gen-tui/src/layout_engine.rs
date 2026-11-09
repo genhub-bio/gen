@@ -17,9 +17,8 @@ use petgraph::{
 use crate::{
     assembly::{AssembledLayout, assemble_window},
     crawl::{
-        EagerSource, EdgePortsFn, ExternalEdge, GraphCursor, GraphSource, OrderHintFn,
-        PreferredWormholeDoors, StructuralSubgraph, build_window_graph_with_order, crawl_batch,
-        subgraph_for,
+        EagerSource, EdgePortsFn, GraphCursor, GraphSource, OrderHintFn, PreferredWormholeDoors,
+        StructuralSubgraph, WormholeDoor, build_window_graph_with_order, crawl_batch, subgraph_for,
     },
     curved::LayoutMode,
 };
@@ -459,10 +458,10 @@ where
         let to_node_index = |node_id: G::NodeId| {
             NodeIndex::new(<G as NodeIndexable>::to_index(&self.graph, node_id))
         };
-        layout.external_edges = subgraph
-            .external_edges
+        layout.wormhole_doors = subgraph
+            .wormhole_doors
             .iter()
-            .map(|edge| ExternalEdge {
+            .map(|edge| WormholeDoor {
                 boundary: to_node_index(edge.boundary),
                 target: to_node_index(edge.target),
                 all_collapsed: edge
@@ -540,7 +539,7 @@ where
     /// `from -> to`), as opposed to a predecessor (`to -> from`). `from` and `to` are always
     /// directly adjacent when this matters in practice - click-to-teleport calls this on a
     /// boundary node and its off-screen wormhole target, which are adjacent by construction
-    /// (that's what makes them an external-edge pair) - so this is an `O(degree)` local check,
+    /// (that's what makes them an wormhole-door pair) - so this is an `O(degree)` local check,
     /// no whole-graph rank axis needed to answer "is the target ahead of or behind `from`."
     pub fn is_successor(&self, from: G::NodeId, to: G::NodeId) -> bool {
         self.graph
@@ -712,7 +711,7 @@ mod tests {
             engine.active_world().and_then(|world| {
                 world
                     .layout()
-                    .external_edges
+                    .wormhole_doors
                     .iter()
                     .find(|edge| edge.target == nodes[next - 1])
                     .map(|edge| edge.boundary)

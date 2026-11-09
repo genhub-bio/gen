@@ -21,9 +21,9 @@ use crate::{
 /// ordinal y values produced by assembly are still intact at this point.
 pub fn orient_aligned_bubbles(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    centered: &HashSet<NodeIndex>,
+    aligned_nodes: &HashSet<NodeIndex>,
 ) {
-    if centered.is_empty() {
+    if aligned_nodes.is_empty() {
         return;
     }
 
@@ -39,7 +39,7 @@ pub fn orient_aligned_bubbles(
         layer.sort_by_key(|&node_index| graph[node_index].pos.y);
     }
 
-    let backward_bundles: HashSet<_> = graph
+    let pin_span_bundles: HashSet<_> = graph
         .edge_references()
         .filter(|edge| edge.weight().is_pin_span)
         .flat_map(|edge| edge.weight().bundle.iter().copied())
@@ -55,7 +55,7 @@ pub fn orient_aligned_bubbles(
                 .weight()
                 .bundle
                 .iter()
-                .any(|bundle| backward_bundles.contains(bundle))
+                .any(|bundle| pin_span_bundles.contains(bundle))
         {
             continue;
         }
@@ -135,7 +135,7 @@ pub fn orient_aligned_bubbles(
         }
 
         // The chain with the most aligned nodes moves to the first row, aligned domain nodes
-        // outranking aligned routing nodes: a bypass edge between two centered nodes touches the
+        // outranking aligned routing nodes: a bypass edge between two aligned nodes touches the
         // path without being on it. A tie has no single reference chain, so the bubble keeps its
         // order.
         let scores: Vec<(usize, usize)> = chains
@@ -145,7 +145,7 @@ pub fn orient_aligned_bubbles(
                     chain
                         .iter()
                         .filter(|&&node_index| {
-                            aligned_kind(graph, node_index, centered) == Some(wanted)
+                            aligned_kind(graph, node_index, aligned_nodes) == Some(wanted)
                         })
                         .count()
                 };
@@ -227,16 +227,18 @@ enum AlignedKind {
 fn aligned_kind(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     node_index: NodeIndex<u32>,
-    centered: &HashSet<NodeIndex>,
+    aligned_nodes: &HashSet<NodeIndex>,
 ) -> Option<AlignedKind> {
     match graph[node_index].role {
-        NodeRole::Data(domain_index) => centered
+        NodeRole::Data(domain_index) => aligned_nodes
             .contains(&domain_index)
             .then_some(AlignedKind::Data),
         NodeRole::Routing => graph
             .edges(node_index)
             .flat_map(|edge| edge.weight().bundle.iter())
-            .any(|(source, target)| centered.contains(source) || centered.contains(target))
+            .any(|(source, target)| {
+                aligned_nodes.contains(source) || aligned_nodes.contains(target)
+            })
             .then_some(AlignedKind::Routing),
         _ => None,
     }
@@ -285,7 +287,7 @@ pub fn assign_cross_coordinates(
                 node.vertical_anchor.center_offset(node.size.1)
             })
             .collect(),
-        // A hair pin moves like a routing node, level with the node it turns around, so it takes
+        // A hairpin node moves like a routing node, level with the node it turns around, so it takes
         // no row of its own beside the data nodes of its layer.
         is_dummy: node_indices
             .iter()
@@ -312,9 +314,9 @@ pub fn assign_cross_coordinates(
 /// aligned data node; ambiguous layers are left without an anchor.
 pub fn align_layers(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    centered: &HashSet<NodeIndex>,
+    aligned_nodes: &HashSet<NodeIndex>,
 ) {
-    if centered.is_empty() {
+    if aligned_nodes.is_empty() {
         return;
     }
     let mut layers: BTreeMap<i64, Vec<NodeIndex<u32>>> = BTreeMap::new();
@@ -336,7 +338,7 @@ pub fn align_layers(
             });
         }
         let data: Vec<_> = layer.iter().copied().filter(|&node_index| {
-            matches!(graph[node_index].role, NodeRole::Data(domain_index) if centered.contains(&domain_index))
+            matches!(graph[node_index].role, NodeRole::Data(domain_index) if aligned_nodes.contains(&domain_index))
         }).collect();
         match data.as_slice() {
             [only] => anchors.push(*only),
@@ -350,7 +352,7 @@ pub fn align_layers(
                                 .edges(node_index)
                                 .flat_map(|edge| edge.weight().bundle.iter())
                                 .any(|(source, target)| {
-                                    centered.contains(source) || centered.contains(target)
+                                    aligned_nodes.contains(source) || aligned_nodes.contains(target)
                                 })
                     })
                     .collect();
@@ -378,7 +380,7 @@ pub fn align_layers(
     let placement = solve_aligned_layers(graph, &constraints, &anchors, &aligned_routing)
         .or_else(|| solve_aligned_layers(graph, &constraints, &anchors, &[]));
     let Some(placement) = placement else {
-        log::warn!("centered cross-coordinate constraints are infeasible");
+        log::warn!("aligned cross-coordinate constraints are infeasible");
         return;
     };
     for node_index in graph.node_indices().collect::<Vec<_>>() {
@@ -443,7 +445,7 @@ fn solve_aligned_layers(
 
 /// Dense representation used by the four Brandes–Köpf alignment passes.
 ///
-/// Plain routing nodes and hair pins are dummy chain segments (a hair pin moves with the node it
+/// Plain routing nodes and hairpin nodes are dummy chain segments (a hairpin node moves with the node it
 /// turns around). Data, pin, and wormhole nodes retain ordinary alignment behavior.
 struct CrossGraph {
     column: Vec<i64>,
@@ -517,14 +519,14 @@ impl CrossGraph {
         let marked = mark_type1_conflicts(self, &layered, &adjacent);
 
         let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(4);
-        for &align_to_upper in &[true, false] {
+        for &align_to_previous_layer in &[true, false] {
             for &prefer_low in &[true, false] {
                 let alignment = vertical_alignment(
                     self,
                     &layered,
                     &adjacent,
                     &marked,
-                    align_to_upper,
+                    align_to_previous_layer,
                     prefer_low,
                 );
                 candidates.push(horizontal_compaction(
@@ -537,21 +539,21 @@ impl CrossGraph {
 }
 
 /// Per-node adjacent-layer neighbor lists in within-layer order, computed once per solve.
-/// `CrossLayered::upper_neighbors`/`lower_neighbors` refilter and re-sort the adjacency list on
+/// `CrossLayered::previous_layer_neighbors`/`next_layer_neighbors` refilter and re-sort the adjacency list on
 /// every call, and the passes query the same lists many times over.
 struct AdjacentNeighbors {
-    upper: Vec<Vec<usize>>,
-    lower: Vec<Vec<usize>>,
+    previous_layer: Vec<Vec<usize>>,
+    next_layer: Vec<Vec<usize>>,
 }
 
 impl AdjacentNeighbors {
     fn new(graph: &CrossGraph, layered: &CrossLayered) -> AdjacentNeighbors {
         AdjacentNeighbors {
-            upper: (0..graph.len())
-                .map(|node_index| layered.upper_neighbors(graph, node_index))
+            previous_layer: (0..graph.len())
+                .map(|node_index| layered.previous_layer_neighbors(graph, node_index))
                 .collect(),
-            lower: (0..graph.len())
-                .map(|node_index| layered.lower_neighbors(graph, node_index))
+            next_layer: (0..graph.len())
+                .map(|node_index| layered.next_layer_neighbors(graph, node_index))
                 .collect(),
         }
     }
@@ -559,7 +561,7 @@ impl AdjacentNeighbors {
 
 impl CrossLayered {
     /// Neighbors in the layer immediately to the left (`column - 1`), in within-layer order.
-    fn upper_neighbors(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
+    fn previous_layer_neighbors(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
         match self.layer_of[node_index].checked_sub(1) {
             Some(layer_index) => self.neighbors_in_layer(graph, node_index, layer_index),
             None => Vec::new(),
@@ -567,7 +569,7 @@ impl CrossLayered {
     }
 
     /// Neighbors in the layer immediately to the right (`column + 1`), in within-layer order.
-    fn lower_neighbors(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
+    fn next_layer_neighbors(&self, graph: &CrossGraph, node_index: usize) -> Vec<usize> {
         self.neighbors_in_layer(graph, node_index, self.layer_of[node_index] + 1)
     }
 
@@ -608,7 +610,7 @@ fn mark_type1_conflicts(
         let mut boundary_position = 0usize;
         let mut previous_scanned = 0usize;
         for (scan_position, &lower_node) in lower_layer.iter().enumerate() {
-            let inner_upper = adjacent.upper[lower_node]
+            let inner_upper = adjacent.previous_layer[lower_node]
                 .iter()
                 .copied()
                 .find(|&upper| is_inner(upper, lower_node));
@@ -621,7 +623,7 @@ fn mark_type1_conflicts(
                 None => layered.layers[layer_index].len().saturating_sub(1),
             };
             for &scanned_node in &lower_layer[previous_scanned..=scan_position] {
-                for &upper in &adjacent.upper[scanned_node] {
+                for &upper in &adjacent.previous_layer[scanned_node] {
                     let upper_position = layered.position_of[upper];
                     let crosses =
                         upper_position < boundary_position || upper_position > next_boundary;
@@ -638,7 +640,7 @@ fn mark_type1_conflicts(
 }
 
 /// Align each node to the median of its unmarked neighbors in the adjacent layer, keeping a
-/// layer's alignment edges mutually non-crossing so blocks never cross. `align_to_upper` picks which
+/// layer's alignment edges mutually non-crossing so blocks never cross. `align_to_previous_layer` picks which
 /// adjacent layer to align against; `prefer_low` picks the lower-position median on ties (and scans
 /// low-to-high), otherwise the higher-position median scanning high-to-low.
 ///
@@ -652,7 +654,7 @@ fn vertical_alignment(
     layered: &CrossLayered,
     adjacent: &AdjacentNeighbors,
     marked: &HashSet<(usize, usize)>,
-    align_to_upper: bool,
+    align_to_previous_layer: bool,
     prefer_low: bool,
 ) -> CrossAlignment {
     let node_count = graph.len();
@@ -660,7 +662,7 @@ fn vertical_alignment(
     let mut align: Vec<usize> = (0..node_count).collect();
     let mut claimed = vec![false; node_count];
 
-    let layer_order: Vec<usize> = if align_to_upper {
+    let layer_order: Vec<usize> = if align_to_previous_layer {
         (0..layered.layers.len()).collect()
     } else {
         (0..layered.layers.len()).rev().collect()
@@ -674,10 +676,10 @@ fn vertical_alignment(
         };
         let mut claims: Vec<(i64, i64)> = Vec::new();
         for &node_index in &scan {
-            let neighbors = if align_to_upper {
-                &adjacent.upper[node_index]
+            let neighbors = if align_to_previous_layer {
+                &adjacent.previous_layer[node_index]
             } else {
-                &adjacent.lower[node_index]
+                &adjacent.next_layer[node_index]
             };
             if neighbors.is_empty() {
                 continue;
@@ -694,7 +696,7 @@ fn vertical_alignment(
                     break;
                 }
                 let medium = neighbors[median_index];
-                let segment = if align_to_upper {
+                let segment = if align_to_previous_layer {
                     (medium, node_index)
                 } else {
                     (node_index, medium)

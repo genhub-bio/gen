@@ -4,9 +4,9 @@ use itertools::Itertools;
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
 use super::{
-    LayoutError, NodeData,
+    NodeData, RoutingError,
     layout_graph_process::{BundledLegEdges, simplify_graph},
-    route_channel::Router,
+    route_channel::ChannelRouter,
     temp_graph::TempGraph,
 };
 use crate::{
@@ -22,14 +22,14 @@ struct Terminal {
 }
 
 #[derive(Clone, Debug)]
-struct Pin {
+struct ChannelPin {
     net: u64,
     position: i64,
 }
 
 type Biclique = (HashSet<u64>, HashSet<u64>);
 
-fn enumerate_bicliques(edges: &[(u64, u64)]) -> Result<Vec<Biclique>, LayoutError> {
+fn enumerate_bicliques(edges: &[(u64, u64)]) -> Result<Vec<Biclique>, RoutingError> {
     // MBEA from Zhang et al. (2014), "On finding bicliques in bipartite graphs."
     let mut part1 = HashSet::new();
     let mut part2 = HashSet::new();
@@ -429,7 +429,7 @@ fn make_terminals(
     nudge_terminals(&mut left_terminals, &mut right_terminals, &node_coord)
 }
 
-fn make_pin_lists(left_pins: Vec<Pin>, right_pins: Vec<Pin>) -> (Vec<u64>, Vec<u64>) {
+fn make_pin_lists(left_pins: Vec<ChannelPin>, right_pins: Vec<ChannelPin>) -> (Vec<u64>, Vec<u64>) {
     let all_pins = [left_pins.clone(), right_pins.clone()].concat();
 
     assert!(!all_pins.is_empty(), "Both lists are empty");
@@ -461,7 +461,11 @@ fn make_pin_lists(left_pins: Vec<Pin>, right_pins: Vec<Pin>) -> (Vec<u64>, Vec<u
     (left_out, right_out)
 }
 
-fn translate_graph(graph: &mut TempGraph, x_offset: i64, y_offset: i64) -> Result<(), LayoutError> {
+fn translate_graph(
+    graph: &mut TempGraph,
+    x_offset: i64,
+    y_offset: i64,
+) -> Result<(), RoutingError> {
     for node_index in graph.node_indices() {
         let mut node_data = graph.get_node(node_index).unwrap();
         let (x, y) = node_data.position;
@@ -472,19 +476,19 @@ fn translate_graph(graph: &mut TempGraph, x_offset: i64, y_offset: i64) -> Resul
     Ok(())
 }
 
-pub fn layout_layer(
+pub fn route_layer(
     left_positions: &[LayoutNode],
     right_positions: &[LayoutNode],
     edges: &[(NodeIndex, NodeIndex)],
     edge_bundles: &BundledLegEdges,
-) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
+) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, RoutingError> {
     let mut selected =
-        layout_layer_internal(left_positions, right_positions, edges, edge_bundles, false)?;
+        route_layer_internal(left_positions, right_positions, edges, edge_bundles, false)?;
     simplify_graph(&mut selected)?;
     let mut selected_score = (total_edge_length(&selected), selected.node_count());
     for (swap_layers, reverse_order) in [(false, true), (true, false), (true, true)] {
         let mut candidate = if swap_layers {
-            layout_layer_swapped(
+            route_layer_swapped(
                 left_positions,
                 right_positions,
                 edges,
@@ -492,7 +496,7 @@ pub fn layout_layer(
                 reverse_order,
             )?
         } else {
-            layout_layer_internal(
+            route_layer_internal(
                 left_positions,
                 right_positions,
                 edges,
@@ -511,13 +515,13 @@ pub fn layout_layer(
 }
 
 /// Route from the opposite layer in the requested vertical orientation.
-fn layout_layer_swapped(
+fn route_layer_swapped(
     left_positions: &[LayoutNode],
     right_positions: &[LayoutNode],
     edges: &[(NodeIndex, NodeIndex)],
     edge_bundles: &BundledLegEdges,
     reverse_order: bool,
-) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
+) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, RoutingError> {
     let reflect_positions = |positions: &[LayoutNode]| {
         positions
             .iter()
@@ -536,7 +540,7 @@ fn layout_layer_swapped(
         .iter()
         .map(|(&(left, right), bundle)| ((right, left), bundle.clone()))
         .collect();
-    let mut graph = layout_layer_internal(
+    let mut graph = route_layer_internal(
         &reflect_positions(right_positions),
         &reflect_positions(left_positions),
         &swapped_edges,
@@ -565,13 +569,13 @@ fn total_edge_length(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) ->
         .sum()
 }
 
-fn layout_layer_internal(
+fn route_layer_internal(
     left_positions: &[LayoutNode],
     right_positions: &[LayoutNode],
     edges: &[(NodeIndex, NodeIndex)],
     edge_bundles: &BundledLegEdges,
     reverse_order: bool,
-) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
+) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, RoutingError> {
     // If reverse_order is true, mirror both layers across the horizontal axis y=0.
     // A global negation is its own inverse regardless of either layer's extent.
     let (left_positions_flipped, right_positions_flipped) = if reverse_order {
@@ -670,24 +674,24 @@ fn layout_layer_internal(
         .enumerate()
         .map(|(i, node)| {
             let node_id = i as u64;
-            Pin {
+            ChannelPin {
                 net: node_id + 1,
                 position: node.pos.y,
             }
         })
-        .collect::<Vec<Pin>>();
+        .collect::<Vec<ChannelPin>>();
     let right_pins = terminals
         .iter()
         .filter(|terminal| left_node_ids.contains(&terminal.node_id))
-        .map(|terminal| Pin {
+        .map(|terminal| ChannelPin {
             net: terminal.node_id + 1,
             position: terminal.position,
         })
-        .collect::<Vec<Pin>>();
+        .collect::<Vec<ChannelPin>>();
 
     let (left_pin_list, right_pin_list) = make_pin_lists(left_pins, right_pins);
 
-    let mut router = Router::new(
+    let mut router = ChannelRouter::new(
         left_pin_list.clone(),
         right_pin_list.clone(),
         None, // Use computed density
@@ -728,23 +732,23 @@ fn layout_layer_internal(
     let left_pins2 = terminals
         .iter()
         .filter(|terminal| left_node_ids.contains(&terminal.node_id))
-        .map(|terminal| Pin {
+        .map(|terminal| ChannelPin {
             net: terminal.net_index + 1,
             position: terminal.position,
         })
-        .collect::<Vec<Pin>>();
+        .collect::<Vec<ChannelPin>>();
     let right_pins2 = terminals
         .iter()
         .filter(|terminal| right_node_ids.contains(&terminal.node_id))
-        .map(|terminal| Pin {
+        .map(|terminal| ChannelPin {
             net: terminal.net_index + 1,
             position: terminal.position,
         })
-        .collect::<Vec<Pin>>();
+        .collect::<Vec<ChannelPin>>();
 
     let (left_pin_list2, right_pin_list2) = make_pin_lists(left_pins2, right_pins2);
 
-    let mut router2 = Router::new(
+    let mut router2 = ChannelRouter::new(
         left_pin_list2.clone(),
         right_pin_list2.clone(),
         None, // Use computed density
@@ -782,26 +786,26 @@ fn layout_layer_internal(
     let left_pins3 = terminals
         .iter()
         .filter(|terminal| right_node_ids.contains(&terminal.node_id))
-        .map(|terminal| Pin {
+        .map(|terminal| ChannelPin {
             net: terminal.node_id + 1,
             position: terminal.position,
         })
-        .collect::<Vec<Pin>>();
+        .collect::<Vec<ChannelPin>>();
     let right_pins3 = right_positions
         .iter()
         .enumerate()
         .map(|(i, node)| {
             let node_id = (left_positions.len() + i) as u64;
-            Pin {
+            ChannelPin {
                 net: node_id + 1,
                 position: node.pos.y,
             }
         })
-        .collect::<Vec<Pin>>();
+        .collect::<Vec<ChannelPin>>();
 
     let (left_pin_list3, right_pin_list3) = make_pin_lists(left_pins3, right_pins3);
 
-    let mut router3 = Router::new(
+    let mut router3 = ChannelRouter::new(
         left_pin_list3.clone(),
         right_pin_list3.clone(),
         None, // Use computed density
@@ -842,7 +846,7 @@ fn layout_layer_internal(
 
     // Helper function to convert NodeData to LayoutNode
     let convert_to_layout_node =
-        |node: &NodeData, adjusted_position: (i64, i64)| -> Result<LayoutNode, LayoutError> {
+        |node: &NodeData, adjusted_position: (i64, i64)| -> Result<LayoutNode, RoutingError> {
             let pos = LocalPos::new(adjusted_position.into());
 
             // Determine node role
@@ -852,12 +856,12 @@ fn layout_layer_internal(
                 } else if let Some(original_id) = node.original_node_id {
                     NodeRole::Data(NodeIndex::new(original_id as usize))
                 } else {
-                    return Err(LayoutError::MissingOriginalNodeId(node.node_id));
+                    return Err(RoutingError::MissingOriginalNodeId(node.node_id));
                 }
             } else if let Some(original_id) = node.original_node_id {
                 NodeRole::Data(NodeIndex::new(original_id as usize))
             } else {
-                return Err(LayoutError::MissingOriginalNodeId(node.node_id));
+                return Err(RoutingError::MissingOriginalNodeId(node.node_id));
             };
 
             // Convert i64 to u64 for size, preserve original layer information
@@ -1168,21 +1172,21 @@ mod tests {
     #[test]
     fn test_make_pin_lists() {
         let left = vec![
-            Pin {
+            ChannelPin {
                 net: 1,
                 position: 2,
             },
-            Pin {
+            ChannelPin {
                 net: 2,
                 position: 4,
             },
         ];
         let right = vec![
-            Pin {
+            ChannelPin {
                 net: 1,
                 position: 1,
             },
-            Pin {
+            ChannelPin {
                 net: 2,
                 position: 3,
             },
@@ -1230,7 +1234,7 @@ mod tests {
         ];
 
         let edge_bundles = HashMap::new();
-        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
+        let graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
 
         let graph = graph.expect("should route the first example");
 
@@ -1258,7 +1262,7 @@ mod tests {
         ];
 
         let edge_bundles = HashMap::new();
-        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
+        let graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
 
         let graph = graph.expect("should route the second example");
 
@@ -1286,16 +1290,16 @@ mod tests {
         ];
 
         let edge_bundles = HashMap::new();
-        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
+        let graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
 
         graph.expect("should route the third example");
     }
 
     /// A wormhole door is a real node from crawl time onward (see
-    /// `crawl::build_window_graph`), not synthesized by `layout_layer` - it's routed exactly
+    /// `crawl::build_window_graph`), not synthesized by `route_layer` - it's routed exactly
     /// like any other node given in `right_nodes` with a real edge to its boundary.
     #[test]
-    fn test_layout_layer_routes_a_wormhole_node_on_the_right_like_any_other_node() {
+    fn test_route_layer_routes_a_wormhole_node_on_the_right_like_any_other_node() {
         let external_target = NodeIndex::new(999);
         let left_nodes = vec![
             LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0), (0, 0), None),
@@ -1316,7 +1320,7 @@ mod tests {
         ];
         let edge_bundles = HashMap::new();
 
-        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
+        let graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
             .expect("should route a wormhole node on the right");
 
         let wormhole_count = graph
@@ -1341,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_layout_layer_routes_a_wormhole_node_on_the_left_like_any_other_node() {
+    fn test_route_layer_routes_a_wormhole_node_on_the_left_like_any_other_node() {
         let external_target = NodeIndex::new(998);
         let left_nodes = vec![
             LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0), (0, 0), None),
@@ -1362,7 +1366,7 @@ mod tests {
         ];
         let edge_bundles = HashMap::new();
 
-        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
+        let graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
             .expect("should route a wormhole node on the left");
 
         let wormhole_count = graph
@@ -1378,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_layout_layer_keeps_two_wormhole_nodes_at_distinct_positions() {
+    fn test_route_layer_keeps_two_wormhole_nodes_at_distinct_positions() {
         let left_nodes = vec![
             LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0), (0, 0), None),
             LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(0, 1), (0, 0), None),
@@ -1405,7 +1409,7 @@ mod tests {
         ];
         let edge_bundles = HashMap::new();
 
-        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
+        let graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
             .expect("should route two wormhole nodes");
 
         let wormhole_positions: Vec<_> = graph

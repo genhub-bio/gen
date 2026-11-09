@@ -3,7 +3,7 @@
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
 use crate::{
-    edge_router::call_rust_router,
+    edge_router::route_test_graph,
     geometry::LocalPos,
     layout::{LayoutEdge, LayoutNode, NodeRole},
 };
@@ -58,7 +58,7 @@ fn test_simple_graph_creation() {
 fn test_router_preserves_or_adds_nodes() {
     let graph = simple_graph();
     let input_node_count = graph.node_count();
-    let output = call_rust_router(graph).expect("should route the graph");
+    let output = route_test_graph(graph).expect("should route the graph");
 
     assert!(output.node_count() >= input_node_count);
 }
@@ -66,11 +66,11 @@ fn test_router_preserves_or_adds_nodes() {
 #[test]
 fn test_router_is_deterministic() {
     let graph = simple_graph();
-    let expected = call_rust_router(graph.clone()).expect("should route the graph");
+    let expected = route_test_graph(graph.clone()).expect("should route the graph");
     let expected_positions = node_positions(&expected);
 
     for _ in 0..9 {
-        let output = call_rust_router(graph.clone()).expect("should route the graph");
+        let output = route_test_graph(graph.clone()).expect("should route the graph");
         assert_eq!(output.node_count(), expected.node_count());
         assert_eq!(output.edge_count(), expected.edge_count());
         assert_eq!(node_positions(&output), expected_positions);

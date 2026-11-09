@@ -35,12 +35,12 @@ pub struct CycleRemovalResult<NodeId> {
 /// For cyclic graphs, uses the Eades–Lin–Smyth heuristic to find a
 /// feedback arc set with minimal backward edges.
 ///
-/// Optional `pin_source` / `pin_sink` force specific nodes to the
+/// Optional `forced_first_node` / `forced_last_node` force specific nodes to the
 /// beginning / end of the ordering.
 pub fn remove_cycles<G>(
     graph: &G,
-    pin_source: Option<G::NodeId>,
-    pin_sink: Option<G::NodeId>,
+    forced_first_node: Option<G::NodeId>,
+    forced_last_node: Option<G::NodeId>,
 ) -> CycleRemovalResult<G::NodeId>
 where
     G: GraphBase + NodeIndexable + NodeCount + Visitable,
@@ -70,12 +70,12 @@ where
 
     info!(
         target: "cycle_removal",
-        "Graph contains cycles, computing Eades ordering (pin_source={}, pin_sink={})",
-        pin_source.is_some(),
-        pin_sink.is_some()
+        "Graph contains cycles, computing Eades ordering (forced_first_node={}, forced_last_node={})",
+        forced_first_node.is_some(),
+        forced_last_node.is_some()
     );
 
-    let ordering = eades_ordering(graph, pin_source, pin_sink);
+    let ordering = eades_ordering(graph, forced_first_node, forced_last_node);
 
     // Build rank map: node -> position in ordering
     let mut rank = vec![0usize; graph.node_bound()];
@@ -112,8 +112,8 @@ where
 /// with maximum (out_degree - in_degree).
 fn eades_ordering<G>(
     graph: &G,
-    pinned_source: Option<G::NodeId>,
-    pinned_sink: Option<G::NodeId>,
+    forced_first_node: Option<G::NodeId>,
+    forced_last_node: Option<G::NodeId>,
 ) -> Vec<G::NodeId>
 where
     G: GraphBase + NodeIndexable + NodeCount,
@@ -203,8 +203,8 @@ where
         }
     };
 
-    // Pin source
-    if let Some(s) = pinned_source {
+    // Place the forced first node
+    if let Some(s) = forced_first_node {
         let si = graph.to_index(s);
         if is_active(si, &active) {
             prefix.push(si);
@@ -223,10 +223,10 @@ where
         }
     }
 
-    // Pin sink
-    if let Some(t) = pinned_sink {
+    // Place the forced last node
+    if let Some(t) = forced_last_node {
         let ti = graph.to_index(t);
-        if is_active(ti, &active) && Some(t) != pinned_source {
+        if is_active(ti, &active) && Some(t) != forced_first_node {
             suffix.push_back(ti);
             remove_node(
                 ti,
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_source_determines_backward_edge() {
+    fn test_forced_first_node_determines_backward_edge() {
         let mut g = StableDiGraph::<&str, ()>::new();
         let node_a = g.add_node("a");
         let node_b = g.add_node("b");
@@ -388,14 +388,14 @@ mod tests {
         g.add_edge(node_b, node_c, ());
         g.add_edge(node_c, node_a, ());
 
-        // Pin node_a as source => ordering [node_a, node_b, node_c], back-edge is node_c->node_a
+        // Force node_a first => ordering [node_a, node_b, node_c], back-edge is node_c->node_a
         let result = remove_cycles(&g, Some(node_a), None);
         assert_eq!(result.backward_edges.len(), 1);
         assert!(result.backward_edges.contains(&(node_c, node_a)));
     }
 
     #[test]
-    fn test_pinned_source_and_sink() {
+    fn test_forced_first_and_last_nodes() {
         let mut g = StableDiGraph::<&str, ()>::new();
         let node_a = g.add_node("a");
         let node_b = g.add_node("b");
@@ -404,7 +404,7 @@ mod tests {
         g.add_edge(node_b, node_c, ());
         g.add_edge(node_c, node_a, ());
 
-        // Pin node_a as source, node_c as sink => ordering [node_a, node_b, node_c], back-edge node_c->node_a
+        // Force node_a first and node_c last => ordering [node_a, node_b, node_c], back-edge node_c->node_a
         let result = remove_cycles(&g, Some(node_a), Some(node_c));
         assert_eq!(result.backward_edges.len(), 1);
         assert!(result.backward_edges.contains(&(node_c, node_a)));

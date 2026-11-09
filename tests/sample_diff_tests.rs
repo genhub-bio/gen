@@ -4,7 +4,7 @@ use r#gen::{
     imports::fasta::import_fasta,
     test_helpers::{TestContext, setup_gen},
     updates::{sequence::update_with_sequence, vcf::update_with_vcf},
-    views::{diff_graph::build_diff_graph_component, gen_graph_widget::stored_edge_key},
+    views::{diff_graph::build_diff_graph_component, gen_graph_widget::stored_ported_edge},
 };
 use gen_diff::{
     graph::DiffChangeKind,
@@ -217,7 +217,7 @@ fn assert_edges_flanking_changed_nodes_match(diff: &SampleDiff, expected_changed
             continue;
         };
         for diff_edge in diff_edges {
-            let key = stored_edge_key(source.node, target.node, &diff_edge.edge);
+            let key = stored_ported_edge(source.node, target.node, &diff_edge.edge);
             let color = component
                 .highlighted_edges
                 .iter()

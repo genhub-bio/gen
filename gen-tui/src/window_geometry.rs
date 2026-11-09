@@ -16,7 +16,7 @@ use crate::{
     assembly::AssembledLayout,
     curved::LayoutMode,
     geometry::WorldPos,
-    layout::{HAIR_PIN_SIZE, NodeRole, VerticalAnchor, WindowGeometry},
+    layout::{HAIRPIN_NODE_SIZE, NodeRole, VerticalAnchor, WindowGeometry},
     layout_compaction::GapPolicy,
     theme::Theme,
     viewport_state::WorldBuffer,
@@ -41,14 +41,14 @@ pub const NODE_GLYPH: char = '●';
 #[cfg(test)]
 pub(crate) fn build_window_geometry(
     assembled: AssembledLayout,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     size_of: impl FnMut(&NodeRole) -> (u64, u64),
     is_visible: impl Fn(NodeIndex) -> bool,
     is_aligned: impl Fn(NodeIndex) -> bool,
 ) -> WindowGeometry {
     build_window_geometry_with_anchors(
         assembled,
-        gaps,
+        gap_policy,
         LayoutMode::Rectilinear,
         size_of,
         is_visible,
@@ -61,7 +61,7 @@ pub(crate) fn build_window_geometry(
 /// and rendering.
 pub(crate) fn build_window_geometry_with_anchors(
     assembled: AssembledLayout,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     layout_mode: LayoutMode,
     mut size_of: impl FnMut(&NodeRole) -> (u64, u64),
     is_visible: impl Fn(NodeIndex) -> bool,
@@ -70,7 +70,7 @@ pub(crate) fn build_window_geometry_with_anchors(
 ) -> WindowGeometry {
     let mut graph = assembled.graph;
     let mut junctions = HashSet::new();
-    let mut centered = HashSet::new();
+    let mut aligned_nodes = HashSet::new();
     for node in graph.node_weights_mut() {
         node.size = size_of(&node.role);
         match node.role {
@@ -80,12 +80,12 @@ pub(crate) fn build_window_geometry_with_anchors(
                     junctions.insert(domain_index);
                 }
                 if is_aligned(domain_index) {
-                    centered.insert(domain_index);
+                    aligned_nodes.insert(domain_index);
                 }
             }
             // A turnaround has a glyph of its own whose top row is the row its bus meets.
             NodeRole::HairPin(_) => {
-                node.size = HAIR_PIN_SIZE;
+                node.size = HAIRPIN_NODE_SIZE;
                 node.vertical_anchor = VerticalAnchor::Top;
             }
             _ => {}
@@ -93,9 +93,9 @@ pub(crate) fn build_window_geometry_with_anchors(
     }
     WindowGeometry::new(
         graph,
-        gaps,
+        gap_policy,
         &junctions,
-        &centered,
+        &aligned_nodes,
         &assembled.domain_edges,
         layout_mode,
     )

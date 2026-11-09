@@ -5,7 +5,7 @@
 //! only drawable directly when the source comes first. Every other combination is carried around
 //! the nodes by a left pin (west of both ends) or a right pin (east of both ends), or by both
 //! with a long span between them. Left and right pins are inserted after the layered layout has
-//! ranked the data endpoints; up and down bend pins participate in that layout directly.
+//! placed the data endpoints; up and down bend pins participate in that layout directly.
 //!
 //! An edge read right to left gets a down pin, and a straight edge that would be drawn on top of it
 //! gets an up pin, so layout can place their bends separately.
@@ -29,7 +29,7 @@ pub enum LegEnd {
     RightPin,
     /// The up or down pin that bends a plan's one straight edge away from its twin.
     BendPin,
-    /// The hair pin beside the one node of a hairpin.
+    /// The hairpin node beside the one node of a hairpin.
     HairPin,
 }
 
@@ -49,21 +49,22 @@ pub struct PinPlan {
     /// The side of the up or down pin between the endpoints, when the plan has one.
     pub bend_pin: Option<PinSide>,
     /// The side of the node a hairpin turns around on, when the plan is one.
-    pub hair_pin: Option<NodeSide>,
+    pub hairpin_side: Option<NodeSide>,
     /// Whether an edge drawn with curves is carried around its nodes by routing nodes inserted
-    /// after layout (see [`crate::loopback_pins::insert_sideways_nodes`]) instead of by left and right
-    /// pins that join the layered layout.
-    pub sideways: bool,
+    /// after layout (see [`crate::loopback_pins::insert_horizontal_bend_nodes`]) instead of by left
+    /// and right pins that join the layered layout.
+    pub horizontal_bend_nodes: bool,
 }
 
 impl PinPlan {
-    /// Whether the plan routes through a pin at all.
+    /// Whether the plan routes through a left, right, bend or hairpin node, or through the routing nodes
+    /// inserted after layout (`horizontal_bend_nodes`). False only for a plain leg or an arc.
     pub fn has_pins(&self) -> bool {
         self.left_pin
             || self.right_pin
-            || self.sideways
+            || self.horizontal_bend_nodes
             || self.bend_pin.is_some()
-            || self.hair_pin.is_some()
+            || self.hairpin_side.is_some()
     }
 
     /// The plan of an edge with a single straight leg, routed through a pin on `side` instead.
@@ -85,8 +86,8 @@ impl PinPlan {
             left_pin: false,
             right_pin: false,
             bend_pin: Some(side),
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         })
     }
 
@@ -121,7 +122,7 @@ pub fn ordering_constraint(ports: EdgePorts) -> Option<OrderingConstraint> {
 /// The legs and pins that replace an edge. `target_follows_source` is the endpoints' relative
 /// order in the cycle-removal ordering; an edge from a node to itself never has its target
 /// following its source.
-pub fn plan_sideways_bends(ports: EdgePorts, target_follows_source: bool) -> PinPlan {
+pub fn plan_horizontal_bends(ports: EdgePorts, target_follows_source: bool) -> PinPlan {
     let leg = |from, to| Leg { from, to };
     match (ports.source, ports.target) {
         (NodeSide::East, NodeSide::West) if target_follows_source => PinPlan {
@@ -129,8 +130,8 @@ pub fn plan_sideways_bends(ports: EdgePorts, target_follows_source: bool) -> Pin
             left_pin: false,
             right_pin: false,
             bend_pin: None,
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         },
         (NodeSide::East, NodeSide::West) => PinPlan {
             legs: vec![
@@ -141,8 +142,8 @@ pub fn plan_sideways_bends(ports: EdgePorts, target_follows_source: bool) -> Pin
             left_pin: true,
             right_pin: true,
             bend_pin: None,
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         },
         (NodeSide::West, NodeSide::East) if target_follows_source => PinPlan {
             legs: vec![
@@ -153,32 +154,32 @@ pub fn plan_sideways_bends(ports: EdgePorts, target_follows_source: bool) -> Pin
             left_pin: true,
             right_pin: true,
             bend_pin: None,
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         },
         (NodeSide::West, NodeSide::East) => PinPlan {
             legs: vec![leg(Target, Source)],
             left_pin: false,
             right_pin: false,
             bend_pin: None,
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         },
         (NodeSide::West, NodeSide::West) => PinPlan {
             legs: vec![leg(LeftPin, Source), leg(LeftPin, Target)],
             left_pin: true,
             right_pin: false,
             bend_pin: None,
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         },
         (NodeSide::East, NodeSide::East) => PinPlan {
             legs: vec![leg(Source, RightPin), leg(Target, RightPin)],
             left_pin: false,
             right_pin: true,
             bend_pin: None,
-            hair_pin: None,
-            sideways: false,
+            hairpin_side: None,
+            horizontal_bend_nodes: false,
         },
     }
 }
@@ -189,7 +190,7 @@ pub fn plan_sideways_bends(ports: EdgePorts, target_follows_source: bool) -> Pin
 /// one, or when it leaves a node and returns to it on the other side, routing nodes beside its
 /// nodes carry it around them once the layers are placed. A self-edge has no leg at all.
 pub fn plan_curved_bends(ports: EdgePorts, target_follows_source: bool, is_loop: bool) -> PinPlan {
-    let straight = plan_sideways_bends(ports, target_follows_source);
+    let straight = plan_horizontal_bends(ports, target_follows_source);
     if !straight.left_pin && !straight.right_pin {
         return straight;
     }
@@ -209,13 +210,13 @@ pub fn plan_curved_bends(ports: EdgePorts, target_follows_source: bool, is_loop:
         left_pin: false,
         right_pin: false,
         bend_pin: None,
-        hair_pin: None,
-        sideways: true,
+        hairpin_side: None,
+        horizontal_bend_nodes: true,
     }
 }
 
 /// The plan of a hairpin: an edge that leaves a side of a node and returns to the same side. One
-/// leg joins the node to a hair pin beside that side, which is drawn as the turnaround. Leaving
+/// leg joins the node to a hairpin node beside that side, which is drawn as the turnaround. Leaving
 /// and returning share the node's one attachment row on that side, so the router sees a single
 /// edge and places the pin among the other edges that compete for the port.
 pub fn plan_hairpin(side: NodeSide) -> PinPlan {
@@ -234,8 +235,8 @@ pub fn plan_hairpin(side: NodeSide) -> PinPlan {
         left_pin: false,
         right_pin: false,
         bend_pin: None,
-        hair_pin: Some(side),
-        sideways: false,
+        hairpin_side: Some(side),
+        horizontal_bend_nodes: false,
     }
 }
 
@@ -256,8 +257,8 @@ pub fn plan_hairpin_arc() -> PinPlan {
         left_pin: false,
         right_pin: false,
         bend_pin: None,
-        hair_pin: None,
-        sideways: false,
+        hairpin_side: None,
+        horizontal_bend_nodes: false,
     }
 }
 
@@ -302,7 +303,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hairpin_is_one_leg_to_a_hair_pin_on_its_side() {
+    fn test_hairpin_is_one_leg_to_a_hairpin_node_on_its_side() {
         let east = plan_hairpin(NodeSide::East);
         assert_eq!(
             east.legs,
@@ -311,7 +312,7 @@ mod tests {
                 to: HairPin
             }]
         );
-        assert_eq!(east.hair_pin, Some(NodeSide::East));
+        assert_eq!(east.hairpin_side, Some(NodeSide::East));
         assert!(east.has_pins() && !east.left_pin && !east.right_pin && east.bend_pin.is_none());
 
         let west = plan_hairpin(NodeSide::West);
@@ -322,14 +323,14 @@ mod tests {
                 to: Source
             }]
         );
-        assert_eq!(west.hair_pin, Some(NodeSide::West));
+        assert_eq!(west.hairpin_side, Some(NodeSide::West));
     }
 
     #[test]
     fn test_curved_plan_is_one_leg_in_layout_order_without_pins() {
         for ports in [WEST_WEST, EAST_EAST] {
             let forward = plan_curved_bends(ports, true, false);
-            assert!(forward.sideways && !forward.left_pin && !forward.right_pin);
+            assert!(forward.horizontal_bend_nodes && !forward.left_pin && !forward.right_pin);
             assert_eq!(
                 forward.legs,
                 vec![Leg {
@@ -352,16 +353,16 @@ mod tests {
     fn test_curved_plan_leaves_edges_that_read_in_order_alone() {
         assert_eq!(
             plan_curved_bends(EdgePorts::default(), true, false),
-            plan_sideways_bends(EdgePorts::default(), true)
+            plan_horizontal_bends(EdgePorts::default(), true)
         );
-        assert!(!plan_curved_bends(WEST_EAST, false, false).sideways);
+        assert!(!plan_curved_bends(WEST_EAST, false, false).horizontal_bend_nodes);
     }
 
     #[test]
     fn test_curved_loop_between_opposite_sides_has_no_leg() {
         for ports in [WEST_EAST, EdgePorts::default()] {
             let plan = plan_curved_bends(ports, ports == WEST_EAST, true);
-            assert!(plan.sideways && plan.legs.is_empty());
+            assert!(plan.horizontal_bend_nodes && plan.legs.is_empty());
         }
     }
 
@@ -371,11 +372,11 @@ mod tests {
 
     #[test]
     fn test_default_edge_needs_pins_only_against_the_order() {
-        let forward = plan_sideways_bends(EdgePorts::default(), true);
+        let forward = plan_horizontal_bends(EdgePorts::default(), true);
         assert!(!forward.has_pins());
         assert_eq!(forward.legs.len(), 1);
 
-        let backward = plan_sideways_bends(EdgePorts::default(), false);
+        let backward = plan_horizontal_bends(EdgePorts::default(), false);
         assert!(backward.left_pin && backward.right_pin);
         assert_eq!(backward.legs.len(), 3);
         assert!(backward.span().is_some());
@@ -384,7 +385,7 @@ mod tests {
     #[test]
     fn test_west_to_west_uses_one_left_pin_in_either_order() {
         for target_follows_source in [true, false] {
-            let plan = plan_sideways_bends(WEST_WEST, target_follows_source);
+            let plan = plan_horizontal_bends(WEST_WEST, target_follows_source);
             assert!(plan.left_pin && !plan.right_pin);
             assert_eq!(
                 plan.legs,
@@ -405,7 +406,7 @@ mod tests {
     #[test]
     fn test_east_to_east_uses_one_right_pin_in_either_order() {
         for target_follows_source in [true, false] {
-            let plan = plan_sideways_bends(EAST_EAST, target_follows_source);
+            let plan = plan_horizontal_bends(EAST_EAST, target_follows_source);
             assert!(!plan.left_pin && plan.right_pin);
             assert_eq!(plan.legs.len(), 2);
         }
@@ -413,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_west_to_east_loops_around_both_when_the_target_follows() {
-        let plan = plan_sideways_bends(WEST_EAST, true);
+        let plan = plan_horizontal_bends(WEST_EAST, true);
         assert!(plan.left_pin && plan.right_pin);
         assert!(plan.legs.contains(&Leg {
             from: LegEnd::LeftPin,
@@ -428,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_west_to_east_is_a_reversed_straight_edge_when_the_target_comes_first() {
-        let plan = plan_sideways_bends(WEST_EAST, false);
+        let plan = plan_horizontal_bends(WEST_EAST, false);
         assert!(!plan.has_pins());
         assert_eq!(
             plan.legs,
@@ -455,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_reversed_edge_bends_down_without_a_twin() {
-        let mut plans = vec![plan_sideways_bends(WEST_EAST, false)];
+        let mut plans = vec![plan_horizontal_bends(WEST_EAST, false)];
         plan_vertical_bends(&mut plans, &[(1, 0)]);
         assert_eq!(plans[0].bend_pin, Some(PinSide::Down));
     }
@@ -463,9 +464,9 @@ mod tests {
     #[test]
     fn test_opposite_straight_edges_bend_apart() {
         let mut plans = vec![
-            plan_sideways_bends(EdgePorts::default(), true),
-            plan_sideways_bends(WEST_EAST, false),
-            plan_sideways_bends(EdgePorts::default(), true),
+            plan_horizontal_bends(EdgePorts::default(), true),
+            plan_horizontal_bends(WEST_EAST, false),
+            plan_horizontal_bends(EdgePorts::default(), true),
         ];
         let ends = [(0, 1), (1, 0), (1, 2)];
         plan_vertical_bends(&mut plans, &ends);

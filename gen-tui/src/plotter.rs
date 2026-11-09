@@ -510,7 +510,7 @@ where
                       color: Color,
                       line_style: LineStyle| {
         if !layout_mode.is_curved() {
-            draw_edge_with_style(buffer, source, target, color, line_style);
+            draw_rectilinear_segment(buffer, source, target, color, line_style);
             return;
         }
         let (Some(source_node), Some(target_node)) = (
@@ -746,18 +746,18 @@ where
                 }
 
                 // Sub-rect highlight pass: tint only the matched column/row range.
-                // tl/br are node-local (col, row) offsets from world_rect.min, both inclusive.
-                for (_, tl, br, path_style) in
+                // first_cell/last_cell are node-local (col, row) offsets from world_rect.min, both inclusive.
+                for (_, first_cell, last_cell, path_style) in
                     cell_highlights.iter().filter(|(nwp, ..)| nwp == world_pos)
                 {
                     let hl = match path_style.color {
                         Color::Reset => theme[0x07],
                         color => color,
                     };
-                    let x0 = (world_rect.min.x + tl.0).max(content_rect.min.x);
-                    let x1 = (world_rect.min.x + br.0).min(content_rect.max.x);
-                    let y0 = (world_rect.min.y + tl.1).max(content_rect.min.y);
-                    let y1 = (world_rect.min.y + br.1).min(content_rect.max.y);
+                    let x0 = (world_rect.min.x + first_cell.0).max(content_rect.min.x);
+                    let x1 = (world_rect.min.x + last_cell.0).min(content_rect.max.x);
+                    let y0 = (world_rect.min.y + first_cell.1).max(content_rect.min.y);
+                    let y1 = (world_rect.min.y + last_cell.1).min(content_rect.max.y);
                     if is_on_screen && x0 <= x1 && y0 <= y1 {
                         tint_cells(buffer, WorldRect::from_coords(x0, y0, x1, y1), hl);
                     }
@@ -1153,7 +1153,7 @@ fn compute_junction_glyph(
 
 /// Draw a rectilinear edge between two world positions (horizontal or vertical only),
 /// using the specified line style for box-drawing characters.
-fn draw_edge_with_style(
+fn draw_rectilinear_segment(
     buffer: &mut WorldBuffer,
     source: WorldPos,
     target: WorldPos,
@@ -1860,7 +1860,7 @@ mod tests {
 
     use super::{
         ARROW_GAPS, ArrowLayout, ArrowObstacles, CURVED_ARROW_GAPS, LineStyle,
-        draw_arrows as draw_route_arrows, draw_edge_with_style, edge_route,
+        draw_arrows as draw_route_arrows, draw_rectilinear_segment, edge_route,
     };
     use crate::{
         curved::{LayoutMode, OverlayPrimitive},
@@ -1935,7 +1935,7 @@ mod tests {
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, state);
         for (start, end, _) in graph.edges() {
-            draw_edge_with_style(&mut world_buffer, start, end, Color::Red, LineStyle::Bold);
+            draw_rectilinear_segment(&mut world_buffer, start, end, Color::Red, LineStyle::Bold);
         }
         // A route leaving westward leaves its source's west side and arrives on its east side.
         let ports = if points[1].x < points[0].x {
@@ -2103,7 +2103,7 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        draw_edge_with_style(
+        draw_rectilinear_segment(
             &mut world_buffer,
             points[1],
             points[0],
@@ -2481,7 +2481,7 @@ mod tests {
         assert!(edge_route(&graph, &ported_edge(source, target, EdgePorts::default())).is_none());
     }
 
-    /// A node at the origin and a hairpin route across a hair pin: the bus runs `bus` cells to a
+    /// A node at the origin and a hairpin route across a hairpin node: the bus runs `bus` cells to a
     /// hub that feeds two flat edges, which a bend joins `width` cells further out.
     fn hairpin_route(
         bus: i64,
@@ -2580,17 +2580,17 @@ mod tests {
             let state = viewport();
             let mut buffer = Buffer::empty(state.viewport_bounds);
             let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-            let mut deferred = Vec::new();
+            let mut overlay_primitives = Vec::new();
             draw_arrows(
                 &mut world_buffer,
                 &graph,
                 &edge,
                 CURVED_ARROW_GAPS,
                 (LayoutMode::Curved, &HashMap::new(), Color::Red),
-                &mut deferred,
+                &mut overlay_primitives,
             );
 
-            let mut arrows: Vec<_> = deferred
+            let mut arrows: Vec<_> = overlay_primitives
                 .iter()
                 .filter_map(|edge| match edge {
                     OverlayPrimitive::Arrow(mark) => Some(*mark),

@@ -396,7 +396,7 @@ pub(crate) fn routed_edge_curve(
                 line_style,
             )
         })
-        .or_else(|| hair_pin_bend(routed_window_graph, source, target, color, line_style))
+        .or_else(|| hairpin_edge_bend(routed_window_graph, source, target, color, line_style))
         .unwrap_or_else(|| {
             let (from, to) = segment_endpoints(source, target, content_rects);
             RoutedCurve {
@@ -531,12 +531,12 @@ pub(crate) fn hairpin_edge_arcs(
 /// How far, in cells, the bend at the end of a hairpin reaches past the flat edges it joins, for
 /// each row between them. A cell is about twice as tall as it is wide, so a bend two rows tall
 /// reads as a semicircle when it reaches two cells.
-const HAIR_PIN_BEND_REACH_PER_ROW: f64 = 1.0;
+const HAIRPIN_EDGE_BEND_REACH_PER_ROW: f64 = 1.0;
 
-/// The bend that closes a hairpin at the far end of its hair pin: the edge between the two routing
+/// The bend that closes a hairpin at the far end of its hairpin node: the edge between the two routing
 /// nodes there, which lie in one column and carry only a self-edge. It starts and
 /// ends flat, bulging away from the flat edges that reach it, so it continues them as a semicircle.
-fn hair_pin_bend(
+fn hairpin_edge_bend(
     routed_window_graph: &RoutedWindowGraph,
     (source, source_node): (WorldPos, &LayoutNode),
     (target, target_node): (WorldPos, &LayoutNode),
@@ -558,7 +558,7 @@ fn hair_pin_bend(
     let direction = if inward.x < source.x { 1.0 } else { -1.0 };
     // A cubic with both handles this far out reaches three quarters of the way to them.
     let rows = (source.y - target.y).abs() as f64;
-    let handle = direction * rows * HAIR_PIN_BEND_REACH_PER_ROW * 4.0 / 3.0;
+    let handle = direction * rows * HAIRPIN_EDGE_BEND_REACH_PER_ROW * 4.0 / 3.0;
     let from = (source.x as f64 + 0.5, source.y as f64 + 0.5);
     let to = (target.x as f64 + 0.5, target.y as f64 + 0.5);
     Some(RoutedCurve {
@@ -721,7 +721,7 @@ fn attach(
             };
             (column, row)
         }
-        // A hair pin is replaced by routing nodes before anything is drawn.
+        // A hairpin node is replaced by routing nodes before anything is drawn.
         NodeRole::Routing | NodeRole::Pin(_) | NodeRole::HairPin(_) => {
             (position.x as f64 + 0.5, row)
         }
@@ -1227,9 +1227,9 @@ mod tests {
         assert!(row > 0.5, "an up arch should rise above its ends");
     }
 
-    /// The routing nodes of a hairpin's route across its hair pin, with the bend between the two
+    /// The routing nodes of a hairpin's route across its hairpin node, with the bend between the two
     /// at the far end.
-    fn hair_pin_route(
+    fn hairpin_route(
         near_x: i64,
         far_x: i64,
         bend_bundle: Vec<(NodeIndex, NodeIndex)>,
@@ -1258,9 +1258,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hair_pin_bend_continues_the_flat_edges_as_a_semicircle() {
+    fn test_hairpin_edge_bend_continues_the_flat_edges_as_a_semicircle() {
         for (near_x, far_x, direction) in [(0, 3, 1.0), (3, 0, -1.0)] {
-            let graph = hair_pin_route(near_x, far_x, vec![(NodeIndex::new(0), NodeIndex::new(0))]);
+            let graph = hairpin_route(near_x, far_x, vec![(NodeIndex::new(0), NodeIndex::new(0))]);
             let (top, bottom) = (WorldPos::new(far_x, 1), WorldPos::new(far_x, -1));
             let routed = routed_edge_curve(
                 &graph,
@@ -1283,8 +1283,8 @@ mod tests {
     }
 
     #[test]
-    fn test_vertical_edge_that_is_not_a_self_edge_is_not_a_hair_pin_bend() {
-        let graph = hair_pin_route(0, 3, vec![(NodeIndex::new(0), NodeIndex::new(1))]);
+    fn test_vertical_edge_that_is_not_a_self_edge_is_not_a_hairpin_edge_bend() {
+        let graph = hairpin_route(0, 3, vec![(NodeIndex::new(0), NodeIndex::new(1))]);
         let (top, bottom) = (WorldPos::new(3, 1), WorldPos::new(3, -1));
         let routed = routed_edge_curve(
             &graph,

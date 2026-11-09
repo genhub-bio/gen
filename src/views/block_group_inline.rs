@@ -178,7 +178,7 @@ fn inline_controller(
             )
         })
         .map_err(|error| io::Error::other(error.to_string()))?;
-    controller.set_curved_edges_available(false);
+    controller.set_curved_layout_available(false);
     // The inline widget follows the keyboard cursor from the start.
     controller.view_state_mut().show_cursor();
     Ok(controller)
@@ -732,7 +732,7 @@ mod tests {
         let workspace = Workspace::from_current_dir();
         let mut controller = inline_controller(&conn, &workspace, &block_group_id, None)
             .expect("should build the inline controller");
-        assert!(!controller.curved_edges_available());
+        assert!(!controller.curved_layout_available());
         assert_eq!(controller.layout_mode(), LayoutMode::Rectilinear);
 
         let press = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);

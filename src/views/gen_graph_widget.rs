@@ -63,7 +63,7 @@ use crate::{
 /// node centering - odd multiples of an odd base stay odd.
 ///
 /// Lives outside gen-tui deliberately: gen-tui only exposes the primitives (the public
-/// `gaps` field, `zoom_index`) and has no notion of which concrete levels exist or their
+/// `gap_policy` field, `zoom_index`) and has no notion of which concrete levels exist or their
 /// gaps - that policy belongs to the widget.
 pub const ZOOM_GAP_POLICIES: [GapPolicy; 5] = [
     GapPolicy {
@@ -369,10 +369,10 @@ pub fn align_zoom_levels(
 ) -> SendSyncZoomLevels {
     levels
         .into_iter()
-        .map(|(detail, inner, gaps)| {
+        .map(|(detail, inner, gap_policy)| {
             let renderer: Arc<dyn NodeRenderer<PackedGenGraph> + Send + Sync> =
                 Arc::new(PathAlignmentRenderer::new(inner, aligned_path.clone()));
-            (detail, renderer, gaps)
+            (detail, renderer, gap_policy)
         })
         .collect()
 }
@@ -387,7 +387,7 @@ pub fn apply_zoom_level<R>(
 ) {
     let index = index.min(levels.len() - 1);
     view_state.zoom_index = index;
-    view_state.gaps = levels[index].2;
+    view_state.gap_policy = levels[index].2;
 }
 
 /// Step one zoom level in (more detail / more spread). No-op at the last level.
@@ -1551,7 +1551,7 @@ pub fn edge_ports(_graph: &PackedGenGraph, edge: &PackedEdgeId<GraphNode, GraphE
 
 /// Name a stored edge in full for highlighting: its two nodes and its strands, so a highlight
 /// lands on this edge and not on a parallel edge with other strands.
-pub fn stored_edge_key(
+pub fn stored_ported_edge(
     source: GraphNode,
     target: GraphNode,
     edge: &GraphEdge,
@@ -1571,7 +1571,7 @@ pub fn stored_edge_key(
 /// crosses the same edge as its reverse-complement twin, `to -> from` with both strands
 /// complemented, and that stored edge is the one named. `None` when the graph holds neither
 /// (the slices are not adjacent, or the edge is not loaded).
-pub fn walk_hop_edge_key(
+pub fn walk_hop_ported_edge(
     graph: &GenGraph,
     from: &GraphNodeSlice,
     to: &GraphNodeSlice,
@@ -1866,7 +1866,7 @@ fn highlight_locus_edges(
 ) {
     let mut lit: HashSet<PortedEdge<GraphNode>> = HashSet::new();
     for (from, to) in locus.slices.iter().zip(locus.slices.iter().skip(1)) {
-        if let Some(ported_edge) = walk_hop_edge_key(graph, from, to)
+        if let Some(ported_edge) = walk_hop_ported_edge(graph, from, to)
             && lit.insert(ported_edge)
         {
             view_state.set_edge_highlight(ported_edge, style);
@@ -1944,9 +1944,9 @@ fn slice_region<R: NodeRenderer<PackedGenGraph>>(
             renderer.map_column(&slice.block, col_end),
         )
     };
-    let tl = (start, 0);
-    let br = (end, 0);
-    (slice.block, tl, br)
+    let first_cell = (start, 0);
+    let last_cell = (end, 0);
+    (slice.block, first_cell, last_cell)
 }
 
 /// Whether two mapped cell regions occupy any of the same cells.
@@ -2407,12 +2407,12 @@ mod tests {
     fn test_complex_dag_at_each_zoom_level() {
         let graph = TestGraphs::domain_complex_dag();
 
-        for (level, (visual, gaps)) in zoom_snapshot_table().into_iter().enumerate() {
+        for (level, (visual, gap_policy)) in zoom_snapshot_table().into_iter().enumerate() {
             let mut terminal = create_test_terminal(120, 40);
             let mut engine = LayoutEngine::new(graph.clone());
             let mut view_state = GraphViewState::default();
             view_state.zoom_index = level;
-            view_state.gaps = gaps;
+            view_state.gap_policy = gap_policy;
 
             terminal
                 .draw(|frame| {
@@ -4775,7 +4775,7 @@ mod tests {
         use super::RepeatingSequenceSource;
         use crate::views::gen_graph_widget::{
             FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL, TRUNCATED_ZOOM_LEVEL, apply_zoom_level,
-            create_gen_graph_engine, highlight_match_range, strand_ports, walk_hop_edge_key,
+            create_gen_graph_engine, highlight_match_range, strand_ports, walk_hop_ported_edge,
         };
 
         const FORWARD_TO_FORWARD: EdgePorts = EdgePorts::new(NodeSide::East, NodeSide::West);
@@ -4835,7 +4835,7 @@ mod tests {
             let (a, b) = (node("a"), node("b"));
 
             assert_eq!(
-                walk_hop_edge_key(
+                walk_hop_ported_edge(
                     &graph,
                     &slice(a, Strand::Forward),
                     &slice(b, Strand::Forward)
@@ -4850,7 +4850,7 @@ mod tests {
             let (a, b) = (node("a"), node("b"));
 
             assert_eq!(
-                walk_hop_edge_key(
+                walk_hop_ported_edge(
                     &graph,
                     &slice(a, Strand::Forward),
                     &slice(b, Strand::Reverse)
@@ -4866,7 +4866,7 @@ mod tests {
 
             // Reading b- then a- crosses the stored `a+ -> b+` edge backwards.
             assert_eq!(
-                walk_hop_edge_key(
+                walk_hop_ported_edge(
                     &graph,
                     &slice(b, Strand::Reverse),
                     &slice(a, Strand::Reverse)
@@ -4875,7 +4875,7 @@ mod tests {
             );
             // Reading b+ then a- is the inversion edge read from its other end.
             assert_eq!(
-                walk_hop_edge_key(
+                walk_hop_ported_edge(
                     &graph,
                     &slice(b, Strand::Forward),
                     &slice(a, Strand::Reverse)
@@ -4890,7 +4890,7 @@ mod tests {
             let (a, b) = (node("a"), node("b"));
 
             assert_eq!(
-                walk_hop_edge_key(
+                walk_hop_ported_edge(
                     &graph,
                     &slice(a, Strand::Reverse),
                     &slice(b, Strand::Forward)
@@ -4898,7 +4898,7 @@ mod tests {
                 None
             );
             assert_eq!(
-                walk_hop_edge_key(
+                walk_hop_ported_edge(
                     &graph,
                     &slice(a, Strand::Forward),
                     &slice(node("c"), Strand::Forward)

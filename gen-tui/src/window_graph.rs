@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// A window's layout graph carries the original domain nodes, the pin nodes that give an edge a
-/// bend or carry it around the nodes it attaches to, the hair pins that turn a self edge around,
+/// bend or carry it around the nodes it attaches to, the hairpin nodes that turn a self edge around,
 /// and the wormhole nodes standing in for off-window neighbors. All four kinds are referenced by
 /// their `NodeIndex` during the actual Layout phase.
 #[derive(Clone, Debug)]
@@ -33,7 +33,7 @@ pub enum WindowNode {
     /// Drawn as a glyph of its own, unlike the other synthetic nodes.
     HairPin(NodeSide),
     /// A door standing in for a windowed node's off-window neighbors on one side
-    /// (see `crawl::ExternalEdge`). Carries the chosen off-window navigation target;
+    /// (see `crawl::WormholeDoor`). Carries the chosen off-window navigation target;
     /// the full collapsed neighbor list is carried on the edge(s) to this node instead
     /// (see `build_window_graph`), matching how ordinary parallel domain edges bundle.
     Wormhole(NodeIndex),

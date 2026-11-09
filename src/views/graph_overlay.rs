@@ -11,7 +11,7 @@ use gen_tui::{
 use itertools::Itertools;
 use ratatui::style::Color;
 
-use crate::views::{annotation_track::AnnotationSpan, gen_graph_widget::stored_edge_key};
+use crate::views::{annotation_track::AnnotationSpan, gen_graph_widget::stored_ported_edge};
 
 /// Remembers the color last chosen for each annotation id by the greedy conflict-avoiding
 /// assignment in `gen_graph_widget::reapply_overlays`. That pass reruns every frame (the
@@ -184,7 +184,7 @@ impl PathMembership {
                         // Reading across a split of one node always runs forward, so of the
                         // edges between the two slices only the forward one is the path.
                         || (continues_in_node
-                            && stored_edge_key(source, target, graph_edge).ports
+                            && stored_ported_edge(source, target, graph_edge).ports
                                 == EdgePorts::default())
                 })
                 .collect();
@@ -198,7 +198,7 @@ impl PathMembership {
             }
             if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
                 for graph_edge in on_path_edges {
-                    let ported_edge = stored_edge_key(source, target, graph_edge);
+                    let ported_edge = stored_ported_edge(source, target, graph_edge);
                     if !route.edges.contains(&ported_edge) {
                         route.edges.push(ported_edge);
                     }

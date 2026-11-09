@@ -6,11 +6,11 @@ pub mod route_channel;
 pub mod route_graph;
 pub mod route_layer;
 #[cfg(test)]
-pub mod simple_test;
+pub mod router_tests;
 pub mod temp_graph;
 
 #[derive(Clone, Debug, Eq, Error, Hash, PartialEq)]
-pub enum LayoutError {
+pub enum RoutingError {
     #[error("Invalid side (only 'T', 'B', or None are allowed): {0}")]
     InvalidSide(String),
     #[error("Node not found in temp graph: {0}")]
@@ -32,7 +32,7 @@ pub struct NodeData {
 /// Call the Rust edge router directly with a LayoutNode/LayoutEdge graph.
 /// Kept as test-only infrastructure to exercise `make_rectilinear` end to end.
 #[cfg(test)]
-pub(crate) fn call_rust_router(
+pub(crate) fn route_test_graph(
     mut graph: petgraph::stable_graph::StableGraph<
         crate::layout::LayoutNode,
         crate::layout::LayoutEdge,
@@ -46,7 +46,7 @@ pub(crate) fn call_rust_router(
         petgraph::Undirected,
         u32,
     >,
-    LayoutError,
+    RoutingError,
 > {
     crate::edge_router::route_graph::make_rectilinear(&mut graph)?;
 

@@ -922,8 +922,8 @@ pub fn view_block_group<'a>(
     // The terminal is asked once, in raw mode and before any event is read, because its answer
     // arrives on standard input. Curved edges are drawn through the Kitty graphics protocol, so
     // a terminal without it keeps the rectilinear style.
-    let curved_edges_available = supports_kitty_graphics();
-    controller.set_curved_edges_available(curved_edges_available);
+    let curved_layout_available = supports_kitty_graphics();
+    controller.set_curved_layout_available(curved_layout_available);
     let mut show_panel = false;
     let mut panel_mode = PanelMode::Details;
     let show_sidebar = true;
@@ -1338,7 +1338,7 @@ pub fn view_block_group<'a>(
                 GraphDatabase::for_connection(conn, workspace)?,
                 history_ref.map(String::from),
             );
-            controller.set_curved_edges_available(curved_edges_available);
+            controller.set_curved_layout_available(curved_layout_available);
             explorer.refresh(
                 conn,
                 config_conn,
@@ -2065,7 +2065,7 @@ pub fn view_block_group<'a>(
         })?;
 
         // Edges drawn through the Kitty graphics protocol go out after the cells, as one image.
-        if curved_edges_available {
+        if curved_layout_available {
             let mut escapes = Vec::new();
             if controller.layout_mode().is_curved() {
                 kitty_overlay.update(

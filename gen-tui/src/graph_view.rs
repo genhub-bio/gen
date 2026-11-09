@@ -169,7 +169,7 @@ fn min_shift_to_avoid_left_clip(
 /// `zoom_index` is an opaque position into whatever renderer/`GapPolicy` table the owning
 /// application maintains - `gen-tui` has no notion of which concrete zoom levels
 /// exist; it only tracks which position in that (external) table this view is currently
-/// showing, and applies `gaps` as told.
+/// showing, and applies `gap_policy` as told.
 #[derive(Clone)]
 pub struct GraphViewState<N> {
     pub frame: FrameIndex<N>,
@@ -177,7 +177,7 @@ pub struct GraphViewState<N> {
     /// off-screen domain target from the last render - the click-to-teleport counterpart of
     /// `frame`, kept separate since `FrameIndex`'s key space is domain node ids only. See
     /// `wormhole_hit`.
-    pub wormhole: Vec<(crate::geometry::WorldRect, N, N)>,
+    pub wormhole_stubs: Vec<(crate::geometry::WorldRect, N, N)>,
     pub cursor: CursorState<N>,
     pub camera: Option<Camera<N>>,
     /// How far `move_by_terminal` has panned `camera.anchor_screen` since `frame` was painted,
@@ -187,7 +187,7 @@ pub struct GraphViewState<N> {
     pub zoom_index: usize,
     /// Minimum inter-node gap for each axis - the current zoom level's target distance,
     /// enforced by compaction (see `layout_compaction::compact_layout_with_vertical_placement`).
-    pub gaps: GapPolicy,
+    pub gap_policy: GapPolicy,
     /// How edges are routed and drawn. Changing it rebuilds the geometry on the next render.
     pub layout_mode: LayoutMode,
     /// Overlay primitives the last render left for the caller to draw, in cell units relative to the
@@ -208,7 +208,7 @@ pub struct GraphViewState<N> {
     /// A node and column the cursor was deliberately put on even though the renderer lists it
     /// as no cursor stop (the ellipsis of a truncated node); see `rest_cursor_on_column`.
     cursor_rest: Option<(N, i64)>,
-    /// Batch whose world produced `frame` and `wormhole`.
+    /// Batch whose world produced `frame` and `wormhole_stubs`.
     last_batch: Option<BatchId>,
     /// Cursor state restored if an explicit jump cannot construct its requested world.
     go_to_previous_cursor: Option<CursorState<N>>,
@@ -228,12 +228,12 @@ impl<N> Default for GraphViewState<N> {
     fn default() -> Self {
         Self {
             frame: FrameIndex::empty(),
-            wormhole: Vec::new(),
+            wormhole_stubs: Vec::new(),
             cursor: CursorState::default(),
             camera: None,
             pan_since_render: (0, 0),
             zoom_index: 0,
-            gaps: GapPolicy::default(),
+            gap_policy: GapPolicy::default(),
             layout_mode: LayoutMode::default(),
             overlay_primitives: Vec::new(),
             highlights: Highlights::default(),
@@ -279,7 +279,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     #[cfg(test)]
     pub(crate) fn reset_render_state(&mut self) {
         self.frame = FrameIndex::empty();
-        self.wormhole.clear();
+        self.wormhole_stubs.clear();
         self.camera = None;
         self.pan_since_render = (0, 0);
         self.last_batch = None;
@@ -396,9 +396,11 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     pub fn wormhole_hit(&self, terminal_x: u16, terminal_y: u16) -> Option<(N, N)> {
         let screen = self.terminal_to_screen(terminal_x, terminal_y)?;
         let point = crate::geometry::Point::new(screen.0, screen.1);
-        self.wormhole.iter().find_map(|&(rect, boundary, target)| {
-            rect.contains(point).then_some((boundary, target))
-        })
+        self.wormhole_stubs
+            .iter()
+            .find_map(|&(rect, boundary, target)| {
+                rect.contains(point).then_some((boundary, target))
+            })
     }
 
     /// Query (without mutation) the domain node at the given terminal coordinates and the
@@ -558,7 +560,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         };
 
         let wormhole = self
-            .wormhole
+            .wormhole_stubs
             .iter()
             .filter(|&&(rect, candidate_boundary, _)| {
                 candidate_boundary == boundary
@@ -588,7 +590,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
                 .saturating_mul(delta_x)
                 .saturating_add(delta_y.saturating_mul(delta_y))
         };
-        self.wormhole
+        self.wormhole_stubs
             .iter()
             .filter(|&&(rect, boundary, _)| {
                 self.frame.junction_point(boundary).is_some()
@@ -747,13 +749,18 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     pub fn set_cell_highlight(
         &mut self,
         node: N,
-        tl: (i64, i64),
-        br: (i64, i64),
+        first_cell: (i64, i64),
+        last_cell: (i64, i64),
         style: PathStyle,
     ) {
-        self.highlights
-            .styles
-            .push((HighlightKind::Cells { node, tl, br }, style));
+        self.highlights.styles.push((
+            HighlightKind::Cells {
+                node,
+                first_cell,
+                last_cell,
+            },
+            style,
+        ));
     }
 
     pub fn has_highlight(&self, style: &PathStyle) -> bool {
@@ -865,14 +872,14 @@ where
             Ok(Some(key)) => key,
             Ok(None) => {
                 state.frame = FrameIndex::empty();
-                state.wormhole.clear();
+                state.wormhole_stubs.clear();
                 state.last_batch = None;
                 return;
             }
             Err(error) => {
                 log::error!("GraphView: initial world construction failed: {}", error);
                 state.frame = FrameIndex::empty();
-                state.wormhole.clear();
+                state.wormhole_stubs.clear();
                 return;
             }
         };
@@ -900,13 +907,13 @@ where
         let world_changed = state.last_batch != Some(active_batch);
         if world_changed {
             state.frame = FrameIndex::empty();
-            state.wormhole.clear();
+            state.wormhole_stubs.clear();
             state.last_batch = Some(active_batch);
         }
 
         let Some(active_world) = self.engine.active_world() else {
             state.frame = FrameIndex::empty();
-            state.wormhole.clear();
+            state.wormhole_stubs.clear();
             return;
         };
         let window = active_world.layout();
@@ -1084,7 +1091,7 @@ where
 
         let Some(mut camera) = state.camera else {
             state.frame = FrameIndex::empty();
-            state.wormhole = Vec::new();
+            state.wormhole_stubs = Vec::new();
             state.overlay_primitives = Vec::new();
             return;
         };
@@ -1104,7 +1111,7 @@ where
                     window.clone(),
                     graph,
                     self.visual,
-                    &state.gaps,
+                    &state.gap_policy,
                     state.layout_mode,
                 );
                 &mut slot.insert((key, scene)).1
@@ -1119,7 +1126,7 @@ where
         }
         let RenderedWindow {
             frame,
-            wormhole,
+            wormhole_stubs,
             overlay_primitives,
         } = scene.paint(
             graph,
@@ -1162,7 +1169,7 @@ where
         }
         CursorOverlay::render(inner_area, buffer, &state.cursor, &frame);
         state.frame = frame;
-        state.wormhole = wormhole;
+        state.wormhole_stubs = wormhole_stubs;
         state.overlay_primitives = overlay_primitives;
     }
 }
@@ -1516,7 +1523,7 @@ mod tests {
         state.move_by_terminal(2, -1);
         state.rebase_camera_to_closest_node();
         state.zoom_index += 1;
-        state.gaps.data_data_x = |_| 2;
+        state.gap_policy.data_data_x = |_| 2;
         state.set_node_highlight(target, PathStyle::new(Color::Red));
         let resized = Rect::new(0, 0, 42, 12);
         let mut resized_buffer = ratatui::buffer::Buffer::empty(resized);
@@ -1713,7 +1720,7 @@ mod tests {
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
         let world_key = engine.active_batch().expect("should have an active world");
         assert!(
-            !state.wormhole.is_empty(),
+            !state.wormhole_stubs.is_empty(),
             "test graph should be large enough that the node budget forces a wormhole boundary"
         );
         let first_rects: Vec<(usize, crate::geometry::WorldRect)> = state
@@ -1762,7 +1769,7 @@ mod tests {
 
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
         let boundary = state
-            .wormhole
+            .wormhole_stubs
             .first()
             .map(|&(_, boundary, _)| boundary)
             .expect("should render a wormhole");
@@ -1770,7 +1777,7 @@ mod tests {
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
 
         let (rect, boundary, target) = state
-            .wormhole
+            .wormhole_stubs
             .iter()
             .copied()
             .find(|(rect, _, _)| {
@@ -2421,7 +2428,7 @@ mod tests {
             forward: bool,
         ) -> NodeIndex {
             let (_, _, target) = state
-                .wormhole
+                .wormhole_stubs
                 .iter()
                 .copied()
                 .find(|&(_, boundary, target)| (target.index() > boundary.index()) == forward)

@@ -36,7 +36,7 @@ pub(crate) struct RenderedWindow<NodeId> {
     /// Where every data node landed.
     pub frame: FrameIndex<NodeId>,
     /// Every placed wormhole stub.
-    pub wormhole: WormholeStubs<NodeId>,
+    pub wormhole_stubs: WormholeStubs<NodeId>,
     /// Overlay primitives in buffer cell units. Empty unless the layout mode is curved.
     pub overlay_primitives: Vec<OverlayPrimitive>,
 }
@@ -49,11 +49,11 @@ pub enum HighlightKind<N> {
     /// One edge, named in full or by its endpoints (see [`EdgeSelector`])
     Edge(EdgeSelector<N>),
     /// Tint a sub-rectangle of a single node.
-    /// tl/br are (col, row) offsets from the node's top-left corner; br is exclusive.
+    /// first_cell/last_cell are (col, row) offsets from the node's top-left corner; last_cell is inclusive.
     Cells {
         node: N,
-        tl: (i64, i64),
-        br: (i64, i64),
+        first_cell: (i64, i64),
+        last_cell: (i64, i64),
     },
 }
 
@@ -142,12 +142,12 @@ pub(crate) struct WindowScene {
 }
 
 impl WindowScene {
-    /// Size every node of `window` via `visual`, then route and compact it with `gaps`.
+    /// Size every node of `window` via `visual`, then route and compact it with `gap_policy`.
     pub fn new<G, V>(
         window: AssembledLayout,
         graph: &G,
         visual: &V,
-        gaps: &GapPolicy,
+        gap_policy: &GapPolicy,
         layout_mode: LayoutMode,
     ) -> Self
     where
@@ -160,7 +160,7 @@ impl WindowScene {
         };
         let geometry = build_window_geometry_with_anchors(
             window,
-            gaps,
+            gap_policy,
             layout_mode,
             |role| match role {
                 NodeRole::Data(node_index) if is_visible(*node_index) => {
@@ -207,7 +207,7 @@ impl WindowScene {
         let overlay_primitives = paint(self, area, buffer, offset, graph, visual, highlights);
         RenderedWindow {
             frame: frame_index(&self.geometry, graph, visual, offset, area),
-            wormhole: wormhole_index(&self.geometry, graph, offset),
+            wormhole_stubs: wormhole_index(&self.geometry, graph, offset),
             overlay_primitives,
         }
     }
@@ -317,13 +317,17 @@ where
                     &mut hairpin_highlights,
                 );
             }
-            HighlightKind::Cells { node, tl, br } => {
+            HighlightKind::Cells {
+                node,
+                first_cell,
+                last_cell,
+            } => {
                 apply_cell_highlight(
                     routed_window_graph,
                     graph,
                     *node,
-                    *tl,
-                    *br,
+                    *first_cell,
+                    *last_cell,
                     *style,
                     &mut cell_highlights,
                 );
@@ -473,14 +477,14 @@ fn apply_cell_highlight<G: GraphBase + NodeIndexable>(
     routed_window_graph: &RoutedWindowGraph,
     graph: &G,
     node_id: G::NodeId,
-    tl: (i64, i64),
-    br: (i64, i64),
+    first_cell: (i64, i64),
+    last_cell: (i64, i64),
     style: PathStyle,
     out: &mut Vec<CellHighlight>,
 ) {
     let node_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
     if let Some(&world_pos) = routed_window_graph.node_positions.get(&node_index) {
-        out.push((world_pos, tl, br, style));
+        out.push((world_pos, first_cell, last_cell, style));
     }
 }
 
@@ -622,7 +626,7 @@ where
 
 /// Every placed `NodeRole::Wormhole` (wormhole) stub's screen rect, the boundary node whose
 /// edge produced it, and its off-screen domain target - the click-to-teleport counterpart of
-/// `frame_index`'s Data-only index. Sourced from the same `external_edges` already fed to the
+/// `frame_index`'s Data-only index. Sourced from the same `wormhole_doors` already fed to the
 /// router. The boundary comes from the stub's own incident
 /// edge bundle, which the router labels with every collapsed `(boundary, target)` domain edge.
 /// Matching by `NodeRole::Wormhole(target)` alone is insufficient because two different
@@ -690,7 +694,7 @@ mod tests {
         window: AssembledLayout,
         graph: &'a G,
         visual: &'a V,
-        gaps: GapPolicy,
+        gap_policy: GapPolicy,
         layout_mode: LayoutMode,
     }
 
@@ -709,14 +713,14 @@ mod tests {
                 window,
                 graph,
                 visual,
-                gaps: GapPolicy::default(),
+                gap_policy: GapPolicy::default(),
                 layout_mode: LayoutMode::default(),
             }
         }
 
         /// Set the minimum inter-node gap for each axis (the current zoom level's target).
-        fn spacing(mut self, gaps: &GapPolicy) -> Self {
-            self.gaps = *gaps;
+        fn spacing(mut self, gap_policy: &GapPolicy) -> Self {
+            self.gap_policy = *gap_policy;
             self
         }
 
@@ -745,7 +749,7 @@ mod tests {
                 self.window,
                 self.graph,
                 self.visual,
-                &self.gaps,
+                &self.gap_policy,
                 self.layout_mode,
             );
             scene.paint(self.graph, self.visual, area, buffer, camera, highlights)
@@ -1217,14 +1221,14 @@ mod tests {
                 }
             }
             for node in geometry.graph.node_weights() {
-                if node.padding_offset != 0 {
+                if node.side_port_offset != 0 {
                     let (center, left, right) = extents_by_layer[&node.layer.unwrap()];
-                    assert_eq!(node.pos.x, center + node.padding_offset);
+                    assert_eq!(node.pos.x, center + node.side_port_offset);
                     let anchor = node
-                        .padding_anchor
+                        .side_port_anchor
                         .expect("should link a side port to its data node");
                     assert_eq!(node.pos.y, geometry.graph[anchor].pos.y);
-                    if node.padding_offset < 0 {
+                    if node.side_port_offset < 0 {
                         assert_eq!(node.pos.x, left - 2);
                     } else {
                         assert_eq!(node.pos.x, right + 2);
@@ -1256,23 +1260,24 @@ mod tests {
             let dummies: Vec<_> = graph
                 .node_indices()
                 .filter(|&index| {
-                    graph[index].role == NodeRole::Routing && graph[index].padding_anchor.is_none()
+                    graph[index].role == NodeRole::Routing
+                        && graph[index].side_port_anchor.is_none()
                 })
                 .collect();
             assert!(!dummies.is_empty(), "the skip edge should leave a dummy");
             for dummy in dummies {
                 let ports: Vec<_> = graph
                     .node_indices()
-                    .filter(|&index| graph[index].padding_anchor == Some(dummy))
+                    .filter(|&index| graph[index].side_port_anchor == Some(dummy))
                     .collect();
                 assert_eq!(ports.len(), 2, "a dummy should get a left and a right port");
                 for port in ports {
                     assert_eq!(graph[port].pos.y, graph[dummy].pos.y);
                     assert_eq!(
                         graph[port].pos.x,
-                        graph[dummy].pos.x + graph[port].padding_offset
+                        graph[dummy].pos.x + graph[port].side_port_offset
                     );
-                    assert!(graph[port].padding_offset.abs() >= 2);
+                    assert!(graph[port].side_port_offset.abs() >= 2);
                 }
             }
         }

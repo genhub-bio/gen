@@ -811,7 +811,7 @@ pub(crate) mod tests {
         );
         assert!(
             batch
-                .external_edges
+                .wormhole_doors
                 .iter()
                 .all(|door| graph.contains_node(door.boundary) && graph.contains_node(door.target))
         );

@@ -6,7 +6,7 @@ use ratatui::widgets::StatefulWidget as _;
 #[cfg(test)]
 use crate::layout::VisualDetail;
 #[cfg(test)]
-use crate::layout_compaction::{GapPolicy, GapSizer};
+use crate::layout_compaction::{GapPolicy, GapTransform};
 #[cfg(test)]
 use crate::testing::create_test_terminal;
 #[cfg(test)]
@@ -21,7 +21,7 @@ const TARGET_GAP_COMBINATIONS: [(u64, u64); 6] = [(0, 0), (1, 0), (4, 0), (0, 2)
 const COMPLEX_DAG_ADDITIONAL_Y_GAP_COMBINATIONS: [(u64, u64); 2] = [(1, 1), (1, 3)];
 
 #[cfg(test)]
-fn fixed_gap(gap: u64) -> GapSizer {
+fn fixed_gap(gap: u64) -> GapTransform {
     match gap {
         0 => |_| 0,
         1 => |_| 1,
@@ -64,7 +64,7 @@ where
     visual.detail = VisualDetail::Full;
 
     let mut state = GraphViewState::default();
-    state.gaps = target_gaps;
+    state.gap_policy = target_gaps;
 
     let result = terminal.draw(|frame| {
         let area = frame.area();
@@ -83,10 +83,10 @@ where
 #[cfg(test)]
 fn detect_backward_edges(
     domain_graph: &MockDomainGraph,
-    pin_source: Option<petgraph::graph::NodeIndex>,
-    pin_sink: Option<petgraph::graph::NodeIndex>,
+    forced_first_node: Option<petgraph::graph::NodeIndex>,
+    forced_last_node: Option<petgraph::graph::NodeIndex>,
 ) -> Vec<(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)> {
-    crate::cycle_removal::remove_cycles(domain_graph, pin_source, pin_sink)
+    crate::cycle_removal::remove_cycles(domain_graph, forced_first_node, forced_last_node)
         .backward_edges
         .into_iter()
         .collect()
@@ -418,7 +418,7 @@ fn test_window_long_chain_middle_window_wormholes() {
         "The node budget should count domain nodes, not wormholes"
     );
     assert_eq!(
-        world.layout().external_edges.len(),
+        world.layout().wormhole_doors.len(),
         2,
         "A middle window in a linear chain should have one wormhole on each side"
     );
@@ -452,11 +452,11 @@ fn test_window_long_chain_middle_window_wormholes() {
         "The rendered frame should contain exactly the budgeted domain nodes"
     );
     assert_eq!(
-        state.wormhole.len(),
+        state.wormhole_stubs.len(),
         2,
         "The rendered frame should contain two wormholes in addition to the domain nodes"
     );
-    for &(stub, boundary, target) in &state.wormhole {
+    for &(stub, boundary, target) in &state.wormhole_stubs {
         let boundary_rect = state
             .frame
             .rect_of(boundary)
@@ -664,25 +664,25 @@ fn test_skip_layer() {
     insta::assert_snapshot!("skip_layer", snapshot);
 }
 
-/// Sizes every node 5x3 and marks a chosen set as centered.
+/// Sizes every node 5x3 and marks a chosen set as aligned.
 #[cfg(test)]
-struct CenteredSizer {
-    centered: Vec<NodeIndex>,
+struct AlignedSizer {
+    aligned_nodes: Vec<NodeIndex>,
 }
 
 #[cfg(test)]
-impl MockRenderer<MockDomainGraph> for CenteredSizer {
+impl MockRenderer<MockDomainGraph> for AlignedSizer {
     fn get_node_size(&self, _node: &NodeIndex, _detail_level: VisualDetail) -> (u64, u64) {
         (5, 3)
     }
 
     fn is_aligned(&self, node: &NodeIndex) -> bool {
-        self.centered.contains(node)
+        self.aligned_nodes.contains(node)
     }
 }
 
 #[test]
-fn test_centered_path_anchor_returns_to_world_row_zero_after_compaction() {
+fn test_aligned_path_anchor_returns_to_world_row_zero_after_compaction() {
     let mut domain_graph = MockDomainGraph::new();
     let [source, reference, alternate, sink] = [(); 4].map(|_| domain_graph.add_node(()));
     for (from, to) in [
@@ -714,14 +714,14 @@ fn test_centered_path_anchor_returns_to_world_row_zero_after_compaction() {
             matches!(node.role, crate::layout::NodeRole::Data(domain_index) if domain_index == source)
                 .then_some(node.pos.y)
         })
-        .expect("should retain the centered source node");
-    assert_eq!(source_y, 0, "the first centered node should return to Y=0");
+        .expect("should retain the aligned source node");
+    assert_eq!(source_y, 0, "the first aligned node should return to Y=0");
 }
 
-/// Forks, merges, and edges that skip a centered node (`A -> C` over `B`) and an uncentered
-/// one (`X -> D` over `Y`). The centered nodes `A -> B -> C -> D -> E` form a complete path and should share one straight row.
+/// Forks, merges, and edges that skip an aligned node (`A -> C` over `B`) and an unaligned
+/// one (`X -> D` over `Y`). The aligned nodes `A -> B -> C -> D -> E` form a complete path and should share one straight row.
 #[test]
-fn test_centered_nodes_pin_their_layers_across_forks_and_skips() {
+fn test_aligned_nodes_pin_their_layers_across_forks_and_skips() {
     let _ = env_logger::try_init();
     let mut domain_graph = MockDomainGraph::new();
     let [a, b, x, c, y, d, e] = [(); 7].map(|_| domain_graph.add_node(()));
@@ -743,8 +743,8 @@ fn test_centered_nodes_pin_their_layers_across_forks_and_skips() {
         domain_graph,
         80,
         30,
-        CenteredSizer {
-            centered: vec![a, b, c, d, e],
+        AlignedSizer {
+            aligned_nodes: vec![a, b, c, d, e],
         },
         TestRenderers::debug(),
         &[],
@@ -754,11 +754,11 @@ fn test_centered_nodes_pin_their_layers_across_forks_and_skips() {
     insta::assert_snapshot!("centered_nodes_pin_layers_forks_and_skips", snapshot);
 }
 
-/// The centered path skips `B` and `C` along `A -> D`, so the layers of `B` and `C` hold no
-/// centered data node; the routing node of that edge pins them instead, keeping the path one
+/// The aligned path skips `B` and `C` along `A -> D`, so the layers of `B` and `C` hold no
+/// aligned data node; the routing node of that edge pins them instead, keeping the path one
 /// straight row.
 #[test]
-fn test_centered_edge_pins_layers_it_crosses_without_a_centered_node() {
+fn test_aligned_edge_pins_layers_it_crosses_without_an_aligned_node() {
     let _ = env_logger::try_init();
     let mut domain_graph = MockDomainGraph::new();
     let [a, b, c, d] = [(); 4].map(|_| domain_graph.add_node(()));
@@ -770,8 +770,8 @@ fn test_centered_edge_pins_layers_it_crosses_without_a_centered_node() {
         domain_graph,
         80,
         20,
-        CenteredSizer {
-            centered: vec![a, d],
+        AlignedSizer {
+            aligned_nodes: vec![a, d],
         },
         TestRenderers::debug(),
         &[],
@@ -782,7 +782,7 @@ fn test_centered_edge_pins_layers_it_crosses_without_a_centered_node() {
 }
 
 #[test]
-fn test_centered_circular_bubble_keeps_return_edge_straight() {
+fn test_aligned_circular_bubble_keeps_return_edge_straight() {
     let mut domain_graph = MockDomainGraph::new();
     let [source, alternate, reference, sink] = [(); 4].map(|_| domain_graph.add_node(()));
     for (from, to) in [
@@ -798,8 +798,8 @@ fn test_centered_circular_bubble_keeps_return_edge_straight() {
         domain_graph,
         80,
         24,
-        CenteredSizer {
-            centered: vec![source, reference, sink],
+        AlignedSizer {
+            aligned_nodes: vec![source, reference, sink],
         },
         TestRenderers::debug(),
         &[(sink, source)],
@@ -2049,9 +2049,9 @@ fn test_backward_edge_two_independent_local_loops() {
 }
 
 // Cycle auto-detection tests. Unlike the `backward_edge_*` tests above, these hand a raw
-// cyclic graph to the auto-detecting `make_snapshot`/`make_snapshot_pinned` path and let
+// cyclic graph to the auto-detecting `make_snapshot`/`make_snapshot_forced_first_node` path and let
 // `cycle_removal::remove_cycles` identify the backward edges, so they exercise detection,
-// self-loops, and `pin_source` end to end rather than the explicit-edge entry point.
+// self-loops, and `forced_first_node` end to end rather than the explicit-edge entry point.
 
 /// Build a graph from an explicit node count and edge list.
 #[cfg(test)]
@@ -2082,14 +2082,14 @@ fn add_edge_by_index(graph: &mut MockDomainGraph, source: usize, target: usize) 
     graph.add_edge(nodes[source], nodes[target], ());
 }
 
-/// Like `make_snapshot`, but forces `pin_source` to the given node index so cycle detection
+/// Like `make_snapshot`, but forces `forced_first_node` to the given node index so cycle detection
 /// breaks each cycle relative to that node.
 #[cfg(test)]
-fn make_snapshot_pinned(
+fn make_snapshot_forced_first_node(
     domain_graph: MockDomainGraph,
     viewport_width: u16,
     viewport_height: u16,
-    pin_source: usize,
+    forced_first_node: usize,
 ) -> String {
     use ratatui::widgets::StatefulWidget as _;
 
@@ -2108,8 +2108,8 @@ fn make_snapshot_pinned(
 
     let mut terminal = create_test_terminal(viewport_width, viewport_height);
 
-    let pin_source = Some(petgraph::graph::NodeIndex::new(pin_source));
-    let backward_edges = detect_backward_edges(&domain_graph, pin_source, None);
+    let forced_first_node = Some(petgraph::graph::NodeIndex::new(forced_first_node));
+    let backward_edges = detect_backward_edges(&domain_graph, forced_first_node, None);
 
     let mut engine = LayoutEngine::new_with_backward_edges(domain_graph.clone(), &backward_edges);
 
@@ -2165,11 +2165,11 @@ fn test_cycle_with_two_chords_autodetected() {
 }
 
 #[test]
-fn test_cycle_pinned_source() {
+fn test_cycle_forced_first_node() {
     let _ = env_logger::try_init();
-    // A 12-cycle with node 6 pinned as the source: detection breaks the cycle relative to
+    // A 12-cycle with node 6 forced first: detection breaks the cycle relative to
     // node 6 rather than at petgraph's default entry point.
-    let snapshot = make_snapshot_pinned(cycle_graph(12), 80, 24, 6);
+    let snapshot = make_snapshot_forced_first_node(cycle_graph(12), 80, 24, 6);
     insta::assert_snapshot!("cycle_pinned_source", snapshot);
 }
 
@@ -2301,7 +2301,7 @@ fn test_hairpin_on_the_east_side_of_the_last_node() {
 
 #[test]
 fn test_hairpin_on_the_east_side_of_the_middle_node() {
-    // The hair pin takes the next layer beside the last node, and the router splits the middle
+    // The hairpin node takes the next layer beside the last node, and the router splits the middle
     // node's east side between the edge to that node and the bus to the turnaround.
     let snapshot = make_snapshot_with_ports(
         graph_from_edges(3, &[(0, 1), (1, 2), (1, 1)]),

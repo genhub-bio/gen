@@ -76,7 +76,7 @@ fn crawl_invariant_errors(
         ));
     }
 
-    for edge in &subgraph.external_edges {
+    for edge in &subgraph.wormhole_doors {
         let boundary = edge.boundary;
         let target = edge.target;
         let bundle = &edge.all_collapsed;
@@ -167,10 +167,10 @@ fn run_case(
                         subgraph.nodes.len()
                     ));
                 }
-                if !subgraph.external_edges.is_empty() {
+                if !subgraph.wormhole_doors.is_empty() {
                     errors.push(format!(
                         "{case}: an unlimited budget left {} window boundary door(s)",
-                        subgraph.external_edges.len()
+                        subgraph.wormhole_doors.len()
                     ));
                 }
             }

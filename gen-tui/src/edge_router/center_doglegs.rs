@@ -7,7 +7,7 @@ use petgraph::{
     visit::{EdgeRef, IntoEdgeReferences},
 };
 
-use super::LayoutError;
+use super::RoutingError;
 use crate::layout::{LayoutEdge, LayoutNode, NodeRole};
 
 /// Represents a dogleg pattern: 4 consecutive routing nodes forming vertical-horizontal-vertical
@@ -38,7 +38,7 @@ struct Dogleg {
 /// routing nodes occupy the swept region.
 pub fn center_doglegs(
     layer_graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
-) -> Result<(), LayoutError> {
+) -> Result<(), RoutingError> {
     let doglegs = find_all_doglegs(layer_graph);
 
     for dogleg in doglegs {

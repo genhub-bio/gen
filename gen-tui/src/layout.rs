@@ -24,8 +24,8 @@ use crate::{
         compact_layout_with_vertical_placement,
     },
     loopback_pins::{
-        SidewaysNodes, drop_orphaned_routing_nodes, insert_sideways_nodes, reattach_loopback_pins,
-        tether_self_loops,
+        HorizontalBendNodes, drop_orphaned_routing_nodes, insert_horizontal_bend_nodes,
+        reattach_loopback_pins, tether_self_loops,
     },
     pinning::hairpin_sides,
     window_graph::{WindowEdge, WindowGraph, WindowNode},
@@ -134,8 +134,8 @@ impl JunctionSymbol {
     }
 }
 
-/// The cells of a hair pin: wide enough for the turnaround and its two arrows, and two rows tall.
-pub const HAIR_PIN_SIZE: (u64, u64) = (3, 2);
+/// The cells of a hairpin node: wide enough for the turnaround and its two arrows, and two rows tall.
+pub const HAIRPIN_NODE_SIZE: (u64, u64) = (3, 2);
 
 /// NodeRole represents the distinction between nodes that were in the input graph (Data)  
 /// and dummy nodes that were added to route the edges during layout (Routing).
@@ -149,9 +149,9 @@ pub enum NodeRole {
     Pin(PinSide),
     /// The turnaround beside one side of a node whose edge leaves that side and returns to it.
     /// Unlike the other synthetic nodes it is drawn as a glyph of its own, of
-    /// [`HAIR_PIN_SIZE`], with its top row on the row its bus meets.
+    /// [`HAIRPIN_NODE_SIZE`], with its top row on the row its bus meets.
     HairPin(NodeSide),
-    /// Ranked boundary door whose payload is its off-window navigation target.
+    /// Layered boundary door whose payload is its off-window navigation target.
     Wormhole(NodeIndex),
 }
 
@@ -215,16 +215,16 @@ pub struct LayoutNode {
     pub vertical_anchor: VerticalAnchor,
     pub size: (u64, u64),
     /// The Sugiyama layer column this node was assembled into. Every node assembled from a
-    /// window's structure has one - data, routing, pin, hair pin and wormhole nodes alike.
-    /// Junctions reset it to `None`, nodes added later (hair pin expansions) never have one, and
+    /// window's structure has one - data, routing, pin, hairpin node and wormhole nodes alike.
+    /// Junctions reset it to `None`, nodes added later (hairpin node expansions) never have one, and
     /// compaction re-snaps the layer of Data nodes to the nearest anchor column.
     pub layer: Option<i32>,
     /// Fixed horizontal offset of a curved side port from its layer's center column.
     #[serde(default)]
-    pub(crate) padding_offset: i64,
+    pub(crate) side_port_offset: i64,
     /// Data node whose row and column this side port follows during compaction.
     #[serde(default)]
-    pub(crate) padding_anchor: Option<NodeIndex<u32>>,
+    pub(crate) side_port_anchor: Option<NodeIndex<u32>>,
     /// Sides with curved self-edges, used to reserve room beyond the visible node border.
     #[serde(default)]
     pub(crate) hairpin_west: bool,
@@ -259,8 +259,8 @@ impl LayoutNode {
             pos,
             size,
             layer,
-            padding_offset: 0,
-            padding_anchor: None,
+            side_port_offset: 0,
+            side_port_anchor: None,
             hairpin_west: false,
             hairpin_east: false,
             row_tether: None,
@@ -352,10 +352,10 @@ fn vertical_placement_for_window(
 }
 
 /// Give every data node and every dummy a straight departure on either side of its layer before a
-/// curved connection may bend. A dummy is a bypass for a long edge; padding it like a data node
+/// curved connection may bend. A dummy is a bypass for a long edge; giving it side ports like a data node
 /// keeps its slopes in the gutters instead of cutting across the layer's data nodes. All
 /// departures in a layer use the widest node's clearance columns.
-fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+fn add_curved_side_ports(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
     let mut layer_widths = BTreeMap::<i64, (i64, i64)>::new();
     for node in graph.node_weights() {
         let extents = layer_widths.entry(node.pos.x).or_insert((0, 0));
@@ -384,13 +384,13 @@ fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirec
         node.pos.x = columns[&node.pos.x];
     }
 
-    // Padding runs before any port exists, so every routing node here is a dummy.
-    let padded_nodes: Vec<_> = graph
+    // Port creation runs before any port exists, so every routing node here is a dummy.
+    let side_ported_nodes: Vec<_> = graph
         .node_indices()
         .filter(|&index| matches!(graph[index].role, NodeRole::Data(_) | NodeRole::Routing))
         .collect();
     let mut ports = HashMap::new();
-    for index in padded_nodes {
+    for index in side_ported_nodes {
         let node = &graph[index];
         let (x, y, layer) = (node.pos.x, node.pos.y, node.layer);
         let (left, right) = offsets_by_center[&x];
@@ -400,8 +400,8 @@ fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirec
             (1, 1),
             layer,
         );
-        left_node.padding_offset = -left;
-        left_node.padding_anchor = Some(index);
+        left_node.side_port_offset = -left;
+        left_node.side_port_anchor = Some(index);
         let left_port = graph.add_node(left_node);
         let mut right_node = LayoutNode::new(
             NodeRole::Routing,
@@ -409,8 +409,8 @@ fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirec
             (1, 1),
             layer,
         );
-        right_node.padding_offset = right;
-        right_node.padding_anchor = Some(index);
+        right_node.side_port_offset = right;
+        right_node.side_port_anchor = Some(index);
         let right_port = graph.add_node(right_node);
         ports.insert(index, (left_port, right_port));
     }
@@ -480,12 +480,14 @@ fn add_hairpin_edges(
     }
 }
 
-/// Align each hair pin to the side of the layer the layout placed it in, so the loop starts at the
+/// Align each hairpin node to the side of the layer the layout placed it in, so the loop starts at the
 /// column where the layer's nodes start and does not drift across the layer. A pin on the east side
 /// of its node has its attachment column on the left edge of the widest data node in its layer, and
 /// a pin on the west side has it on the right edge. A layer with no data node leaves its pin where
 /// compaction put it.
-fn scoot_hair_pins(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+fn align_hairpin_nodes_beside_layer(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+) {
     let origin = WorldPos::new(0, 0);
     let pins: Vec<_> = graph
         .node_indices()
@@ -515,14 +517,14 @@ fn scoot_hair_pins(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u
     }
 }
 
-/// Replace each hair pin with routing nodes that make its loop, so the shape is drawn by the
+/// Replace each hairpin node with routing nodes that make its loop, so the shape is drawn by the
 /// ordinary rules for routes and no mode draws a node of its own. The loop is two rows tall: the
 /// route leaves the neighbor on the top row, which is the row of the bus, runs across the pin and
 /// down at the far end, and comes back along the bottom row. The bus keeps its single edge to an
 /// entry on the pin's near side. In the terminal the return rises to that entry; in the curve and
 /// line modes it is an S-curve back to that neighbor, and the far end is a bend that starts and
 /// ends flat.
-fn expand_hair_pins(
+fn expand_hairpin_nodes(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     layout_mode: LayoutMode,
 ) {
@@ -564,7 +566,7 @@ fn expand_hair_pins(
         let far_bottom = routing_node(far_x, row - 1);
         let near_bottom = routing_node(near_x, row - 1);
         // The curve modes return to the neighbor the bus reached, so the S-curve ends where the
-        // hair pin was joined to the layout. The terminal's router needs the return to end on the
+        // hairpin node was joined to the layout. The terminal's router needs the return to end on the
         // bus at the entry.
         let return_end = if layout_mode.is_curved() {
             neighbor
@@ -656,7 +658,7 @@ fn shorten_self_link_detours(graph: &mut StableGraph<LayoutNode, LayoutEdge, Und
         let middle = left_other;
         let ports: Vec<_> = graph
             .node_indices()
-            .filter(|&index| graph[index].padding_anchor == Some(middle))
+            .filter(|&index| graph[index].side_port_anchor == Some(middle))
             .collect();
         if ports
             .iter()
@@ -716,13 +718,13 @@ fn shorten_self_link_detours(graph: &mut StableGraph<LayoutNode, LayoutEdge, Und
     }
 }
 
-/// Padding creates both side ports before it knows which edges will use them. Drop ports with no
+/// Side ports are created in pairs before it is known which edges will use them. Drop ports with no
 /// incident edge after compaction so the final geometry and DOT export contain only real routes.
-fn prune_unused_padding_ports(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+fn prune_unused_side_ports(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
     let unused: Vec<_> = graph
         .node_indices()
         .filter(|&index| {
-            graph[index].padding_anchor.is_some() && graph.edges(index).next().is_none()
+            graph[index].side_port_anchor.is_some() && graph.edges(index).next().is_none()
         })
         .collect();
     for index in unused {
@@ -738,7 +740,7 @@ impl WindowGeometry {
     /// bundle, then become routing nodes before compaction: they are drawn as the junction of
     /// their edges and are never placed as selectable nodes.
     ///
-    /// `centered` names the domain nodes aligned before routing (see
+    /// `aligned_nodes` names the domain nodes aligned before routing (see
     /// [`crate::cross_coordinates::align_layers`]). The first surviving aligned node is
     /// returned to y = 0 after compaction; other nodes may drift if routing breaks the line.
     ///
@@ -750,9 +752,9 @@ impl WindowGeometry {
     /// columns far enough apart for those edges to slope gently.
     pub fn new(
         mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-        gaps: &GapPolicy,
+        gap_policy: &GapPolicy,
         junctions: &HashSet<NodeIndex>,
-        centered: &HashSet<NodeIndex>,
+        aligned_nodes: &HashSet<NodeIndex>,
         domain_edges: &[PortedEdge<NodeIndex>],
         layout_mode: LayoutMode,
     ) -> Self {
@@ -763,19 +765,19 @@ impl WindowGeometry {
         // is the sole place the six gaps of the `GapPolicy` are enforced.
         // A curved drawing has no loopback pins in its layered layout: the ends that need one get a
         // routing node beside their node instead, and the pin returns once compaction is done.
-        let sideways = if layout_mode.is_curved() {
+        let horizontal_bend_nodes = if layout_mode.is_curved() {
             drop_orphaned_routing_nodes(&mut layout_graph);
-            insert_sideways_nodes(&mut layout_graph, domain_edges)
+            insert_horizontal_bend_nodes(&mut layout_graph, domain_edges)
         } else {
-            SidewaysNodes::default()
+            HorizontalBendNodes::default()
         };
-        orient_aligned_bubbles(&mut layout_graph, centered);
+        orient_aligned_bubbles(&mut layout_graph, aligned_nodes);
         assign_cross_coordinates(&mut layout_graph, 1);
-        align_layers(&mut layout_graph, centered);
-        tether_self_loops(&mut layout_graph, &sideways);
+        align_layers(&mut layout_graph, aligned_nodes);
+        tether_self_loops(&mut layout_graph, &horizontal_bend_nodes);
 
         if layout_mode.is_curved() {
-            pad_curved_data_nodes(&mut layout_graph);
+            add_curved_side_ports(&mut layout_graph);
         }
         // A curved layout turns a hairpin into an arc beside its node. The layered layout cannot
         // carry a loop on one node, so the loop joins the node's side port to itself once the
@@ -792,10 +794,10 @@ impl WindowGeometry {
 
         // The router replaces layout-node indices, so identify the first aligned domain node
         // after routing. A final translation restores its absolute row without bending edges.
-        let center_anchor = layout_graph
+        let first_aligned_node = layout_graph
             .node_indices()
             .filter(|&node_index| {
-                matches!(layout_graph[node_index].role, NodeRole::Data(domain_index) if centered.contains(&domain_index))
+                matches!(layout_graph[node_index].role, NodeRole::Data(domain_index) if aligned_nodes.contains(&domain_index))
             })
             .min_by_key(|&node_index| {
                 (layout_graph[node_index].pos.x, node_index.index())
@@ -816,31 +818,31 @@ impl WindowGeometry {
         }
 
         // Curved edges keep the minimal zoom level's routing gaps at every level.
-        let curved_gaps = GapPolicy {
+        let curved_gap_policy = GapPolicy {
             routing_routing_y: MINIMUM_ROUTING_GAP_Y,
             data_routing_y: |_| 1,
-            ..*gaps
+            ..*gap_policy
         };
-        let gaps = if layout_mode.is_curved() {
-            &curved_gaps
+        let gap_policy = if layout_mode.is_curved() {
+            &curved_gap_policy
         } else {
-            gaps
+            gap_policy
         };
         compact_layout_with_vertical_placement(
             &mut layout_graph,
-            gaps,
+            gap_policy,
             vertical_placement,
-            center_anchor,
+            first_aligned_node,
             layout_mode,
         );
-        reattach_loopback_pins(&mut layout_graph, sideways.pins);
-        scoot_hair_pins(&mut layout_graph);
-        expand_hair_pins(&mut layout_graph, layout_mode);
+        reattach_loopback_pins(&mut layout_graph, horizontal_bend_nodes.pins);
+        align_hairpin_nodes_beside_layer(&mut layout_graph);
+        expand_hairpin_nodes(&mut layout_graph, layout_mode);
         if layout_mode.is_curved() {
             shorten_self_link_detours(&mut layout_graph);
-            prune_unused_padding_ports(&mut layout_graph);
+            prune_unused_side_ports(&mut layout_graph);
         }
-        if let Some(anchor) = center_anchor {
+        if let Some(anchor) = first_aligned_node {
             let offset = layout_graph[anchor].pos.y;
             for node in layout_graph.node_weights_mut() {
                 node.pos.y -= offset;
@@ -930,14 +932,14 @@ impl std::fmt::Debug for WindowGeometry {
 /// vertex here comes straight from `rust_sugiyama::from_edges_with_dummies`'s own
 /// crossing-minimized placement, not something gen-tui synthesizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Vertex {
+pub(crate) struct StructureVertex {
     pub(crate) input_node_idx: Option<NodeIndex<u32>>,
 }
 
 /// Which window-graph edge (if any) this hop belongs to, so a dummy chain traces back to the
 /// domain edge it routes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Edge {
+pub struct StructureEdge {
     pub(crate) input_node_idx_pair: Option<(NodeIndex<u32>, NodeIndex<u32>)>,
 }
 
@@ -945,8 +947,8 @@ pub struct Edge {
 #[derive(Debug, Clone)]
 pub struct WindowStructure {
     /// Post-layering vertex graph. Dummy routing vertices are present; each data vertex
-    /// carries the window-graph node index it stands for in `Vertex::input_node_idx`.
-    pub(crate) vertex_graph: StableDiGraph<Vertex, Edge, u32>,
+    /// carries the window-graph node index it stands for in `StructureVertex::input_node_idx`.
+    pub(crate) vertex_graph: StableDiGraph<StructureVertex, StructureEdge, u32>,
     /// Per-layer vertex ordering from crossing minimization. The outer index is the layer;
     /// the inner order is the within-layer ordering. Entries index `vertex_graph`.
     pub(crate) vertex_layers: Vec<Vec<NodeIndex<u32>>>,
@@ -989,9 +991,9 @@ impl WindowStructure {
 #[derive(Debug)]
 pub(crate) struct WindowStructureBuilder<'a> {
     window_graph: &'a StableDiGraph<WindowNode, WindowEdge, u32>,
-    /// Pairs of data nodes that Sugiyama must rank in order. See `with_ordering_edges`.
+    /// Pairs of data nodes that Sugiyama must layer in order. See `with_ordering_edges`.
     ordering_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
-    vertex_graph: StableDiGraph<Vertex, Edge, u32>,
+    vertex_graph: StableDiGraph<StructureVertex, StructureEdge, u32>,
     vertex_layers: Option<Vec<Vec<NodeIndex<u32>>>>,
     config: Config,
     /// Copied from `WindowGraph::pin_span_edges` at construction. See
@@ -1009,18 +1011,18 @@ enum LayerEntry {
     Dummy(u32),
 }
 
-/// Per-rank slot ordering: outer index is the rank, inner is `(layer entry, x)` sorted by x.
-type RankedLayers = Vec<Vec<(LayerEntry, f64)>>;
-/// Each multi-rank window-graph edge's routing-dummy chain, as returned by
+/// Per-layer slot ordering: outer index is the layer, inner is `(layer entry, x)` sorted by x.
+type LayerSlots = Vec<Vec<(LayerEntry, f64)>>;
+/// Each multi-layer window-graph edge's routing-dummy chain, as returned by
 /// `from_edges_with_dummies`, keyed by the edge's position among the window graph's edges so that
 /// parallel edges between the same two nodes keep chains of their own.
 type DummyChains = HashMap<usize, Vec<u32>>;
 /// One dense edge fed to `from_edges_with_dummies`, paired with the window-graph endpoints it
 /// came from so a returned `LayoutVertex::Dummy(edge_id)` can be traced back to them.
 type DenseEdgeWithEndpoints = ((u32, u32), (NodeIndex<u32>, NodeIndex<u32>));
-/// Raw per-vertex output from `from_edges_with_dummies`, grouped by rank before dummy ids are
-/// minted (see `WindowStructureBuilder::build_ranks`).
-type RawRankGroups = HashMap<u64, Vec<(LayoutVertex<usize, usize>, f64)>>;
+/// Raw per-vertex output from `from_edges_with_dummies`, grouped by layer before dummy ids are
+/// minted (see `WindowStructureBuilder::build_layers`).
+type RawLayerGroups = HashMap<u64, Vec<(LayoutVertex<usize, usize>, f64)>>;
 
 impl<'a> WindowStructureBuilder<'a> {
     /// Create a new WindowStructureBuilder for the given window graph.
@@ -1037,7 +1039,7 @@ impl<'a> WindowStructureBuilder<'a> {
     }
 
     /// Supply pairs of data nodes whose layers must stay in the given order while Sugiyama runs.
-    /// Edges bent by pins use them to keep their endpoints' ranks fixed; the pairs add no edge to the
+    /// Edges bent by pins use them to keep their endpoints' layers fixed; the pairs add no edge to the
     /// structure, and the dummies Sugiyama routes along them are dropped from the layers.
     pub(crate) fn with_ordering_edges(
         mut self,
@@ -1047,10 +1049,10 @@ impl<'a> WindowStructureBuilder<'a> {
         self
     }
 
-    /// Establish the detail-independent structure of the window: validate the graph, then rank
+    /// Establish the detail-independent structure of the window: validate the graph, then layer
     /// and order every vertex - real and dummy alike - via
-    /// `rust_sugiyama::from_edges_with_dummies` (see `Vertex`). A window with a backward-edge
-    /// bypass loop is mirrored to a consistent orientation in `build_ranks`; every other window
+    /// `rust_sugiyama::from_edges_with_dummies` (see `StructureVertex`). A window with a backward-edge
+    /// bypass loop is mirrored to a consistent orientation in `build_layers`; every other window
     /// keeps the crate's own placement untouched. Idempotent; a single-node window needs no
     /// layering.
     pub(crate) fn build_structure(&mut self) -> Result<(), String> {
@@ -1064,7 +1066,7 @@ impl<'a> WindowStructureBuilder<'a> {
             return Ok(());
         }
 
-        // Sugiyama ranking requires a connected graph.
+        // Sugiyama layering requires a connected graph.
         let components = count_connected_components(self.window_graph);
         if components > 1 {
             return Err(format!(
@@ -1086,28 +1088,28 @@ impl<'a> WindowStructureBuilder<'a> {
             .map(|(dense, &window_idx)| (window_idx, dense as u32))
             .collect();
 
-        let (ranks_full, dummy_chains): (RankedLayers, DummyChains) =
-            self.build_ranks(&window_ids, &dense_id);
+        let (layers_full, dummy_chains): (LayerSlots, DummyChains) =
+            self.build_layers(&window_ids, &dense_id);
 
         // Build `vertex_graph`: one vertex per real/dummy layer entry, then wire each
         // window-graph edge through its dummy chain (if any).
-        let mut vertex_graph = StableDiGraph::<Vertex, Edge, u32>::new();
+        let mut vertex_graph = StableDiGraph::<StructureVertex, StructureEdge, u32>::new();
         let mut window_to_vertex: HashMap<NodeIndex<u32>, NodeIndex<u32>> = HashMap::new();
         let mut dummy_to_vertex: HashMap<u32, NodeIndex<u32>> = HashMap::new();
-        let mut vertex_layers: Vec<Vec<NodeIndex<u32>>> = Vec::with_capacity(ranks_full.len());
-        for layer in &ranks_full {
+        let mut vertex_layers: Vec<Vec<NodeIndex<u32>>> = Vec::with_capacity(layers_full.len());
+        for layer in &layers_full {
             let mut vertex_layer = Vec::with_capacity(layer.len());
             for &(entry, _) in layer {
                 let vertex_idx = match entry {
                     LayerEntry::Real(window_idx) => {
-                        let v = vertex_graph.add_node(Vertex {
+                        let v = vertex_graph.add_node(StructureVertex {
                             input_node_idx: Some(window_idx),
                         });
                         window_to_vertex.insert(window_idx, v);
                         v
                     }
                     LayerEntry::Dummy(dummy_id) => {
-                        let v = vertex_graph.add_node(Vertex {
+                        let v = vertex_graph.add_node(StructureVertex {
                             input_node_idx: None,
                         });
                         dummy_to_vertex.insert(dummy_id, v);
@@ -1135,7 +1137,7 @@ impl<'a> WindowStructureBuilder<'a> {
                     vertex_graph.add_edge(
                         tail_vertex,
                         dummy_vertex,
-                        Edge {
+                        StructureEdge {
                             input_node_idx_pair: window_edge,
                         },
                     );
@@ -1146,7 +1148,7 @@ impl<'a> WindowStructureBuilder<'a> {
             vertex_graph.add_edge(
                 tail_vertex,
                 head_vertex,
-                Edge {
+                StructureEdge {
                     input_node_idx_pair: window_edge,
                 },
             );
@@ -1154,26 +1156,26 @@ impl<'a> WindowStructureBuilder<'a> {
 
         self.vertex_graph = vertex_graph;
         self.vertex_layers = Some(vertex_layers);
-        self.resolve_edge_legs(&window_to_vertex);
+        self.resolve_pin_span_edges(&window_to_vertex);
 
         Ok(())
     }
 
-    /// Call `from_edges_with_dummies` once, which ranks and orders every vertex - real and
-    /// dummy alike - via full-graph crossing minimization. Every multi-rank edge's dummy chain,
+    /// Call `from_edges_with_dummies` once, which layers and orders every vertex - real and
+    /// dummy alike - via full-graph crossing minimization. Every multi-layer edge's dummy chain,
     /// backward-edge bypass loops included, comes straight from that single call; nothing is
     /// reconstructed or moved. The ordering edges (see `with_ordering_edges`) take part in the
-    /// ranking and crossing minimization, then their dummies are dropped, so they leave no trace
+    /// layering and crossing minimization, then their dummies are dropped, so they leave no trace
     /// in the layers. The only other override is a whole-window mirror: crossing counts are
-    /// invariant under reversing every rank's order together (it's a reflection, not a
+    /// invariant under reversing every layer's order together (it's a reflection, not a
     /// reordering relative to anything else), so if a window's bypass loop came out bulging the
-    /// "wrong" way, every rank gets reversed once to make it consistent - see the mirror step at
+    /// "wrong" way, every layer gets reversed once to make it consistent - see the mirror step at
     /// the end of this function.
-    fn build_ranks(
+    fn build_layers(
         &self,
         window_ids: &[NodeIndex<u32>],
         dense_id: &HashMap<NodeIndex<u32>, u32>,
-    ) -> (RankedLayers, DummyChains) {
+    ) -> (LayerSlots, DummyChains) {
         // Build the dense edge list `from_edges_with_dummies` needs alongside a parallel list of
         // window-graph endpoints, in lockstep, so `edge_endpoints[edge_id]` always names the
         // input edge a returned `LayoutVertex::Dummy(edge_id)` subdivides.
@@ -1209,24 +1211,24 @@ impl<'a> WindowStructureBuilder<'a> {
             "window graph connectivity is validated above"
         );
 
-        // Group by rank (y), keeping each vertex's raw `LayoutVertex` for now - the crate's
-        // output order has no relationship to rank order, so dummy ids can only be minted once
-        // ranks are sorted low to high below; minting them here would scramble each edge's
+        // Group by layer (y), keeping each vertex's raw `LayoutVertex` for now - the crate's
+        // output order has no relationship to layer order, so dummy ids can only be minted once
+        // layers are sorted low to high below; minting them here would scramble each edge's
         // chain into an arbitrary order instead of tail-to-head.
-        let mut groups: RawRankGroups = HashMap::new();
+        let mut groups: RawLayerGroups = HashMap::new();
         for (vertex, (x, y)) in positions {
             groups.entry(y.to_bits()).or_default().push((vertex, x));
         }
-        let mut rank_ys: Vec<f64> = groups.keys().map(|&bits| f64::from_bits(bits)).collect();
-        rank_ys.sort_by(f64::total_cmp);
+        let mut layer_ys: Vec<f64> = groups.keys().map(|&bits| f64::from_bits(bits)).collect();
+        layer_ys.sort_by(f64::total_cmp);
 
-        // Now walk ranks low to high, sorting each by x, minting a fresh globally-unique id for
-        // each dummy vertex and appending it to its edge's chain accumulator - both in true rank
+        // Now walk layers low to high, sorting each by x, minting a fresh globally-unique id for
+        // each dummy vertex and appending it to its edge's chain accumulator - both in true layer
         // order, since that's the order this loop visits them in.
-        let mut ranks_full: RankedLayers = Vec::with_capacity(rank_ys.len());
+        let mut layers_full: LayerSlots = Vec::with_capacity(layer_ys.len());
         let mut chains_by_edge: HashMap<usize, Vec<u32>> = HashMap::new();
         let mut next_id: u32 = 0;
-        for y in &rank_ys {
+        for y in &layer_ys {
             let mut layer = groups.remove(&y.to_bits()).unwrap();
             layer.sort_by(|a, b| a.1.total_cmp(&b.1));
             let layer: Vec<(LayerEntry, f64)> = layer
@@ -1248,7 +1250,7 @@ impl<'a> WindowStructureBuilder<'a> {
                 })
                 .collect();
             if !layer.is_empty() {
-                ranks_full.push(layer);
+                layers_full.push(layer);
             }
         }
 
@@ -1256,8 +1258,8 @@ impl<'a> WindowStructureBuilder<'a> {
 
         // Mirror the whole window if it has a bypass loop. `from_edges_with_dummies` reliably
         // places dummy vertices - added to the graph after every real node, so tie-breaking
-        // consistently favors their higher index - at the far extreme of their rank, opposite
-        // this codebase's below-the-graph convention. Reversing every rank's order the once is a
+        // consistently favors their higher index - at the far extreme of their layer, opposite
+        // this codebase's below-the-graph convention. Reversing every layer's order the once is a
         // pure reflection: it changes no relative order and so no crossing count, and always
         // corrects that bias in a single pass rather than checking for it per window.
         //
@@ -1266,23 +1268,26 @@ impl<'a> WindowStructureBuilder<'a> {
         // middle-anchor case (multiple boundary doors collapsing to the same off-window target).
         // `order` isn't just bookkeeping - `assemble_window` writes it straight into
         // `LayoutNode.pos` as a real row coordinate - and `edge_router::route_layer`'s
-        // `layout_layer` is not a pure function of that row order: it detects "backtracking" via
+        // `route_layer` is not a pure function of that row order: it detects "backtracking" via
         // a Y-range-vs-envelope heuristic and conditionally re-routes with reversed vertical
-        // order, tuned against whatever arrangement `build_ranks` handed it before. Flipping
+        // order, tuned against whatever arrangement `build_layers` handed it before. Flipping
         // every window changes which windows trigger that fallback and how, so a wider flip
-        // needs `layout_layer` made robust to it first, not just more flipping here.
+        // needs `route_layer` made robust to it first, not just more flipping here.
         if !self.pin_span_edges.is_empty() {
-            for layer in &mut ranks_full {
+            for layer in &mut layers_full {
                 layer.reverse();
             }
         }
-        (ranks_full, dummy_chains)
+        (layers_full, dummy_chains)
     }
 
     /// Resolve `pin_span_edges` (window-graph node indices, set at window-build time)
     /// into `resolved_pin_span_edges` (`vertex_graph` edge endpoints), walking through
     /// any dummy-vertex chain Sugiyama inserted for that edge.
-    fn resolve_edge_legs(&mut self, window_to_vertex: &HashMap<NodeIndex<u32>, NodeIndex<u32>>) {
+    fn resolve_pin_span_edges(
+        &mut self,
+        window_to_vertex: &HashMap<NodeIndex<u32>, NodeIndex<u32>>,
+    ) {
         for &(from_window_idx, to_window_idx) in &self.pin_span_edges {
             let (Some(&from_vertex), Some(&to_vertex)) = (
                 window_to_vertex.get(&from_window_idx),
@@ -1297,7 +1302,7 @@ impl<'a> WindowStructureBuilder<'a> {
             else {
                 continue;
             };
-            for hop in resolve_leg_chain(&self.vertex_graph, from_vertex, to_vertex, bundle) {
+            for hop in trace_dummy_chain(&self.vertex_graph, from_vertex, to_vertex, bundle) {
                 self.resolved_pin_span_edges.insert(hop);
             }
         }
@@ -1329,8 +1334,8 @@ impl<'a> WindowStructureBuilder<'a> {
 /// follow the first matching edge out of `from`; it must confirm the chain actually
 /// terminates at `to`. Past the first hop it is unambiguous: a dummy vertex inserted for one
 /// edge belongs to no other chain, so it has exactly one qualifying successor.
-fn resolve_leg_chain(
-    vertex_graph: &StableDiGraph<Vertex, Edge, u32>,
+fn trace_dummy_chain(
+    vertex_graph: &StableDiGraph<StructureVertex, StructureEdge, u32>,
     from: NodeIndex<u32>,
     to: NodeIndex<u32>,
     bundle: (NodeIndex, NodeIndex),
@@ -1391,10 +1396,10 @@ mod tests {
     use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
     use super::{
-        HAIR_PIN_SIZE, LayoutEdge, LayoutNode, NodeRole, PinSide, VerticalAnchor,
-        VerticalPlacement, add_hairpin_edges, expand_hair_pins, pad_curved_data_nodes,
-        prune_unused_padding_ports, scoot_hair_pins, shorten_self_link_detours,
-        vertical_placement_for_window,
+        HAIRPIN_NODE_SIZE, LayoutEdge, LayoutNode, NodeRole, PinSide, VerticalAnchor,
+        VerticalPlacement, add_curved_side_ports, add_hairpin_edges,
+        align_hairpin_nodes_beside_layer, expand_hairpin_nodes, prune_unused_side_ports,
+        shorten_self_link_detours, vertical_placement_for_window,
     };
     use crate::{
         curved::LayoutMode,
@@ -1565,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unused_padding_ports_do_not_leave_disconnected_routing_nodes() {
+    fn test_unused_side_ports_do_not_leave_disconnected_routing_nodes() {
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
         let first_domain = NodeIndex::new(1);
         let second_domain = NodeIndex::new(2);
@@ -1590,15 +1595,15 @@ mod tests {
         graph.add_edge(first, pin, LayoutEdge::new(first_domain, first_domain));
         graph.add_edge(first, second, LayoutEdge::new(first_domain, second_domain));
 
-        pad_curved_data_nodes(&mut graph);
+        add_curved_side_ports(&mut graph);
         let pin_position = graph[pin].pos;
         assert!(graph.find_edge(first, pin).is_some());
-        prune_unused_padding_ports(&mut graph);
+        prune_unused_side_ports(&mut graph);
 
         assert_eq!(graph[pin].pos, pin_position);
         assert!(graph.find_edge(first, pin).is_some());
         assert!(graph.node_indices().all(|index| {
-            graph[index].padding_anchor.is_none() || graph.edges(index).next().is_some()
+            graph[index].side_port_anchor.is_none() || graph.edges(index).next().is_some()
         }));
     }
 
@@ -1612,7 +1617,7 @@ mod tests {
             (5, 1),
             Some(0),
         ));
-        pad_curved_data_nodes(&mut graph);
+        add_curved_side_ports(&mut graph);
         add_hairpin_edges(
             &mut graph,
             &HashSet::from([
@@ -1620,19 +1625,19 @@ mod tests {
                 (domain_index, NodeSide::East),
             ]),
         );
-        prune_unused_padding_ports(&mut graph);
+        prune_unused_side_ports(&mut graph);
 
         assert!(graph.find_edge(anchor, anchor).is_some());
         assert!(graph[anchor].hairpin_west && graph[anchor].hairpin_east);
         assert!(graph.node_indices().all(|index| {
-            graph[index].padding_anchor.is_none() || graph.edges(index).next().is_some()
+            graph[index].side_port_anchor.is_none() || graph.edges(index).next().is_some()
         }));
         assert_eq!(graph.node_count(), 1);
     }
 
-    /// A node with a hair pin on `side`, joined by one edge carrying the node's self-edge, sized
+    /// A node with a hairpin node on `side`, joined by one edge carrying the node's self-edge, sized
     /// and anchored as the geometry builder does.
-    fn node_with_hair_pin(
+    fn node_with_hairpin_node(
         side: NodeSide,
     ) -> (
         StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
@@ -1647,15 +1652,15 @@ mod tests {
             (5, 3),
             Some(0),
         ));
-        let mut hair_pin = LayoutNode::new(
+        let mut hairpin_node = LayoutNode::new(
             NodeRole::HairPin(side),
             LocalPos::new_xy(12, 3),
-            HAIR_PIN_SIZE,
+            HAIRPIN_NODE_SIZE,
             Some(1),
         );
-        hair_pin.vertical_anchor = VerticalAnchor::Top;
-        let rect = hair_pin.rect(WorldPos::new(0, 0));
-        let pin = graph.add_node(hair_pin);
+        hairpin_node.vertical_anchor = VerticalAnchor::Top;
+        let rect = hairpin_node.rect(WorldPos::new(0, 0));
+        let pin = graph.add_node(hairpin_node);
         graph.add_edge(
             node,
             pin,
@@ -1677,11 +1682,11 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_hair_pins_makes_a_two_row_box_in_the_terminal() {
+    fn test_expand_hairpin_nodes_makes_a_two_row_box_in_the_terminal() {
         for side in [NodeSide::East, NodeSide::West] {
-            let (mut graph, node, rect) = node_with_hair_pin(side);
+            let (mut graph, node, rect) = node_with_hairpin_node(side);
 
-            expand_hair_pins(&mut graph, LayoutMode::Rectilinear);
+            expand_hairpin_nodes(&mut graph, LayoutMode::Rectilinear);
 
             let (near_x, far_x) = match side {
                 NodeSide::East => (rect.min.x, rect.max.x),
@@ -1708,12 +1713,12 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_hair_pins_returns_to_the_neighbor_in_the_curve_modes() {
+    fn test_expand_hairpin_nodes_returns_to_the_neighbor_in_the_curve_modes() {
         let style = LayoutMode::Curved;
         for side in [NodeSide::East, NodeSide::West] {
-            let (mut graph, node, rect) = node_with_hair_pin(side);
+            let (mut graph, node, rect) = node_with_hairpin_node(side);
 
-            expand_hair_pins(&mut graph, style);
+            expand_hairpin_nodes(&mut graph, style);
 
             let (near_x, far_x) = match side {
                 NodeSide::East => (rect.min.x, rect.max.x),
@@ -1738,9 +1743,9 @@ mod tests {
         }
     }
 
-    /// A layer of two data nodes, one narrow and one wide, with a hair pin of `side` in the same
+    /// A layer of two data nodes, one narrow and one wide, with a hairpin node of `side` in the same
     /// layer, off to the side of both.
-    fn layer_with_hair_pin_beside_data_nodes(
+    fn layer_with_hairpin_node_beside_data_nodes(
         side: NodeSide,
         pin_x: i64,
     ) -> (
@@ -1768,24 +1773,25 @@ mod tests {
             (15, 3),
             Some(0),
         ));
-        let mut hair_pin = LayoutNode::new(
+        let mut hairpin_node = LayoutNode::new(
             NodeRole::HairPin(side),
             LocalPos::new_xy(pin_x, 9),
-            HAIR_PIN_SIZE,
+            HAIRPIN_NODE_SIZE,
             Some(1),
         );
-        hair_pin.vertical_anchor = VerticalAnchor::Top;
-        let pin = graph.add_node(hair_pin);
+        hairpin_node.vertical_anchor = VerticalAnchor::Top;
+        let pin = graph.add_node(hairpin_node);
         (graph, wide, pin)
     }
 
     #[test]
-    fn test_scoot_aligns_an_east_hair_pin_to_the_left_of_the_widest_node_in_its_layer() {
+    fn test_align_hairpin_nodes_puts_an_east_hairpin_node_to_the_left_of_the_widest_node_in_its_layer()
+     {
         for pin_x in [10, 22, 40] {
             let (mut graph, wide, pin) =
-                layer_with_hair_pin_beside_data_nodes(NodeSide::East, pin_x);
+                layer_with_hairpin_node_beside_data_nodes(NodeSide::East, pin_x);
 
-            scoot_hair_pins(&mut graph);
+            align_hairpin_nodes_beside_layer(&mut graph);
 
             let origin = WorldPos::new(0, 0);
             assert_eq!(
@@ -1798,12 +1804,13 @@ mod tests {
     }
 
     #[test]
-    fn test_scoot_aligns_a_west_hair_pin_to_the_right_of_the_widest_node_in_its_layer() {
+    fn test_align_hairpin_nodes_puts_a_west_hairpin_node_to_the_right_of_the_widest_node_in_its_layer()
+     {
         for pin_x in [10, 22, 40] {
             let (mut graph, wide, pin) =
-                layer_with_hair_pin_beside_data_nodes(NodeSide::West, pin_x);
+                layer_with_hairpin_node_beside_data_nodes(NodeSide::West, pin_x);
 
-            scoot_hair_pins(&mut graph);
+            align_hairpin_nodes_beside_layer(&mut graph);
 
             let origin = WorldPos::new(0, 0);
             assert_eq!(
@@ -1815,11 +1822,11 @@ mod tests {
     }
 
     #[test]
-    fn test_scoot_leaves_a_hair_pin_in_a_layer_without_data_nodes() {
-        let (mut graph, _, pin) = layer_with_hair_pin_beside_data_nodes(NodeSide::East, 40);
+    fn test_align_hairpin_nodes_leaves_a_hairpin_node_in_a_layer_without_data_nodes() {
+        let (mut graph, _, pin) = layer_with_hairpin_node_beside_data_nodes(NodeSide::East, 40);
         graph[pin].layer = Some(7);
 
-        scoot_hair_pins(&mut graph);
+        align_hairpin_nodes_beside_layer(&mut graph);
 
         assert_eq!(graph[pin].pos.x, 40);
     }

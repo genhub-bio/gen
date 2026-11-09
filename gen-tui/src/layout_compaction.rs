@@ -203,12 +203,12 @@ struct AxisSolution {
 }
 
 /// Transforms an incoming free-space gap into the gap to enforce.
-pub(crate) type GapSizer = fn(u64) -> u64;
+pub(crate) type GapTransform = fn(u64) -> u64;
 
 /// The least vertical distance routing nodes keep from each other and from data nodes, however far
 /// apart the layout placed them: the minimal zoom level's policy, which curved edges reuse at every
 /// zoom level.
-pub const MINIMUM_ROUTING_GAP_Y: GapSizer = |_| 0;
+pub const MINIMUM_ROUTING_GAP_Y: GapTransform = |_| 0;
 
 /// How to place Y segments after satisfying the routed drawing's constraints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,12 +227,12 @@ pub(crate) enum VerticalPlacement {
 /// or wire obstacles. Wormhole nodes count as data nodes for policy selection.
 #[derive(Clone, Copy)]
 pub struct GapPolicy {
-    pub data_data_x: GapSizer,
-    pub data_data_y: GapSizer,
-    pub data_routing_x: GapSizer,
-    pub data_routing_y: GapSizer,
-    pub routing_routing_x: GapSizer,
-    pub routing_routing_y: GapSizer,
+    pub data_data_x: GapTransform,
+    pub data_data_y: GapTransform,
+    pub data_routing_x: GapTransform,
+    pub data_routing_y: GapTransform,
+    pub routing_routing_x: GapTransform,
+    pub routing_routing_y: GapTransform,
 }
 
 impl Default for GapPolicy {
@@ -249,7 +249,7 @@ impl Default for GapPolicy {
 }
 
 impl GapPolicy {
-    fn between(&self, axis: Axis, a_is_data: bool, b_is_data: bool) -> GapSizer {
+    fn between(&self, axis: Axis, a_is_data: bool, b_is_data: bool) -> GapTransform {
         match (axis, a_is_data && b_is_data, a_is_data || b_is_data) {
             (Axis::X, true, _) => self.data_data_x,
             (Axis::X, false, true) => self.data_routing_x,
@@ -262,8 +262,8 @@ impl GapPolicy {
 }
 
 /// Attachment-point minimum for an ordered obstacle pair.
-fn transform_distance(
-    gap_sizer: GapSizer,
+fn required_distance(
+    gap_transform: GapTransform,
     lower_incoming_pos: i64,
     upper_incoming_pos: i64,
     base: i64,
@@ -276,22 +276,22 @@ fn transform_distance(
     } else {
         0
     };
-    let transformed_gap = gap_sizer(suggested_gap);
+    let transformed_gap = gap_transform(suggested_gap);
     let transformed_gap =
         i64::try_from(transformed_gap).expect("should fit transformed gap in layout coordinates");
     base.checked_add(transformed_gap)
         .expect("should fit constraint distance in layout coordinates")
 }
 
-/// Tight placement uses minimum Y gaps and packs toward `vertical_anchor`.
+/// Tight placement uses minimum Y gaps and packs toward `first_aligned_node`.
 ///
 /// A curved `layout_mode` has no routed channels to give layers room, so compaction keeps each
 /// layer a rigid column and spaces columns by the slope of the edges between them.
 pub(crate) fn compact_layout_with_vertical_placement(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     vertical_placement: VerticalPlacement,
-    vertical_anchor: Option<NodeIndex>,
+    first_aligned_node: Option<NodeIndex>,
     layout_mode: LayoutMode,
 ) {
     const MAX_ROUNDS: usize = 4;
@@ -304,15 +304,15 @@ pub(crate) fn compact_layout_with_vertical_placement(
         .collect();
     let mut previous: Option<Vec<(i64, i64)>> = None;
     for _ in 0..MAX_ROUNDS {
-        compact_x(graph, gaps, &incoming_positions, layout_mode);
+        compact_x(graph, gap_policy, &incoming_positions, layout_mode);
         if let Some(solution) = solve_axis(
             graph,
             Axis::Y,
-            gaps,
+            gap_policy,
             &incoming_positions,
             vertical_placement == VerticalPlacement::Balanced,
             if vertical_placement == VerticalPlacement::Tight {
-                vertical_anchor
+                first_aligned_node
             } else {
                 None
             },
@@ -330,19 +330,19 @@ pub(crate) fn compact_layout_with_vertical_placement(
         }
         previous = Some(current);
     }
-    snap_wormholes_to_neighbor(graph, gaps, &incoming_positions);
+    snap_wormholes_to_neighbor(graph, gap_policy, &incoming_positions);
 }
 
 fn compact_x(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
     layout_mode: LayoutMode,
 ) {
     if let Some(solution) = solve_axis(
         graph,
         Axis::X,
-        gaps,
+        gap_policy,
         incoming_positions,
         true,
         None,
@@ -359,10 +359,10 @@ fn compact_x(
 fn solve_axis(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     axis: Axis,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
     preserve_incoming_y_gaps: bool,
-    vertical_anchor: Option<NodeIndex>,
+    first_aligned_node: Option<NodeIndex>,
     layout_mode: LayoutMode,
 ) -> Option<AxisSolution> {
     let nodes: Vec<NodeIndex> = graph.node_indices().collect();
@@ -387,7 +387,7 @@ fn solve_axis(
     }
     if axis == Axis::Y {
         for (dense, &index) in nodes.iter().enumerate() {
-            if let Some(anchor) = graph[index].padding_anchor {
+            if let Some(anchor) = graph[index].side_port_anchor {
                 union_find.union(dense, dense_of[&anchor]);
             }
         }
@@ -471,7 +471,8 @@ fn solve_axis(
         }
     }
 
-    let mut constraints = collision_constraints(&obstacles, axis, gaps, preserve_incoming_y_gaps);
+    let mut constraints =
+        collision_constraints(&obstacles, axis, gap_policy, preserve_incoming_y_gaps);
 
     // A tethered node stays exactly its row offset from its anchor, not just at least a minimum
     // away: placement would otherwise float it anywhere in its slack.
@@ -496,7 +497,7 @@ fn solve_axis(
     if curved_columns {
         for &index in &nodes {
             let port = &graph[index];
-            let Some(anchor) = port.padding_anchor else {
+            let Some(anchor) = port.side_port_anchor else {
                 continue;
             };
             let core_segment = seg_of[&anchor];
@@ -504,12 +505,12 @@ fn solve_axis(
             constraints.push(Constraint {
                 from: core_segment,
                 to: port_segment,
-                gap: port.padding_offset,
+                gap: port.side_port_offset,
             });
             constraints.push(Constraint {
                 from: port_segment,
                 to: core_segment,
-                gap: -port.padding_offset,
+                gap: -port.side_port_offset,
             });
         }
     }
@@ -535,7 +536,7 @@ fn solve_axis(
             continue;
         }
         let gap = if curved_columns {
-            curved_column_gap(graph, gaps, incoming_positions, (lower, upper))
+            curved_column_gap(graph, gap_policy, incoming_positions, (lower, upper))
         } else {
             0
         };
@@ -549,14 +550,18 @@ fn solve_axis(
     match compact_axis_with_centering(0..segments.len(), &constraints) {
         Ok(mut placement) => {
             if axis == Axis::Y && !preserve_incoming_y_gaps {
-                let anchor_segment = vertical_anchor
+                let anchor_segment = first_aligned_node
                     .and_then(|node_index| seg_of.get(&node_index).copied())
                     .unwrap_or_else(|| {
                         let mut segment_order: Vec<_> = (0..segments.len()).collect();
                         segment_order.sort_by_key(|segment| placement.centered[segment]);
                         segment_order[segment_order.len() / 2]
                     });
-                pack_toward_anchor(&mut placement.centered, &constraints, anchor_segment);
+                pack_toward_first_aligned_node(
+                    &mut placement.centered,
+                    &constraints,
+                    anchor_segment,
+                );
             }
             Some(AxisSolution { seg_of, placement })
         }
@@ -571,15 +576,15 @@ fn solve_axis(
 /// zoom level's gap between the pair, widened so the edge's drop fits its horizontal run.
 fn curved_column_gap(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
     (lower, upper): (NodeIndex, NodeIndex),
 ) -> i64 {
     let is_data =
         |node: &LayoutNode| matches!(node.role, NodeRole::Data(_) | NodeRole::Wormhole(_));
     let (left, right) = (&graph[lower], &graph[upper]);
-    let policy = transform_distance(
-        gaps.between(Axis::X, is_data(left), is_data(right)),
+    let policy = required_distance(
+        gap_policy.between(Axis::X, is_data(left), is_data(right)),
         incoming_positions[&lower].0,
         incoming_positions[&upper].0,
         base_step(Axis::X.size(left), Axis::X.size(right)),
@@ -605,13 +610,13 @@ fn hairpin_run(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     (lower, upper): (NodeIndex, NodeIndex),
 ) -> i64 {
-    let east_port_loops = graph[lower].padding_offset > 0
+    let east_port_loops = graph[lower].side_port_offset > 0
         && graph[lower]
-            .padding_anchor
+            .side_port_anchor
             .is_some_and(|anchor| graph[anchor].hairpin_east);
-    let west_port_loops = graph[upper].padding_offset < 0
+    let west_port_loops = graph[upper].side_port_offset < 0
         && graph[upper]
-            .padding_anchor
+            .side_port_anchor
             .is_some_and(|anchor| graph[anchor].hairpin_west);
     (i64::from(east_port_loops) + i64::from(west_port_loops)) * HAIRPIN_ARC_RESERVED_CELLS
 }
@@ -659,7 +664,7 @@ fn loopback_run(
 
 /// Move each segment inward without crossing an ordered obstacle. Processing the nearest
 /// segments first lets movement on either side propagate toward the outside of the graph.
-fn pack_toward_anchor(
+fn pack_toward_first_aligned_node(
     positions: &mut HashMap<usize, i64>,
     constraints: &[Constraint],
     anchor_segment: usize,
@@ -739,7 +744,7 @@ fn overlap_groups<T>(items: &[T], perp: impl Fn(&T) -> Interval) -> Vec<Vec<usiz
 fn collision_constraints(
     obstacles: &[Obstacle],
     axis: Axis,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     preserve_incoming_y_gaps: bool,
 ) -> Vec<Constraint> {
     let mut constraints = Vec::new();
@@ -762,7 +767,7 @@ fn collision_constraints(
                 if a.perp.start > b.perp.end || b.perp.start > a.perp.end {
                     continue;
                 }
-                let gap = constraint_distance(gaps, axis, a, b, preserve_incoming_y_gaps);
+                let gap = constraint_distance(gap_policy, axis, a, b, preserve_incoming_y_gaps);
                 constraints.push(Constraint {
                     from: a.seg_id,
                     to: b.seg_id,
@@ -775,15 +780,15 @@ fn collision_constraints(
 }
 
 fn constraint_distance(
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     axis: Axis,
     lower: &Obstacle,
     upper: &Obstacle,
     preserve_incoming_y_gaps: bool,
 ) -> i64 {
-    let gap_sizer = gaps.between(axis, lower.is_data, upper.is_data);
-    transform_distance(
-        gap_sizer,
+    let gap_transform = gap_policy.between(axis, lower.is_data, upper.is_data);
+    required_distance(
+        gap_transform,
         lower.incoming_axis_pos,
         upper.incoming_axis_pos,
         base_step(lower.axis_size, upper.axis_size) + lower.center_offset - upper.center_offset,
@@ -794,7 +799,7 @@ fn constraint_distance(
 /// Snap each degree-one wormhole beside its boundary after shared compaction settles.
 fn snap_wormholes_to_neighbor(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapPolicy,
+    gap_policy: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
 ) {
     let wormhole_indices: Vec<NodeIndex> = graph
@@ -805,8 +810,8 @@ fn snap_wormholes_to_neighbor(
         let Some(neighbor_index) = graph.neighbors(wormhole_index).next() else {
             continue;
         };
-        let distance = transform_distance(
-            gaps.data_routing_x,
+        let distance = required_distance(
+            gap_policy.data_routing_x,
             incoming_positions[&wormhole_index].0,
             incoming_positions[&neighbor_index].0,
             base_step(
@@ -901,11 +906,11 @@ mod tests {
     /// remain the baseline for gap transforms, and data layers are re-snapped after each X solve.
     fn compact_layout(
         graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-        gaps: &GapPolicy,
+        gap_policy: &GapPolicy,
     ) {
         compact_layout_with_vertical_placement(
             graph,
-            gaps,
+            gap_policy,
             VerticalPlacement::Balanced,
             None,
             LayoutMode::Rectilinear,
@@ -928,8 +933,8 @@ mod tests {
         }
         let mut port = |anchor: NodeIndex, x: i64, offset: i64| {
             let mut node = LayoutNode::new(NodeRole::Routing, LocalPos::new_xy(x, 0), (1, 1), None);
-            node.padding_anchor = Some(anchor);
-            node.padding_offset = offset;
+            node.side_port_anchor = Some(anchor);
+            node.side_port_offset = offset;
             graph.add_node(node)
         };
         let east_port = port(first, 3, 3);
@@ -1021,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_iterative_rounds_reuse_the_incoming_baseline() {
-        let gaps = GapPolicy {
+        let gap_policy = GapPolicy {
             data_data_x: |gap| gap.saturating_mul(2),
             ..GapPolicy::default()
         };
@@ -1030,14 +1035,14 @@ mod tests {
         let right = graph.add_node(data_node(1, 10, 0, (3, 1), Some(1)));
         graph.add_edge(left, right, edge(0, 1));
 
-        compact_layout(&mut graph, &gaps);
+        compact_layout(&mut graph, &gap_policy);
 
         assert_eq!(graph[left].pos.x.abs_diff(graph[right].pos.x), 17);
     }
 
     #[test]
     fn test_tight_vertical_placement_packs_both_sides_of_anchor() {
-        let gaps = GapPolicy {
+        let gap_policy = GapPolicy {
             data_data_y: |gap| gap.max(3),
             ..GapPolicy::default()
         };
@@ -1049,14 +1054,14 @@ mod tests {
 
         compact_layout_with_vertical_placement(
             &mut balanced,
-            &gaps,
+            &gap_policy,
             VerticalPlacement::Balanced,
             None,
             LayoutMode::Rectilinear,
         );
         compact_layout_with_vertical_placement(
             &mut tight,
-            &gaps,
+            &gap_policy,
             VerticalPlacement::Tight,
             Some(middle),
             LayoutMode::Rectilinear,
@@ -1076,7 +1081,7 @@ mod tests {
 
     #[test]
     fn test_unconnected_wormhole_counts_as_data_for_gap_policy() {
-        let gaps = GapPolicy {
+        let gap_policy = GapPolicy {
             data_data_x: |_| 2,
             data_routing_x: |_| 0,
             routing_routing_x: |_| 0,
@@ -1091,14 +1096,14 @@ mod tests {
             None,
         ));
 
-        compact_layout(&mut graph, &gaps);
+        compact_layout(&mut graph, &gap_policy);
 
         assert_eq!(graph[boundary].pos.x.abs_diff(graph[wormhole].pos.x), 3);
     }
 
     #[test]
     fn test_connected_wormhole_stays_within_data_routing_x_of_routing_neighbor() {
-        let gaps = GapPolicy {
+        let gap_policy = GapPolicy {
             data_routing_x: |_| 1,
             routing_routing_x: |gap| gap,
             ..GapPolicy::default()
@@ -1118,7 +1123,7 @@ mod tests {
         graph.add_edge(neighbor, vertical_anchor, edge(0, 1));
         graph.add_edge(left_anchor, vertical_anchor, edge(0, 1));
 
-        compact_layout(&mut graph, &gaps);
+        compact_layout(&mut graph, &gap_policy);
 
         assert_eq!(graph[wormhole].pos.x.abs_diff(graph[neighbor].pos.x), 2);
     }

@@ -135,8 +135,8 @@ pub struct GenGraphController {
     aligned_path: AlignedPath,
     /// Whether opened block groups align their current path on y = 0 (default).
     align_current_path: bool,
-    /// Whether the curved layout mode can be shown; see [`Self::set_curved_edges_available`].
-    curved_edges_available: bool,
+    /// Whether the curved layout mode can be shown; see [`Self::set_curved_layout_available`].
+    curved_layout_available: bool,
     /// Where the position scale of the aligned path is drawn; see [`PathScale`].
     scale_placement: ScalePlacement,
     /// Where annotations start and end on each loaded node, for the `w`/`b`/`e` keys. Rebuilt with the
@@ -156,7 +156,7 @@ pub struct GenGraphController {
     /// The batch the annotation groups were last loaded for. A batch is already the
     /// deliberately-constrained local window, so a reload is only needed when it changes (not
     /// on every pan/zoom within the same batch).
-    annotation_groups_world: Option<BatchId>,
+    annotation_groups_batch: Option<BatchId>,
     /// Paths the `p` key can highlight; the last one is used.
     paths: Vec<PathMembership>,
     /// Annotation, path and search overlays currently loaded, ready for highlight and label
@@ -208,13 +208,13 @@ impl Clone for GenGraphController {
             node_annotations,
             aligned_path,
             align_current_path: self.align_current_path,
-            curved_edges_available: self.curved_edges_available,
+            curved_layout_available: self.curved_layout_available,
             scale_placement: self.scale_placement,
             annotation_starts: self.annotation_starts.clone(),
             focus_offset: self.focus_offset,
             block_group: self.block_group.clone(),
             annotation_group_entries: self.annotation_group_entries.clone(),
-            annotation_groups_world: self.annotation_groups_world,
+            annotation_groups_batch: self.annotation_groups_batch,
             paths: self.paths.clone(),
             overlays: self.overlays.clone(),
             annotation_colors: self.annotation_colors.clone(),
@@ -262,13 +262,13 @@ impl GenGraphController {
             node_annotations,
             aligned_path,
             align_current_path: true,
-            curved_edges_available: true,
+            curved_layout_available: true,
             scale_placement: ScalePlacement::default(),
             annotation_starts: AnnotationStarts::default(),
             focus_offset: None,
             block_group: None,
             annotation_group_entries: Vec::new(),
-            annotation_groups_world: None,
+            annotation_groups_batch: None,
             paths: Vec::new(),
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
@@ -316,23 +316,23 @@ impl GenGraphController {
     /// Whether the curved layout mode can be shown. Curved edges are overlay primitives that
     /// need pixels: a terminal shows them through the Kitty graphics protocol and a PNG export
     /// always can, but a plot kept in the scrollback has neither. Defaults to true.
-    pub fn set_curved_edges_available(&mut self, available: bool) {
-        self.curved_edges_available = available;
+    pub fn set_curved_layout_available(&mut self, available: bool) {
+        self.curved_layout_available = available;
         if !available && self.view_state.layout_mode.is_curved() {
             self.view_state.layout_mode = LayoutMode::Rectilinear;
         }
     }
 
-    /// Whether the curved layout mode can be shown; see [`Self::set_curved_edges_available`].
-    pub fn curved_edges_available(&self) -> bool {
-        self.curved_edges_available
+    /// Whether the curved layout mode can be shown; see [`Self::set_curved_layout_available`].
+    pub fn curved_layout_available(&self) -> bool {
+        self.curved_layout_available
     }
 
     /// Switch between rectilinear and curved edges. Returns false, changing nothing, when the
     /// curved layout mode is not available.
-    pub fn toggle_curved_edges(&mut self) -> bool {
+    pub fn toggle_layout_mode(&mut self) -> bool {
         self.view_state.layout_mode = match self.view_state.layout_mode {
-            LayoutMode::Rectilinear if self.curved_edges_available => LayoutMode::Curved,
+            LayoutMode::Rectilinear if self.curved_layout_available => LayoutMode::Curved,
             LayoutMode::Rectilinear => return false,
             LayoutMode::Curved => LayoutMode::Rectilinear,
         };
@@ -401,7 +401,7 @@ impl GenGraphController {
                     .map_or(last_graph_row, |(_, row)| row);
                 let lowest_content_row = lowest_node_row
                     .max(lowest_buffer_row(buf, graph_area))
-                    .max(self.lowest_overlay_row(graph_area));
+                    .max(self.lowest_overlay_primitive_row(graph_area));
                 lowest_content_row.min(last_graph_row) + SCALE_CONTENT_GAP + 1
             }
         }
@@ -409,7 +409,7 @@ impl GenGraphController {
 
     /// The lowest terminal row of `graph_area` that an overlay primitive reaches
     /// (control points included, so a loop is never cut short), or the top row without any.
-    fn lowest_overlay_row(&self, graph_area: Rect) -> u16 {
+    fn lowest_overlay_primitive_row(&self, graph_area: Rect) -> u16 {
         let last_row = f64::from(graph_area.y + graph_area.height - 1);
         self.view_state
             .overlay_primitives
@@ -468,7 +468,7 @@ impl GenGraphController {
         self.annotation_group_entries =
             load_annotation_group_entries(self.database.connection()?, &block_group, history_ref);
         self.block_group = Some(block_group);
-        self.annotation_groups_world = None;
+        self.annotation_groups_batch = None;
         self.paths.clear();
         self.overlays.clear();
         self.node_annotations.replace(HashMap::new());
@@ -489,7 +489,7 @@ impl GenGraphController {
     /// are loaded again on the next sync.
     pub fn set_annotation_color_overrides(&mut self, overrides: HashMap<HashId, Option<Color>>) {
         self.annotation_color_overrides = overrides;
-        self.annotation_groups_world = None;
+        self.annotation_groups_batch = None;
     }
 
     /// The open block group's annotation groups, whether or not they are switched on.
@@ -503,7 +503,7 @@ impl GenGraphController {
     pub fn set_annotation_group_enabled(&mut self, group_id: &str, enabled: bool) {
         if enabled {
             if self.disabled_annotation_groups.remove(group_id) {
-                self.annotation_groups_world = None;
+                self.annotation_groups_batch = None;
             }
         } else if self.disabled_annotation_groups.insert(group_id.to_string()) {
             remove_track_overlays(&mut self.overlays, &group_track_key(group_id));
@@ -868,7 +868,7 @@ impl GenGraphController {
                 }
             }
             KeyCode::Char('s') => {
-                if self.toggle_curved_edges() {
+                if self.toggle_layout_mode() {
                     GraphKeyOutcome::Redraw
                 } else {
                     GraphKeyOutcome::Ignore
@@ -949,7 +949,7 @@ impl GenGraphController {
             .is_some_and(|inputs| inputs != OverlayInputs::current(&self.engine, &self.view_state));
         let changed = dimming_changed || overlays_stale;
         let current_world = self.engine.active_batch();
-        if self.block_group.is_none() || current_world == self.annotation_groups_world {
+        if self.block_group.is_none() || current_world == self.annotation_groups_batch {
             return WorldSync {
                 changed,
                 group_reload: None,
@@ -963,7 +963,7 @@ impl GenGraphController {
             };
         }
         let group_reload = self.load_annotation_groups(&node_ids);
-        self.annotation_groups_world = current_world;
+        self.annotation_groups_batch = current_world;
         self.overlays_dirty = true;
         WorldSync {
             changed: true,
@@ -2158,7 +2158,7 @@ mod tests {
             for _ in 0..400 {
                 render_text(&mut controller, 40, 12);
                 let view_state = controller.view_state();
-                door_cell = view_state.wormhole.iter().find_map(|(rect, _, _)| {
+                door_cell = view_state.wormhole_stubs.iter().find_map(|(rect, _, _)| {
                     let center = rect.center();
                     view_state.screen_to_terminal(center.x, center.y)
                 });

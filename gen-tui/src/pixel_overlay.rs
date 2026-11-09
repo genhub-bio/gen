@@ -1193,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deferred_straight_segments_are_not_dropped() {
+    fn test_overlay_straight_segments_are_not_dropped() {
         let edge = OverlayPrimitive::Line(crate::curved::StraightSegment {
             from: (1.0, 1.0),
             to: (8.0, 1.0),

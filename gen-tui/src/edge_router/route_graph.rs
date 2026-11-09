@@ -10,10 +10,10 @@ use petgraph::{
 };
 
 use super::{
-    LayoutError,
+    RoutingError,
     center_doglegs::center_doglegs,
     layout_graph_process::{BundledLeg, BundledLegEdges, simplify_graph},
-    route_layer::layout_layer,
+    route_layer::route_layer,
 };
 use crate::{
     geometry::LocalPos,
@@ -22,7 +22,7 @@ use crate::{
 
 pub(crate) fn make_rectilinear(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
-) -> Result<(), LayoutError> {
+) -> Result<(), RoutingError> {
     info!(
         "layout_graph: Starting with {} nodes, {} edges",
         graph.node_count(),
@@ -87,7 +87,7 @@ pub(crate) fn make_rectilinear(
         let all_right_indices = node_indices_by_layer.get(x_right).unwrap();
 
         // A boundary node with no edge inside this layer pair contributes nothing to the pair's
-        // routing, yet `layout_layer` still emits a stray routing stub off it. When that node is
+        // routing, yet `route_layer` still emits a stray routing stub off it. When that node is
         // a pin, the stub gives it a second neighbor, so `prune_pin_stubs` reads the pin as a
         // load-bearing corner and leaves the stub in the render. Route only the nodes
         // that participate in an edge here; a skipped node still appears in its other adjacent
@@ -116,7 +116,7 @@ pub(crate) fn make_rectilinear(
             continue;
         }
 
-        // Create mappings from NodeIndex to array index for layout_layer
+        // Create mappings from NodeIndex to array index for route_layer
         let left_idx_to_array_idx: HashMap<NodeIndex, usize> = left_node_indices
             .iter()
             .enumerate()
@@ -144,7 +144,7 @@ pub(crate) fn make_rectilinear(
                         (edge.bundle.clone(), edge.is_pin_span)
                     };
 
-                // Convert from NodeIndex to array indices for layout_layer
+                // Convert from NodeIndex to array indices for route_layer
                 let left_array_idx = *left_idx_to_array_idx.get(node_index1).unwrap();
                 let right_array_idx = *right_idx_to_array_idx.get(node_index2).unwrap();
 
@@ -158,7 +158,7 @@ pub(crate) fn make_rectilinear(
             })
             .collect();
 
-        // Separate edges and bundles for passing to layout_layer
+        // Separate edges and bundles for passing to route_layer
         let edges: Vec<(NodeIndex, NodeIndex)> =
             edges_with_bundles.iter().map(|(e, _)| *e).collect();
         let edge_bundles: BundledLegEdges = edges_with_bundles.into_iter().collect();
@@ -231,7 +231,7 @@ pub(crate) fn make_rectilinear(
             );
 
             // Rectilinear edge routing to replace the original edges
-            let mut layer_graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)?;
+            let mut layer_graph = route_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)?;
             // Label the rectilinear edges with a reference to original edge(s) they represent
             make_bundles(&mut layer_graph, graph)?;
             center_doglegs(&mut layer_graph)?;
@@ -400,7 +400,7 @@ pub(crate) fn make_rectilinear(
 fn make_bundles(
     layer_graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>,
     original_graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>,
-) -> Result<(), LayoutError> {
+) -> Result<(), RoutingError> {
     // Find all original (non-routing) nodes in this layer
     let original_nodes: Vec<NodeIndex> = layer_graph
         .node_indices()
@@ -640,7 +640,7 @@ mod tests {
     }
 
     /// A wormhole door collapsing several off-window neighbors (see
-    /// `crawl::neighborhood`'s external-edge collapsing) carries every one of them on its
+    /// `crawl::neighborhood`'s wormhole-door collapsing) carries every one of them on its
     /// edge's bundle from crawl time onward - `make_rectilinear` must not lose any of them.
     #[test]
     fn test_make_rectilinear_keeps_a_wormhole_edges_full_bundle() {
