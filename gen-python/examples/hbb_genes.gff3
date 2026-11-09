@@ -1,0 +1,9 @@
+##gff-version 3
+chr11_5224001_5230000	ensembl_havana	gene	1464	5395	.	-	.	Name=HBB
+chr11_5224001_5230000	ensembl_havana	mRNA	1464	3071	.	-	.	Name=HBB-201
+chr11_5224001_5230000	ensembl_havana	exon	2930	3071	.	-	.	Name=HBB exon 1
+chr11_5224001_5230000	ensembl_havana	exon	2577	2799	.	-	.	Name=HBB exon 2
+chr11_5224001_5230000	ensembl_havana	exon	1464	1726	.	-	.	Name=HBB exon 3
+chr11_5224001_5230000	ensembl_havana	CDS	2930	3021	.	-	0	Name=HBB coding sequence
+chr11_5224001_5230000	ensembl_havana	CDS	2577	2799	.	-	1	Name=HBB coding sequence
+chr11_5224001_5230000	ensembl_havana	CDS	1598	1726	.	-	0	Name=HBB coding sequence

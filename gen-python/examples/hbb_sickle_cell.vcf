@@ -1,0 +1,5 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr11_5224001_5230000,length=6000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	sickle_cell	sickle_trait
+chr11_5224001_5230000	3002	rs334	T	A	.	PASS	.	GT	1/1	0/1
