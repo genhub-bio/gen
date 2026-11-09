@@ -1,6 +1,8 @@
 //! Global layout compaction for layout graphs.
 //!
-//! Rebuilds routed coordinates with size-aware separation constraints.
+//! Rebuilds routed coordinates with size-aware separation constraints. This module derives
+//! the constraints from a positioned layout graph; the axis-independent solver that
+//! satisfies them lives in [`crate::compaction`].
 //!
 //! Aligned nodes move as rigid segments. Tight Y placement packs them toward a chosen path.
 
@@ -18,7 +20,7 @@ use crate::{
         AxisPlacement, Constraint, compact_axis_with_centering, constraints_are_satisfied,
     },
     curved::{
-        EdgeStyle, HAIRPIN_ARC_RESERVED_CELLS, LoopbackNeighbors, loopback_neighbors,
+        HAIRPIN_ARC_RESERVED_CELLS, LayoutMode, LoopbackNeighbors, loopback_neighbors,
         loopback_reach,
     },
     layout::{LayoutEdge, LayoutNode, NodeRole},
@@ -217,14 +219,14 @@ pub(crate) enum VerticalPlacement {
     Tight,
 }
 
-/// Gap transforms for both axes, split by the kinds of obstacle in a pair.
+/// Gap policy for both axes, split by the kinds of obstacle in a pair.
 ///
-/// Each function receives the pair's incoming free-space gap, captured before iterative
-/// compaction, and returns the gap to enforce. `data_data_x`/`data_data_y` cover pairs of
+/// Each field is a function that transforms a pair's incoming free-space gap, captured
+/// before iterative compaction, into the required gap to enforce. `data_data_x`/`data_data_y` cover pairs of
 /// data nodes; `data_routing_*`/`routing_routing_*` cover pairs touching routing, pin,
 /// or wire obstacles. Wormhole nodes count as data nodes for policy selection.
 #[derive(Clone, Copy)]
-pub struct GapSizes {
+pub struct GapPolicy {
     pub data_data_x: GapSizer,
     pub data_data_y: GapSizer,
     pub data_routing_x: GapSizer,
@@ -233,7 +235,7 @@ pub struct GapSizes {
     pub routing_routing_y: GapSizer,
 }
 
-impl Default for GapSizes {
+impl Default for GapPolicy {
     fn default() -> Self {
         Self {
             data_data_x: |_| 1,
@@ -246,7 +248,7 @@ impl Default for GapSizes {
     }
 }
 
-impl GapSizes {
+impl GapPolicy {
     fn between(&self, axis: Axis, a_is_data: bool, b_is_data: bool) -> GapSizer {
         match (axis, a_is_data && b_is_data, a_is_data || b_is_data) {
             (Axis::X, true, _) => self.data_data_x,
@@ -287,27 +289,27 @@ fn transform_distance(
 /// remain the baseline for gap transforms, and data layers are re-snapped after each X solve.
 pub fn compact_layout(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
 ) {
     compact_layout_with_vertical_placement(
         graph,
         gaps,
         VerticalPlacement::Balanced,
         None,
-        EdgeStyle::Rectilinear,
+        LayoutMode::Rectilinear,
     );
 }
 
 /// Tight placement uses minimum Y gaps and packs toward `vertical_anchor`.
 ///
-/// A curved `edge_style` has no routed channels to give layers room, so compaction keeps each
+/// A curved `layout_mode` has no routed channels to give layers room, so compaction keeps each
 /// layer a rigid column and spaces columns by the slope of the edges between them.
 pub(crate) fn compact_layout_with_vertical_placement(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     vertical_placement: VerticalPlacement,
     vertical_anchor: Option<NodeIndex>,
-    edge_style: EdgeStyle,
+    layout_mode: LayoutMode,
 ) {
     const MAX_ROUNDS: usize = 4;
     let incoming_positions: HashMap<NodeIndex, (i64, i64)> = graph
@@ -319,7 +321,7 @@ pub(crate) fn compact_layout_with_vertical_placement(
         .collect();
     let mut previous: Option<Vec<(i64, i64)>> = None;
     for _ in 0..MAX_ROUNDS {
-        compact_x(graph, gaps, &incoming_positions, edge_style);
+        compact_x(graph, gaps, &incoming_positions, layout_mode);
         if let Some(solution) = solve_axis(
             graph,
             Axis::Y,
@@ -331,7 +333,7 @@ pub(crate) fn compact_layout_with_vertical_placement(
             } else {
                 None
             },
-            edge_style,
+            layout_mode,
         ) {
             apply_axis(graph, Axis::Y, &solution);
         }
@@ -347,9 +349,9 @@ pub(crate) fn compact_layout_with_vertical_placement(
 
 fn compact_x(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
-    edge_style: EdgeStyle,
+    layout_mode: LayoutMode,
 ) {
     if let Some(solution) = solve_axis(
         graph,
@@ -358,7 +360,7 @@ fn compact_x(
         incoming_positions,
         true,
         None,
-        edge_style,
+        layout_mode,
     ) {
         apply_axis(graph, Axis::X, &solution);
         snap_layers_to_anchor_columns(graph, &solution);
@@ -371,11 +373,11 @@ fn compact_x(
 fn solve_axis(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     axis: Axis,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
     preserve_incoming_y_gaps: bool,
     vertical_anchor: Option<NodeIndex>,
-    edge_style: EdgeStyle,
+    layout_mode: LayoutMode,
 ) -> Option<AxisSolution> {
     let nodes: Vec<NodeIndex> = graph.node_indices().collect();
     if nodes.is_empty() {
@@ -405,7 +407,7 @@ fn solve_axis(
         }
     }
     // Without routing nodes to tie a layer together, keep its nodes in one column.
-    let curved_columns = edge_style.is_curved() && axis == Axis::X;
+    let curved_columns = layout_mode.is_curved() && axis == Axis::X;
     if curved_columns {
         let mut first_in_column: HashMap<i64, usize> = HashMap::new();
         for (dense, &node_idx) in nodes.iter().enumerate() {
@@ -583,7 +585,7 @@ fn solve_axis(
 /// zoom level's gap between the pair, widened so the edge's drop fits its horizontal run.
 fn curved_column_gap(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
     (lower, upper): (NodeIndex, NodeIndex),
 ) -> i64 {
@@ -751,7 +753,7 @@ fn overlap_groups<T>(items: &[T], perp: impl Fn(&T) -> Interval) -> Vec<Vec<usiz
 fn collision_constraints(
     obstacles: &[Obstacle],
     axis: Axis,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     preserve_incoming_y_gaps: bool,
 ) -> Vec<Constraint> {
     let mut constraints = Vec::new();
@@ -787,7 +789,7 @@ fn collision_constraints(
 }
 
 fn constraint_distance(
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     axis: Axis,
     lower: &Obstacle,
     upper: &Obstacle,
@@ -806,7 +808,7 @@ fn constraint_distance(
 /// Snap each degree-one wormhole beside its boundary after shared compaction settles.
 fn snap_wormholes_to_neighbor(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
 ) {
     let wormhole_indices: Vec<NodeIndex> = graph
@@ -934,7 +936,7 @@ mod tests {
             .collect();
         curved_column_gap(
             &graph,
-            &GapSizes::default(),
+            &GapPolicy::default(),
             &incoming,
             (east_port, west_port),
         )
@@ -964,7 +966,7 @@ mod tests {
             align_layers(&mut graph, &HashSet::from([NodeIndex::new(0)]));
             assert_eq!(graph[lower].pos.y, 0);
             assert_eq!(graph[upper].pos.y, height as i64 + 1);
-            compact_layout(&mut graph, &GapSizes::default());
+            compact_layout(&mut graph, &GapPolicy::default());
             let lower_rect = graph[lower].rect(WorldPos::ZERO);
             let upper_rect = graph[upper].rect(WorldPos::ZERO);
             assert_eq!(lower_rect.max.y, graph[lower].pos.y);
@@ -981,7 +983,7 @@ mod tests {
         let left = graph.add_node(LayoutNode::routing(LocalPos::new_xy(-10, -10), (1, 1)));
         let right = graph.add_node(LayoutNode::routing(LocalPos::new_xy(10, -10), (1, 1)));
         graph.add_edge(left, right, edge(0, 1));
-        compact_layout(&mut graph, &GapSizes::default());
+        compact_layout(&mut graph, &GapPolicy::default());
         assert_eq!(graph[left].pos.y, graph[right].pos.y);
         assert!(graph[left].pos.y < graph[annotated].rect(WorldPos::ZERO).min.y);
     }
@@ -1015,9 +1017,9 @@ mod tests {
 
     #[test]
     fn iterative_rounds_reuse_the_incoming_baseline() {
-        let gaps = GapSizes {
+        let gaps = GapPolicy {
             data_data_x: |gap| gap.saturating_mul(2),
-            ..GapSizes::default()
+            ..GapPolicy::default()
         };
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
         let left = graph.add_node(data_node(0, 0, 0, (3, 1), Some(0)));
@@ -1031,9 +1033,9 @@ mod tests {
 
     #[test]
     fn test_tight_vertical_placement_packs_both_sides_of_anchor() {
-        let gaps = GapSizes {
+        let gaps = GapPolicy {
             data_data_y: |gap| gap.max(3),
-            ..GapSizes::default()
+            ..GapPolicy::default()
         };
         let mut balanced = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
         let first = balanced.add_node(data_node(0, 0, 0, (1, 1), Some(0)));
@@ -1046,14 +1048,14 @@ mod tests {
             &gaps,
             VerticalPlacement::Balanced,
             None,
-            EdgeStyle::Rectilinear,
+            LayoutMode::Rectilinear,
         );
         compact_layout_with_vertical_placement(
             &mut tight,
             &gaps,
             VerticalPlacement::Tight,
             Some(middle),
-            EdgeStyle::Rectilinear,
+            LayoutMode::Rectilinear,
         );
 
         assert_eq!(
@@ -1070,11 +1072,11 @@ mod tests {
 
     #[test]
     fn unconnected_wormhole_counts_as_data_for_gap_policy() {
-        let gaps = GapSizes {
+        let gaps = GapPolicy {
             data_data_x: |_| 2,
             data_routing_x: |_| 0,
             routing_routing_x: |_| 0,
-            ..GapSizes::default()
+            ..GapPolicy::default()
         };
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
         let boundary = graph.add_node(data_node(0, 0, 0, (1, 1), Some(0)));
@@ -1092,10 +1094,10 @@ mod tests {
 
     #[test]
     fn connected_wormhole_stays_within_data_routing_x_of_routing_neighbor() {
-        let gaps = GapSizes {
+        let gaps = GapPolicy {
             data_routing_x: |_| 1,
             routing_routing_x: |gap| gap,
-            ..GapSizes::default()
+            ..GapPolicy::default()
         };
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
         let wormhole = graph.add_node(LayoutNode::new(
@@ -1178,7 +1180,7 @@ mod tests {
         graph.add_edge(a, w, edge(1, 2));
         graph.add_edge(w, b, edge(2, 3));
 
-        compact_layout(&mut graph, &GapSizes::default());
+        compact_layout(&mut graph, &GapPolicy::default());
 
         assert_eq!(graph[a].pos.x, 0);
         assert_eq!(graph[w].pos.x, 12);
@@ -1215,7 +1217,7 @@ mod tests {
         graph.add_edge(n0, n1, edge(0, 1));
         graph.add_edge(n1, n2, edge(1, 2));
 
-        compact_layout(&mut graph, &GapSizes::default());
+        compact_layout(&mut graph, &GapPolicy::default());
 
         assert_eq!(graph[n0].pos.x, 0);
         assert_eq!(graph[n1].pos.x, 6);
@@ -1233,7 +1235,7 @@ mod tests {
         let bottom = graph.add_node(data_node(1, 0, 10, (1, 1), Some(0)));
         graph.add_edge(top, bottom, edge(0, 1));
 
-        compact_layout(&mut graph, &GapSizes::default());
+        compact_layout(&mut graph, &GapPolicy::default());
 
         assert_eq!(graph[top].pos.y, 0);
         assert_eq!(graph[bottom].pos.y, 2);
@@ -1255,7 +1257,7 @@ mod tests {
         let right = graph.add_node(data_node(3, 20, 2, (5, 1), Some(2)));
         graph.add_edge(left, right, edge(2, 3));
 
-        compact_layout(&mut graph, &GapSizes::default());
+        compact_layout(&mut graph, &GapPolicy::default());
 
         // The crossing column must stay strictly between the row nodes with
         // a one-cell clearance from each label: base_step(5,1)+1 = 4 from the
@@ -1397,10 +1399,10 @@ mod tests {
             let (mut graph, [anchor, pin, returning]) = loopback_graph(return_rows);
             compact_layout_with_vertical_placement(
                 &mut graph,
-                &GapSizes::default(),
+                &GapPolicy::default(),
                 VerticalPlacement::Balanced,
                 None,
-                EdgeStyle::Curved,
+                LayoutMode::Curved,
             );
             let height = (graph[anchor].pos.y - graph[returning].pos.y).abs();
             let anchor_border = graph[anchor].pos.x + halves(5).hi + 1;

@@ -1,3 +1,8 @@
+//! Builds `WindowGeometry` for a graph window and supplies the minimal single-glyph node
+//! renderer, plus the cursor styling helpers shared by the painters. Callers such as the
+//! painter, tests and exports use these to get positioned, compacted nodes without
+//! going through a full controller.
+
 use std::collections::HashSet;
 
 use petgraph::{graph::NodeIndex, visit::GraphBase};
@@ -5,10 +10,10 @@ use ratatui::style::Style;
 
 use crate::{
     assembly::AssembledLayout,
-    curved::EdgeStyle,
-    distribute_nodes::GapSizes,
+    curved::LayoutMode,
     geometry::{WorldPos, WorldRect},
     layout::{HAIR_PIN_SIZE, NodeRole, VerticalAnchor, WindowGeometry},
+    layout_compaction::GapPolicy,
     plotter::NodeRenderer,
     theme::Theme,
     viewport_state::WorldBuffer,
@@ -48,7 +53,7 @@ impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
 /// y = 0 (see `NodeRenderer::is_aligned`).
 pub fn build_window_geometry(
     assembled: AssembledLayout,
-    gaps: &GapSizes,
+    gaps: &GapPolicy,
     size_of: impl FnMut(&NodeRole) -> (u64, u64),
     is_visible: impl Fn(NodeIndex) -> bool,
     is_aligned: impl Fn(NodeIndex) -> bool,
@@ -56,7 +61,7 @@ pub fn build_window_geometry(
     build_window_geometry_with_anchors(
         assembled,
         gaps,
-        EdgeStyle::Rectilinear,
+        LayoutMode::Rectilinear,
         size_of,
         is_visible,
         is_aligned,
@@ -67,8 +72,8 @@ pub fn build_window_geometry(
 /// Build geometry with a per-node vertical attachment row, shared by layout and rendering.
 pub fn build_window_geometry_with_anchors(
     assembled: AssembledLayout,
-    gaps: &GapSizes,
-    edge_style: EdgeStyle,
+    gaps: &GapPolicy,
+    layout_mode: LayoutMode,
     mut size_of: impl FnMut(&NodeRole) -> (u64, u64),
     is_visible: impl Fn(NodeIndex) -> bool,
     is_aligned: impl Fn(NodeIndex) -> bool,
@@ -102,8 +107,8 @@ pub fn build_window_geometry_with_anchors(
         gaps,
         &junctions,
         &centered,
-        &assembled.pinned_edges,
-        edge_style,
+        &assembled.domain_edges,
+        layout_mode,
     )
 }
 
@@ -147,9 +152,9 @@ mod tests {
 
     use crate::{
         geometry::WorldPos,
-        graph_widget::{CURSOR_ARROW, style_cursor_cell},
         theme::current_theme,
         viewport_state::{ViewportState, WorldBuffer},
+        window_geometry::{CURSOR_ARROW, style_cursor_cell},
     };
 
     #[test]
@@ -184,7 +189,7 @@ mod tests {
         );
     }
 
-    mod window_geometry {
+    mod build_window_geometry {
         use std::collections::HashMap;
 
         use super::super::*;
@@ -229,8 +234,8 @@ mod tests {
             let graph = TestGraphs::domain_extended_diamond();
             let geometry = build_window_geometry_with_anchors(
                 assembled_window(&graph),
-                &GapSizes::default(),
-                EdgeStyle::Rectilinear,
+                &GapPolicy::default(),
+                LayoutMode::Rectilinear,
                 |role| match role {
                     NodeRole::Data(index) => (5, 2 + index.index() as u64 % 5),
                     _ => (1, 1),
@@ -269,7 +274,7 @@ mod tests {
 
             let geometry = build_window_geometry(
                 assembled,
-                &GapSizes::default(),
+                &GapPolicy::default(),
                 size_of,
                 |_| true,
                 |_| false,
@@ -293,7 +298,7 @@ mod tests {
 
             let geometry = build_window_geometry(
                 assembled,
-                &GapSizes::default(),
+                &GapPolicy::default(),
                 size_of,
                 |_| true,
                 |_| false,

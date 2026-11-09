@@ -1,14 +1,15 @@
-//! The curved edges of a graph rasterized at pixel resolution.
+//! The graphics that accompany a graph's character-cell buffer, rasterized at pixel resolution.
 //!
-//! A curved edge style leaves the edges out of the cell buffer and reports them as
-//! [`EdgeShape`]s. An [`EdgeLayer`] draws those shapes with antialiased strokes onto a
-//! transparent image laid over the buffer's cell grid, which a terminal can display through the
-//! Kitty graphics protocol (see `kitty_graphics`) and the PNG export composites onto its text.
+//! A curved layout mode leaves the edges out of the cell buffer and reports them, with arrows and
+//! glows, as [`OverlayPrimitive`]s. A [`PixelOverlay`] draws those primitives with antialiased
+//! strokes onto a transparent image laid over the buffer's cell grid, which a terminal can
+//! display through the Kitty graphics protocol (see `kitty_graphics`) and the PNG export
+//! composites onto its text.
 //!
-//! Both routes show the same picture because the layer is cut out of every cell that holds text
-//! or a node background. Edges attach at node borders, so the cut leaves them visible, and it
-//! means the layer can sit on top of the cells without anyone deciding which layer the nodes
-//! are on.
+//! Both routes show the same picture because the overlay is cut out of every cell that holds
+//! text or a node background. Edges attach at node borders, so the cut leaves them visible, and
+//! it means the overlay can sit on top of the cells without anyone deciding which layer the
+//! nodes are on.
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -24,10 +25,10 @@ use tiny_skia::{
 };
 
 use crate::{
-    curved::{ArrowMark, BezierCurve, EdgeShape, NodeGlow, SymbolGlow},
-    graph_widget::NODE_GLYPH,
+    curved::{ArrowMark, BezierCurve, NodeGlow, OverlayPrimitive, SymbolGlow},
     plotter::LineStyle,
-    png_export::{PngConfig, color_to_rgb},
+    png_export::{RasterConfig, color_to_rgb},
+    window_geometry::NODE_GLYPH,
 };
 
 // Rasterize beyond each band before cropping, so antialiasing at the clip edge cannot
@@ -62,7 +63,7 @@ fn band_reach(scale: f32) -> f32 {
     (EDGE_GLOW_REACH + 1.0) * scale
 }
 
-/// Opacity of the halo at `ring` pixels beyond the lit shape's edge (the ring's center is half
+/// Opacity of the halo at `ring` pixels beyond the lit primitive's edge (the ring's center is half
 /// a pixel further): `peak * exp(-d^2 / (2 * sigma^2))`, evaluated once per ring rather than per
 /// pixel.
 fn glow_opacity(peak: f32, ring: usize) -> f32 {
@@ -94,7 +95,7 @@ impl CellMask {
         }
     }
 
-    fn of(buffer: &Buffer, config: PngConfig) -> Self {
+    fn of(buffer: &Buffer, config: RasterConfig) -> Self {
         let occupied = buffer
             .content
             .iter()
@@ -130,36 +131,36 @@ impl CellMask {
 /// The most horizontal strips a full raster is split into, one thread each.
 const MAX_STRIPS: usize = 8;
 
-/// Fewer shapes than this are prepared on the calling thread, where spawning would cost more
+/// Fewer primitives than this are prepared on the calling thread, where spawning would cost more
 /// than it saves.
-const PARALLEL_PREPARE_SHAPES: usize = 256;
+const PARALLEL_PREPARE_PRIMITIVES: usize = 256;
 
-/// Edge shapes ready to rasterize over a buffer. The strokes are built on first use, so a caller
+/// Overlay primitives ready to rasterize over a buffer. The strokes are built on first use, so a caller
 /// can compare [`Self::digest`] with the previous frame's and skip the work entirely.
-pub struct EdgeLayer {
-    visible: Vec<EdgeShape>,
+pub struct PixelOverlay {
+    visible: Vec<OverlayPrimitive>,
     origin: (u16, u16),
-    paths: OnceLock<Vec<EdgePath>>,
+    paths: OnceLock<Vec<PixelOverlayPath>>,
     mask: CellMask,
-    config: PngConfig,
+    config: RasterConfig,
     digest: u64,
 }
 
-impl EdgeLayer {
-    /// Prepare `shapes`, in cells with `origin` as the top-left corner of the image, over
+impl PixelOverlay {
+    /// Prepare `overlay_primitives`, in cells with `origin` as the top-left corner of the image, over
     /// `buffer`. One cell of `config` is one cell of the buffer, so the image is
-    /// `buffer.area.width * config.cell_width` pixels wide. Shapes that cannot reach the
+    /// `buffer.area.width * config.cell_width` pixels wide. Primitives that cannot reach the
     /// buffer are dropped before any stroke is built: a window holds every placed edge, usually
     /// far more than the screen shows.
     pub fn new(
-        shapes: &[EdgeShape],
+        overlay_primitives: &[OverlayPrimitive],
         buffer: &Buffer,
         origin: (u16, u16),
-        config: PngConfig,
+        config: RasterConfig,
     ) -> Self {
-        let visible: Vec<EdgeShape> = shapes
+        let visible: Vec<OverlayPrimitive> = overlay_primitives
             .iter()
-            .filter(|shape| reaches_view(shape, origin, buffer.area))
+            .filter(|primitive| reaches_view(primitive, origin, buffer.area))
             .copied()
             .collect();
         let mask = CellMask::of(buffer, config);
@@ -169,8 +170,8 @@ impl EdgeLayer {
         config.background.hash(&mut hasher);
         mask.columns.hash(&mut hasher);
         mask.occupied.hash(&mut hasher);
-        for shape in &visible {
-            hash_shape(shape, &mut hasher);
+        for primitive in &visible {
+            hash_primitive(primitive, &mut hasher);
         }
         Self {
             visible,
@@ -193,14 +194,14 @@ impl EdgeLayer {
         self.visible.is_empty()
     }
 
-    /// The strokes of the visible shapes, in paint order. A large frame is prepared on several
-    /// threads, each taking a run of shapes, and the runs are joined back in order.
-    fn paths(&self) -> &[EdgePath] {
+    /// The strokes of the visible primitives, in paint order. A large frame is prepared on several
+    /// threads, each taking a run of primitives, and the runs are joined back in order.
+    fn paths(&self) -> &[PixelOverlayPath] {
         self.paths.get_or_init(|| {
             let threads = available_parallelism()
                 .map_or(1, usize::from)
                 .min(MAX_STRIPS);
-            if self.visible.len() < PARALLEL_PREPARE_SHAPES || threads == 1 {
+            if self.visible.len() < PARALLEL_PREPARE_PRIMITIVES || threads == 1 {
                 return prepare_paths(&self.visible, self.origin, self.config);
             }
             let run = self.visible.len().div_ceil(threads);
@@ -208,7 +209,10 @@ impl EdgeLayer {
                 let handles: Vec<_> = self
                     .visible
                     .chunks(run)
-                    .map(|shapes| workers.spawn(|| prepare_paths(shapes, self.origin, self.config)))
+                    .map(|overlay_primitives| {
+                        workers
+                            .spawn(|| prepare_paths(overlay_primitives, self.origin, self.config))
+                    })
                     .collect();
                 handles
                     .into_iter()
@@ -268,7 +272,7 @@ impl EdgeLayer {
         block: &mut [u8],
         top: usize,
         (width, row_bytes): (usize, usize),
-        paths: &[EdgePath],
+        paths: &[PixelOverlayPath],
     ) {
         let rows = block.len() / row_bytes;
         let Some(mut strip) = PixmapMut::from_bytes(block, width as u32, rows as u32) else {
@@ -290,35 +294,35 @@ impl EdgeLayer {
     }
 }
 
-/// Feed everything that decides how `shape` is drawn into `hasher`.
-fn hash_shape(shape: &EdgeShape, hasher: &mut impl Hasher) {
+/// Feed everything that decides how `primitive` is drawn into `hasher`.
+fn hash_primitive(primitive: &OverlayPrimitive, hasher: &mut impl Hasher) {
     let mut point = |(x, y): (f64, f64)| {
         x.to_bits().hash(hasher);
         y.to_bits().hash(hasher);
     };
-    match shape {
-        EdgeShape::Line(line) => {
+    match primitive {
+        OverlayPrimitive::Line(line) => {
             point(line.from);
             point(line.to);
             (0_u8, line.color, line.line_style).hash(hasher);
         }
-        EdgeShape::Bezier(curve) => {
+        OverlayPrimitive::Bezier(curve) => {
             for control in [curve.from, curve.control1, curve.control2, curve.to] {
                 point(control);
             }
             (1_u8, curve.color, curve.line_style).hash(hasher);
         }
-        EdgeShape::Arrow(mark) => {
+        OverlayPrimitive::Arrow(mark) => {
             point(mark.center);
             point(mark.direction);
             (2_u8, mark.color).hash(hasher);
         }
-        EdgeShape::NodeGlow(glow) => {
+        OverlayPrimitive::NodeGlow(glow) => {
             point(glow.top_left);
             point(glow.bottom_right);
             (3_u8, glow.clip_left, glow.clip_right, glow.color).hash(hasher);
         }
-        EdgeShape::SymbolGlow(glow) => {
+        OverlayPrimitive::SymbolGlow(glow) => {
             point(glow.center);
             (4_u8, glow.color).hash(hasher);
         }
@@ -328,15 +332,15 @@ fn hash_shape(shape: &EdgeShape, hasher: &mut impl Hasher) {
 /// How far, in cells, a stroke's halo and antialiasing reach beyond its path.
 const REACH_MARGIN_CELLS: f64 = 2.0;
 
-/// Whether `shape` can touch the view: `area`'s cells, whose top-left cell sits at `origin`. A
+/// Whether `primitive` can touch the view: `area`'s cells, whose top-left cell sits at `origin`. A
 /// curve stays inside the box of its control points, so that box decides without sampling it.
-fn reaches_view(shape: &EdgeShape, origin: (u16, u16), area: Rect) -> bool {
-    let points: &[(f64, f64)] = match shape {
-        EdgeShape::Line(line) => &[line.from, line.to],
-        EdgeShape::Bezier(curve) => &[curve.from, curve.control1, curve.control2, curve.to],
-        EdgeShape::Arrow(mark) => &[mark.center],
-        EdgeShape::NodeGlow(glow) => &[glow.top_left, glow.bottom_right],
-        EdgeShape::SymbolGlow(glow) => &[glow.center],
+fn reaches_view(primitive: &OverlayPrimitive, origin: (u16, u16), area: Rect) -> bool {
+    let points: &[(f64, f64)] = match primitive {
+        OverlayPrimitive::Line(line) => &[line.from, line.to],
+        OverlayPrimitive::Bezier(curve) => &[curve.from, curve.control1, curve.control2, curve.to],
+        OverlayPrimitive::Arrow(mark) => &[mark.center],
+        OverlayPrimitive::NodeGlow(glow) => &[glow.top_left, glow.bottom_right],
+        OverlayPrimitive::SymbolGlow(glow) => &[glow.center],
     };
     let (mut left, mut top) = (f64::INFINITY, f64::INFINITY);
     let (mut right, mut bottom) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -356,24 +360,28 @@ fn reaches_view(shape: &EdgeShape, origin: (u16, u16), area: Rect) -> bool {
         && top - REACH_MARGIN_CELLS <= view_bottom
 }
 
-/// Recolor the cells of highlighted nodes in `buffer` (whose top-left cell is at `origin`) the
-/// way the picture shows them: a node's background is lightened toward contrast where an
-/// [`EdgeShape::NodeGlow`] covers it, and a minimal highlighted node loses its glyph so the
-/// glow's disc is the whole node. Call this before building the [`EdgeLayer`] so the recolored
-/// cells are cut out of it.
-pub fn apply_highlight_cells(
+/// Adjust node backgrounds and remove symbol glyphs in `buffer` (whose top-left cell is at
+/// `origin`) before the overlay is composited, so the cells show highlighted nodes the way the
+/// picture does: a node's background is lightened toward contrast where an
+/// [`OverlayPrimitive::NodeGlow`] covers it, and a minimal highlighted node loses its glyph so the
+/// glow's disc is the whole node. This mutates the cell buffer, so call it before building the
+/// [`PixelOverlay`] and the recolored cells are cut out of it.
+pub fn prepare_node_highlight_cells(
     buffer: &mut Buffer,
-    shapes: &[EdgeShape],
+    overlay_primitives: &[OverlayPrimitive],
     origin: (u16, u16),
-    config: PngConfig,
+    config: RasterConfig,
 ) {
     let width = buffer.area.width;
     let height = buffer.area.height;
     let light_theme = luminance(config.background) > luminance(config.foreground);
-    for glow in shapes.iter().filter_map(|shape| match shape {
-        EdgeShape::NodeGlow(glow) => Some(glow),
-        _ => None,
-    }) {
+    for glow in overlay_primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            OverlayPrimitive::NodeGlow(glow) => Some(glow),
+            _ => None,
+        })
+    {
         let original = color_to_rgb(glow.color, config.foreground);
         let [red, green, blue] = highlight_color(original, EDGE_CORE_BRIGHTNESS, light_theme);
         let left = (glow.top_left.0.floor() as i32 - i32::from(origin.0)).max(0);
@@ -393,10 +401,13 @@ pub fn apply_highlight_cells(
     }
     // A minimal highlighted node is drawn as a disc by SymbolGlow. Keep its text glyph
     // out of the picture so the disc and halo are the whole visible node.
-    for glow in shapes.iter().filter_map(|shape| match shape {
-        EdgeShape::SymbolGlow(glow) => Some(glow),
-        _ => None,
-    }) {
+    for glow in overlay_primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            OverlayPrimitive::SymbolGlow(glow) => Some(glow),
+            _ => None,
+        })
+    {
         let column = glow.center.0.floor() as i32 - i32::from(origin.0);
         let row = glow.center.1.floor() as i32 - i32::from(origin.1);
         if column >= 0 && row >= 0 && column < i32::from(width) && row < i32::from(height) {
@@ -408,7 +419,7 @@ pub fn apply_highlight_cells(
     }
 }
 
-struct EdgePath {
+struct PixelOverlayPath {
     path: Path,
     paint: Paint<'static>,
     /// Farthest the stroke reaches from the path's bounds, in pixels, for band culling.
@@ -417,7 +428,11 @@ struct EdgePath {
 
 // Build geometry once per export. Each band clips the original path, rather than splitting
 // curves, so tangents and dash phase remain continuous across PNG rows.
-fn prepare_paths(lines: &[EdgeShape], origin: (u16, u16), config: PngConfig) -> Vec<EdgePath> {
+fn prepare_paths(
+    lines: &[OverlayPrimitive],
+    origin: (u16, u16),
+    config: RasterConfig,
+) -> Vec<PixelOverlayPath> {
     // A cell's center falls on a pixel center only when its size is odd; an even size needs half
     // a pixel to put one-pixel strokes on the middle pixel row or column, like the text glyphs.
     // A stroke that is an even number of pixels wide is centered on a pixel boundary already.
@@ -438,28 +453,28 @@ fn prepare_paths(lines: &[EdgeShape], origin: (u16, u16), config: PngConfig) -> 
     };
     let mut paths = Vec::new();
     for edge in lines {
-        if let EdgeShape::Arrow(mark) = edge {
+        if let OverlayPrimitive::Arrow(mark) = edge {
             push_arrow(mark, point(mark.center), config, &mut paths);
             continue;
         }
-        if let EdgeShape::NodeGlow(glow) = edge {
+        if let OverlayPrimitive::NodeGlow(glow) = edge {
             push_node_glow(glow, point, config, &mut paths);
             continue;
         }
-        if let EdgeShape::SymbolGlow(glow) = edge {
+        if let OverlayPrimitive::SymbolGlow(glow) = edge {
             push_symbol_glow(glow, point(glow.center), config, &mut paths);
             continue;
         }
         let mut builder = PathBuilder::new();
         let (color, line_style) = match edge {
-            EdgeShape::Line(line) => {
+            OverlayPrimitive::Line(line) => {
                 let from = point(line.from);
                 let to = point(line.to);
                 builder.move_to(from.0, from.1);
                 builder.line_to(to.0, to.1);
                 (line.color, line.line_style)
             }
-            EdgeShape::Bezier(curve) => {
+            OverlayPrimitive::Bezier(curve) => {
                 let from = point(curve.from);
                 let control1 = point(curve.control1);
                 let control2 = point(curve.control2);
@@ -468,7 +483,9 @@ fn prepare_paths(lines: &[EdgeShape], origin: (u16, u16), config: PngConfig) -> 
                 builder.cubic_to(control1.0, control1.1, control2.0, control2.1, to.0, to.1);
                 (curve.color, curve.line_style)
             }
-            EdgeShape::Arrow(_) | EdgeShape::NodeGlow(_) | EdgeShape::SymbolGlow(_) => {
+            OverlayPrimitive::Arrow(_)
+            | OverlayPrimitive::NodeGlow(_)
+            | OverlayPrimitive::SymbolGlow(_) => {
                 continue;
             }
         };
@@ -597,7 +614,12 @@ fn arrow_horizontal_span(center_x: f32, half_length: f32) -> (f32, f32) {
 }
 
 /// A chevron centered on `center`, in pixels, pointing the way `mark` says.
-fn push_arrow(mark: &ArrowMark, center: (f32, f32), config: PngConfig, paths: &mut Vec<EdgePath>) {
+fn push_arrow(
+    mark: &ArrowMark,
+    center: (f32, f32),
+    config: RasterConfig,
+    paths: &mut Vec<PixelOverlayPath>,
+) {
     let half_width = config.cell_height as f32 * ARROWHEAD_WIDTH_CELLS / 2.0;
     let half_length = config.cell_height as f32 * ARROWHEAD_LENGTH_CELLS / 2.0;
     let pixel_direction = (
@@ -655,7 +677,7 @@ fn push_arrow(mark: &ArrowMark, center: (f32, f32), config: PngConfig, paths: &m
     let mut paint = Paint::default();
     paint.set_color_rgba8(color[0], color[1], color[2], 255);
     paint.anti_alias = true;
-    paths.push(EdgePath {
+    paths.push(PixelOverlayPath {
         path: outline,
         paint,
         reach: band_reach(scale),
@@ -669,8 +691,8 @@ fn push_arrow(mark: &ArrowMark, center: (f32, f32), config: PngConfig, paths: &m
 fn push_node_glow(
     glow: &NodeGlow,
     point: impl Fn((f64, f64)) -> (f32, f32),
-    config: PngConfig,
-    paths: &mut Vec<EdgePath>,
+    config: RasterConfig,
+    paths: &mut Vec<PixelOverlayPath>,
 ) {
     let light_theme = luminance(config.background) > luminance(config.foreground);
     let color = shift_toward_contrast(
@@ -745,7 +767,7 @@ fn push_node_glow(
         let mut paint = Paint::default();
         paint.set_color_rgba8(color[0], color[1], color[2], opacity);
         paint.anti_alias = true;
-        paths.push(EdgePath {
+        paths.push(PixelOverlayPath {
             path: outline,
             paint,
             reach: band_reach(scale),
@@ -759,8 +781,8 @@ fn push_node_glow(
 fn push_symbol_glow(
     glow: &SymbolGlow,
     center: (f32, f32),
-    config: PngConfig,
-    paths: &mut Vec<EdgePath>,
+    config: RasterConfig,
+    paths: &mut Vec<PixelOverlayPath>,
 ) {
     let light_theme = luminance(config.background) > luminance(config.foreground);
     let color = color_to_rgb(glow.color, config.foreground);
@@ -777,7 +799,7 @@ fn push_symbol_glow(
         let mut paint = Paint::default();
         paint.set_color_rgba8(color[0], color[1], color[2], opacity);
         paint.anti_alias = true;
-        paths.push(EdgePath {
+        paths.push(PixelOverlayPath {
             path: disc,
             paint,
             reach: band_reach(scale),
@@ -809,8 +831,8 @@ fn prepare_strokes(
     mut path: Path,
     color: [u8; 3],
     line_style: LineStyle,
-    config: PngConfig,
-    paths: &mut Vec<EdgePath>,
+    config: RasterConfig,
+    paths: &mut Vec<PixelOverlayPath>,
 ) {
     let light_theme = luminance(config.background) > luminance(config.foreground);
     let scale = config.scale as f32;
@@ -855,7 +877,7 @@ fn prepare_strokes(
         let mut paint = Paint::default();
         paint.set_color_rgba8(color[0], color[1], color[2], opacity);
         paint.anti_alias = true;
-        paths.push(EdgePath {
+        paths.push(PixelOverlayPath {
             path: outline,
             paint,
             reach: band_reach(scale),
@@ -886,19 +908,22 @@ fn curve_points(curve: &BezierCurve) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// The cells that `shapes` cross, clipped to `area`, or `None` without shapes.
-pub fn shapes_bounds(shapes: &[EdgeShape], area: Rect) -> Option<Rect> {
+/// The cells that `overlay_primitives` cross, clipped to `area`, or `None` without primitives.
+pub fn overlay_primitives_bounds(
+    overlay_primitives: &[OverlayPrimitive],
+    area: Rect,
+) -> Option<Rect> {
     let cell = |value: f64, limit: u16| value.floor().clamp(0.0, f64::from(limit)) as u16;
-    shapes
+    overlay_primitives
         .iter()
         .flat_map(|edge| match edge {
-            EdgeShape::Line(line) => vec![line.from, line.to],
+            OverlayPrimitive::Line(line) => vec![line.from, line.to],
             // The control points of a loop that bulges far can lie well outside the curve, so
             // the curve's own points bound it, not its control polygon.
-            EdgeShape::Bezier(curve) => curve_points(curve),
-            EdgeShape::Arrow(mark) => vec![mark.center],
-            EdgeShape::SymbolGlow(glow) => vec![glow.center],
-            EdgeShape::NodeGlow(glow) => vec![glow.top_left, glow.bottom_right],
+            OverlayPrimitive::Bezier(curve) => curve_points(curve),
+            OverlayPrimitive::Arrow(mark) => vec![mark.center],
+            OverlayPrimitive::SymbolGlow(glow) => vec![glow.center],
+            OverlayPrimitive::NodeGlow(glow) => vec![glow.top_left, glow.bottom_right],
         })
         .map(|(x, y)| {
             Rect::new(
@@ -917,7 +942,7 @@ pub fn shapes_bounds(shapes: &[EdgeShape], area: Rect) -> Option<Rect> {
 fn draw_paths(
     pixels: &mut [u8],
     top: usize,
-    (paths, mask): (&[EdgePath], &CellMask),
+    (paths, mask): (&[PixelOverlayPath], &CellMask),
     pixmap: &mut Pixmap,
 ) {
     pixmap.data_mut().fill(0);
@@ -994,10 +1019,10 @@ mod tests {
     use tiny_skia::Pixmap;
 
     use super::{
-        ArrowMark, BAND_PADDING, BezierCurve, CellMask, EdgeLayer, EdgeShape, SYMBOL_RADIUS,
-        SymbolGlow, arrow_horizontal_span, draw_paths, prepare_paths,
+        ArrowMark, BAND_PADDING, BezierCurve, CellMask, OverlayPrimitive, PixelOverlay,
+        SYMBOL_RADIUS, SymbolGlow, arrow_horizontal_span, draw_paths, prepare_paths,
     };
-    use crate::{plotter::LineStyle, png_export::PngConfig};
+    use crate::{plotter::LineStyle, png_export::RasterConfig};
 
     fn curve(
         from: (f64, f64),
@@ -1026,9 +1051,9 @@ mod tests {
             height,
             top,
             curves,
-            PngConfig {
+            RasterConfig {
                 background: [0; 3],
-                ..PngConfig::default()
+                ..RasterConfig::default()
             },
         )
     }
@@ -1038,10 +1063,14 @@ mod tests {
         height: usize,
         top: usize,
         curves: &[BezierCurve],
-        config: PngConfig,
+        config: RasterConfig,
     ) -> Vec<u8> {
         let mut pixels = config.background.repeat(width * height);
-        let edges: Vec<_> = curves.iter().copied().map(EdgeShape::Bezier).collect();
+        let edges: Vec<_> = curves
+            .iter()
+            .copied()
+            .map(OverlayPrimitive::Bezier)
+            .collect();
         let paths = prepare_paths(&edges, (0, 0), config);
         let mut pixmap = Pixmap::new(width as u32, height as u32 + 2 * BAND_PADDING)
             .expect("should allocate test band");
@@ -1079,11 +1108,11 @@ mod tests {
 
     #[test]
     fn test_node_glow_fades_outward_from_node_edge() {
-        let config = PngConfig {
+        let config = RasterConfig {
             background: [0; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
-        let edge = EdgeShape::NodeGlow(crate::curved::NodeGlow {
+        let edge = OverlayPrimitive::NodeGlow(crate::curved::NodeGlow {
             top_left: (5.0, 2.0),
             bottom_right: (10.0, 3.0),
             clip_left: false,
@@ -1104,11 +1133,11 @@ mod tests {
 
     #[test]
     fn test_symbol_glow_rings_the_glyph_and_fades_outward() {
-        let config = PngConfig {
+        let config = RasterConfig {
             background: [0; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
-        let edge = EdgeShape::SymbolGlow(SymbolGlow {
+        let edge = OverlayPrimitive::SymbolGlow(SymbolGlow {
             center: (5.5, 2.5),
             color: Color::Red,
         });
@@ -1127,11 +1156,11 @@ mod tests {
 
     #[test]
     fn test_node_glow_stops_at_clipped_side() {
-        let config = PngConfig {
+        let config = RasterConfig {
             background: [0; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
-        let edge = EdgeShape::NodeGlow(crate::curved::NodeGlow {
+        let edge = OverlayPrimitive::NodeGlow(crate::curved::NodeGlow {
             top_left: (5.0, 2.0),
             bottom_right: (10.0, 3.0),
             clip_left: true,
@@ -1153,13 +1182,13 @@ mod tests {
 
     #[test]
     fn test_deferred_straight_edges_are_not_dropped() {
-        let edge = EdgeShape::Line(crate::curved::StraightSegment {
+        let edge = OverlayPrimitive::Line(crate::curved::StraightSegment {
             from: (1.0, 1.0),
             to: (8.0, 1.0),
             color: Color::Red,
             line_style: LineStyle::Normal,
         });
-        let paths = prepare_paths(&[edge], (0, 0), PngConfig::default());
+        let paths = prepare_paths(&[edge], (0, 0), RasterConfig::default());
         let mut pixmap =
             Pixmap::new(120, 44 + 2 * BAND_PADDING).expect("should allocate test band");
         let mut pixels = canvas(120, 44);
@@ -1291,10 +1320,10 @@ mod tests {
             (40.0, 10.5),
             LineStyle::Bold,
         );
-        let config = PngConfig {
+        let config = RasterConfig {
             background: [250; 3],
             foreground: [20; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
         let pixels = draw_with_config(800, 600, 0, &[bold], config);
         let pixel = |x: usize, y: usize| &pixels[(y * 800 + x) * 3..][..3];
@@ -1332,12 +1361,12 @@ mod tests {
 
     #[test]
     fn test_forward_and_reverse_arrows_mirror_each_other_about_the_same_center() {
-        let config = PngConfig {
+        let config = RasterConfig {
             background: [0; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
         let render = |points_right: bool| {
-            let mark = EdgeShape::Arrow(ArrowMark {
+            let mark = OverlayPrimitive::Arrow(ArrowMark {
                 center: (3.37, 2.0),
                 direction: (if points_right { 1.0 } else { -1.0 }, 0.0),
                 color: Color::Red,
@@ -1363,9 +1392,9 @@ mod tests {
             LineStyle::Normal,
         );
         for scale in [1_usize, 2, 3] {
-            let config = PngConfig {
+            let config = RasterConfig {
                 background: [0; 3],
-                ..PngConfig::default()
+                ..RasterConfig::default()
             }
             .with_scale(scale);
             let pixels = draw_with_config(300, 300, 0, &[horizontal], config);
@@ -1382,25 +1411,25 @@ mod tests {
 
     #[test]
     fn test_cells_with_text_or_a_node_background_are_cut_out_of_the_layer() {
-        let config = PngConfig {
+        let config = RasterConfig {
             cell_width: 4,
             cell_height: 8,
             scale: 1,
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
         buffer.set_string(1, 0, "A", ratatui::style::Style::default());
         buffer[(2, 0)].set_bg(Color::Rgb(200, 10, 10));
-        let across = EdgeShape::Bezier(curve(
+        let across = OverlayPrimitive::Bezier(curve(
             (0.0, 0.5),
             (1.0, 0.5),
             (2.0, 0.5),
             (3.0, 0.5),
             LineStyle::Bold,
         ));
-        let layer = EdgeLayer::new(&[across], &buffer, (0, 0), config);
+        let pixel_overlay = PixelOverlay::new(&[across], &buffer, (0, 0), config);
 
-        let pixmap = layer.rasterize(3, 1).expect("should draw the edge");
+        let pixmap = pixel_overlay.rasterize(3, 1).expect("should draw the edge");
 
         let alpha_at = |x: u32, y: u32| pixmap.pixel(x, y).expect("should be in bounds").alpha();
         assert!(alpha_at(1, 4) > 0, "the blank first cell keeps the edge");
@@ -1414,32 +1443,32 @@ mod tests {
 
     #[test]
     fn test_full_raster_matches_composited_bands_outside_cut_out_cells() {
-        let config = PngConfig {
+        let config = RasterConfig {
             background: [0; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 4));
         buffer.set_string(2, 1, "N", ratatui::style::Style::default());
-        let edges = [EdgeShape::Bezier(curve(
+        let edges = [OverlayPrimitive::Bezier(curve(
             (0.5, 0.5),
             (4.0, 0.5),
             (2.0, 3.5),
             (5.5, 3.5),
             LineStyle::Normal,
         ))];
-        let layer = EdgeLayer::new(&edges, &buffer, (0, 0), config);
+        let pixel_overlay = PixelOverlay::new(&edges, &buffer, (0, 0), config);
         let width = 6 * config.cell_width;
         let rows = 4 * config.cell_height;
-        let mut scratch = layer
+        let mut scratch = pixel_overlay
             .band_pixmap(width, config.cell_height)
             .expect("should allocate a band");
         let mut bands = Vec::new();
         for top in (0..rows).step_by(config.cell_height) {
             let mut band = vec![0; width * config.cell_height * 3];
-            layer.composite_band(&mut band, top, &mut scratch);
+            pixel_overlay.composite_band(&mut band, top, &mut scratch);
             bands.extend(band);
         }
-        let full = layer.rasterize(6, 4).expect("should draw the edge");
+        let full = pixel_overlay.rasterize(6, 4).expect("should draw the edge");
         // Where the full raster is opaque red the bands must be bright too, and inside the
         // cut-out cell neither draws anything.
         let cut_pixel = (2 * config.cell_width + 1, config.cell_height + 3);
@@ -1456,30 +1485,30 @@ mod tests {
 
     #[test]
     fn test_shapes_outside_the_view_are_not_prepared() {
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         let buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        let inside = EdgeShape::Bezier(curve(
+        let inside = OverlayPrimitive::Bezier(curve(
             (1.0, 2.5),
             (8.0, 2.5),
             (12.0, 2.5),
             (19.0, 2.5),
             LineStyle::Normal,
         ));
-        let far_right = EdgeShape::Bezier(curve(
+        let far_right = OverlayPrimitive::Bezier(curve(
             (500.0, 2.5),
             (510.0, 2.5),
             (520.0, 2.5),
             (530.0, 2.5),
             LineStyle::Normal,
         ));
-        let far_below = EdgeShape::Bezier(curve(
+        let far_below = OverlayPrimitive::Bezier(curve(
             (2.0, 90.0),
             (4.0, 95.0),
             (6.0, 95.0),
             (8.0, 90.0),
             LineStyle::Normal,
         ));
-        let straddling = EdgeShape::Bezier(curve(
+        let straddling = OverlayPrimitive::Bezier(curve(
             (-30.0, 2.5),
             (-10.0, 2.5),
             (10.0, 2.5),
@@ -1487,14 +1516,15 @@ mod tests {
             LineStyle::Normal,
         ));
 
-        let only_outside = EdgeLayer::new(&[far_right, far_below], &buffer, (0, 0), config);
-        let with_inside = EdgeLayer::new(&[far_right, inside, far_below], &buffer, (0, 0), config);
-        let crossing = EdgeLayer::new(&[straddling], &buffer, (0, 0), config);
+        let only_outside = PixelOverlay::new(&[far_right, far_below], &buffer, (0, 0), config);
+        let with_inside =
+            PixelOverlay::new(&[far_right, inside, far_below], &buffer, (0, 0), config);
+        let crossing = PixelOverlay::new(&[straddling], &buffer, (0, 0), config);
 
         assert!(only_outside.is_empty());
         assert_eq!(
             with_inside.paths().len(),
-            EdgeLayer::new(&[inside], &buffer, (0, 0), config)
+            PixelOverlay::new(&[inside], &buffer, (0, 0), config)
                 .paths()
                 .len()
         );
@@ -1506,38 +1536,38 @@ mod tests {
 
     #[test]
     fn test_view_follows_the_origin_of_a_cropped_buffer() {
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         let buffer = Buffer::empty(Rect::new(0, 0, 10, 4));
-        let at_origin = EdgeShape::Bezier(curve(
+        let at_origin = OverlayPrimitive::Bezier(curve(
             (100.0, 52.0),
             (102.0, 52.0),
             (104.0, 52.0),
             (106.0, 52.0),
             LineStyle::Normal,
         ));
-        assert!(EdgeLayer::new(&[at_origin], &buffer, (0, 0), config).is_empty());
-        assert!(!EdgeLayer::new(&[at_origin], &buffer, (100, 50), config).is_empty());
+        assert!(PixelOverlay::new(&[at_origin], &buffer, (0, 0), config).is_empty());
+        assert!(!PixelOverlay::new(&[at_origin], &buffer, (100, 50), config).is_empty());
     }
 
     #[test]
     fn test_digest_changes_with_the_shapes_and_the_cut_out_but_not_with_hidden_shapes() {
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         let buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        let shape = EdgeShape::Bezier(curve(
+        let primitive = OverlayPrimitive::Bezier(curve(
             (1.0, 2.5),
             (8.0, 2.5),
             (12.0, 1.5),
             (19.0, 1.5),
             LineStyle::Normal,
         ));
-        let moved = EdgeShape::Bezier(curve(
+        let moved = OverlayPrimitive::Bezier(curve(
             (1.0, 2.5),
             (8.0, 2.5),
             (12.0, 1.5),
             (19.0, 2.0),
             LineStyle::Normal,
         ));
-        let hidden = EdgeShape::Bezier(curve(
+        let hidden = OverlayPrimitive::Bezier(curve(
             (900.0, 2.5),
             (908.0, 2.5),
             (912.0, 1.5),
@@ -1546,25 +1576,31 @@ mod tests {
         ));
         let mut with_text = buffer.clone();
         with_text.set_string(5, 2, "N", ratatui::style::Style::default());
-        let digest = |shapes: &[EdgeShape], buffer: &Buffer| {
-            EdgeLayer::new(shapes, buffer, (0, 0), config).digest()
+        let digest = |overlay_primitives: &[OverlayPrimitive], buffer: &Buffer| {
+            PixelOverlay::new(overlay_primitives, buffer, (0, 0), config).digest()
         };
 
-        assert_eq!(digest(&[shape], &buffer), digest(&[shape], &buffer));
-        assert_eq!(digest(&[shape], &buffer), digest(&[hidden, shape], &buffer));
-        assert_ne!(digest(&[shape], &buffer), digest(&[moved], &buffer));
-        assert_ne!(digest(&[shape], &buffer), digest(&[shape], &with_text));
+        assert_eq!(digest(&[primitive], &buffer), digest(&[primitive], &buffer));
+        assert_eq!(
+            digest(&[primitive], &buffer),
+            digest(&[hidden, primitive], &buffer)
+        );
+        assert_ne!(digest(&[primitive], &buffer), digest(&[moved], &buffer));
+        assert_ne!(
+            digest(&[primitive], &buffer),
+            digest(&[primitive], &with_text)
+        );
     }
 
     #[test]
     fn test_strips_drawn_on_separate_threads_match_one_strip() {
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 12));
         buffer.set_string(10, 5, "NNN", ratatui::style::Style::default());
-        let shapes: Vec<_> = (0..40_u32)
+        let overlay_primitives: Vec<_> = (0..40_u32)
             .map(|index| {
                 let y = f64::from(index % 11) + 0.5;
-                EdgeShape::Bezier(curve(
+                OverlayPrimitive::Bezier(curve(
                     (1.0, y),
                     (12.0, y),
                     (18.0, 11.5 - y),
@@ -1573,10 +1609,14 @@ mod tests {
                 ))
             })
             .collect();
-        let layer = EdgeLayer::new(&shapes, &buffer, (0, 0), config);
+        let pixel_overlay = PixelOverlay::new(&overlay_primitives, &buffer, (0, 0), config);
 
-        let single = layer.rasterize_in_strips(30, 12, 1).expect("should draw");
-        let split = layer.rasterize_in_strips(30, 12, 5).expect("should draw");
+        let single = pixel_overlay
+            .rasterize_in_strips(30, 12, 1)
+            .expect("should draw");
+        let split = pixel_overlay
+            .rasterize_in_strips(30, 12, 5)
+            .expect("should draw");
 
         let worst = single
             .data()

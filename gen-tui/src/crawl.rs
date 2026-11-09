@@ -15,23 +15,19 @@ use petgraph::{
 };
 
 use crate::{
-    curved::EdgeStyle,
+    curved::LayoutMode,
     cycle_removal::remove_cycles,
-    edge_ports::{EdgePorts, NodeSide},
+    edge_ports::{EdgePorts, NodeSide, PortedEdge},
     layout::{PinSide, WindowStructureBuilder},
     pinning::{
-        LegEnd, OrderingConstraint, PinPlan, PinnedEdge, ordering_constraint, plan_curved_bends,
-        plan_hairpin, plan_hairpin_arc, plan_sideways_bends, plan_vertical_bends,
+        LegEnd, OrderingConstraint, PinPlan, ordering_constraint, plan_curved_bends, plan_hairpin,
+        plan_hairpin_arc, plan_sideways_bends, plan_vertical_bends,
     },
     window_graph::{WindowEdge, WindowGraph, WindowNode},
 };
 
 /// Preferred target for each boundary node and direction, retained across window rebuilds.
 pub type PreferredWormholeDoors<NodeId> = HashMap<(NodeId, bool), NodeId>;
-
-/// The domain edges that landed fully inside a built window, with their direction metadata
-/// along the route. See `build_window_graph`.
-pub type WindowPinnedEdges = Vec<PinnedEdge>;
 
 /// Where a node belongs in the order a caller wants the layout to read left to right, if the
 /// caller has one. See `build_window_graph_with_order`.
@@ -357,7 +353,7 @@ pub fn build_window_graph<G>(
     neighborhood: &StructuralSubgraph<G::NodeId>,
     graph: &G,
     explicit_backward_edges: Option<&HashSet<(G::NodeId, G::NodeId)>>,
-) -> Result<(WindowGraph, WindowPinnedEdges), String>
+) -> Result<(WindowGraph, Vec<PortedEdge<NodeIndex>>), String>
 where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash + Ord + 'static,
@@ -367,7 +363,7 @@ where
         graph,
         explicit_backward_edges,
         None,
-        EdgeStyle::default(),
+        LayoutMode::default(),
     )
 }
 
@@ -375,15 +371,15 @@ where
 /// caller knows, such as the nodes of an aligned reference path, whose position scale only
 /// reads correctly when they lie in path order. Hinted nodes are ordered by their hints
 /// whatever cycles the edges form, so an edge running against the hints is drawn as a backward
-/// edge instead of cycle removal choosing which edge of a cycle to flip. `edge_style` decides
+/// edge instead of cycle removal choosing which edge of a cycle to flip. `layout_mode` decides
 /// whether left and right pins join the Sugiyama input: the curved styles leave them out.
 pub fn build_window_graph_with_order<G>(
     neighborhood: &StructuralSubgraph<G::NodeId>,
     graph: &G,
     explicit_backward_edges: Option<&HashSet<(G::NodeId, G::NodeId)>>,
     order_hint: Option<&OrderHintFn<G>>,
-    edge_style: EdgeStyle,
-) -> Result<(WindowGraph, WindowPinnedEdges), String>
+    layout_mode: LayoutMode,
+) -> Result<(WindowGraph, Vec<PortedEdge<NodeIndex>>), String>
 where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash + Ord + 'static,
@@ -408,13 +404,13 @@ where
         })
         .collect();
 
-    let mut domain_edges: Vec<DomainEdge<G::NodeId>> = Vec::new();
+    let mut declared_edges: Vec<DomainEdge<G::NodeId>> = Vec::new();
     for &(source, target) in &neighborhood.edges {
         if forced_pairs.contains(&(source, target)) {
             continue;
         }
         for ports in neighborhood.ports_of(source, target) {
-            domain_edges.push(DomainEdge {
+            declared_edges.push(DomainEdge {
                 source,
                 target,
                 ports,
@@ -424,15 +420,15 @@ where
     }
     // A caller's explicit backward edge is looped even when the domain graph lacks it.
     for &(source, target) in &forced_pairs {
-        domain_edges.push(DomainEdge {
+        declared_edges.push(DomainEdge {
             source,
             target,
             ports: EdgePorts::default(),
             forced_backward: true,
         });
     }
-    domain_edges.sort_by_key(|edge| (edge.source, edge.target, edge.ports));
-    domain_edges.dedup_by_key(|edge| (edge.source, edge.target, edge.ports));
+    declared_edges.sort_by_key(|edge| (edge.source, edge.target, edge.ports));
+    declared_edges.dedup_by_key(|edge| (edge.source, edge.target, edge.ports));
 
     // The first sort: an order of the nodes that agrees with as many edges as possible. Only
     // edges that attach east to west or west to east say anything about the order.
@@ -463,7 +459,7 @@ where
             (Some(source_hint), Some(target_hint)) if target_hint < source_hint
         )
     };
-    for edge in domain_edges
+    for edge in declared_edges
         .iter()
         .filter(|edge| !edge.forced_backward && edge.source != edge.target && !against_hints(edge))
     {
@@ -484,13 +480,13 @@ where
         .map(|(position, node_id)| (node_id, position))
         .collect();
 
-    let mut plans: Vec<PinPlan> = domain_edges
+    let mut plans: Vec<PinPlan> = declared_edges
         .iter()
         .map(|edge| {
             // An edge that leaves a side of a node and returns to it is a hairpin, which a hair
             // pin beside that side turns around.
             if edge.source == edge.target && edge.ports.source == edge.ports.target {
-                return if edge_style.is_curved() {
+                return if layout_mode.is_curved() {
                     plan_hairpin_arc()
                 } else {
                     plan_hairpin(edge.ports.source)
@@ -504,7 +500,7 @@ where
                 !edge.forced_backward
                     && position_in_order[&edge.target] > position_in_order[&edge.source]
             };
-            if edge_style.is_curved() {
+            if layout_mode.is_curved() {
                 plan_curved_bends(
                     edge.ports,
                     target_follows_source,
@@ -515,17 +511,17 @@ where
             }
         })
         .collect();
-    let ends: Vec<(G::NodeId, G::NodeId)> = domain_edges
+    let ends: Vec<(G::NodeId, G::NodeId)> = declared_edges
         .iter()
         .map(|edge| (edge.source, edge.target))
         .collect();
     plan_vertical_bends(&mut plans, &ends);
 
     let mut pin_span_edges: HashSet<(NodeIndex<u32>, NodeIndex<u32>)> = HashSet::new();
-    let mut pinned_edges: WindowPinnedEdges = Vec::new();
+    let mut domain_edges: Vec<PortedEdge<NodeIndex>> = Vec::new();
     let mut plain_legs: HashSet<(NodeIndex<u32>, NodeIndex<u32>)> = HashSet::new();
     let mut ordering_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = Vec::new();
-    for (edge, plan) in domain_edges.iter().zip(&plans) {
+    for (edge, plan) in declared_edges.iter().zip(&plans) {
         let bundle = (to_domain(edge.source), to_domain(edge.target));
         let left_pin = plan
             .left_pin
@@ -572,7 +568,7 @@ where
                 ordering_edges.push(ordering_edge);
             }
         }
-        pinned_edges.push(PinnedEdge {
+        domain_edges.push(PortedEdge {
             source: bundle.0,
             target: bundle.1,
             ports: edge.ports,
@@ -613,7 +609,7 @@ where
         window.structure = builder.structure();
     }
 
-    Ok((window, pinned_edges))
+    Ok((window, domain_edges))
 }
 
 /// How far past its node budget a batch may grow to take the whole of its last shell. Cutting a
@@ -1035,7 +1031,10 @@ mod tests {
     const WEST_EAST: EdgePorts = EdgePorts::new(NodeSide::West, NodeSide::East);
 
     /// Window of the chain 0 -> 1 -> 2 whose edge 0 -> 2 attaches to the given ports.
-    fn window_with_ports(ports: EdgePorts, edge: (i32, i32)) -> (WindowGraph, WindowPinnedEdges) {
+    fn window_with_ports(
+        ports: EdgePorts,
+        edge: (i32, i32),
+    ) -> (WindowGraph, Vec<PortedEdge<NodeIndex>>) {
         let mut graph = make_test_graph(vec![(0, 1), (1, 2), (edge.0, edge.1)]);
         let mut subgraph = neighborhood(
             TestNode(0),
@@ -1751,7 +1750,7 @@ mod tests {
             external_edges: Vec::new(),
         };
         let (window, _) =
-            build_window_graph_with_order(&subgraph, &graph, None, hint, EdgeStyle::default())
+            build_window_graph_with_order(&subgraph, &graph, None, hint, LayoutMode::default())
                 .expect("should build the window");
         let structure = window
             .structure

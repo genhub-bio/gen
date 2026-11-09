@@ -15,19 +15,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cross_coordinates::{align_layers, assign_cross_coordinates, orient_aligned_bubbles},
-    curved::EdgeStyle,
-    distribute_nodes::{
-        GapSizes, MINIMUM_ROUTING_GAP_Y, VerticalPlacement, base_step,
-        compact_layout_with_vertical_placement,
-    },
-    edge_ports::NodeSide,
+    curved::LayoutMode,
+    edge_ports::{NodeSide, PortedEdge},
     edge_router::{layout_graph_process::prune_pin_stubs, route_graph::make_rectilinear},
     geometry::{LocalPos, WorldPos, WorldRect},
+    layout_compaction::{
+        GapPolicy, MINIMUM_ROUTING_GAP_Y, VerticalPlacement, base_step,
+        compact_layout_with_vertical_placement,
+    },
     loopback_pins::{
         SidewaysNodes, drop_orphaned_routing_nodes, insert_sideways_nodes, reattach_loopback_pins,
         tether_self_loops,
     },
-    pinning::{PinnedEdge, hairpin_sides},
+    pinning::hairpin_sides,
     window_graph::{WindowEdge, WindowGraph, WindowNode},
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -355,7 +355,7 @@ fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirec
     for node in graph.node_weights() {
         let extents = layer_widths.entry(node.pos.x).or_insert((0, 0));
         if matches!(node.role, NodeRole::Data(_) | NodeRole::Routing) {
-            let halves = crate::distribute_nodes::halves(node.size.0 as i64);
+            let halves = crate::layout_compaction::halves(node.size.0 as i64);
             extents.0 = extents.0.max(halves.lo + 1);
             extents.1 = extents.1.max(halves.hi + 2);
         }
@@ -452,7 +452,7 @@ fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirec
     }
 }
 
-/// Keep each curved hairpin as a self-edge on its data node. Its pinned edge retains the side.
+/// Keep each curved hairpin as a self-edge on its data node. Its domain edge retains the side.
 fn add_hairpin_edges(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     hairpins: &HashSet<(NodeIndex, NodeSide)>,
@@ -519,7 +519,7 @@ fn scoot_hair_pins(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u
 /// ends flat.
 fn expand_hair_pins(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    edge_style: EdgeStyle,
+    layout_mode: LayoutMode,
 ) {
     let pins: Vec<_> = graph
         .node_indices()
@@ -561,7 +561,7 @@ fn expand_hair_pins(
         // The curve modes return to the neighbour the bus reached, so the S-curve ends where the
         // hair pin was joined to the layout. The terminal's router needs the return to end on the
         // bus at the entry.
-        let return_end = if edge_style.is_curved() {
+        let return_end = if layout_mode.is_curved() {
             neighbor
         } else {
             entry
@@ -737,19 +737,19 @@ impl WindowGeometry {
     /// [`crate::cross_coordinates::align_layers`]). The first surviving aligned node is
     /// returned to y = 0 after compaction; other nodes may drift if routing breaks the line.
     ///
-    /// `pinned_edges` tell a curved layout which edge ends attach on the side their edge does not
+    /// `domain_edges` tell a curved layout which edge ends attach on the side their edge does not
     /// leave toward and need a loop beside their node.
     ///
-    /// With a curved `edge_style` the router is skipped: every layer-to-layer segment, dummy
+    /// With a curved `layout_mode` the router is skipped: every layer-to-layer segment, dummy
     /// chains and loopback pins included, stays a straight edge, and compaction keeps layers in
     /// columns far enough apart for those edges to slope gently.
     pub fn new(
         mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-        gaps: &GapSizes,
+        gaps: &GapPolicy,
         junctions: &HashSet<NodeIndex>,
         centered: &HashSet<NodeIndex>,
-        pinned_edges: &[PinnedEdge],
-        edge_style: EdgeStyle,
+        domain_edges: &[PortedEdge<NodeIndex>],
+        layout_mode: LayoutMode,
     ) -> Self {
         let vertical_placement = vertical_placement_for_window(&layout_graph, junctions);
         // Assembly places rows at their size-independent within-layer ordinals. The edge router
@@ -758,9 +758,9 @@ impl WindowGeometry {
         // is the sole place either target gap is enforced.
         // A curved drawing has no loopback pins in its layered layout: the ends that need one get a
         // routing node beside their node instead, and the pin returns once compaction is done.
-        let sideways = if edge_style.is_curved() {
+        let sideways = if layout_mode.is_curved() {
             drop_orphaned_routing_nodes(&mut layout_graph);
-            insert_sideways_nodes(&mut layout_graph, pinned_edges)
+            insert_sideways_nodes(&mut layout_graph, domain_edges)
         } else {
             SidewaysNodes::default()
         };
@@ -769,17 +769,17 @@ impl WindowGeometry {
         align_layers(&mut layout_graph, centered);
         tether_self_loops(&mut layout_graph, &sideways);
 
-        if edge_style.is_curved() {
+        if layout_mode.is_curved() {
             pad_curved_data_nodes(&mut layout_graph);
         }
         // A Bezier drawing turns a hairpin into an arc beside its node. The layered layout cannot
         // carry a loop on one node, so the loop joins the node's side port to itself once the
         // ports exist, which lets compaction, drawing and highlighting treat it as an edge.
-        if edge_style.is_curved() {
-            add_hairpin_edges(&mut layout_graph, &hairpin_sides(pinned_edges));
+        if layout_mode.is_curved() {
+            add_hairpin_edges(&mut layout_graph, &hairpin_sides(domain_edges));
         }
 
-        if !edge_style.is_curved()
+        if !layout_mode.is_curved()
             && let Err(error) = make_rectilinear(&mut layout_graph)
         {
             log::warn!("Edge routing failed: {:?}", error);
@@ -811,12 +811,12 @@ impl WindowGeometry {
         }
 
         // Curved edges keep the minimal zoom level's routing gaps at every level.
-        let curved_gaps = GapSizes {
+        let curved_gaps = GapPolicy {
             routing_routing_y: MINIMUM_ROUTING_GAP_Y,
             data_routing_y: |_| 1,
             ..*gaps
         };
-        let gaps = if edge_style.is_curved() {
+        let gaps = if layout_mode.is_curved() {
             &curved_gaps
         } else {
             gaps
@@ -826,12 +826,12 @@ impl WindowGeometry {
             gaps,
             vertical_placement,
             center_anchor,
-            edge_style,
+            layout_mode,
         );
         reattach_loopback_pins(&mut layout_graph, sideways.pins);
         scoot_hair_pins(&mut layout_graph);
-        expand_hair_pins(&mut layout_graph, edge_style);
-        if edge_style.is_curved() {
+        expand_hair_pins(&mut layout_graph, layout_mode);
+        if layout_mode.is_curved() {
             shorten_self_link_detours(&mut layout_graph);
             prune_unused_padding_ports(&mut layout_graph);
         }
@@ -842,7 +842,7 @@ impl WindowGeometry {
             }
         }
         // A curved pin is an ordinary vertex of its loop's polyline, not a router stub.
-        if !edge_style.is_curved() {
+        if !layout_mode.is_curved() {
             prune_pin_stubs(&mut layout_graph);
         }
 
@@ -1418,7 +1418,7 @@ mod tests {
         vertical_placement_for_window,
     };
     use crate::{
-        curved::EdgeStyle,
+        curved::LayoutMode,
         edge_ports::NodeSide,
         geometry::{LocalPos, WorldPos, WorldRect},
     };
@@ -1702,7 +1702,7 @@ mod tests {
         for side in [NodeSide::East, NodeSide::West] {
             let (mut graph, node, rect) = node_with_hair_pin(side);
 
-            expand_hair_pins(&mut graph, EdgeStyle::Rectilinear);
+            expand_hair_pins(&mut graph, LayoutMode::Rectilinear);
 
             let (near_x, far_x) = match side {
                 NodeSide::East => (rect.min.x, rect.max.x),
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_expand_hair_pins_returns_to_the_neighbor_in_the_curve_modes() {
-        let style = EdgeStyle::Curved;
+        let style = LayoutMode::Curved;
         for side in [NodeSide::East, NodeSide::West] {
             let (mut graph, node, rect) = node_with_hair_pin(side);
 

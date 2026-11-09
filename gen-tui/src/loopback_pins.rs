@@ -19,10 +19,9 @@ use petgraph::{
 };
 
 use crate::{
-    edge_ports::NodeSide,
+    edge_ports::{NodeSide, PortedEdge},
     geometry::{LocalPos, WorldPos},
     layout::{LayoutEdge, LayoutNode, NodeRole, PinSide},
-    pinning::PinnedEdge,
 };
 
 type LayoutGraph = StableGraph<LayoutNode, LayoutEdge, Undirected, u32>;
@@ -100,7 +99,7 @@ impl LayerOrder {
     }
 }
 
-/// Give every end of `pinned_edges` that attaches on the wrong side a routing node beside its
+/// Give every end of `domain_edges` that attaches on the wrong side a routing node beside its
 /// node, and return the pins that put each loop back after compaction.
 ///
 /// An end is on the wrong side when its edge continues to a later layer from a west side or to
@@ -108,7 +107,7 @@ impl LayerOrder {
 /// one routing node serves both of its ends.
 pub(crate) fn insert_sideways_nodes(
     graph: &mut LayoutGraph,
-    pinned_edges: &[PinnedEdge],
+    domain_edges: &[PortedEdge<NodeIndex>],
 ) -> SidewaysNodes {
     let node_of: HashMap<NodeIndex, NodeIndex<u32>> = graph
         .node_indices()
@@ -119,7 +118,7 @@ pub(crate) fn insert_sideways_nodes(
         .collect();
     let mut sideways_edges = Vec::new();
     let mut self_loops = Vec::new();
-    for edge in pinned_edges {
+    for edge in domain_edges {
         let (Some(&source), Some(&target)) = (node_of.get(&edge.source), node_of.get(&edge.target))
         else {
             continue;
@@ -588,8 +587,8 @@ mod tests {
         )
     }
 
-    fn pinned(source: usize, target: usize, ports: EdgePorts) -> PinnedEdge {
-        PinnedEdge {
+    fn ported_edge(source: usize, target: usize, ports: EdgePorts) -> PortedEdge<NodeIndex> {
+        PortedEdge {
             source: domain(source),
             target: domain(target),
             ports,
@@ -632,7 +631,11 @@ mod tests {
     #[test]
     fn test_edge_leaving_the_side_it_continues_toward_gets_no_routing_node() {
         let (mut graph, _, _) = two_nodes();
-        let edges = [pinned(0, 1, EdgePorts::new(NodeSide::East, NodeSide::West))];
+        let edges = [ported_edge(
+            0,
+            1,
+            EdgePorts::new(NodeSide::East, NodeSide::West),
+        )];
         assert!(insert_sideways_nodes(&mut graph, &edges).pins.is_empty());
         assert!(routing_nodes(&graph).is_empty());
     }
@@ -641,7 +644,7 @@ mod tests {
     fn test_east_to_east_edge_gets_a_routing_node_beside_each_end() {
         let (mut graph, first, second) = two_nodes();
         // From 0 east to 1 east: 1 continues west toward 0 from its east side, so it loops.
-        let edges = [pinned(0, 1, EAST_EAST)];
+        let edges = [ported_edge(0, 1, EAST_EAST)];
         let detached = insert_sideways_nodes(&mut graph, &edges).pins;
         assert_eq!(detached.len(), 1);
         let [routing] = routing_nodes(&graph)[..] else {
@@ -665,7 +668,7 @@ mod tests {
         let last = graph.add_node(data(3, 0, 2));
         graph.add_edge(node, middle, LayoutEdge::new(domain(0), domain(1)));
         graph.add_edge(other, last, LayoutEdge::new(domain(2), domain(3)));
-        insert_sideways_nodes(&mut graph, &[pinned(0, 1, EAST_EAST)]);
+        insert_sideways_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]);
         let [routing] = routing_nodes(&graph)[..] else {
             panic!("should add one routing node");
         };
@@ -681,7 +684,7 @@ mod tests {
         let first = graph.add_node(data(0, 0, 0));
         let second = graph.add_node(data(1, 1, 0));
         graph.add_edge(second, first, LayoutEdge::new(domain(0), domain(1)));
-        let detached = insert_sideways_nodes(&mut graph, &[pinned(0, 1, EAST_EAST)]).pins;
+        let detached = insert_sideways_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]).pins;
         assert_eq!(detached.len(), 1);
         assert_eq!(routing_nodes(&graph).len(), 1);
     }
@@ -689,7 +692,7 @@ mod tests {
     #[test]
     fn test_routing_node_prefers_the_gap_beside_its_node_when_none_crosses_less() {
         let (mut graph, _, second) = two_nodes();
-        insert_sideways_nodes(&mut graph, &[pinned(0, 1, EAST_EAST)]);
+        insert_sideways_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]);
         let [routing] = routing_nodes(&graph)[..] else {
             panic!("should add one routing node");
         };
@@ -700,7 +703,7 @@ mod tests {
     fn test_self_edge_between_sides_gets_one_routing_node_and_two_pins() {
         let mut graph = LayoutGraph::default();
         let node = graph.add_node(data(0, 0, 0));
-        let edges = [pinned(0, 0, WEST_EAST)];
+        let edges = [ported_edge(0, 0, WEST_EAST)];
         let detached = insert_sideways_nodes(&mut graph, &edges).pins;
         assert_eq!(detached.len(), 2);
         assert_eq!(routing_nodes(&graph).len(), 1);
@@ -721,7 +724,7 @@ mod tests {
     #[test]
     fn test_reattached_pins_use_cells_no_other_node_uses() {
         let (mut graph, _, _) = two_nodes();
-        let detached = insert_sideways_nodes(&mut graph, &[pinned(0, 1, EAST_EAST)]).pins;
+        let detached = insert_sideways_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]).pins;
         reattach_loopback_pins(&mut graph, detached);
         let positions: Vec<_> = graph
             .node_weights()

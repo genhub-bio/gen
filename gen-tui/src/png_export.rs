@@ -50,11 +50,12 @@ pub enum PngExportError {
     Io(#[from] IoError),
 }
 
-/// Sizes are in pixels of the written image. [`Self::with_scale`] derives a sharper config from a
+/// Pixel cell dimensions, scale and colors shared by PNG export and terminal graphics. Sizes are
+/// in pixels of the rendered image. [`Self::with_scale`] derives a sharper config from a
 /// logical one: the same grid of cells with every length multiplied, so a browser can show the
 /// image at its logical size and use the extra pixels on high-density screens.
 #[derive(Clone, Copy, Debug)]
-pub struct PngConfig {
+pub struct RasterConfig {
     pub cell_width: usize,
     pub cell_height: usize,
     /// How many image pixels draw one logical pixel. Strokes, paddings and offsets that are a
@@ -66,7 +67,7 @@ pub struct PngConfig {
     pub background: [u8; 3],
 }
 
-impl Default for PngConfig {
+impl Default for RasterConfig {
     /// An 11x21 pixel cell with the current theme's text and canvas colors.
     fn default() -> Self {
         let theme = current_theme();
@@ -80,7 +81,7 @@ impl Default for PngConfig {
     }
 }
 
-impl PngConfig {
+impl RasterConfig {
     /// This config drawn at `scale` image pixels per logical pixel, so a scale of 2 writes an
     /// image twice as wide and tall with the same cell grid. A scale of 0 is treated as 1.
     /// The PNG declares 96 dpi times the scale, so 2 is 192 dpi and 3 is 288 dpi, close to a
@@ -115,7 +116,7 @@ struct CachedGlyph {
 /// Text is sized to fit the cell and centered. Glyphs are clipped to their cell.
 pub struct PngRenderer {
     font: Font,
-    config: PngConfig,
+    config: RasterConfig,
     text_size: f32,
     text_baseline: i64,
     glyphs: HashMap<char, CachedGlyph>,
@@ -123,7 +124,7 @@ pub struct PngRenderer {
 }
 
 impl PngRenderer {
-    pub fn new(config: PngConfig) -> Result<Self, PngExportError> {
+    pub fn new(config: RasterConfig) -> Result<Self, PngExportError> {
         let font =
             Font::from_bytes(FONT_BYTES, FontSettings::default()).map_err(PngExportError::Font)?;
         const PROBE_SIZE: f32 = 100.0;
@@ -380,7 +381,7 @@ fn draw_sentinel_glyph(
     pixels: &mut [u8],
     row_width: usize,
     (cell_x, character): (usize, char),
-    config: PngConfig,
+    config: RasterConfig,
     color: [u8; 3],
 ) -> bool {
     let (width, height) = (config.cell_width, config.cell_height);
@@ -430,7 +431,7 @@ fn fill_rect(
     }
 }
 
-fn cell_colors(cell: &Cell, config: PngConfig) -> ([u8; 3], [u8; 3]) {
+fn cell_colors(cell: &Cell, config: RasterConfig) -> ([u8; 3], [u8; 3]) {
     let mut colors = (
         color_to_rgb(cell.fg, config.foreground),
         color_to_rgb(cell.bg, config.background),
@@ -474,10 +475,10 @@ mod tests {
     use png::Decoder;
     use ratatui::{layout::Rect, style::Style};
 
-    use super::{Buffer, Color, PngConfig, PngRenderer};
+    use super::{Buffer, Color, PngRenderer, RasterConfig};
 
-    fn small_config() -> PngConfig {
-        PngConfig {
+    fn small_config() -> RasterConfig {
+        RasterConfig {
             cell_width: 8,
             cell_height: 12,
             scale: 1,
@@ -541,7 +542,7 @@ mod tests {
     }
 
     fn cell_pixels(character: &str) -> Vec<[u8; 3]> {
-        let config = PngConfig {
+        let config = RasterConfig {
             cell_width: 11,
             cell_height: 21,
             scale: 1,
@@ -600,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_descenders_share_the_text_baseline_without_clipping() {
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         let renderer = PngRenderer::new(config).expect("should load font");
         for character in "MgypqÅ".chars() {
             let metrics = renderer.font.metrics(character, renderer.text_size);
@@ -687,10 +688,10 @@ mod tests {
     }
 
     fn scaled_cell_pixels(character: &str, scale: usize) -> (usize, usize, Vec<[u8; 3]>) {
-        let config = PngConfig {
+        let config = RasterConfig {
             foreground: [255; 3],
             background: [0; 3],
-            ..PngConfig::default()
+            ..RasterConfig::default()
         }
         .with_scale(scale);
         let mut renderer = PngRenderer::new(config).unwrap();

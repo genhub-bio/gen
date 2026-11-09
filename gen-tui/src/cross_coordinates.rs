@@ -12,8 +12,8 @@ use petgraph::{
 
 use crate::{
     compaction::{Constraint, compact_axis_with_centering},
-    distribute_nodes::base_step,
     layout::{LayoutEdge, LayoutNode, NodeRole},
+    layout_compaction::base_step,
 };
 
 /// Rotate the most-aligned chain of simple branch-and-merge bubbles to the first row.

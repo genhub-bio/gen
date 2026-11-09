@@ -6,14 +6,14 @@ use petgraph::graph::NodeIndex;
 
 use crate::{
     crawl::{EagerSource, GraphCursor, SHELL_CUTOFF_FACTOR, neighborhood},
-    distribute_nodes::GapSizes,
-    graph_widget::build_window_geometry,
     layout::NodeRole,
+    layout_compaction::GapPolicy,
     layout_engine::LayoutEngine,
     testing::{
         mocks::{MockDomainGraph, TestGraphs},
         validate_layout_graph,
     },
+    window_geometry::build_window_geometry,
 };
 
 /// Return every domain-level window invariant violated by one crawl.
@@ -121,7 +121,7 @@ fn full_render_errors(
     };
     let geometry = build_window_geometry(
         assembled,
-        &GapSizes::default(),
+        &GapPolicy::default(),
         |role| match role {
             NodeRole::Data(_) => (5, 3),
             _ => (1, 1),

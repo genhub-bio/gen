@@ -1,78 +1,81 @@
 //! PNG export of graphs drawn with curved edges.
 //!
 //! The viewer places every node exactly as it does in a terminal but leaves the edges out of the
-//! buffer and reports them as shapes (see `EdgeStyle::Curved`). The text is rasterized by
-//! `PngRenderer`, and the shapes are rasterized by the same `EdgeLayer` a terminal shows through
-//! the Kitty graphics protocol, composited band by band as the image streams out.
+//! buffer and reports them as overlay primitives (see `LayoutMode::Curved`). The text is rasterized
+//! by `PngRenderer`, and the primitives are rasterized by the same `PixelOverlay` a terminal shows
+//! through the Kitty graphics protocol, composited band by band as the image streams out.
 
 use std::io::{self, Write};
 
 use gen_tui::{
-    EdgeShape,
-    edge_layer::{EdgeLayer, apply_highlight_cells, shapes_bounds},
-    png_export::{PngConfig, PngRenderer},
+    OverlayPrimitive,
+    pixel_overlay::{PixelOverlay, overlay_primitives_bounds, prepare_node_highlight_cells},
+    png_export::{PngRenderer, RasterConfig},
 };
 use ratatui::buffer::Buffer;
 
-/// Write `buffer` as a PNG cropped to its content, with `shapes` (in cells of `buffer`) drawn
+/// Write `buffer` as a PNG cropped to its content, with `overlay_primitives` (in cells of `buffer`) drawn
 /// over its blank cells. Every length is multiplied by `scale` image pixels per logical pixel, so
 /// a scale of 2 gives the same picture on twice as many pixels.
 pub fn write_png_with_edges(
     buffer: &Buffer,
-    shapes: &[EdgeShape],
+    overlay_primitives: &[OverlayPrimitive],
     scale: usize,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    write_png_with_edges_inner(buffer, shapes, scale, output, true)
+    write_png_with_edges_inner(buffer, overlay_primitives, scale, output, true)
 }
 
 /// Write a full viewport PNG without trimming its terminal-cell geometry.
 pub fn write_png_with_edges_full_viewport(
     buffer: &Buffer,
-    shapes: &[EdgeShape],
+    overlay_primitives: &[OverlayPrimitive],
     scale: usize,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    write_png_with_edges_inner(buffer, shapes, scale, output, false)
+    write_png_with_edges_inner(buffer, overlay_primitives, scale, output, false)
 }
 
 fn write_png_with_edges_inner(
     buffer: &Buffer,
-    shapes: &[EdgeShape],
+    overlay_primitives: &[OverlayPrimitive],
     scale: usize,
     output: &mut impl Write,
     crop_to_content: bool,
 ) -> io::Result<()> {
-    let config = PngConfig::default().with_scale(scale);
+    let config = RasterConfig::default().with_scale(scale);
     let mut renderer = PngRenderer::new(config).map_err(io::Error::other)?;
     let crop = if crop_to_content {
-        renderer.content_crop(buffer, shapes_bounds(shapes, buffer.area))
+        renderer.content_crop(
+            buffer,
+            overlay_primitives_bounds(overlay_primitives, buffer.area),
+        )
     } else {
         buffer.area
     };
     let mut cropped = PngRenderer::crop(buffer, crop);
     let origin = (crop.x, crop.y);
-    apply_highlight_cells(&mut cropped, shapes, origin, config);
-    let layer = EdgeLayer::new(shapes, &cropped, origin, config);
-    if layer.is_empty() {
+    prepare_node_highlight_cells(&mut cropped, overlay_primitives, origin, config);
+    let pixel_overlay = PixelOverlay::new(overlay_primitives, &cropped, origin, config);
+    if pixel_overlay.is_empty() {
         return renderer
             .write_png(&cropped, output)
             .map_err(io::Error::other);
     }
     let width = usize::from(cropped.area.width) * config.cell_width;
-    let mut scratch = layer
+    let mut scratch = pixel_overlay
         .band_pixmap(width, config.cell_height)
         .ok_or_else(|| io::Error::other("could not allocate PNG edge band"))?;
     renderer
         .write_png_with_overlay(&cropped, output, |pixels, _, top| {
-            layer.composite_band(pixels, top, &mut scratch);
+            pixel_overlay.composite_band(pixels, top, &mut scratch);
         })
         .map_err(io::Error::other)
 }
 
 #[cfg(test)]
 mod tests {
-    use gen_tui::{BezierCurve, EdgeShape, LineStyle, png_export::PngConfig};
+    use gen_tui::{BezierCurve, LineStyle, OverlayPrimitive, png_export::RasterConfig};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     use super::{write_png_with_edges, write_png_with_edges_full_viewport};
@@ -98,7 +101,7 @@ mod tests {
     fn test_png_with_bezier_is_cropped_around_the_curve_not_its_control_points() {
         let area = Rect::new(0, 0, 40, 20);
         let buffer = Buffer::empty(area);
-        let curves = [EdgeShape::Bezier(curve(
+        let curves = [OverlayPrimitive::Bezier(curve(
             (5.0, 10.0),
             (20.0, 1.0),
             (30.0, 1.0),
@@ -114,7 +117,7 @@ mod tests {
                     .expect("should have a header"),
             ) as usize
         };
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         assert_eq!(dimension(16), (35 - 5 + 1 + 2) * config.cell_width);
         // The curve peaks at y = 3.25, three quarters of the way to its handles at y = 1.
         assert_eq!(dimension(20), (10 - 3 + 1 + 2) * config.cell_height);
@@ -134,7 +137,7 @@ mod tests {
                     .expect("should have a header"),
             ) as usize
         };
-        let config = PngConfig::default();
+        let config = RasterConfig::default();
         assert_eq!(dimension(16), 40 * config.cell_width);
         assert_eq!(dimension(20), 20 * config.cell_height);
     }
@@ -154,7 +157,7 @@ mod tests {
     fn test_png_with_lines_at_scale_two_doubles_the_pixels() {
         let area = Rect::new(0, 0, 40, 20);
         let buffer = Buffer::empty(area);
-        let curves = [EdgeShape::Bezier(curve(
+        let curves = [OverlayPrimitive::Bezier(curve(
             (5.0, 10.0),
             (20.0, 1.0),
             (30.0, 1.0),

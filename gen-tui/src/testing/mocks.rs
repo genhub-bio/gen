@@ -6,8 +6,8 @@ use petgraph::{graph::NodeIndex, stable_graph::StableDiGraph, visit::GraphBase};
 use ratatui::style::{Color, Style};
 
 use crate::{
-    geometry::WorldRect, graph_widget::NODE_GLYPH, layout::VisualDetail, plotter::NodeRenderer,
-    viewport_state::WorldBuffer,
+    geometry::WorldRect, layout::VisualDetail, plotter::NodeRenderer, viewport_state::WorldBuffer,
+    window_geometry::NODE_GLYPH,
 };
 
 // Type alias for the common test graph type

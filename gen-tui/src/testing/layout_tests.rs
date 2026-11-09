@@ -4,9 +4,9 @@ use petgraph::graph::NodeIndex;
 use ratatui::widgets::StatefulWidget as _;
 
 #[cfg(test)]
-use crate::distribute_nodes::{GapSizer, GapSizes};
-#[cfg(test)]
 use crate::layout::VisualDetail;
+#[cfg(test)]
+use crate::layout_compaction::{GapPolicy, GapSizer};
 #[cfg(test)]
 use crate::testing::create_test_terminal;
 #[cfg(test)]
@@ -43,7 +43,7 @@ fn make_snapshot_custom<S, R>(
     node_sizer: S,
     renderer: R,
     backward_edges: &[(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)],
-    target_gaps: GapSizes,
+    target_gaps: GapPolicy,
 ) -> String
 where
     S: crate::testing::mocks::MockRenderer<MockDomainGraph>,
@@ -113,7 +113,7 @@ fn make_snapshot(
         node_sizer,
         renderer,
         &backward_edges,
-        GapSizes::default(),
+        GapPolicy::default(),
     )
 }
 
@@ -127,24 +127,24 @@ fn make_snapshot_at_target_gaps(
 ) -> String {
     let (data_data_x, data_data_y) = target_gaps;
 
-    make_snapshot_at_gap_sizes(
+    make_snapshot_at_gap_policy(
         domain_graph,
         viewport_width,
         viewport_height,
-        GapSizes {
+        GapPolicy {
             data_data_x: fixed_gap(data_data_x),
             data_data_y: fixed_gap(data_data_y),
-            ..GapSizes::default()
+            ..GapPolicy::default()
         },
     )
 }
 
 #[cfg(test)]
-fn make_snapshot_at_gap_sizes(
+fn make_snapshot_at_gap_policy(
     domain_graph: MockDomainGraph,
     viewport_width: u16,
     viewport_height: u16,
-    target_gaps: GapSizes,
+    target_gaps: GapPolicy,
 ) -> String {
     let backward_edges = detect_backward_edges(&domain_graph, None, None);
 
@@ -184,7 +184,7 @@ fn make_snapshot_with_backward_edges(
         node_sizer,
         renderer,
         backward_edges,
-        GapSizes::default(),
+        GapPolicy::default(),
     )
 }
 
@@ -209,10 +209,10 @@ fn make_snapshot_with_backward_edges_at_target_gaps(
         },
         TestRenderers::debug(),
         backward_edges,
-        GapSizes {
+        GapPolicy {
             data_data_x: fixed_gap(data_data_x),
             data_data_y: fixed_gap(data_data_y),
-            ..GapSizes::default()
+            ..GapPolicy::default()
         },
     )
 }
@@ -341,14 +341,14 @@ fn target_gap_combinations_complex_dag() {
         );
     }
 
-    let identity_y = GapSizes {
+    let identity_y = GapPolicy {
         data_data_x: |_| 1,
         data_data_y: |gap| gap,
         data_routing_y: |gap| gap,
         routing_routing_y: |gap| gap,
-        ..GapSizes::default()
+        ..GapPolicy::default()
     };
-    let snapshot = make_snapshot_at_gap_sizes(domain_graph, 80, 24, identity_y);
+    let snapshot = make_snapshot_at_gap_policy(domain_graph, 80, 24, identity_y);
     insta::assert_snapshot!("target_gaps_complex_dag_x_1_y_identity", snapshot);
 }
 
@@ -507,8 +507,8 @@ fn test_layer_coordinate_alignment_and_ordering() {
         layout::NodeRole,
         layout_engine::LayoutEngine,
         plotter::NodeRenderer,
+        routed_window_graph::RoutedWindowGraph,
         testing::mocks::{FixedNodeSizer, MockDomainGraph, TestGraphs},
-        viewport_graph::ViewportGraph,
     };
 
     let domain_graph = TestGraphs::domain_extended_diamond();
@@ -524,16 +524,16 @@ fn test_layer_coordinate_alignment_and_ordering() {
     let assembled = engine
         .window_for(anchor, domain_graph.node_count() * 8)
         .expect("should build a window covering the graph");
-    let pinned_edges = assembled.pinned_edges.clone();
+    let domain_edges = assembled.domain_edges.clone();
 
     let geometry = {
         let visual = &node_sizer;
-        crate::graph_widget::build_window_geometry(
+        crate::window_geometry::build_window_geometry(
             assembled,
-            &GapSizes {
+            &GapPolicy {
                 data_data_x: |_| 1,
                 data_data_y: |_| 0,
-                ..GapSizes::default()
+                ..GapPolicy::default()
             },
             |role| match role {
                 NodeRole::Data(domain_idx) => {
@@ -545,20 +545,20 @@ fn test_layer_coordinate_alignment_and_ordering() {
             |_| false,
         )
     };
-    let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &pinned_edges);
-    let viewport_graph = &viewport_graph;
+    let routed_window_graph = RoutedWindowGraph::from_window_geometry(&geometry, &domain_edges);
+    let routed_window_graph = &routed_window_graph;
 
-    assert!(viewport_graph.layer_count() > 0);
+    assert!(routed_window_graph.layer_count() > 0);
 
     // Group nodes by layer and collect their x-coordinates
     let mut layer_x_coords: Vec<Vec<i64>> = Vec::new();
 
-    for layer_idx in 0..viewport_graph.layer_count() {
-        if let Some(layer_nodes) = viewport_graph.get_layer(layer_idx) {
+    for layer_idx in 0..routed_window_graph.layer_count() {
+        if let Some(layer_nodes) = routed_window_graph.get_layer(layer_idx) {
             let mut x_coords = Vec::new();
 
             for &domain_node in layer_nodes {
-                let world_pos = viewport_graph
+                let world_pos = routed_window_graph
                     .node_positions
                     .get(&domain_node)
                     .expect("should position every layered domain node");
@@ -647,7 +647,7 @@ fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
         node_sizer,
         renderer,
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("bridge_position_variable_widths", snapshot);
@@ -699,9 +699,9 @@ fn test_centered_path_anchor_returns_to_world_row_zero_after_compaction() {
     let assembled = engine
         .window_for(anchor, domain_graph.node_count() * 8)
         .expect("should build a window covering the graph");
-    let geometry = crate::graph_widget::build_window_geometry(
+    let geometry = crate::window_geometry::build_window_geometry(
         assembled,
-        &GapSizes::default(),
+        &GapPolicy::default(),
         |_| (5, 3),
         |_| true,
         |node| [source, reference, sink].contains(&node),
@@ -748,7 +748,7 @@ fn test_centered_nodes_pin_their_layers_across_forks_and_skips() {
         },
         TestRenderers::debug(),
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("centered_nodes_pin_layers_forks_and_skips", snapshot);
@@ -775,7 +775,7 @@ fn test_centered_edge_pins_layers_it_crosses_without_a_centered_node() {
         },
         TestRenderers::debug(),
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("centered_edge_pins_layers_without_centered_node", snapshot);
@@ -803,7 +803,7 @@ fn test_centered_circular_bubble_keeps_return_edge_straight() {
         },
         TestRenderers::debug(),
         &[(sink, source)],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("centered_circular_bubble", snapshot);
@@ -857,8 +857,8 @@ fn test_skip_layer_edges_carry_bundles() {
         layout::NodeRole,
         layout_engine::LayoutEngine,
         plotter::NodeRenderer,
+        routed_window_graph::RoutedWindowGraph,
         testing::mocks::{FixedNodeSizer, TestGraphs},
-        viewport_graph::ViewportGraph,
     };
 
     let domain_graph = TestGraphs::domain_skip_layer();
@@ -874,16 +874,16 @@ fn test_skip_layer_edges_carry_bundles() {
     let assembled = engine
         .window_for(anchor, domain_graph.node_count() * 8)
         .expect("should build a window covering the graph");
-    let pinned_edges = assembled.pinned_edges.clone();
+    let domain_edges = assembled.domain_edges.clone();
 
     let geometry = {
         let visual = &node_sizer;
-        crate::graph_widget::build_window_geometry(
+        crate::window_geometry::build_window_geometry(
             assembled,
-            &GapSizes {
+            &GapPolicy {
                 data_data_x: |_| 1,
                 data_data_y: |_| 0,
-                ..GapSizes::default()
+                ..GapPolicy::default()
             },
             |role| match role {
                 NodeRole::Data(domain_idx) => {
@@ -895,11 +895,11 @@ fn test_skip_layer_edges_carry_bundles() {
             |_| false,
         )
     };
-    let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &pinned_edges);
+    let routed_window_graph = RoutedWindowGraph::from_window_geometry(&geometry, &domain_edges);
 
     // Every edge in the assembled viewport graph should carry a bundle back to the domain
     // edge(s) it represents.
-    let edges_without_bundles = viewport_graph
+    let edges_without_bundles = routed_window_graph
         .graph
         .all_edges()
         .filter(|(_, _, bundle)| bundle.is_empty())
@@ -965,7 +965,7 @@ fn viewport_even_width_node_spacing() {
         node_sizer,
         renderer,
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("even_width_nodes", snapshot);
@@ -1367,7 +1367,7 @@ fn test_complex_multipath_dag() {
         AlphabeticSizer,
         AlphabeticRenderer,
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
     insta::assert_snapshot!("complex_multipath_dag", snapshot);
 }
@@ -1442,7 +1442,7 @@ fn test_grid_disperse_zoom_preserves_spacing() {
 
     use crate::{
         layout::NodeRole, layout_engine::LayoutEngine, plotter::NodeRenderer,
-        testing::mocks::FixedNodeSizer, viewport_graph::ViewportGraph,
+        routed_window_graph::RoutedWindowGraph, testing::mocks::FixedNodeSizer,
     };
 
     let domain_graph = make_grid_all_to_all_with_bypass(4, 4);
@@ -1463,15 +1463,15 @@ fn test_grid_disperse_zoom_preserves_spacing() {
         let assembled = engine
             .window_for(anchor, domain_graph.node_count() * 30)
             .expect("should build a window covering the graph");
-        let pinned_edges = assembled.pinned_edges.clone();
+        let domain_edges = assembled.domain_edges.clone();
         let geometry = {
             let visual = &node_sizer;
-            crate::graph_widget::build_window_geometry(
+            crate::window_geometry::build_window_geometry(
                 assembled,
-                &GapSizes {
+                &GapPolicy {
                     data_data_x: |_| 1,
                     data_data_y: fixed_gap(gap_y),
-                    ..GapSizes::default()
+                    ..GapPolicy::default()
                 },
                 |role| match role {
                     NodeRole::Data(domain_idx) => {
@@ -1483,11 +1483,11 @@ fn test_grid_disperse_zoom_preserves_spacing() {
                 |_| false,
             )
         };
-        let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &pinned_edges);
+        let routed_window_graph = RoutedWindowGraph::from_window_geometry(&geometry, &domain_edges);
         let mut ys: Vec<i64> = row_node_indices
             .iter()
             .map(|&i| {
-                viewport_graph
+                routed_window_graph
                     .node_positions
                     .get(&petgraph::graph::NodeIndex::new(i as usize))
                     .expect("should include the node in the viewport graph")
@@ -1601,7 +1601,7 @@ fn test_grid_all_to_all_with_bypass_variable_widths() {
         WideBypassSizer,
         renderer,
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("grid_all_to_all_with_bypass_variable_widths", snapshot);
@@ -1825,7 +1825,7 @@ fn test_diamond_variable_width_parallel_nodes() {
         node_sizer,
         renderer,
         &[],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     insta::assert_snapshot!("diamond_variable_width_parallel", snapshot);
@@ -1901,7 +1901,7 @@ fn backward_edge_tall_nodes_marks_only_horizontal_runs() {
         },
         TestRenderers::debug(),
         &[(nodes[2], nodes[0])],
-        GapSizes::default(),
+        GapPolicy::default(),
     );
 
     assert!(

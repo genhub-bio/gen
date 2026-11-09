@@ -4,15 +4,17 @@ use log::debug;
 use petgraph::{graphmap::UnGraphMap, prelude::NodeIndex};
 
 use crate::{
+    edge_ports::PortedEdge,
     geometry::WorldPos,
     layout::{LayoutNode, NodeRole},
-    pinning::PinnedEdge,
 };
 
-/// A graph containing only the nodes and edges visible in the current viewport.
-/// Uses world coordinates as keys for natural deduplication.
+/// The full routed graph of an assembled window, keyed by world coordinates for natural
+/// deduplication. It holds every node and edge of the window geometry, not only what is on
+/// screen; the plotter and painter clip to the visible viewport at plot time, so panning
+/// within the window reuses one graph.
 #[derive(Clone)]
-pub struct ViewportGraph {
+pub struct RoutedWindowGraph {
     /// Graph keyed by world coordinates, edges store domain node pairs
     pub graph: UnGraphMap<WorldPos, Vec<(NodeIndex, NodeIndex)>>,
 
@@ -31,7 +33,7 @@ pub struct ViewportGraph {
 
     /// Domain edges and their ports (see `crawl::build_window_graph`), copied through so the
     /// plotter can mark every curved route and the selected rectilinear routes.
-    pub pinned_edges: Vec<PinnedEdge>,
+    pub domain_edges: Vec<PortedEdge<NodeIndex>>,
 
     /// World position pairs whose edge is a backward edge's `left_pin -> right_pin` main
     /// span (`LayoutEdge::is_pin_span`), keyed by both `(source, target)` orderings so a
@@ -40,10 +42,10 @@ pub struct ViewportGraph {
     pub pin_span_edges: HashSet<(WorldPos, WorldPos)>,
 }
 
-impl ViewportGraph {
+impl RoutedWindowGraph {
     pub fn empty() -> Self {
         debug!(
-            "[DEBUG_TRACE_LAYOUT] empty: -> result=ViewportGraph{{graph_nodes=0, nodes_count=0, domain_to_world_count=0, layers_count=0}}"
+            "[DEBUG_TRACE_LAYOUT] empty: -> result=RoutedWindowGraph{{graph_nodes=0, nodes_count=0, domain_to_world_count=0, layers_count=0}}"
         );
         Self {
             graph: UnGraphMap::new(),
@@ -51,12 +53,12 @@ impl ViewportGraph {
             node_positions: HashMap::new(),
             junction_positions: HashMap::new(),
             layers: Vec::new(),
-            pinned_edges: Vec::new(),
+            domain_edges: Vec::new(),
             pin_span_edges: HashSet::new(),
         }
     }
 
-    /// Build a `ViewportGraph` from an already-assembled window geometry.
+    /// Build a `RoutedWindowGraph` from an already-assembled window geometry.
     ///
     /// The window is a single coordinate space produced by
     /// [`crate::assembly::assemble_window`] + [`crate::layout::WindowGeometry::new`], so
@@ -65,7 +67,7 @@ impl ViewportGraph {
     /// the window by construction, so this iterates the whole layout graph.
     pub fn from_window_geometry(
         geometry: &crate::layout::WindowGeometry,
-        pinned_edges: &[PinnedEdge],
+        domain_edges: &[PortedEdge<NodeIndex>],
     ) -> Self {
         let mut this = Self::empty();
 
@@ -105,7 +107,7 @@ impl ViewportGraph {
         }
 
         this.build_layers_from_coordinates();
-        this.pinned_edges = pinned_edges.to_vec();
+        this.domain_edges = domain_edges.to_vec();
 
         this
     }
@@ -231,7 +233,7 @@ impl ViewportGraph {
         self.layers.len()
     }
 
-    /// Create a new ViewportGraph from a list of visual (rectilinear) edges.
+    /// Create a new RoutedWindowGraph from a list of visual (rectilinear) edges.
     /// This is useful for creating temporary graphs for highlighting.
     pub fn from_visual_edges(edges: &[((WorldPos, WorldPos), crate::plotter::PathStyle)]) -> Self {
         let mut new_graph = Self::empty();
@@ -242,7 +244,7 @@ impl ViewportGraph {
     }
 }
 
-impl Default for ViewportGraph {
+impl Default for RoutedWindowGraph {
     fn default() -> Self {
         Self::empty()
     }

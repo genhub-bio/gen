@@ -5,10 +5,13 @@ use petgraph::{Undirected, stable_graph::StableGraph};
 use crate::{
     geometry::WorldPos,
     layout::{LayoutEdge, LayoutNode, NodeRole, PinSide},
-    viewport_graph::ViewportGraph,
+    routed_window_graph::RoutedWindowGraph,
 };
 
-pub fn export_to_dot(viewport_graph: &ViewportGraph, filename: &str) -> Result<(), std::io::Error> {
+pub fn export_to_dot(
+    routed_window_graph: &RoutedWindowGraph,
+    filename: &str,
+) -> Result<(), std::io::Error> {
     let mut dot = String::new();
     writeln!(&mut dot, "graph {{").unwrap();
     writeln!(&mut dot, "    layout=neato;").unwrap();
@@ -19,7 +22,7 @@ pub fn export_to_dot(viewport_graph: &ViewportGraph, filename: &str) -> Result<(
     let mut world_to_id: HashMap<WorldPos, usize> = HashMap::new();
 
     // Collect and sort world positions for consistent output
-    let mut sorted_positions: Vec<_> = viewport_graph.nodes().map(|(pos, _)| *pos).collect();
+    let mut sorted_positions: Vec<_> = routed_window_graph.nodes().map(|(pos, _)| *pos).collect();
     sorted_positions.sort_by(|a, b| {
         // Sort by x coordinate first, then y coordinate
         a.x.cmp(&b.x).then(a.y.cmp(&b.y))
@@ -33,7 +36,7 @@ pub fn export_to_dot(viewport_graph: &ViewportGraph, filename: &str) -> Result<(
     // Write nodes with coordinates, in sorted order by node ID
     for pos in sorted_positions.iter() {
         let node_id = world_to_id[pos];
-        let node = viewport_graph
+        let node = routed_window_graph
             .nodes()
             .find(|(world_pos, _)| *world_pos == pos)
             .map(|(_, n)| n)
@@ -67,7 +70,7 @@ pub fn export_to_dot(viewport_graph: &ViewportGraph, filename: &str) -> Result<(
     }
 
     // Write edges (with bundle information as custom attributes)
-    for (source_pos, target_pos, edge_bundle) in viewport_graph.edges() {
+    for (source_pos, target_pos, edge_bundle) in routed_window_graph.edges() {
         // Check if both nodes exist in our mapping
         let source_id = world_to_id.get(&source_pos);
         let target_id = world_to_id.get(&target_pos);
@@ -134,7 +137,7 @@ pub fn export_to_dot(viewport_graph: &ViewportGraph, filename: &str) -> Result<(
 
 /// Dump a raw `LayoutNode` graph (local coordinates) to a `dot` file. Unlike `export_to_dot`,
 /// this includes Pin nodes, since the whole point is to inspect alignment-relevant structure
-/// that's invisible by the time a `ViewportGraph` is built (pins are stripped by
+/// that's invisible by the time a `RoutedWindowGraph` is built (pins are stripped by
 /// `prune_pin_stubs` before that point). Intended for ad hoc debugging, e.g. dumping the graph
 /// to see where Pin rows sit relative to Data/Routing nodes.
 pub fn export_layout_graph_to_dot(

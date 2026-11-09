@@ -20,7 +20,7 @@ use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, Workspace, is_terminal, range::Range};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    EdgeStyle, LineStyle,
+    LayoutMode, LineStyle,
     layout::VisualDetail,
     plotter::{NodeRenderer, PathStyle},
     theme::current_theme,
@@ -1246,12 +1246,12 @@ impl PyGraphController {
     /// Return the logical pixel dimensions of a PNG terminal cell. A PNG rendered at ``scale``
     /// has cells ``scale`` times this size in image pixels.
     fn png_cell_size(&self) -> (usize, usize) {
-        gen_tui::PngConfig::default().logical_cell_size()
+        gen_tui::RasterConfig::default().logical_cell_size()
     }
 
     /// Return the exact canvas color used by the native PNG renderer.
     fn png_background_color(&self) -> String {
-        let [red, green, blue] = gen_tui::PngConfig::default().background;
+        let [red, green, blue] = gen_tui::RasterConfig::default().background;
         format!("#{red:02x}{green:02x}{blue:02x}")
     }
 
@@ -1472,9 +1472,9 @@ fn render_png_bytes<'py>(
 ) -> PyResult<Bound<'py, PyBytes>> {
     let scale = validated_png_scale(scale)?;
     let controller = &mut widget.active()?.controller;
-    let previous_style = controller.view_state().edge_style;
+    let previous_style = controller.view_state().layout_mode;
     let previous_placement = controller.scale_placement();
-    controller.view_state_mut().edge_style = EdgeStyle::Curved;
+    controller.view_state_mut().layout_mode = LayoutMode::Curved;
     controller.set_scale_placement(if full_viewport {
         ScalePlacement::Bottom
     } else {
@@ -1495,14 +1495,19 @@ fn render_png_bytes<'py>(
         widget.render_graph_buffer(cols, rows)
     };
     let controller = &mut widget.active()?.controller;
-    controller.view_state_mut().edge_style = previous_style;
+    controller.view_state_mut().layout_mode = previous_style;
     controller.set_scale_placement(previous_placement);
     let buffer = buffer_result?;
     let mut bytes = Vec::new();
     let write_result = if full_viewport {
-        write_png_with_edges_full_viewport(&buffer, controller.edge_shapes(), scale, &mut bytes)
+        write_png_with_edges_full_viewport(
+            &buffer,
+            controller.overlay_primitives(),
+            scale,
+            &mut bytes,
+        )
     } else {
-        write_png_with_edges(&buffer, controller.edge_shapes(), scale, &mut bytes)
+        write_png_with_edges(&buffer, controller.overlay_primitives(), scale, &mut bytes)
     };
     write_result.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(PyBytes::new(py, &bytes))

@@ -10,17 +10,17 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice, PackedEdgeId, Pa
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
     crawl::{EagerSource, GraphSource},
-    distribute_nodes::{GapSizes, MINIMUM_ROUTING_GAP_Y},
-    edge_ports::{EdgeKey, EdgePorts, NodeSide},
+    edge_ports::{EdgePorts, NodeSide, PortedEdge},
     frame_index::FrameIndex,
     geometry::{WorldPos, WorldRect, floor_half},
     graph_view::GraphViewState,
-    graph_widget::NODE_GLYPH,
     layout::{VerticalAnchor, VisualDetail},
+    layout_compaction::{GapPolicy, MINIMUM_ROUTING_GAP_Y},
     layout_engine::{BatchId, LayoutEngine},
     plotter::{ColumnRun, CursorColumns, NodeRenderer, PathStyle},
     theme::current_theme,
     viewport_state::WorldBuffer,
+    window_geometry::NODE_GLYPH,
 };
 use ratatui::{
     buffer::Buffer,
@@ -65,8 +65,8 @@ use crate::{
 /// Lives outside gen-tui deliberately: gen-tui only exposes the primitives (the public
 /// `gaps` field, `zoom_index`) and has no notion of which concrete levels exist or their
 /// gaps - that policy belongs to the widget.
-pub const ZOOM_GAP_SIZES: [GapSizes; 5] = [
-    GapSizes {
+pub const ZOOM_GAP_POLICIES: [GapPolicy; 5] = [
+    GapPolicy {
         data_data_x: |_| 1,
         data_data_y: |_| 0,
         data_routing_x: |_| 1,
@@ -74,7 +74,7 @@ pub const ZOOM_GAP_SIZES: [GapSizes; 5] = [
         routing_routing_x: |_| 0,
         routing_routing_y: MINIMUM_ROUTING_GAP_Y,
     },
-    GapSizes {
+    GapPolicy {
         data_data_x: |_| 2,
         data_data_y: |y| y.max(1),
         data_routing_x: |_| 1,
@@ -82,7 +82,7 @@ pub const ZOOM_GAP_SIZES: [GapSizes; 5] = [
         routing_routing_x: |_| 0,
         routing_routing_y: |y| y,
     },
-    GapSizes {
+    GapPolicy {
         data_data_x: |_| 2,
         data_data_y: |y| y.max(1),
         data_routing_x: |_| 1,
@@ -90,7 +90,7 @@ pub const ZOOM_GAP_SIZES: [GapSizes; 5] = [
         routing_routing_x: |_| 0,
         routing_routing_y: |y| y,
     },
-    GapSizes {
+    GapPolicy {
         data_data_x: |_| 5,
         data_data_y: |y| 3 * y.max(1),
         data_routing_x: |_| 1,
@@ -98,7 +98,7 @@ pub const ZOOM_GAP_SIZES: [GapSizes; 5] = [
         routing_routing_x: |_| 0,
         routing_routing_y: |y| y,
     },
-    GapSizes {
+    GapPolicy {
         data_data_x: |_| 9,
         data_data_y: |y| 5 * y.max(1),
         data_routing_x: |_| 1,
@@ -132,10 +132,10 @@ pub const FULL_ZOOM_LEVEL: usize = 2;
 pub type ZoomLevels<'a> = Vec<(
     VisualDetail,
     Arc<dyn NodeRenderer<PackedGenGraph> + 'a>,
-    GapSizes,
+    GapPolicy,
 )>;
 
-/// The five `(VisualDetail, GapSizes)` gap-size steps paired with fresh renderer instances,
+/// The five `(VisualDetail, GapPolicy)` gap-size steps paired with fresh renderer instances,
 /// tightest to loosest - shared by [`build_zoom_levels`] and [`build_send_sync_zoom_levels`].
 /// The truncated and full renderers each get their own instance (sharing one sequence cache
 /// across the three full-detail entries via `Arc`, not cloning it) so a cache warmed at one
@@ -143,11 +143,11 @@ pub type ZoomLevels<'a> = Vec<(
 macro_rules! zoom_entries {
     ($minimal:expr, $truncated:expr, $full:expr) => {
         vec![
-            (VisualDetail::Minimal, $minimal, ZOOM_GAP_SIZES[0]),
-            (VisualDetail::Truncated, $truncated, ZOOM_GAP_SIZES[1]),
-            (VisualDetail::Full, $full.clone(), ZOOM_GAP_SIZES[2]),
-            (VisualDetail::Full, $full.clone(), ZOOM_GAP_SIZES[3]),
-            (VisualDetail::Full, $full, ZOOM_GAP_SIZES[4]),
+            (VisualDetail::Minimal, $minimal, ZOOM_GAP_POLICIES[0]),
+            (VisualDetail::Truncated, $truncated, ZOOM_GAP_POLICIES[1]),
+            (VisualDetail::Full, $full.clone(), ZOOM_GAP_POLICIES[2]),
+            (VisualDetail::Full, $full.clone(), ZOOM_GAP_POLICIES[3]),
+            (VisualDetail::Full, $full, ZOOM_GAP_POLICIES[4]),
         ]
     };
 }
@@ -187,7 +187,7 @@ where
 pub type SendSyncZoomLevels = Vec<(
     VisualDetail,
     Arc<dyn NodeRenderer<PackedGenGraph> + Send + Sync>,
-    GapSizes,
+    GapPolicy,
 )>;
 
 /// Like [`build_zoom_levels`], but for a `Send + Sync + 'static` sequence source (e.g.
@@ -379,11 +379,11 @@ pub fn align_zoom_levels(
 
 /// Apply `levels[index]` (clamped in range) to a view state's zoom index and gaps. Generic
 /// over the renderer's trait-object bound so it works for both [`ZoomLevels`] and
-/// [`SendSyncZoomLevels`] - it only ever reads the `GapSizes` element.
+/// [`SendSyncZoomLevels`] - it only ever reads the `GapPolicy` element.
 pub fn apply_zoom_level<R>(
     view_state: &mut GraphViewState<GraphNode>,
     index: usize,
-    levels: &[(VisualDetail, R, GapSizes)],
+    levels: &[(VisualDetail, R, GapPolicy)],
 ) {
     let index = index.min(levels.len() - 1);
     view_state.zoom_index = index;
@@ -393,7 +393,7 @@ pub fn apply_zoom_level<R>(
 /// Step one zoom level in (more detail / more spread). No-op at the last level.
 pub fn zoom_in<R>(
     view_state: &mut GraphViewState<GraphNode>,
-    levels: &[(VisualDetail, R, GapSizes)],
+    levels: &[(VisualDetail, R, GapPolicy)],
 ) {
     apply_zoom_level(view_state, view_state.zoom_index + 1, levels);
 }
@@ -401,7 +401,7 @@ pub fn zoom_in<R>(
 /// Step one zoom level out (less detail / tighter packing). No-op at the first level.
 pub fn zoom_out<R>(
     view_state: &mut GraphViewState<GraphNode>,
-    levels: &[(VisualDetail, R, GapSizes)],
+    levels: &[(VisualDetail, R, GapPolicy)],
 ) {
     apply_zoom_level(view_state, view_state.zoom_index.saturating_sub(1), levels);
 }
@@ -1520,7 +1520,7 @@ where
 
 type GraphEngineSetup<R> = (
     LayoutEngine<PackedGenGraph>,
-    Vec<(VisualDetail, R, GapSizes)>,
+    Vec<(VisualDetail, R, GapPolicy)>,
     GraphViewState<GraphNode>,
 );
 
@@ -1555,8 +1555,8 @@ pub fn stored_edge_key(
     source: GraphNode,
     target: GraphNode,
     edge: &GraphEdge,
-) -> EdgeKey<GraphNode> {
-    EdgeKey::new(
+) -> PortedEdge<GraphNode> {
+    PortedEdge::new(
         source,
         target,
         strand_ports(edge.source_strand, edge.target_strand),
@@ -1575,7 +1575,7 @@ pub fn walk_hop_edge_key(
     graph: &GenGraph,
     from: &GraphNodeSlice,
     to: &GraphNodeSlice,
-) -> Option<EdgeKey<GraphNode>> {
+) -> Option<PortedEdge<GraphNode>> {
     let stores = |source: GraphNode, target: GraphNode, ports: EdgePorts| {
         graph.edge_weight(source, target).is_some_and(|edges| {
             edges
@@ -1585,11 +1585,11 @@ pub fn walk_hop_edge_key(
     };
     let read_forward = strand_ports(from.strand, to.strand);
     if stores(from.block, to.block, read_forward) {
-        return Some(EdgeKey::new(from.block, to.block, read_forward));
+        return Some(PortedEdge::new(from.block, to.block, read_forward));
     }
     let read_backward = strand_ports(to.strand.complement(), from.strand.complement());
     stores(to.block, from.block, read_backward)
-        .then(|| EdgeKey::new(to.block, from.block, read_backward))
+        .then(|| PortedEdge::new(to.block, from.block, read_backward))
 }
 
 /// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
@@ -1605,7 +1605,7 @@ pub fn walk_hop_edge_key(
 /// performed here either; that GFA-import cleanup is deferred for now.
 fn build_gen_graph_engine<R>(
     graph: GenGraph,
-    levels: Vec<(VisualDetail, R, GapSizes)>,
+    levels: Vec<(VisualDetail, R, GapPolicy)>,
 ) -> GraphEngineSetup<R> {
     let projection = crate::views::junction_projection::project_junctions(&graph);
     let graph = projection.graph;
@@ -1632,7 +1632,7 @@ fn build_gen_graph_engine<R>(
 
 type GraphEngineSetupLazy<R, S> = (
     LayoutEngine<PackedGenGraph, S>,
-    Vec<(VisualDetail, R, GapSizes)>,
+    Vec<(VisualDetail, R, GapPolicy)>,
     GraphViewState<GraphNode>,
 );
 
@@ -1645,7 +1645,7 @@ type GraphEngineSetupLazy<R, S> = (
 fn build_gen_graph_engine_lazy<R, S>(
     graph: GenGraph,
     source: S,
-    levels: Vec<(VisualDetail, R, GapSizes)>,
+    levels: Vec<(VisualDetail, R, GapPolicy)>,
     zoom_index: usize,
 ) -> GraphEngineSetupLazy<R, S>
 where
@@ -1829,7 +1829,7 @@ fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
 /// columns at truncated detail.
 pub fn highlight_match_range<R>(
     view_state: &mut GraphViewState<GraphNode>,
-    levels: &[(VisualDetail, R, GapSizes)],
+    levels: &[(VisualDetail, R, GapPolicy)],
     graph: &GenGraph,
     m: &GraphLocus,
     style: PathStyle,
@@ -1851,7 +1851,7 @@ fn highlight_locus_edges(
     locus: &GraphLocus,
     style: PathStyle,
 ) {
-    let mut lit: HashSet<EdgeKey<GraphNode>> = HashSet::new();
+    let mut lit: HashSet<PortedEdge<GraphNode>> = HashSet::new();
     for (from, to) in locus.slices.iter().zip(locus.slices.iter().skip(1)) {
         if let Some(key) = walk_hop_edge_key(graph, from, to)
             && lit.insert(key)
@@ -1894,7 +1894,7 @@ fn highlight_locus_cells<R: NodeRenderer<PackedGenGraph>>(
 pub fn highlight_adhoc_loci<R: NodeRenderer<PackedGenGraph>>(
     graph: &GenGraph,
     view_state: &mut GraphViewState<GraphNode>,
-    levels: &[(VisualDetail, R, GapSizes)],
+    levels: &[(VisualDetail, R, GapPolicy)],
     overlays: &[GraphOverlay],
 ) {
     let loaded = LoadedNodeSlices::new(graph);
@@ -1982,7 +1982,7 @@ fn accent_colors() -> [Color; 8] {
 pub fn reapply_overlays<R, S>(
     engine: &LayoutEngine<PackedGenGraph, S>,
     view_state: &mut GraphViewState<GraphNode>,
-    levels: &[(VisualDetail, R, GapSizes)],
+    levels: &[(VisualDetail, R, GapPolicy)],
     overlays: &mut [GraphOverlay],
     color_cache: &mut AnnotationColorCache,
 ) where
@@ -2377,16 +2377,16 @@ mod tests {
         }
     }
 
-    /// Mirrors [`ZOOM_GAP_SIZES`] paired with the mock renderers above, so
+    /// Mirrors [`ZOOM_GAP_POLICIES`] paired with the mock renderers above, so
     /// `complex_dag_at_each_zoom_level` exercises the same five-step progression the
     /// production `build_zoom_levels` builds for a real GenGraph.
-    fn zoom_snapshot_table() -> Vec<(Box<dyn NodeRenderer<MockDomainGraph>>, GapSizes)> {
+    fn zoom_snapshot_table() -> Vec<(Box<dyn NodeRenderer<MockDomainGraph>>, GapPolicy)> {
         vec![
-            (Box::new(ZoomSnapshotMinimal), ZOOM_GAP_SIZES[0]),
-            (Box::new(ZoomSnapshotTruncated), ZOOM_GAP_SIZES[1]),
-            (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[2]),
-            (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[3]),
-            (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[4]),
+            (Box::new(ZoomSnapshotMinimal), ZOOM_GAP_POLICIES[0]),
+            (Box::new(ZoomSnapshotTruncated), ZOOM_GAP_POLICIES[1]),
+            (Box::new(ZoomSnapshotFull), ZOOM_GAP_POLICIES[2]),
+            (Box::new(ZoomSnapshotFull), ZOOM_GAP_POLICIES[3]),
+            (Box::new(ZoomSnapshotFull), ZOOM_GAP_POLICIES[4]),
         ]
     }
 
@@ -4740,7 +4740,7 @@ mod tests {
         use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
         use gen_models::locus::GraphLocus;
         use gen_tui::{
-            edge_ports::{EdgeKey, EdgePorts, NodeSide},
+            edge_ports::{EdgePorts, NodeSide, PortedEdge},
             graph_view::GraphView,
             plotter::PathStyle,
             testing::create_test_terminal,
@@ -4815,7 +4815,7 @@ mod tests {
                     &slice(a, Strand::Forward),
                     &slice(b, Strand::Forward)
                 ),
-                Some(EdgeKey::new(a, b, FORWARD_TO_FORWARD))
+                Some(PortedEdge::new(a, b, FORWARD_TO_FORWARD))
             );
         }
 
@@ -4830,7 +4830,7 @@ mod tests {
                     &slice(a, Strand::Forward),
                     &slice(b, Strand::Reverse)
                 ),
-                Some(EdgeKey::new(a, b, FORWARD_TO_REVERSE))
+                Some(PortedEdge::new(a, b, FORWARD_TO_REVERSE))
             );
         }
 
@@ -4846,7 +4846,7 @@ mod tests {
                     &slice(b, Strand::Reverse),
                     &slice(a, Strand::Reverse)
                 ),
-                Some(EdgeKey::new(a, b, FORWARD_TO_FORWARD))
+                Some(PortedEdge::new(a, b, FORWARD_TO_FORWARD))
             );
             // Reading b+ then a- is the inversion edge read from its other end.
             assert_eq!(
@@ -4855,7 +4855,7 @@ mod tests {
                     &slice(b, Strand::Forward),
                     &slice(a, Strand::Reverse)
                 ),
-                Some(EdgeKey::new(a, b, FORWARD_TO_REVERSE))
+                Some(PortedEdge::new(a, b, FORWARD_TO_REVERSE))
             );
         }
 

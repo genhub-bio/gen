@@ -4,7 +4,7 @@ use gen_core::{HashId, is_terminal};
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{db::GraphConnection, edge::Edge, path::Path};
 use gen_tui::{
-    edge_ports::{EdgeKey, EdgePorts},
+    edge_ports::{EdgePorts, PortedEdge},
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
 };
@@ -106,7 +106,7 @@ impl PathRange {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LoadedPathRoute {
     pub nodes: Vec<GraphNode>,
-    pub edges: Vec<EdgeKey<GraphNode>>,
+    pub edges: Vec<PortedEdge<GraphNode>>,
 }
 
 impl PathMembership {
@@ -348,7 +348,7 @@ mod tests {
     use gen_graph::{GenGraph, GraphEdge, GraphNode, PackedGenGraph};
     use gen_models::{db::get_connection, edge::Edge, path::Path};
     use gen_tui::{
-        edge_ports::{EdgeKey, EdgePorts},
+        edge_ports::{EdgePorts, PortedEdge},
         layout_engine::LayoutEngine,
     };
 
@@ -506,7 +506,7 @@ mod tests {
 
         assert_eq!(
             route.edges,
-            vec![EdgeKey::new(x_slice, y_slice, EdgePorts::default())],
+            vec![PortedEdge::new(x_slice, y_slice, EdgePorts::default())],
             "only the path's own forward edge should be on the route, not its inversion twin"
         );
     }

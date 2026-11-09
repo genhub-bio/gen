@@ -33,17 +33,18 @@ impl Default for EdgePorts {
     }
 }
 
-/// A domain edge named in full: both endpoints and the sides it attaches to. Two edges between
-/// the same pair of nodes that differ in their ports (for a sequence graph, in their strands) are
-/// different edges, so this is what highlights are keyed on rather than a node pair.
+/// A domain edge named in full: its source and target nodes plus the side each end attaches to
+/// ([`EdgePorts`]). Two edges between the same pair of nodes that differ in their ports (for a
+/// sequence graph, in their strands) are different edges, so this is what highlights and window
+/// routes are keyed on rather than a node pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EdgeKey<N> {
+pub struct PortedEdge<N> {
     pub source: N,
     pub target: N,
     pub ports: EdgePorts,
 }
 
-impl<N> EdgeKey<N> {
+impl<N> PortedEdge<N> {
     pub const fn new(source: N, target: N, ports: EdgePorts) -> Self {
         Self {
             source,
@@ -61,7 +62,7 @@ impl<N> EdgeKey<N> {
 /// parallel edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeSelector<N> {
-    Exact(EdgeKey<N>),
+    Exact(PortedEdge<N>),
     Between { source: N, target: N },
 }
 
@@ -81,8 +82,8 @@ impl<N: Copy> EdgeSelector<N> {
     }
 }
 
-impl<N> From<EdgeKey<N>> for EdgeSelector<N> {
-    fn from(key: EdgeKey<N>) -> Self {
+impl<N> From<PortedEdge<N>> for EdgeSelector<N> {
+    fn from(key: PortedEdge<N>) -> Self {
         Self::Exact(key)
     }
 }

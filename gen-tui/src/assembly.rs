@@ -13,9 +13,9 @@ use petgraph::{
 
 use crate::{
     crawl::ExternalEdge,
+    edge_ports::PortedEdge,
     geometry::LocalPos,
     layout::{LayoutEdge, LayoutNode, NodeRole},
-    pinning::PinnedEdge,
     window_graph::{WindowGraph, WindowNode},
 };
 
@@ -39,7 +39,7 @@ pub struct AssembledLayout {
     /// Collapsed boundary edges, filled by `LayoutEngine` after assembly.
     pub external_edges: Vec<ExternalEdge<NodeIndex<u32>>>,
     /// Domain edge routes and their rectilinear arrow policy, filled by `LayoutEngine`.
-    pub pinned_edges: Vec<PinnedEdge>,
+    pub domain_edges: Vec<PortedEdge<NodeIndex>>,
 }
 
 /// Assemble a window's cached Sugiyama structure into a layout graph.
@@ -69,7 +69,7 @@ pub fn assemble_window(window: &WindowGraph) -> Option<AssembledLayout> {
             height: 0,
             anchor_index: None,
             external_edges: Vec::new(),
-            pinned_edges: Vec::new(),
+            domain_edges: Vec::new(),
         });
     };
 
@@ -152,7 +152,7 @@ pub fn assemble_window(window: &WindowGraph) -> Option<AssembledLayout> {
         height,
         anchor_index: None,
         external_edges: Vec::new(),
-        pinned_edges: Vec::new(),
+        domain_edges: Vec::new(),
     })
 }
 

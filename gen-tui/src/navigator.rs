@@ -5,10 +5,10 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use crate::{
     frame_index::{Direction, FrameIndex},
     geometry::{Point, WorldPos, WorldRect, floor_half},
-    graph_widget::style_cursor_cell,
     plotter::CursorColumns,
     theme::current_theme,
     viewport_state::{ViewportState, WorldBuffer},
+    window_geometry::style_cursor_cell,
 };
 
 const NO_NEXT_LAYER_ERR: &str = "No next layer";

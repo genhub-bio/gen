@@ -1,4 +1,4 @@
-// This module implements graph rendering using the ViewportGraph system.
+// This module implements graph rendering using the RoutedWindowGraph system.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
@@ -16,17 +16,16 @@ use ratatui::{
 
 use crate::{
     curved::{
-        ArrowMark, EdgeShape, EdgeStyle, NodeGlow, StraightSegment, SymbolGlow, bend_arch,
+        ArrowMark, LayoutMode, NodeGlow, OverlayPrimitive, StraightSegment, SymbolGlow, bend_arch,
         hairpin_arc_arrow, hairpin_edge_arcs, routed_edge_curve,
     },
-    edge_ports::NodeSide,
+    edge_ports::{NodeSide, PortedEdge},
     geometry::{WorldPos, WorldRect},
-    graph_widget::NODE_GLYPH,
     layout::{JunctionSymbol, NodeRole, VerticalAnchor},
-    pinning::PinnedEdge,
+    routed_window_graph::RoutedWindowGraph,
     theme::Theme,
-    viewport_graph::ViewportGraph,
     viewport_state::WorldBuffer,
+    window_geometry::NODE_GLYPH,
 };
 
 /// Rectilinear routes retain their established marker rhythm.
@@ -382,8 +381,8 @@ fn cell_glow(
     rect: WorldRect,
     container: WorldRect,
     color: Color,
-) -> EdgeShape {
-    EdgeShape::NodeGlow(NodeGlow {
+) -> OverlayPrimitive {
+    OverlayPrimitive::NodeGlow(NodeGlow {
         top_left: buffer.world_to_terminal_continuous((rect.min.x as f64, rect.max.y as f64 + 1.0)),
         bottom_right: buffer
             .world_to_terminal_continuous((rect.max.x as f64 + 1.0, rect.min.y as f64)),
@@ -400,7 +399,7 @@ fn highlight_glow(
     rect: WorldRect,
     container: WorldRect,
     color: Color,
-) -> EdgeShape {
+) -> OverlayPrimitive {
     let is_symbol = rect.min == rect.max
         && buffer
             .get_char_styled(rect.min)
@@ -408,7 +407,7 @@ fn highlight_glow(
     if !is_symbol {
         return cell_glow(buffer, rect, container, color);
     }
-    EdgeShape::SymbolGlow(SymbolGlow {
+    OverlayPrimitive::SymbolGlow(SymbolGlow {
         center: buffer
             .world_to_terminal_continuous((rect.min.x as f64 + 0.5, rect.min.y as f64 + 0.5)),
         color,
@@ -417,17 +416,17 @@ fn highlight_glow(
 
 /// Plot a viewport graph with resolved highlights and lowlights.
 ///
-/// Returns the shapes of a curved edge style, which the buffer does not contain; the rectilinear
+/// Returns the overlay primitives of a curved layout mode, which the buffer does not contain; the rectilinear
 /// style draws all of its edges into the buffer and returns none.
-pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
-    viewport_graph: &ViewportGraph,
+pub(crate) fn plot_routed_window_graph_with_highlights<V, G>(
+    routed_window_graph: &RoutedWindowGraph,
     buffer: &mut WorldBuffer<'_>,
     renderer: &V,
     original_graph: &G,
     decorations: PlotDecorations<'_>,
     theme: &Theme,
-    edge_style: EdgeStyle,
-) -> Vec<EdgeShape>
+    layout_mode: LayoutMode,
+) -> Vec<OverlayPrimitive>
 where
     V: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -443,10 +442,10 @@ where
 
     // Annotation labels reserve layout space beyond the visible sequence. Attach edges to
     // sequence content, not those invisible margins, and use the same endpoints for arrows.
-    let content_rects: HashMap<_, _> = viewport_graph
+    let content_rects: HashMap<_, _> = routed_window_graph
         .nodes()
         .filter_map(|(position, node)| {
-            if !edge_style.is_curved() {
+            if !layout_mode.is_curved() {
                 return None;
             }
             let NodeRole::Data(domain_index) = node.role else {
@@ -501,19 +500,19 @@ where
             region.max.y + margin,
         ))
     };
-    let mut edge_shapes = Vec::new();
+    let mut overlay_primitives = Vec::new();
     let mut stroke = |buffer: &mut WorldBuffer<'_>,
                       source: WorldPos,
                       target: WorldPos,
                       color: Color,
                       line_style: LineStyle| {
-        if !edge_style.is_curved() {
+        if !layout_mode.is_curved() {
             draw_edge_with_style(buffer, source, target, color, line_style);
             return;
         }
         let (Some(source_node), Some(target_node)) = (
-            viewport_graph.node_data_by_pos.get(&source),
-            viewport_graph.node_data_by_pos.get(&target),
+            routed_window_graph.node_data_by_pos.get(&source),
+            routed_window_graph.node_data_by_pos.get(&target),
         ) else {
             return;
         };
@@ -522,7 +521,14 @@ where
         }
         // An arch through an up or down pin is drawn once, with the pin's west half.
         let bend_pin = [source, target].into_iter().find(|&position| {
-            bend_arch(viewport_graph, position, &content_rects, color, line_style).is_some()
+            bend_arch(
+                routed_window_graph,
+                position,
+                &content_rects,
+                color,
+                line_style,
+            )
+            .is_some()
         });
         if let Some(pin) = bend_pin
             && [source, target].iter().any(|position| position.x > pin.x)
@@ -530,7 +536,7 @@ where
             return;
         }
         let routed = routed_edge_curve(
-            viewport_graph,
+            routed_window_graph,
             (source, source_node),
             (target, target_node),
             &content_rects,
@@ -538,13 +544,13 @@ where
             line_style,
         );
         if let Some(stub) = routed.stub {
-            edge_shapes.push(EdgeShape::Line(StraightSegment {
+            overlay_primitives.push(OverlayPrimitive::Line(StraightSegment {
                 from: buffer.world_to_terminal_continuous(stub.from),
                 to: buffer.world_to_terminal_continuous(stub.to),
                 ..stub
             }));
         }
-        edge_shapes.push(EdgeShape::Bezier(
+        overlay_primitives.push(OverlayPrimitive::Bezier(
             routed
                 .curve
                 .mapped(|point| buffer.world_to_terminal_continuous(point)),
@@ -552,8 +558,8 @@ where
     };
 
     // Draw edges first so nodes appear on top
-    let mut edges: Vec<_> = viewport_graph.edges().collect();
-    if edge_style.is_curved() {
+    let mut edges: Vec<_> = routed_window_graph.edges().collect();
+    if layout_mode.is_curved() {
         // Curves are painted in order, so draw dimmed edges first and highlighted ones last: a
         // highlight is never painted over.
         let is_pair = |(s, t): &(WorldPos, WorldPos), source: WorldPos, target: WorldPos| {
@@ -605,16 +611,16 @@ where
         }
     };
     for (source, target, bundle) in edges {
-        if edge_style.is_curved() && source == target {
+        if layout_mode.is_curved() && source == target {
             continue;
         }
         let (color, line_style) = edge_look(source, target, !bundle.is_empty());
         stroke(buffer, source, target, color, line_style);
     }
 
-    if edge_style.is_curved() {
-        let mut hairpins: Vec<_> = viewport_graph
-            .pinned_edges
+    if layout_mode.is_curved() {
+        let mut hairpins: Vec<_> = routed_window_graph
+            .domain_edges
             .iter()
             .filter(|edge| edge.source == edge.target && edge.ports.source == edge.ports.target)
             .collect();
@@ -628,13 +634,13 @@ where
             if !drawn.insert((edge.source, edge.ports.source)) {
                 continue;
             }
-            let Some(&position) = viewport_graph.node_positions.get(&edge.source) else {
+            let Some(&position) = routed_window_graph.node_positions.get(&edge.source) else {
                 continue;
             };
-            if !viewport_graph.graph.contains_edge(position, position) {
+            if !routed_window_graph.graph.contains_edge(position, position) {
                 continue;
             }
-            let Some(node) = viewport_graph.node_data_by_pos.get(&position) else {
+            let Some(node) = routed_window_graph.node_data_by_pos.get(&position) else {
                 continue;
             };
             if !may_reach_view([position, position]) {
@@ -675,15 +681,18 @@ where
                 line_style,
             )
             .map(|arc| arc.mapped(|point| buffer.world_to_terminal_continuous(point)));
-            edge_shapes.push(EdgeShape::Arrow(hairpin_arc_arrow(&arcs, ordinary_color)));
-            edge_shapes.extend(arcs.into_iter().map(EdgeShape::Bezier));
+            overlay_primitives.push(OverlayPrimitive::Arrow(hairpin_arc_arrow(
+                &arcs,
+                ordinary_color,
+            )));
+            overlay_primitives.extend(arcs.into_iter().map(OverlayPrimitive::Bezier));
         }
     }
 
     // Draw nodes. The layout window holds more nodes than fit on screen, and rendering one reads
     // its sequence from the database, so nodes outside the viewport are left alone.
     let visible_cells = buffer.visible_cells();
-    for (world_pos, node) in viewport_graph.nodes() {
+    for (world_pos, node) in routed_window_graph.nodes() {
         match &node.role {
             NodeRole::Data(domain_idx) => {
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
@@ -723,8 +732,13 @@ where
                     if is_on_screen {
                         tint_cells(buffer, content_rect, hl);
                     }
-                    if edge_style.is_curved() {
-                        edge_shapes.push(highlight_glow(buffer, content_rect, content_rect, hl));
+                    if layout_mode.is_curved() {
+                        overlay_primitives.push(highlight_glow(
+                            buffer,
+                            content_rect,
+                            content_rect,
+                            hl,
+                        ));
                     }
                 }
 
@@ -744,8 +758,8 @@ where
                     if is_on_screen && x0 <= x1 && y0 <= y1 {
                         tint_cells(buffer, WorldRect::from_coords(x0, y0, x1, y1), hl);
                     }
-                    if edge_style.is_curved() && x0 <= x1 && y0 <= y1 {
-                        edge_shapes.push(highlight_glow(
+                    if layout_mode.is_curved() && x0 <= x1 && y0 <= y1 {
+                        overlay_primitives.push(highlight_glow(
                             buffer,
                             WorldRect::from_coords(x0, y0, x1, y1),
                             content_rect,
@@ -756,12 +770,12 @@ where
             }
             NodeRole::Routing | NodeRole::Pin(_) | NodeRole::HairPin(_) | NodeRole::Wormhole(_) => {
                 // Straight lines meet at routing points without a junction glyph.
-                if edge_style.is_curved() && !matches!(node.role, NodeRole::Wormhole(_)) {
+                if layout_mode.is_curved() && !matches!(node.role, NodeRole::Wormhole(_)) {
                     continue;
                 }
                 let edge_color = ordinary_color;
                 let base_glyph =
-                    compute_junction_glyph(viewport_graph.neighbors(*world_pos), *world_pos);
+                    compute_junction_glyph(routed_window_graph.neighbors(*world_pos), *world_pos);
 
                 // Check if this routing node is part of any highlighted edge
                 let highlighted_style = edge_highlights
@@ -780,8 +794,9 @@ where
                     .map(|(_, style)| *style)
                     .next_back();
 
-                // Collect neighbors once; reused for both glyph shape and color decisions.
-                let all_neighbors: Vec<WorldPos> = viewport_graph.neighbors(*world_pos).collect();
+                // Collect neighbors once; reused for both glyph primitive and color decisions.
+                let all_neighbors: Vec<WorldPos> =
+                    routed_window_graph.neighbors(*world_pos).collect();
 
                 // Highlight takes full priority: skip lowlight logic entirely when present.
                 let (character, fg_color) = if let Some(style) = highlighted_style {
@@ -790,7 +805,7 @@ where
                         .filter(|(_, s)| *s == style)
                         .cloned()
                         .collect();
-                    let highlight_graph = ViewportGraph::from_visual_edges(&active_edges);
+                    let highlight_graph = RoutedWindowGraph::from_visual_edges(&active_edges);
                     let high_glyph =
                         compute_junction_glyph(highlight_graph.neighbors(*world_pos), *world_pos);
                     let ch = if style.merge_glyphs {
@@ -843,7 +858,7 @@ where
 
                 // Render each degree-one wormhole as a horizontal direction marker.
                 let character = if matches!(node.role, NodeRole::Wormhole(_)) {
-                    match viewport_graph.neighbors(*world_pos).next() {
+                    match routed_window_graph.neighbors(*world_pos).next() {
                         Some(neighbor) if neighbor.x > world_pos.x => '◁',
                         Some(neighbor) if neighbor.x < world_pos.x => '▷',
                         _ => character,
@@ -858,41 +873,41 @@ where
 
     // Edges are marked only where their route runs against the left-to-right flow. Routes are
     // traced once and shared by every pass below.
-    let routes: Vec<Option<Vec<WorldPos>>> = viewport_graph
-        .pinned_edges
+    let routes: Vec<Option<Vec<WorldPos>>> = routed_window_graph
+        .domain_edges
         .iter()
-        .map(|pinned_edge| pinned_edge_route(viewport_graph, pinned_edge))
+        .map(|edge| edge_route(routed_window_graph, edge))
         .collect();
-    let obstacles = ArrowObstacles::new(viewport_graph, &routes);
-    for (pinned_edge, route) in viewport_graph.pinned_edges.iter().zip(&routes) {
+    let obstacles = ArrowObstacles::new(routed_window_graph, &routes);
+    for (edge, route) in routed_window_graph.domain_edges.iter().zip(&routes) {
         let Some(route) = route else {
             continue;
         };
         // A Bezier hairpin carries its arrow on the bend itself.
-        if edge_style.is_curved()
-            && pinned_edge.source == pinned_edge.target
-            && pinned_edge.ports.source == pinned_edge.ports.target
+        if layout_mode.is_curved()
+            && edge.source == edge.target
+            && edge.ports.source == edge.ports.target
         {
             continue;
         }
-        if !route_runs_against_flow(viewport_graph, route) {
+        if !route_runs_against_flow(routed_window_graph, route) {
             continue;
         }
         draw_arrows(
             buffer,
-            viewport_graph,
+            routed_window_graph,
             route,
-            if edge_style.is_curved() {
+            if layout_mode.is_curved() {
                 CURVED_ARROW_GAPS
             } else {
                 ARROW_GAPS
             },
-            (edge_style, &content_rects, ordinary_color),
+            (layout_mode, &content_rects, ordinary_color),
             &obstacles,
-            &mut edge_shapes,
+            &mut overlay_primitives,
         );
     }
-    edge_shapes
+    overlay_primitives
 }
 
 /// Recolor the on-screen cells of a node region: sequence glyphs take the color as foreground and
@@ -967,9 +982,9 @@ struct ArrowObstacles {
 }
 
 impl ArrowObstacles {
-    fn new(viewport_graph: &ViewportGraph, routes: &[Option<Vec<WorldPos>>]) -> Self {
+    fn new(routed_window_graph: &RoutedWindowGraph, routes: &[Option<Vec<WorldPos>>]) -> Self {
         let mut data_nodes = RowSpans::new();
-        for (center, node) in viewport_graph.nodes() {
+        for (center, node) in routed_window_graph.nodes() {
             if !matches!(node.role, NodeRole::Data(_)) {
                 continue;
             }
@@ -1187,9 +1202,9 @@ fn draw_edge_with_style(
 /// Whether a domain edge's route runs against the layout's left-to-right flow, through a pin or
 /// along a segment heading west. Only such edges need arrows: rightward flow is the default
 /// reading direction, so an arrow is worth drawing where that implication fails.
-fn route_runs_against_flow(viewport_graph: &ViewportGraph, route: &[WorldPos]) -> bool {
+fn route_runs_against_flow(routed_window_graph: &RoutedWindowGraph, route: &[WorldPos]) -> bool {
     let passes_pin = route.iter().any(|position| {
-        viewport_graph
+        routed_window_graph
             .node_data_by_pos
             .get(position)
             .is_some_and(|node| matches!(node.role, NodeRole::Pin(_)))
@@ -1201,45 +1216,45 @@ fn route_runs_against_flow(viewport_graph: &ViewportGraph, route: &[WorldPos]) -
 /// on the side its ports name and arriving at its target on the other named side. Bundles
 /// distinguish the route from other edges sharing its junctions, and the sides from parallel
 /// edges between the same two nodes.
-fn pinned_edge_route(
-    viewport_graph: &ViewportGraph,
-    pinned_edge: &PinnedEdge,
+fn edge_route(
+    routed_window_graph: &RoutedWindowGraph,
+    edge: &PortedEdge<NodeIndex>,
 ) -> Option<Vec<WorldPos>> {
-    trace_edge_route(viewport_graph, pinned_edge, |node| {
-        viewport_graph.node_positions.get(&node).copied()
+    trace_edge_route(routed_window_graph, edge, |node| {
+        routed_window_graph.node_positions.get(&node).copied()
     })
 }
 
-/// [`pinned_edge_route`] for highlighting, which also follows edges into and out of invisible
+/// [`edge_route`] for highlighting, which also follows edges into and out of invisible
 /// junction nodes, drawn as routing points.
 pub(crate) fn highlighted_edge_route(
-    viewport_graph: &ViewportGraph,
-    pinned_edge: &PinnedEdge,
+    routed_window_graph: &RoutedWindowGraph,
+    edge: &PortedEdge<NodeIndex>,
 ) -> Option<Vec<WorldPos>> {
-    trace_edge_route(viewport_graph, pinned_edge, |node| {
-        viewport_graph
+    trace_edge_route(routed_window_graph, edge, |node| {
+        routed_window_graph
             .node_positions
             .get(&node)
-            .or_else(|| viewport_graph.junction_positions.get(&node))
+            .or_else(|| routed_window_graph.junction_positions.get(&node))
             .copied()
     })
 }
 
 fn trace_edge_route(
-    viewport_graph: &ViewportGraph,
-    pinned_edge: &PinnedEdge,
+    routed_window_graph: &RoutedWindowGraph,
+    edge: &PortedEdge<NodeIndex>,
     position_of: impl Fn(NodeIndex) -> Option<WorldPos>,
 ) -> Option<Vec<WorldPos>> {
-    let PinnedEdge {
+    let PortedEdge {
         source,
         target,
         ports,
         ..
-    } = *pinned_edge;
+    } = *edge;
     let source_pos = position_of(source)?;
     let target_pos = position_of(target)?;
     let follows_edge = |start, end| {
-        viewport_graph
+        routed_window_graph
             .graph
             .edge_weight(start, end)
             .is_some_and(|bundle| bundle.contains(&(source, target)))
@@ -1256,7 +1271,7 @@ fn trace_edge_route(
         // the edge just used takes it out along its bus, around the turnaround and back, instead
         // of out and in by the same leg. Higher branches come first, so it leaves on the top row.
         let by_height = |position: WorldPos| {
-            let mut neighbors: Vec<WorldPos> = viewport_graph.neighbors(position).collect();
+            let mut neighbors: Vec<WorldPos> = routed_window_graph.neighbors(position).collect();
             neighbors.sort_by_key(|neighbor| std::cmp::Reverse(neighbor.y));
             neighbors
         };
@@ -1300,7 +1315,7 @@ fn trace_edge_route(
     let mut previous = HashMap::from([(source_pos, source_pos)]);
     let mut pending = VecDeque::from([source_pos]);
     while let Some(position) = pending.pop_front() {
-        for neighbor in viewport_graph.neighbors(position) {
+        for neighbor in routed_window_graph.neighbors(position) {
             if !follows_edge(position, neighbor)
                 || (position == source_pos && !is_on_side(neighbor, source_pos, ports.source))
             {
@@ -1358,12 +1373,12 @@ fn straight_runs(route: &[WorldPos]) -> Vec<(WorldPos, WorldPos)> {
 /// route combines adjacent flat stretches that meet end to end, but excludes
 /// turnarounds and S-curves that change row.
 fn horizontal_runs(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     route: &[WorldPos],
-    edge_style: EdgeStyle,
+    layout_mode: LayoutMode,
     content_rects: &HashMap<WorldPos, WorldRect>,
 ) -> Vec<(WorldPos, WorldPos)> {
-    if !edge_style.is_curved() {
+    if !layout_mode.is_curved() {
         return straight_runs(route)
             .into_iter()
             .filter(|(start, end)| start.y == end.y)
@@ -1373,10 +1388,10 @@ fn horizontal_runs(
     let mut can_merge = false;
     for pair in route.windows(2) {
         let flat = (|| {
-            let first = (pair[0], viewport_graph.node_data_by_pos.get(&pair[0])?);
-            let second = (pair[1], viewport_graph.node_data_by_pos.get(&pair[1])?);
+            let first = (pair[0], routed_window_graph.node_data_by_pos.get(&pair[0])?);
+            let second = (pair[1], routed_window_graph.node_data_by_pos.get(&pair[1])?);
             let routed = routed_edge_curve(
-                viewport_graph,
+                routed_window_graph,
                 first,
                 second,
                 content_rects,
@@ -1428,31 +1443,31 @@ fn horizontal_runs(
 /// the cost follows the screen and not the length of the run.
 fn draw_arrows(
     buffer: &mut WorldBuffer,
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     route: &[WorldPos],
     gaps: i64,
-    (edge_style, content_rects, color): (EdgeStyle, &HashMap<WorldPos, WorldRect>, Color),
+    (layout_mode, content_rects, color): (LayoutMode, &HashMap<WorldPos, WorldRect>, Color),
     obstacles: &ArrowObstacles,
-    shapes: &mut Vec<EdgeShape>,
+    overlay_primitives: &mut Vec<OverlayPrimitive>,
 ) {
     let Some(visible) = buffer.visible_cells() else {
         return;
     };
-    let accepts = if edge_style.is_curved() {
+    let accepts = if layout_mode.is_curved() {
         is_blank
     } else {
         is_horizontal_wire
     };
-    if edge_style.is_curved() {
+    if layout_mode.is_curved() {
         draw_bend_arrows(
             buffer,
-            viewport_graph,
+            routed_window_graph,
             route,
             (content_rects, color),
-            shapes,
+            overlay_primitives,
         );
     }
-    for (start, end) in horizontal_runs(viewport_graph, route, edge_style, content_rects) {
+    for (start, end) in horizontal_runs(routed_window_graph, route, layout_mode, content_rects) {
         let direction = WorldPos::new((end.x - start.x).signum(), 0);
         if direction.x > 0 || start.y < visible.min.y || start.y > visible.max.y {
             continue;
@@ -1471,7 +1486,7 @@ fn draw_arrows(
         let touches_data_node = [start - direction, start, end, end + direction]
             .into_iter()
             .any(|position| obstacles.is_inside_node(position));
-        if edge_style.is_curved() && free_count < MIN_ARROW_RUN_CELLS && touches_data_node {
+        if layout_mode.is_curved() && free_count < MIN_ARROW_RUN_CELLS && touches_data_node {
             continue;
         }
         // Free cells are numbered from the west. The first and last ones on screen bound the
@@ -1506,8 +1521,8 @@ fn draw_arrows(
                 continue;
             };
             let position = WorldPos::new(column, start.y);
-            if edge_style.is_curved() {
-                shapes.push(EdgeShape::Arrow(ArrowMark {
+            if layout_mode.is_curved() {
+                overlay_primitives.push(OverlayPrimitive::Arrow(ArrowMark {
                     center: buffer.world_to_terminal_continuous((
                         position.x as f64 + 0.5,
                         position.y as f64 + 0.5,
@@ -1559,17 +1574,17 @@ impl ArrowLayout {
 /// Mark bend arches at their level midpoint with an arrow mark on the curve.
 fn draw_bend_arrows(
     buffer: &mut WorldBuffer,
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     route: &[WorldPos],
     (content_rects, color): (&HashMap<WorldPos, WorldRect>, Color),
-    shapes: &mut Vec<EdgeShape>,
+    overlay_primitives: &mut Vec<OverlayPrimitive>,
 ) {
     for window in route.windows(3) {
         let [before, pin, after] = window else {
             continue;
         };
         let Some(arch) = bend_arch(
-            viewport_graph,
+            routed_window_graph,
             *pin,
             content_rects,
             Color::Reset,
@@ -1582,7 +1597,7 @@ fn draw_bend_arrows(
             continue;
         }
         let midpoint = arch.midpoint();
-        shapes.push(EdgeShape::Arrow(ArrowMark {
+        overlay_primitives.push(OverlayPrimitive::Arrow(ArrowMark {
             center: buffer.world_to_terminal_continuous(midpoint),
             direction: (-1.0, 0.0),
             color,
@@ -1605,27 +1620,29 @@ mod curved_highlight_tests {
     use petgraph::graph::NodeIndex;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-    use super::{NodeRenderer, PathStyle, PlotDecorations, plot_viewport_graph_with_highlights};
+    use super::{
+        NodeRenderer, PathStyle, PlotDecorations, plot_routed_window_graph_with_highlights,
+    };
     use crate::{
-        curved::{EdgeShape, EdgeStyle},
+        curved::{LayoutMode, OverlayPrimitive},
         geometry::{LocalPos, WorldPos, WorldRect},
-        graph_widget::MinimalNodeRenderer,
         layout::{LayoutNode, NodeRole},
+        routed_window_graph::RoutedWindowGraph,
         theme::current_theme,
-        viewport_graph::ViewportGraph,
         viewport_state::{ViewportState, WorldBuffer},
+        window_geometry::MinimalNodeRenderer,
     };
 
     /// Two crossing diagonals between routing points: edge 0 runs up, edge 1 runs down, and
     /// they meet in the middle cells.
-    fn crossing_graph() -> (ViewportGraph, [WorldPos; 4]) {
+    fn crossing_graph() -> (RoutedWindowGraph, [WorldPos; 4]) {
         let points = [
             WorldPos::new(0, 0),
             WorldPos::new(10, 6),
             WorldPos::new(0, 6),
             WorldPos::new(10, 0),
         ];
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         for point in &points {
             graph.node_data_by_pos.insert(
                 *point,
@@ -1652,10 +1669,10 @@ mod curved_highlight_tests {
     }
 
     fn plot(
-        graph: &ViewportGraph,
+        graph: &RoutedWindowGraph,
         highlights: &[((WorldPos, WorldPos), PathStyle)],
         lowlights: &[(WorldPos, WorldPos)],
-    ) -> (Buffer, Vec<EdgeShape>) {
+    ) -> (Buffer, Vec<OverlayPrimitive>) {
         let state = ViewportState {
             camera_current: WorldPos::new(5, 3),
             viewport_bounds: Rect::new(0, 0, 12, 8),
@@ -1663,9 +1680,9 @@ mod curved_highlight_tests {
         };
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let theme = current_theme();
-        let lines = {
+        let overlay_primitives = {
             let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-            plot_viewport_graph_with_highlights::<
+            plot_routed_window_graph_with_highlights::<
                 MinimalNodeRenderer,
                 petgraph::graph::DiGraph<(), ()>,
             >(
@@ -1682,17 +1699,17 @@ mod curved_highlight_tests {
                     node_lowlights: &[],
                 },
                 &theme,
-                EdgeStyle::Curved,
+                LayoutMode::Curved,
             )
         };
-        (buffer, lines)
+        (buffer, overlay_primitives)
     }
 
     #[test]
     fn test_shapes_list_highlights_last_and_lowlights_first() {
         let (graph, points) = crossing_graph();
         let bold_red = PathStyle::new(Color::Red).with_line_style(crate::plotter::LineStyle::Bold);
-        let (buffer, lines) = plot(
+        let (buffer, overlay_primitives) = plot(
             &graph,
             &[((points[0], points[1]), bold_red)],
             &[(points[2], points[3])],
@@ -1701,12 +1718,12 @@ mod curved_highlight_tests {
             buffer.content.iter().all(|cell| cell.symbol() == " "),
             "curved drawing leaves the buffer empty"
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(overlay_primitives.len(), 2);
         let theme = current_theme();
-        let EdgeShape::Bezier(dimmed) = lines[0] else {
+        let OverlayPrimitive::Bezier(dimmed) = overlay_primitives[0] else {
             panic!("should report a curve");
         };
-        let EdgeShape::Bezier(highlighted) = lines[1] else {
+        let OverlayPrimitive::Bezier(highlighted) = overlay_primitives[1] else {
             panic!("should report a curve");
         };
         assert_eq!(dimmed.color, theme[0x04], "dimmed edge first");
@@ -1716,8 +1733,8 @@ mod curved_highlight_tests {
     }
 
     /// One edge between two routing points on row 3, which the camera of [`plot`] looks at.
-    fn edge_along_row(from_x: i64, to_x: i64) -> ViewportGraph {
-        let mut graph = ViewportGraph::empty();
+    fn edge_along_row(from_x: i64, to_x: i64) -> RoutedWindowGraph {
+        let mut graph = RoutedWindowGraph::empty();
         let points = [WorldPos::new(from_x, 3), WorldPos::new(to_x, 3)];
         for point in &points {
             graph.node_data_by_pos.insert(
@@ -1741,17 +1758,17 @@ mod curved_highlight_tests {
 
     #[test]
     fn test_edge_far_from_the_viewport_builds_no_shapes() {
-        let (_, shapes) = plot(&edge_along_row(1_000, 1_100), &[], &[]);
-        assert!(shapes.is_empty());
+        let (_, overlay_primitives) = plot(&edge_along_row(1_000, 1_100), &[], &[]);
+        assert!(overlay_primitives.is_empty());
     }
 
     #[test]
     fn test_edge_crossing_the_viewport_keeps_its_shape_when_both_endpoints_are_off_screen() {
-        let (_, shapes) = plot(&edge_along_row(-1_000, 1_000), &[], &[]);
+        let (_, overlay_primitives) = plot(&edge_along_row(-1_000, 1_000), &[], &[]);
         assert!(
-            shapes
+            overlay_primitives
                 .iter()
-                .any(|shape| matches!(shape, EdgeShape::Bezier(_)))
+                .any(|primitive| matches!(primitive, OverlayPrimitive::Bezier(_)))
         );
     }
 
@@ -1772,7 +1789,7 @@ mod curved_highlight_tests {
 
     #[test]
     fn test_nodes_outside_the_viewport_are_not_rendered() {
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         for (index, x) in [(0, 3), (1, 5_000)] {
             let position = WorldPos::new(x, 3);
             graph.node_data_by_pos.insert(
@@ -1796,7 +1813,7 @@ mod curved_highlight_tests {
             rendered: std::cell::Cell::new(0),
         };
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        plot_viewport_graph_with_highlights(
+        plot_routed_window_graph_with_highlights(
             &graph,
             &mut world_buffer,
             &renderer,
@@ -1810,7 +1827,7 @@ mod curved_highlight_tests {
                 node_lowlights: &[],
             },
             &current_theme(),
-            EdgeStyle::Curved,
+            LayoutMode::Curved,
         );
         assert_eq!(renderer.rendered.get(), 1);
     }
@@ -1825,52 +1842,63 @@ mod tests {
 
     use super::{
         ARROW_GAPS, ArrowLayout, ArrowObstacles, CURVED_ARROW_GAPS, LineStyle,
-        draw_arrows as draw_route_arrows, draw_edge_with_style, pinned_edge_route,
+        draw_arrows as draw_route_arrows, draw_edge_with_style, edge_route,
     };
     use crate::{
-        curved::{EdgeShape, EdgeStyle},
-        edge_ports::{EdgePorts, NodeSide},
+        curved::{LayoutMode, OverlayPrimitive},
+        edge_ports::{EdgePorts, NodeSide, PortedEdge},
         geometry::{LocalPos, WorldPos},
         layout::{LayoutNode, NodeRole, PinSide},
-        pinning::PinnedEdge,
-        viewport_graph::ViewportGraph,
+        routed_window_graph::RoutedWindowGraph,
         viewport_state::{ViewportState, WorldBuffer},
     };
 
-    fn pinned(source: NodeIndex, target: NodeIndex, ports: EdgePorts) -> PinnedEdge {
-        PinnedEdge {
+    fn ported_edge(
+        source: NodeIndex,
+        target: NodeIndex,
+        ports: EdgePorts,
+    ) -> PortedEdge<NodeIndex> {
+        PortedEdge {
             source,
             target,
             ports,
         }
     }
 
-    /// Draw the arrows of one pinned edge, with the route traced and obstacles gathered the way
+    /// Draw the arrows of one domain edge, with the route traced and obstacles gathered the way
     /// painting does for the whole graph.
     fn draw_arrows(
         buffer: &mut WorldBuffer,
-        graph: &ViewportGraph,
-        pinned_edge: &PinnedEdge,
+        graph: &RoutedWindowGraph,
+        edge: &PortedEdge<NodeIndex>,
         gaps: i64,
         style: (
-            EdgeStyle,
+            LayoutMode,
             &HashMap<WorldPos, crate::geometry::WorldRect>,
             Color,
         ),
-        shapes: &mut Vec<EdgeShape>,
+        overlay_primitives: &mut Vec<OverlayPrimitive>,
     ) {
-        let route = pinned_edge_route(graph, pinned_edge);
+        let route = edge_route(graph, edge);
         let routes = [route.clone()];
         let obstacles = ArrowObstacles::new(graph, &routes);
         if let Some(route) = route {
-            draw_route_arrows(buffer, graph, &route, gaps, style, &obstacles, shapes);
+            draw_route_arrows(
+                buffer,
+                graph,
+                &route,
+                gaps,
+                style,
+                &obstacles,
+                overlay_primitives,
+            );
         }
     }
 
-    fn routed_edge(points: &[WorldPos]) -> (ViewportGraph, NodeIndex, NodeIndex) {
+    fn routed_edge(points: &[WorldPos]) -> (RoutedWindowGraph, NodeIndex, NodeIndex) {
         let source = NodeIndex::new(0);
         let target = NodeIndex::new(usize::from(points.first() != points.last()));
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         graph.node_positions.insert(source, points[0]);
         graph
             .node_positions
@@ -1900,9 +1928,9 @@ mod tests {
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(source, target, ports),
+            &ported_edge(source, target, ports),
             ARROW_GAPS,
-            (EdgeStyle::Rectilinear, &HashMap::new(), Color::Reset),
+            (LayoutMode::Rectilinear, &HashMap::new(), Color::Reset),
             &mut Vec::new(),
         );
         let mut arrows = Vec::new();
@@ -1939,22 +1967,22 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        let mut shapes = Vec::new();
+        let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 target,
                 EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
             CURVED_ARROW_GAPS,
-            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
-            &mut shapes,
+            (LayoutMode::Curved, &HashMap::new(), Color::Reset),
+            &mut overlay_primitives,
         );
-        shapes
+        overlay_primitives
             .iter()
-            .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+            .filter(|primitive| matches!(primitive, OverlayPrimitive::Arrow(_)))
             .count()
     }
 
@@ -1970,16 +1998,16 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        let mut shapes = Vec::new();
+        let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(source, target, EdgePorts::default()),
+            &ported_edge(source, target, EdgePorts::default()),
             CURVED_ARROW_GAPS,
-            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
-            &mut shapes,
+            (LayoutMode::Curved, &HashMap::new(), Color::Reset),
+            &mut overlay_primitives,
         );
-        assert!(shapes.is_empty());
+        assert!(overlay_primitives.is_empty());
     }
 
     #[test]
@@ -2016,23 +2044,23 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        let mut shapes = Vec::new();
+        let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 target,
                 EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
             CURVED_ARROW_GAPS,
-            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
-            &mut shapes,
+            (LayoutMode::Curved, &HashMap::new(), Color::Reset),
+            &mut overlay_primitives,
         );
-        let centers: Vec<_> = shapes
+        let centers: Vec<_> = overlay_primitives
             .iter()
-            .filter_map(|shape| match shape {
-                EdgeShape::Arrow(mark) => Some(mark.center),
+            .filter_map(|primitive| match primitive {
+                OverlayPrimitive::Arrow(mark) => Some(mark.center),
                 _ => None,
             })
             .collect();
@@ -2074,13 +2102,13 @@ mod tests {
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 target,
                 EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
             1,
-            (EdgeStyle::Rectilinear, &HashMap::new(), Color::Reset),
+            (LayoutMode::Rectilinear, &HashMap::new(), Color::Reset),
             &mut Vec::new(),
         );
         for (x, glyph) in [(2, '╮'), (4, '┼'), (6, '┬')] {
@@ -2102,24 +2130,24 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        let mut shapes = Vec::new();
+        let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 target,
                 EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
             CURVED_ARROW_GAPS,
-            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
-            &mut shapes,
+            (LayoutMode::Curved, &HashMap::new(), Color::Reset),
+            &mut overlay_primitives,
         );
         let visible = world_buffer.visible_world_area();
         let width = visible.max.x - visible.min.x + 1;
-        let arrows = shapes
+        let arrows = overlay_primitives
             .iter()
-            .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+            .filter(|primitive| matches!(primitive, OverlayPrimitive::Arrow(_)))
             .count() as i64;
         assert!(arrows >= 1 && arrows <= width / CURVED_ARROW_GAPS + 1);
     }
@@ -2145,13 +2173,13 @@ mod tests {
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 target,
                 EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
             ARROW_GAPS,
-            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
+            (LayoutMode::Curved, &HashMap::new(), Color::Reset),
             &mut Vec::new(),
         );
         for x in -25..25 {
@@ -2166,13 +2194,15 @@ mod tests {
 
     /// A data anchor, a loopback pin and a routing return node, joined as one backward route from
     /// the anchor to the return node.
-    fn loopback_route(returning_x: i64) -> (ViewportGraph, NodeIndex, NodeIndex, [WorldPos; 3]) {
+    fn loopback_route(
+        returning_x: i64,
+    ) -> (RoutedWindowGraph, NodeIndex, NodeIndex, [WorldPos; 3]) {
         let anchor = WorldPos::new(10, 0);
         let pin = WorldPos::new(30, 0);
         let returning = WorldPos::new(returning_x, -10);
         let source = NodeIndex::new(0);
         let target = NodeIndex::new(1);
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         graph.node_positions.insert(source, anchor);
         graph.node_positions.insert(target, returning);
         for (position, role) in [
@@ -2200,28 +2230,28 @@ mod tests {
         };
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        let mut shapes = Vec::new();
+        let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 target,
                 EdgePorts::new(NodeSide::East, NodeSide::East),
             ),
             ARROW_GAPS,
-            (EdgeStyle::Curved, &HashMap::new(), Color::Red),
-            &mut shapes,
+            (LayoutMode::Curved, &HashMap::new(), Color::Red),
+            &mut overlay_primitives,
         );
-        let arrows = shapes
+        let arrows = overlay_primitives
             .iter()
-            .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+            .filter(|primitive| matches!(primitive, OverlayPrimitive::Arrow(_)))
             .count();
         assert_eq!(arrows, 3);
     }
 
     #[test]
-    fn test_pinned_edge_route_follows_only_its_bundle() {
+    fn test_edge_route_follows_only_its_bundle() {
         let points = [
             WorldPos::new(0, 0),
             WorldPos::new(20, 0),
@@ -2240,20 +2270,20 @@ mod tests {
             vec![(source, NodeIndex::new(2))],
         );
         assert_eq!(
-            pinned_edge_route(&graph, &pinned(source, target, EdgePorts::default())),
+            edge_route(&graph, &ported_edge(source, target, EdgePorts::default())),
             Some(points.to_vec())
         );
     }
 
     #[test]
-    fn test_pinned_edge_route_picks_the_route_on_its_sides() {
+    fn test_edge_route_picks_the_route_on_its_sides() {
         // Two parallel edges between the same nodes: one leaves and arrives on the east sides
         // through a pin to the right, the other on the west sides through a pin to the left.
         let source = NodeIndex::new(0);
         let target = NodeIndex::new(1);
         let (source_pos, target_pos) = (WorldPos::new(0, 0), WorldPos::new(20, 0));
         let (left, right) = (WorldPos::new(-10, 0), WorldPos::new(30, 5));
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         graph.node_positions.insert(source, source_pos);
         graph.node_positions.insert(target, target_pos);
         for (from, to) in [
@@ -2267,11 +2297,11 @@ mod tests {
         let east_east = EdgePorts::new(NodeSide::East, NodeSide::East);
         let west_west = EdgePorts::new(NodeSide::West, NodeSide::West);
         assert_eq!(
-            pinned_edge_route(&graph, &pinned(source, target, east_east)),
+            edge_route(&graph, &ported_edge(source, target, east_east)),
             Some(vec![source_pos, right, target_pos])
         );
         assert_eq!(
-            pinned_edge_route(&graph, &pinned(source, target, west_west)),
+            edge_route(&graph, &ported_edge(source, target, west_west)),
             Some(vec![source_pos, left, target_pos])
         );
     }
@@ -2403,7 +2433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_edge_route_traces_self_loop_from_outgoing_port() {
+    fn test_edge_route_traces_self_loop_from_outgoing_port() {
         let points = [
             WorldPos::new(0, 0),
             WorldPos::new(20, 0),
@@ -2414,7 +2444,7 @@ mod tests {
         ];
         let (graph, source, target) = routed_edge(&points);
         assert_eq!(
-            pinned_edge_route(&graph, &pinned(source, target, EdgePorts::default())),
+            edge_route(&graph, &ported_edge(source, target, EdgePorts::default())),
             Some(points.to_vec())
         );
         // Only the 40 cell westward run carries markers, four of them.
@@ -2422,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_edge_route_does_not_decorate_disconnected_segments() {
+    fn test_edge_route_does_not_decorate_disconnected_segments() {
         let points = [
             WorldPos::new(0, 0),
             WorldPos::new(20, 0),
@@ -2430,12 +2460,15 @@ mod tests {
         ];
         let (mut graph, source, target) = routed_edge(&points);
         graph.graph.remove_edge(points[1], points[2]);
-        assert!(pinned_edge_route(&graph, &pinned(source, target, EdgePorts::default())).is_none());
+        assert!(edge_route(&graph, &ported_edge(source, target, EdgePorts::default())).is_none());
     }
 
     /// A node at the origin and a hairpin route across a hair pin: the bus runs `bus` cells to a
     /// hub that feeds two flat edges, which a bend joins `width` cells further out.
-    fn hairpin_route(bus: i64, width: i64) -> (ViewportGraph, NodeIndex, [WorldPos; 4], WorldPos) {
+    fn hairpin_route(
+        bus: i64,
+        width: i64,
+    ) -> (RoutedWindowGraph, NodeIndex, [WorldPos; 4], WorldPos) {
         let source = NodeIndex::new(0);
         let origin = WorldPos::new(0, 0);
         let hub = WorldPos::new(bus, 0);
@@ -2447,7 +2480,7 @@ mod tests {
             WorldPos::new(near + width, 1),
             WorldPos::new(near + width, -1),
         ];
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         graph.node_positions.insert(source, origin);
         let mut edges = vec![
             (corners[0], corners[2]),
@@ -2468,8 +2501,10 @@ mod tests {
     fn test_hairpin_route_leaves_by_the_top_leg_and_returns_by_the_bottom() {
         for (width, side) in [(3, NodeSide::East), (-3, NodeSide::West)] {
             let (graph, source, corners, _) = hairpin_route(0, width);
-            let route =
-                pinned_edge_route(&graph, &pinned(source, source, EdgePorts::new(side, side)));
+            let route = edge_route(
+                &graph,
+                &ported_edge(source, source, EdgePorts::new(side, side)),
+            );
             let origin = WorldPos::new(0, 0);
             assert_eq!(
                 route,
@@ -2483,9 +2518,9 @@ mod tests {
     #[test]
     fn test_hairpin_route_runs_out_and_back_along_a_shared_bus() {
         let (graph, source, corners, hub) = hairpin_route(4, 3);
-        let route = pinned_edge_route(
+        let route = edge_route(
             &graph,
-            &pinned(
+            &ported_edge(
                 source,
                 source,
                 EdgePorts::new(NodeSide::East, NodeSide::East),
@@ -2522,8 +2557,8 @@ mod tests {
                     ),
                 );
             }
-            let pinned_edge = pinned(source, source, EdgePorts::new(side, side));
-            graph.pinned_edges = vec![pinned_edge];
+            let edge = ported_edge(source, source, EdgePorts::new(side, side));
+            graph.domain_edges = vec![edge];
             let state = viewport();
             let mut buffer = Buffer::empty(state.viewport_bounds);
             let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
@@ -2531,16 +2566,16 @@ mod tests {
             draw_arrows(
                 &mut world_buffer,
                 &graph,
-                &pinned_edge,
+                &edge,
                 CURVED_ARROW_GAPS,
-                (EdgeStyle::Curved, &HashMap::new(), Color::Red),
+                (LayoutMode::Curved, &HashMap::new(), Color::Red),
                 &mut deferred,
             );
 
             let mut arrows: Vec<_> = deferred
                 .iter()
                 .filter_map(|edge| match edge {
-                    EdgeShape::Arrow(mark) => Some(*mark),
+                    OverlayPrimitive::Arrow(mark) => Some(*mark),
                     _ => None,
                 })
                 .collect();

@@ -1,6 +1,6 @@
 //! Curved edges shown through the Kitty graphics protocol.
 //!
-//! The curved edge style leaves the edges out of the cell buffer. An [`EdgeLayer`] rasterizes
+//! The curved layout mode leaves the edges out of the cell buffer. A [`PixelOverlay`] rasterizes
 //! them with the same antialiased strokes as the PNG export onto a transparent image the size of
 //! the screen, and the terminal composites that image over the cells. Cells that hold text or a
 //! background are cut out of the image, so an edge never needs to know which layer the terminal
@@ -24,7 +24,7 @@ use flate2::{Compression, write::ZlibEncoder};
 use ratatui::buffer::Buffer;
 use tiny_skia::Pixmap;
 
-use crate::{curved::EdgeShape, edge_layer::EdgeLayer, png_export::PngConfig};
+use crate::{curved::OverlayPrimitive, pixel_overlay::PixelOverlay, png_export::RasterConfig};
 
 const IMAGE_ID: u32 = 0x6765_6e31;
 const PLACEMENT_ID: u32 = 1;
@@ -134,7 +134,7 @@ enum StripOutput {
 
 /// Remembers what the terminal shows so unchanged work is not redone or sent again.
 #[derive(Default)]
-pub struct KittyEdgeOverlay {
+pub struct KittyPixelOverlay {
     /// What the layer drew last, so identical input skips the raster altogether.
     last_input: Option<u64>,
     /// What the terminal holds for each strip, so a strip whose pixels did not change is not
@@ -142,27 +142,27 @@ pub struct KittyEdgeOverlay {
     strips: Vec<StripState>,
 }
 
-impl KittyEdgeOverlay {
-    /// Show `shapes` over `buffer`, the frame just drawn, or remove the image when there is
+impl KittyPixelOverlay {
+    /// Show `overlay_primitives` over `buffer`, the frame just drawn, or remove the image when there is
     /// nothing to show. The picture is sent as horizontal strips of whole cell rows, each its
     /// own image, encoded in parallel; strips that look as they did are skipped.
     pub fn update(
         &mut self,
         output: &mut impl Write,
         buffer: &Buffer,
-        shapes: &[EdgeShape],
+        overlay_primitives: &[OverlayPrimitive],
     ) -> io::Result<()> {
         let config = pixel_config(cell_pixels());
-        let layer = EdgeLayer::new(shapes, buffer, (0, 0), config);
-        if layer.is_empty() {
+        let pixel_overlay = PixelOverlay::new(overlay_primitives, buffer, (0, 0), config);
+        if pixel_overlay.is_empty() {
             return self.clear(output);
         }
-        if self.last_input == Some(layer.digest()) {
+        if self.last_input == Some(pixel_overlay.digest()) {
             return Ok(());
         }
-        self.last_input = Some(layer.digest());
+        self.last_input = Some(pixel_overlay.digest());
         let (columns, rows) = (buffer.area.width, buffer.area.height);
-        let Some(pixmap) = layer.rasterize(columns, rows) else {
+        let Some(pixmap) = pixel_overlay.rasterize(columns, rows) else {
             return self.clear(output);
         };
         let outputs = encode_strips(&pixmap, (columns, rows, config.cell_height), &self.strips);
@@ -232,13 +232,13 @@ fn cell_pixels() -> (usize, usize) {
     (width, height)
 }
 
-fn pixel_config((cell_width, cell_height): (usize, usize)) -> PngConfig {
+fn pixel_config((cell_width, cell_height): (usize, usize)) -> RasterConfig {
     let scale = (cell_height as f32 / LOGICAL_CELL_HEIGHT).round().max(1.0) as usize;
-    PngConfig {
+    RasterConfig {
         cell_width,
         cell_height,
         scale,
-        ..PngConfig::default()
+        ..RasterConfig::default()
     }
 }
 
@@ -369,7 +369,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        curved::{BezierCurve, EdgeShape},
+        curved::{BezierCurve, OverlayPrimitive},
         plotter::LineStyle,
     };
 
@@ -387,8 +387,8 @@ mod tests {
         }
     }
 
-    fn curve_across(row: f64) -> EdgeShape {
-        EdgeShape::Bezier(BezierCurve {
+    fn curve_across(row: f64) -> OverlayPrimitive {
+        OverlayPrimitive::Bezier(BezierCurve {
             from: (1.0, row),
             control1: (10.0, row),
             control2: (30.0, row + 2.0),
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn test_overlay_sends_once_then_nothing_until_the_picture_changes() {
         let buffer = Buffer::empty(Rect::new(0, 0, 40, 10));
-        let mut overlay = KittyEdgeOverlay::default();
+        let mut overlay = KittyPixelOverlay::default();
         let mut first = Vec::new();
         let mut second = Vec::new();
         let mut moved = Vec::new();

@@ -1,8 +1,11 @@
 //! Orthogonal drawing compaction via constraint-graph longest-path passes.
 //!
+//! This is only the constraint solver; [`crate::layout_compaction`] is the size-aware
+//! compaction of positioned layouts that builds the constraints it solves.
+//!
 //! The solver is axis-agnostic: the caller builds spacing constraints from the
 //! drawing geometry and passes them in. The same algorithm handles x and y.
-//! See [`crate::distribute_nodes::compact_layout`] for how constraints are
+//! See [`crate::layout_compaction::compact_layout`] for how constraints are
 //! derived from a layout graph.
 
 use std::collections::{HashMap, HashSet};

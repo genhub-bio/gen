@@ -1,8 +1,8 @@
 //! Curved edges, the counterpart of the rectilinear router.
 //!
 //! Curved edges keep the Sugiyama layers, dummy nodes and loopback pins, but skip `edge_router`.
-//! The buffer holds only nodes; each edge is reported as an [`EdgeShape`] in buffer cell units,
-//! and the caller draws the shapes at pixel resolution (see `edge_layer`).
+//! The buffer holds only nodes; each edge is reported as an [`OverlayPrimitive`] in buffer cell units,
+//! and the caller draws the primitives at pixel resolution (see `pixel_overlay`).
 
 use std::collections::HashMap;
 
@@ -13,12 +13,13 @@ use crate::{
     geometry::{WorldPos, WorldRect},
     layout::{LayoutNode, NodeRole, PinSide},
     plotter::LineStyle,
-    viewport_graph::ViewportGraph,
+    routed_window_graph::RoutedWindowGraph,
 };
 
-/// How a window's edges are routed and drawn.
+/// Selects how a window is laid out and drawn. The mode coordinates edge routing, layer spacing,
+/// compaction and rendering together rather than only changing how edges look.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum EdgeStyle {
+pub enum LayoutMode {
     /// Axis-aligned routed edges drawn with box-drawing characters.
     #[default]
     Rectilinear,
@@ -26,7 +27,7 @@ pub enum EdgeStyle {
     Curved,
 }
 
-impl EdgeStyle {
+impl LayoutMode {
     /// Whether edges skip the router.
     pub const fn is_curved(self) -> bool {
         matches!(self, Self::Curved)
@@ -89,9 +90,12 @@ pub struct SymbolGlow {
     pub color: Color,
 }
 
-/// A curved-edge shape for bitmap renderers.
+/// One graphic drawn over the character-cell buffer: lines, Bezier curves, arrows, node glows
+/// and symbol glows. The cells keep the text, and these primitives accompany them in buffer
+/// cell units so terminal graphics (Kitty) and PNG rendering draw the same picture at pixel
+/// resolution.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EdgeShape {
+pub enum OverlayPrimitive {
     Line(StraightSegment),
     Bezier(BezierCurve),
     Arrow(ArrowMark),
@@ -223,14 +227,14 @@ struct Loopback {
 }
 
 fn loopback_at(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     pin: WorldPos,
     content_rects: &HashMap<WorldPos, WorldRect>,
 ) -> Option<Loopback> {
-    let pin_node = viewport_graph.node_data_by_pos.get(&pin)?;
+    let pin_node = routed_window_graph.node_data_by_pos.get(&pin)?;
     let LoopbackNeighbors { anchor, returning } =
-        loopback_neighbors(viewport_graph.neighbors(pin).filter_map(|neighbor| {
-            let node = viewport_graph.node_data_by_pos.get(&neighbor)?;
+        loopback_neighbors(routed_window_graph.neighbors(pin).filter_map(|neighbor| {
+            let node = routed_window_graph.node_data_by_pos.get(&neighbor)?;
             Some((neighbor, &node.role))
         }))?;
     let side = match anchor.x.cmp(&pin.x) {
@@ -238,8 +242,8 @@ fn loopback_at(
         core::cmp::Ordering::Greater => LoopbackSide::Left,
         core::cmp::Ordering::Equal => return None,
     };
-    let anchor_node = viewport_graph.node_data_by_pos.get(&anchor)?;
-    let returning_node = viewport_graph.node_data_by_pos.get(&returning)?;
+    let anchor_node = routed_window_graph.node_data_by_pos.get(&anchor)?;
+    let returning_node = routed_window_graph.node_data_by_pos.get(&returning)?;
     let (anchor_end, _) = segment_endpoints((anchor, anchor_node), (pin, pin_node), content_rects);
     let (return_end, _) =
         segment_endpoints((returning, returning_node), (pin, pin_node), content_rects);
@@ -292,18 +296,18 @@ impl BendArch {
 /// Build the arch of an up or down pin, or `None` when `pin` is not one or lacks a neighbor on
 /// each side. The bend follows the pin's position relative to the line between its neighbors.
 pub(crate) fn bend_arch(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     pin: WorldPos,
     content_rects: &HashMap<WorldPos, WorldRect>,
     color: Color,
     line_style: LineStyle,
 ) -> Option<BendArch> {
     let NodeRole::Pin(PinSide::Up | PinSide::Down) =
-        viewport_graph.node_data_by_pos.get(&pin)?.role
+        routed_window_graph.node_data_by_pos.get(&pin)?.role
     else {
         return None;
     };
-    let neighbors: Vec<WorldPos> = viewport_graph.neighbors(pin).collect();
+    let neighbors: Vec<WorldPos> = routed_window_graph.neighbors(pin).collect();
     let west = neighbors
         .iter()
         .copied()
@@ -315,8 +319,8 @@ pub(crate) fn bend_arch(
         .filter(|n| n.x > pin.x)
         .max_by_key(|n| n.x)?;
     let (from, to) = segment_endpoints(
-        (west, viewport_graph.node_data_by_pos.get(&west)?),
-        (east, viewport_graph.node_data_by_pos.get(&east)?),
+        (west, routed_window_graph.node_data_by_pos.get(&west)?),
+        (east, routed_window_graph.node_data_by_pos.get(&east)?),
         content_rects,
     );
     let gap = to.0 - from.0;
@@ -355,7 +359,7 @@ pub(crate) struct RoutedCurve {
 
 /// Build the cubic for an edge, including loopback routing and its optional departure stub.
 pub(crate) fn routed_edge_curve(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     source: (WorldPos, &LayoutNode),
     target: (WorldPos, &LayoutNode),
     content_rects: &HashMap<WorldPos, WorldRect>,
@@ -364,7 +368,7 @@ pub(crate) fn routed_edge_curve(
 ) -> RoutedCurve {
     [source, target]
         .into_iter()
-        .find_map(|(pin, _)| bend_arch(viewport_graph, pin, content_rects, color, line_style))
+        .find_map(|(pin, _)| bend_arch(routed_window_graph, pin, content_rects, color, line_style))
         .map(|arch| RoutedCurve {
             curve: arch.curve,
             stub: None,
@@ -372,7 +376,7 @@ pub(crate) fn routed_edge_curve(
         })
         .or_else(|| {
             self_link_span_curve(
-                viewport_graph,
+                routed_window_graph,
                 source,
                 target,
                 content_rects,
@@ -382,7 +386,7 @@ pub(crate) fn routed_edge_curve(
         })
         .or_else(|| {
             loopback_edge_curve(
-                viewport_graph,
+                routed_window_graph,
                 source,
                 target,
                 content_rects,
@@ -390,7 +394,7 @@ pub(crate) fn routed_edge_curve(
                 line_style,
             )
         })
-        .or_else(|| hair_pin_bend(viewport_graph, source, target, color, line_style))
+        .or_else(|| hair_pin_bend(routed_window_graph, source, target, color, line_style))
         .unwrap_or_else(|| {
             let (from, to) = segment_endpoints(source, target, content_rects);
             RoutedCurve {
@@ -531,7 +535,7 @@ const HAIR_PIN_BEND_REACH_PER_ROW: f64 = 1.0;
 /// nodes there, which lie in one column and carry only a self-edge. It starts and
 /// ends flat, bulging away from the flat edges that reach it, so it continues them as a semicircle.
 fn hair_pin_bend(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     (source, source_node): (WorldPos, &LayoutNode),
     (target, target_node): (WorldPos, &LayoutNode),
     color: Color,
@@ -542,11 +546,11 @@ fn hair_pin_bend(
     if !between_routing_nodes || source.x != target.x || source.y == target.y {
         return None;
     }
-    let bundle = viewport_graph.graph.edge_weight(source, target)?;
+    let bundle = routed_window_graph.graph.edge_weight(source, target)?;
     if bundle.is_empty() || !bundle.iter().all(|(first, second)| first == second) {
         return None;
     }
-    let inward = viewport_graph
+    let inward = routed_window_graph
         .neighbors(source)
         .find(|&neighbor| neighbor != target)?;
     let direction = if inward.x < source.x { 1.0 } else { -1.0 };
@@ -571,7 +575,7 @@ fn hair_pin_bend(
 
 /// Join the two turnaround ends of a contracted self-link without extending toward either pin.
 fn self_link_span_curve(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     (source, source_node): (WorldPos, &LayoutNode),
     (target, target_node): (WorldPos, &LayoutNode),
     content_rects: &HashMap<WorldPos, WorldRect>,
@@ -585,8 +589,8 @@ fn self_link_span_curve(
     if !opposite_sides {
         return None;
     }
-    let first = loopback_at(viewport_graph, source, content_rects)?;
-    let second = loopback_at(viewport_graph, target, content_rects)?;
+    let first = loopback_at(routed_window_graph, source, content_rects)?;
+    let second = loopback_at(routed_window_graph, target, content_rects)?;
     if first.anchor != second.anchor || first.returning != target || second.returning != source {
         return None;
     }
@@ -603,7 +607,7 @@ fn self_link_span_curve(
 }
 
 fn loopback_edge_curve(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     (source, source_node): (WorldPos, &LayoutNode),
     (target, target_node): (WorldPos, &LayoutNode),
     content_rects: &HashMap<WorldPos, WorldRect>,
@@ -619,7 +623,7 @@ fn loopback_edge_curve(
     } else {
         return None;
     };
-    let loopback = loopback_at(viewport_graph, pin, content_rects)?;
+    let loopback = loopback_at(routed_window_graph, pin, content_rects)?;
     // The loop is traced outward from its anchor: turnaround first, then the return run.
     let (canonical, canonical_source, is_turnaround, stub) = if other == loopback.anchor {
         let curve = loopback_curve(
@@ -739,7 +743,7 @@ mod tests {
         geometry::{LocalPos, WorldPos, WorldRect},
         layout::{LayoutNode, NodeRole, PinSide},
         plotter::LineStyle,
-        viewport_graph::ViewportGraph,
+        routed_window_graph::RoutedWindowGraph,
     };
 
     /// Sample a cubic at evenly spaced parameter values.
@@ -825,8 +829,8 @@ mod tests {
         anchor: WorldPos,
         pin: WorldPos,
         returning: WorldPos,
-    ) -> (ViewportGraph, [WorldPos; 3]) {
-        let mut graph = ViewportGraph::empty();
+    ) -> (RoutedWindowGraph, [WorldPos; 3]) {
+        let mut graph = RoutedWindowGraph::empty();
         graph
             .node_data_by_pos
             .insert(anchor, data_node(anchor.x, anchor.y));
@@ -842,7 +846,7 @@ mod tests {
         (graph, [anchor, pin, returning])
     }
 
-    fn curve_between(graph: &ViewportGraph, source: WorldPos, target: WorldPos) -> BezierCurve {
+    fn curve_between(graph: &RoutedWindowGraph, source: WorldPos, target: WorldPos) -> BezierCurve {
         routed_edge_curve(
             graph,
             (source, &graph.node_data_by_pos[&source]),
@@ -1071,7 +1075,7 @@ mod tests {
         let anchor = WorldPos::new(10, 0);
         let left = WorldPos::new(2, 3);
         let right = WorldPos::new(18, 3);
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         graph.node_data_by_pos.insert(anchor, data_node(10, 0));
         graph
             .node_data_by_pos
@@ -1139,7 +1143,7 @@ mod tests {
 
     #[test]
     fn test_pin_without_data_neighbor_keeps_ordinary_s_curve() {
-        let mut graph = ViewportGraph::empty();
+        let mut graph = RoutedWindowGraph::empty();
         let first = WorldPos::new(20, 0);
         let second = WorldPos::new(-20, -15);
         for point in [first, second] {
@@ -1183,7 +1187,7 @@ mod tests {
             [(PinSide::Up, -2, -1.0), (PinSide::Down, 2, 1.0)]
         {
             let pin = WorldPos::new(2, pin_row);
-            let mut graph = ViewportGraph::empty();
+            let mut graph = RoutedWindowGraph::empty();
             graph.node_data_by_pos.insert(west, data_node(0, 0));
             graph.node_data_by_pos.insert(east, data_node(4, 0));
             graph
@@ -1227,8 +1231,8 @@ mod tests {
         near_x: i64,
         far_x: i64,
         bend_bundle: Vec<(NodeIndex, NodeIndex)>,
-    ) -> ViewportGraph {
-        let mut graph = ViewportGraph::empty();
+    ) -> RoutedWindowGraph {
+        let mut graph = RoutedWindowGraph::empty();
         let corners = [(near_x, 1), (near_x, -1), (far_x, 1), (far_x, -1)];
         for (x, y) in corners {
             graph

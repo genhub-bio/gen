@@ -19,7 +19,7 @@ use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, path::Path, port_crawl::LocateError};
 use gen_tui::{
-    curved::{EdgeShape, EdgeStyle},
+    curved::{LayoutMode, OverlayPrimitive},
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
     layout_engine::{BatchId, LayoutEngine},
@@ -135,7 +135,7 @@ pub struct GenGraphController {
     aligned_path: AlignedPath,
     /// Whether opened block groups align their current path on y = 0 (default).
     align_current_path: bool,
-    /// Whether the curved edge style can be shown; see [`Self::set_curved_edges_available`].
+    /// Whether the curved layout mode can be shown; see [`Self::set_curved_edges_available`].
     curved_edges_available: bool,
     /// Where the position scale of the aligned path is drawn; see [`PathScale`].
     scale_placement: ScalePlacement,
@@ -302,27 +302,27 @@ impl GenGraphController {
         }
     }
 
-    /// Route and draw edges in `edge_style`, including in block groups opened from now on.
-    pub fn with_edge_style(mut self, edge_style: EdgeStyle) -> Self {
-        self.view_state.edge_style = edge_style;
+    /// Route and draw edges in `layout_mode`, including in block groups opened from now on.
+    pub fn with_layout_mode(mut self, layout_mode: LayoutMode) -> Self {
+        self.view_state.layout_mode = layout_mode;
         self
     }
 
     /// How edges are routed and drawn.
-    pub fn edge_style(&self) -> EdgeStyle {
-        self.view_state.edge_style
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.view_state.layout_mode
     }
 
-    /// Whether the curved edge style can be shown. A terminal needs the Kitty graphics protocol
+    /// Whether the curved layout mode can be shown. A terminal needs the Kitty graphics protocol
     /// for it; a PNG always can. Defaults to true.
     pub fn set_curved_edges_available(&mut self, available: bool) {
         self.curved_edges_available = available;
-        if !available && self.view_state.edge_style.is_curved() {
-            self.view_state.edge_style = EdgeStyle::Rectilinear;
+        if !available && self.view_state.layout_mode.is_curved() {
+            self.view_state.layout_mode = LayoutMode::Rectilinear;
         }
     }
 
-    /// Whether the curved edge style can be shown; see [`Self::set_curved_edges_available`].
+    /// Whether the curved layout mode can be shown; see [`Self::set_curved_edges_available`].
     pub fn curved_edges_available(&self) -> bool {
         self.curved_edges_available
     }
@@ -330,18 +330,18 @@ impl GenGraphController {
     /// Switch between rectilinear and curved edges. Returns false, changing nothing, when the
     /// curved style is not available.
     pub fn toggle_curved_edges(&mut self) -> bool {
-        self.view_state.edge_style = match self.view_state.edge_style {
-            EdgeStyle::Rectilinear if self.curved_edges_available => EdgeStyle::Curved,
-            EdgeStyle::Rectilinear => return false,
-            EdgeStyle::Curved => EdgeStyle::Rectilinear,
+        self.view_state.layout_mode = match self.view_state.layout_mode {
+            LayoutMode::Rectilinear if self.curved_edges_available => LayoutMode::Curved,
+            LayoutMode::Rectilinear => return false,
+            LayoutMode::Curved => LayoutMode::Rectilinear,
         };
         true
     }
 
-    /// The edge lines the last draw left for the caller, in cells of the buffer drawn into.
-    /// Empty unless the edge style is curved.
-    pub fn edge_shapes(&self) -> &[EdgeShape] {
-        &self.view_state.edge_shapes
+    /// The overlay primitives the last draw left for the caller, in cells of the buffer drawn into.
+    /// Empty unless the layout mode is curved.
+    pub fn overlay_primitives(&self) -> &[OverlayPrimitive] {
+        &self.view_state.overlay_primitives
     }
 
     /// Align the current path of subsequently opened block groups along y = 0. Variants branch
@@ -410,16 +410,16 @@ impl GenGraphController {
     fn lowest_deferred_edge_row(&self, graph_area: Rect) -> u16 {
         let last_row = f64::from(graph_area.y + graph_area.height - 1);
         self.view_state
-            .edge_shapes
+            .overlay_primitives
             .iter()
             .flat_map(|edge| match edge {
-                EdgeShape::Line(line) => vec![line.from.1, line.to.1],
-                EdgeShape::Bezier(curve) => {
+                OverlayPrimitive::Line(line) => vec![line.from.1, line.to.1],
+                OverlayPrimitive::Bezier(curve) => {
                     vec![curve.from.1, curve.control1.1, curve.control2.1, curve.to.1]
                 }
-                EdgeShape::Arrow(mark) => vec![mark.center.1],
-                EdgeShape::NodeGlow(glow) => vec![glow.bottom_right.1],
-                EdgeShape::SymbolGlow(glow) => vec![glow.center.1],
+                OverlayPrimitive::Arrow(mark) => vec![mark.center.1],
+                OverlayPrimitive::NodeGlow(glow) => vec![glow.bottom_right.1],
+                OverlayPrimitive::SymbolGlow(glow) => vec![glow.center.1],
             })
             .fold(f64::from(graph_area.y), f64::max)
             .floor()
@@ -438,7 +438,7 @@ impl GenGraphController {
             history_ref,
             self.prune_history,
         )?;
-        let edge_style = self.view_state.edge_style;
+        let layout_mode = self.view_state.layout_mode;
         (self.engine, self.zoom_levels, self.view_state) =
             create_send_sync_annotated_gen_graph_engine_lazy(
                 loaded.graph,
@@ -447,7 +447,7 @@ impl GenGraphController {
                 self.node_annotations.clone(),
                 TRUNCATED_ZOOM_LEVEL,
             );
-        self.view_state.edge_style = edge_style;
+        self.view_state.layout_mode = layout_mode;
         self.zoom_levels = align_zoom_levels(self.zoom_levels.clone(), &self.aligned_path);
         // The position scale reads left to right, so the aligned path's nodes must be laid out in
         // path order even where recombination edges make the graph cyclic.
@@ -1202,8 +1202,8 @@ mod tests {
     use gen_core::Workspace;
     use gen_models::{db::get_connection, path::Path};
     use gen_tui::{
-        EdgeStyle, VerticalAnchor,
-        curved::{BezierCurve, EdgeShape},
+        LayoutMode, VerticalAnchor,
+        curved::{BezierCurve, OverlayPrimitive},
         plotter::LineStyle,
     };
     use ratatui::{
@@ -1402,8 +1402,8 @@ mod tests {
 
         controller
             .view_state
-            .edge_shapes
-            .push(EdgeShape::Bezier(BezierCurve {
+            .overlay_primitives
+            .push(OverlayPrimitive::Bezier(BezierCurve {
                 from: (2.0, 3.0),
                 control1: (2.0, 20.5),
                 control2: (30.0, 20.5),
@@ -1470,12 +1470,12 @@ mod tests {
             controller.handle_key(press(KeyCode::Char('p'))),
             GraphKeyOutcome::Ignore
         );
-        for style in [EdgeStyle::Curved, EdgeStyle::Rectilinear] {
+        for style in [LayoutMode::Curved, LayoutMode::Rectilinear] {
             assert_eq!(
                 controller.handle_key(press(KeyCode::Char('s'))),
                 GraphKeyOutcome::Redraw
             );
-            assert_eq!(controller.view_state.edge_style, style);
+            assert_eq!(controller.view_state.layout_mode, style);
         }
         assert_eq!(
             controller.handle_key(press(KeyCode::Char('d'))),

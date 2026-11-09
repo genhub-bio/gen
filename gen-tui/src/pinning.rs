@@ -16,17 +16,9 @@ use LegEnd::{BendPin, HairPin, LeftPin, RightPin, Source, Target};
 use petgraph::graph::NodeIndex;
 
 use crate::{
-    edge_ports::{EdgePorts, NodeSide},
+    edge_ports::{EdgePorts, NodeSide, PortedEdge},
     layout::PinSide,
 };
-
-/// A domain edge with the information needed to trace its route for direction arrows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PinnedEdge {
-    pub source: NodeIndex,
-    pub target: NodeIndex,
-    pub ports: EdgePorts,
-}
 
 /// One end of a leg in a [`PinPlan`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,8 +239,8 @@ pub fn plan_hairpin(side: NodeSide) -> PinPlan {
 }
 
 /// The node sides that have a hairpin: an edge whose two ends are the same node and the same side.
-pub fn hairpin_sides(pinned_edges: &[PinnedEdge]) -> HashSet<(NodeIndex, NodeSide)> {
-    pinned_edges
+pub fn hairpin_sides(domain_edges: &[PortedEdge<NodeIndex>]) -> HashSet<(NodeIndex, NodeSide)> {
+    domain_edges
         .iter()
         .filter(|edge| edge.source == edge.target && edge.ports.source == edge.ports.target)
         .map(|edge| (edge.source, edge.ports.source))

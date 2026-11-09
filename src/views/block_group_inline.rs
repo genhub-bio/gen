@@ -170,7 +170,7 @@ fn run_inline_event_loop<B: Backend>(
 /// * Arrow keys: Navigate cursor between nodes and pan the view
 /// * +/-: Zoom in/out (Minimal → Truncated → Full)
 /// * p: Toggle the highlight of the last of `paths`
-/// * s: Cycle between routed, straight, and curved edge styles
+/// * s: Cycle between routed, straight, and curved layout modes
 /// * f: Switch to the full-screen viewer
 /// * q/Enter/Esc: Exit the widget
 ///
@@ -392,7 +392,7 @@ pub fn write_block_group_png(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut controller = GenGraphController::new(database, history_ref.map(String::from))
         .with_pruned_history(true)
-        .with_edge_style(gen_tui::EdgeStyle::Curved);
+        .with_layout_mode(gen_tui::LayoutMode::Curved);
     controller
         .open_block_group(&block_group_id)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -412,7 +412,7 @@ pub fn write_block_group_png(
         Clear.render(area, &mut buffer);
         draw_flags_under_nodes(&mut controller, &mut buffer, area);
     }
-    write_png_with_edges(&buffer, controller.edge_shapes(), size.scale, output)
+    write_png_with_edges(&buffer, controller.overlay_primitives(), size.scale, output)
 }
 
 /// Write a PNG of a sample diff using the standard added/removed highlights.
@@ -429,10 +429,10 @@ pub fn write_diff_graph_png(
     apply_diff_highlights(&mut view_state, &component);
     let area = Rect::new(0, 0, size.columns, size.rows);
     let mut buffer = Buffer::empty(area);
-    view_state.edge_style = gen_tui::EdgeStyle::Curved;
+    view_state.layout_mode = gen_tui::LayoutMode::Curved;
     let view = GraphView::new(&mut engine, &zoom_levels[view_state.zoom_index].1);
     StatefulWidget::render(view, area, &mut buffer, &mut view_state);
-    write_png_with_edges(&buffer, &view_state.edge_shapes, size.scale, output)
+    write_png_with_edges(&buffer, &view_state.overlay_primitives, size.scale, output)
 }
 
 fn draw_flags_under_nodes(controller: &mut GenGraphController, buffer: &mut Buffer, area: Rect) {

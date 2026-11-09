@@ -457,7 +457,7 @@ only the frame in a fenced code block.
   `rows` and `cols` set its render canvas; blank space is trimmed as with `save_png`.
   `sample.plot(interactive=False)` renders its first sequence graph; its `go_to`
   target should belong to that graph. PNG exports use smooth curves, while the
-  interactive/text views retain their terminal edge style.
+  interactive/text views retain their terminal layout mode.
 
 ```python
 import gen

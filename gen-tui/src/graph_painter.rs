@@ -16,21 +16,20 @@ use ratatui::{
 
 use crate::{
     assembly::AssembledLayout,
-    curved::{EdgeShape, EdgeStyle},
-    distribute_nodes::GapSizes,
-    edge_ports::{EdgePorts, EdgeSelector, NodeSide},
+    curved::{LayoutMode, OverlayPrimitive},
+    edge_ports::{EdgePorts, EdgeSelector, NodeSide, PortedEdge},
     frame_index::{FrameIndex, PlacedNode},
     geometry::{WorldPos, WorldRect, floor_half},
-    graph_widget::build_window_geometry_with_anchors,
     layout::{LayoutNode, NodeRole, WindowGeometry},
-    pinning::PinnedEdge,
+    layout_compaction::GapPolicy,
     plotter::{
         CellHighlight, NodeRenderer, PathStyle, PlotDecorations, highlighted_edge_route,
-        plot_viewport_graph_with_highlights,
+        plot_routed_window_graph_with_highlights,
     },
+    routed_window_graph::RoutedWindowGraph,
     theme::current_theme,
-    viewport_graph::ViewportGraph,
     viewport_state::{ViewportState, WorldBuffer},
+    window_geometry::build_window_geometry_with_anchors,
 };
 
 /// Every placed wormhole (`NodeRole::Wormhole`) stub's screen rect, boundary node, and
@@ -43,8 +42,8 @@ pub struct RenderedWindow<NodeId> {
     pub frame: FrameIndex<NodeId>,
     /// Every placed wormhole stub.
     pub wormhole: WormholeStubs<NodeId>,
-    /// Edge shapes in buffer cell units. Empty unless the edge style is curved.
-    pub lines: Vec<EdgeShape>,
+    /// Overlay primitives in buffer cell units. Empty unless the layout mode is curved.
+    pub overlay_primitives: Vec<OverlayPrimitive>,
 }
 
 /// Type of element to highlight in the graph.
@@ -148,8 +147,8 @@ where
     window: AssembledLayout,
     graph: &'a G,
     visual: &'a V,
-    gaps: GapSizes,
-    edge_style: EdgeStyle,
+    gaps: GapPolicy,
+    layout_mode: LayoutMode,
     block: Option<Block<'a>>,
     style: Style,
 }
@@ -169,22 +168,22 @@ where
             window,
             graph,
             visual,
-            gaps: GapSizes::default(),
-            edge_style: EdgeStyle::default(),
+            gaps: GapPolicy::default(),
+            layout_mode: LayoutMode::default(),
             block: None,
             style: Style::default(),
         }
     }
 
     /// Set the minimum inter-node gap for each axis (the current zoom level's target).
-    pub fn spacing(mut self, gaps: &GapSizes) -> Self {
+    pub fn spacing(mut self, gaps: &GapPolicy) -> Self {
         self.gaps = *gaps;
         self
     }
 
-    /// Choose how edges are routed and drawn. Defaults to [`EdgeStyle::Rectilinear`].
-    pub fn edge_style(mut self, edge_style: EdgeStyle) -> Self {
-        self.edge_style = edge_style;
+    /// Choose how edges are routed and drawn. Defaults to [`LayoutMode::Rectilinear`].
+    pub fn layout_mode(mut self, layout_mode: LayoutMode) -> Self {
+        self.layout_mode = layout_mode;
         self
     }
 
@@ -205,7 +204,7 @@ where
     /// boundary node, and off-screen domain target - kept separate from `FrameIndex` rather
     /// than folded into it, since `FrameIndex`'s `N` key space is domain node ids only and
     /// wormhole stubs are synthetic routing nodes with no domain id of their own. The third
-    /// element holds the edge shapes of the curved style.
+    /// element holds the overlay primitives of the curved style.
     pub fn render(
         self,
         area: Rect,
@@ -227,7 +226,7 @@ where
             self.graph,
             self.visual,
             &self.gaps,
-            self.edge_style,
+            self.layout_mode,
         );
         scene.paint(self.graph, self.visual, inner_area, buf, camera, highlights)
     }
@@ -239,8 +238,8 @@ where
 #[derive(Clone)]
 pub struct WindowScene {
     geometry: WindowGeometry,
-    viewport_graph: ViewportGraph,
-    edge_style: EdgeStyle,
+    routed_window_graph: RoutedWindowGraph,
+    layout_mode: LayoutMode,
 }
 
 impl WindowScene {
@@ -249,21 +248,21 @@ impl WindowScene {
         window: AssembledLayout,
         graph: &G,
         visual: &V,
-        gaps: &GapSizes,
-        edge_style: EdgeStyle,
+        gaps: &GapPolicy,
+        layout_mode: LayoutMode,
     ) -> Self
     where
         G: GraphBase + NodeIndexable,
         V: NodeRenderer<G>,
     {
-        let pinned_edges = window.pinned_edges.clone();
+        let domain_edges = window.domain_edges.clone();
         let is_visible = |node_index: NodeIndex| {
             visual.is_visible(&<G as NodeIndexable>::from_index(graph, node_index.index()))
         };
         let geometry = build_window_geometry_with_anchors(
             window,
             gaps,
-            edge_style,
+            layout_mode,
             |role| match role {
                 NodeRole::Data(node_index) if is_visible(*node_index) => {
                     let node_id = <G as NodeIndexable>::from_index(graph, node_index.index());
@@ -279,11 +278,11 @@ impl WindowScene {
                 visual.vertical_anchor(&<G as NodeIndexable>::from_index(graph, node_index.index()))
             },
         );
-        let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &pinned_edges);
+        let routed_window_graph = RoutedWindowGraph::from_window_geometry(&geometry, &domain_edges);
         Self {
             geometry,
-            viewport_graph,
-            edge_style,
+            routed_window_graph,
+            layout_mode,
         }
     }
 
@@ -306,11 +305,11 @@ impl WindowScene {
         V: NodeRenderer<G>,
     {
         let offset = anchor_offset(&self.geometry, graph, camera);
-        let lines = paint(self, area, buf, offset, graph, visual, highlights);
+        let overlay_primitives = paint(self, area, buf, offset, graph, visual, highlights);
         RenderedWindow {
             frame: frame_index(&self.geometry, graph, visual, offset, area),
             wormhole: wormhole_index(&self.geometry, graph, offset),
-            lines,
+            overlay_primitives,
         }
     }
 
@@ -369,7 +368,7 @@ where
 }
 
 /// Paint the window into `buf`, resolving `highlights` from domain terms to screen positions
-/// for this call only (nothing is baked into `viewport_graph` beyond this paint).
+/// for this call only (nothing is baked into `routed_window_graph` beyond this paint).
 fn paint<G, V>(
     scene: &WindowScene,
     area: Rect,
@@ -378,14 +377,14 @@ fn paint<G, V>(
     graph: &G,
     visual: &V,
     highlights: &Highlights<G::NodeId>,
-) -> Vec<EdgeShape>
+) -> Vec<OverlayPrimitive>
 where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash,
     V: NodeRenderer<G>,
 {
-    let viewport_graph = &scene.viewport_graph;
-    let edge_style = scene.edge_style;
+    let routed_window_graph = &scene.routed_window_graph;
+    let layout_mode = scene.layout_mode;
     let half_width = floor_half(area.width as i64);
     let half_height = floor_half(area.height as i64);
     let camera_current = WorldPos::new(half_width - offset.x, half_height - offset.y);
@@ -402,7 +401,7 @@ where
         match kind {
             HighlightKind::Node(node_id) => {
                 apply_node_highlight(
-                    viewport_graph,
+                    routed_window_graph,
                     graph,
                     *node_id,
                     *style,
@@ -411,7 +410,7 @@ where
             }
             HighlightKind::Edge(selector) => {
                 apply_edge_highlight(
-                    viewport_graph,
+                    routed_window_graph,
                     graph,
                     *selector,
                     *style,
@@ -421,7 +420,7 @@ where
             }
             HighlightKind::Cells { node, tl, br } => {
                 apply_cell_highlight(
-                    viewport_graph,
+                    routed_window_graph,
                     graph,
                     *node,
                     *tl,
@@ -433,13 +432,15 @@ where
         }
     }
 
-    let edge_lowlights = resolve_edge_lowlights(viewport_graph, graph, &highlights.edge_lowlights);
-    let node_lowlights = resolve_node_lowlights(viewport_graph, graph, &highlights.node_lowlights);
+    let edge_lowlights =
+        resolve_edge_lowlights(routed_window_graph, graph, &highlights.edge_lowlights);
+    let node_lowlights =
+        resolve_node_lowlights(routed_window_graph, graph, &highlights.node_lowlights);
 
     let theme = current_theme();
     let mut world_buffer = WorldBuffer::new(buf, &viewport_state);
-    plot_viewport_graph_with_highlights(
-        viewport_graph,
+    plot_routed_window_graph_with_highlights(
+        routed_window_graph,
         &mut world_buffer,
         visual,
         graph,
@@ -452,19 +453,19 @@ where
             node_lowlights: &node_lowlights,
         },
         &theme,
-        edge_style,
+        layout_mode,
     )
 }
 
 fn apply_node_highlight<G: GraphBase + NodeIndexable>(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     graph: &G,
     node_id: G::NodeId,
     style: PathStyle,
     out: &mut Vec<(WorldPos, PathStyle)>,
 ) {
     let node_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
-    if let Some(pos) = viewport_graph.node_positions.get(&node_index) {
+    if let Some(pos) = routed_window_graph.node_positions.get(&node_index) {
         out.push((*pos, style));
     }
 }
@@ -477,7 +478,7 @@ fn apply_node_highlight<G: GraphBase + NodeIndexable>(
 /// them when none reads west to east, and nothing when that is ambiguous. A pair with no domain
 /// edge in the window at all is a wormhole stub, which has no ports and is matched by its pair.
 fn apply_edge_highlight<G: GraphBase + NodeIndexable>(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     graph: &G,
     selector: EdgeSelector<G::NodeId>,
     style: PathStyle,
@@ -487,34 +488,34 @@ fn apply_edge_highlight<G: GraphBase + NodeIndexable>(
     let source = NodeIndex::new(<G as NodeIndexable>::to_index(graph, selector.source()));
     let target = NodeIndex::new(<G as NodeIndexable>::to_index(graph, selector.target()));
 
-    let joins_pair = |pinned: &&PinnedEdge| {
-        (pinned.source, pinned.target) == (source, target)
-            || (pinned.source, pinned.target) == (target, source)
+    let joins_pair = |ported_edge: &&PortedEdge<NodeIndex>| {
+        (ported_edge.source, ported_edge.target) == (source, target)
+            || (ported_edge.source, ported_edge.target) == (target, source)
     };
-    if !viewport_graph
-        .pinned_edges
+    if !routed_window_graph
+        .domain_edges
         .iter()
-        .any(|pinned| joins_pair(&pinned))
+        .any(|ported_edge| joins_pair(&ported_edge))
     {
-        out.extend(bundled_segments(viewport_graph, source, target, style));
+        out.extend(bundled_segments(routed_window_graph, source, target, style));
         return;
     }
 
-    let candidates: Vec<&PinnedEdge> = viewport_graph
-        .pinned_edges
+    let candidates: Vec<&PortedEdge<NodeIndex>> = routed_window_graph
+        .domain_edges
         .iter()
-        .filter(|pinned| (pinned.source, pinned.target) == (source, target))
+        .filter(|ported_edge| (ported_edge.source, ported_edge.target) == (source, target))
         .collect();
-    let chosen: Vec<&PinnedEdge> = match selector {
+    let chosen: Vec<&PortedEdge<NodeIndex>> = match selector {
         EdgeSelector::Exact(key) => candidates
             .into_iter()
-            .filter(|pinned| pinned.ports == key.ports)
+            .filter(|ported_edge| ported_edge.ports == key.ports)
             .collect(),
         EdgeSelector::Between { .. } => {
-            let forward: Vec<&PinnedEdge> = candidates
+            let forward: Vec<&PortedEdge<NodeIndex>> = candidates
                 .iter()
                 .copied()
-                .filter(|pinned| pinned.ports == EdgePorts::default())
+                .filter(|ported_edge| ported_edge.ports == EdgePorts::default())
                 .collect();
             if forward.is_empty() && candidates.len() == 1 {
                 candidates
@@ -524,25 +525,29 @@ fn apply_edge_highlight<G: GraphBase + NodeIndexable>(
         }
     };
 
-    for pinned in chosen {
-        if pinned.source == pinned.target
-            && pinned.ports.source == pinned.ports.target
-            && viewport_graph
+    for ported_edge in chosen {
+        if ported_edge.source == ported_edge.target
+            && ported_edge.ports.source == ported_edge.ports.target
+            && routed_window_graph
                 .node_positions
                 .get(&source)
-                .is_some_and(|position| viewport_graph.graph.contains_edge(*position, *position))
+                .is_some_and(|position| {
+                    routed_window_graph
+                        .graph
+                        .contains_edge(*position, *position)
+                })
         {
-            hairpin_out.push(((source, pinned.ports.source), style));
+            hairpin_out.push(((source, ported_edge.ports.source), style));
             continue;
         }
-        match highlighted_edge_route(viewport_graph, pinned) {
+        match highlighted_edge_route(routed_window_graph, ported_edge) {
             Some(route) => out.extend(route.windows(2).map(|hop| ((hop[0], hop[1]), style))),
             // A junction's routing point has no sides to tell its edges apart by, so when the
             // ports cannot be followed through one, the pair's bundled segments stand in.
-            None if viewport_graph.junction_positions.contains_key(&source)
-                || viewport_graph.junction_positions.contains_key(&target) =>
+            None if routed_window_graph.junction_positions.contains_key(&source)
+                || routed_window_graph.junction_positions.contains_key(&target) =>
             {
-                out.extend(bundled_segments(viewport_graph, source, target, style));
+                out.extend(bundled_segments(routed_window_graph, source, target, style));
             }
             None => {}
         }
@@ -551,12 +556,12 @@ fn apply_edge_highlight<G: GraphBase + NodeIndexable>(
 
 /// Every routed segment carrying a domain edge between `source` and `target` in either direction.
 fn bundled_segments(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     source: NodeIndex,
     target: NodeIndex,
     style: PathStyle,
 ) -> Vec<((WorldPos, WorldPos), PathStyle)> {
-    viewport_graph
+    routed_window_graph
         .edges()
         .filter(|(_, _, bundle)| {
             bundle.contains(&(source, target)) || bundle.contains(&(target, source))
@@ -566,7 +571,7 @@ fn bundled_segments(
 }
 
 fn apply_cell_highlight<G: GraphBase + NodeIndexable>(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     graph: &G,
     node_id: G::NodeId,
     tl: (i64, i64),
@@ -575,7 +580,7 @@ fn apply_cell_highlight<G: GraphBase + NodeIndexable>(
     out: &mut Vec<CellHighlight>,
 ) {
     let node_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
-    if let Some(&world_pos) = viewport_graph.node_positions.get(&node_index) {
+    if let Some(&world_pos) = routed_window_graph.node_positions.get(&node_index) {
         out.push((world_pos, tl, br, style));
     }
 }
@@ -584,17 +589,17 @@ fn apply_cell_highlight<G: GraphBase + NodeIndexable>(
 /// so one can name a node the graph has since re-carved or dropped; looking nodes up through
 /// the window instead of indexing into the graph leaves such stale entries with nothing to dim.
 fn window_node_indices<G>(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     graph: &G,
 ) -> HashMap<G::NodeId, NodeIndex>
 where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash,
 {
-    viewport_graph
+    routed_window_graph
         .node_positions
         .keys()
-        .chain(viewport_graph.junction_positions.keys())
+        .chain(routed_window_graph.junction_positions.keys())
         .filter(|index| index.index() < graph.node_bound())
         .map(|&index| {
             (
@@ -606,7 +611,7 @@ where
 }
 
 fn resolve_edge_lowlights<G>(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     graph: &G,
     domain_lowlights: &[(G::NodeId, G::NodeId)],
 ) -> Vec<(WorldPos, WorldPos)>
@@ -614,7 +619,7 @@ where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash,
 {
-    let window_nodes = window_node_indices(viewport_graph, graph);
+    let window_nodes = window_node_indices(routed_window_graph, graph);
     let lowlight_pairs: HashSet<(NodeIndex, NodeIndex)> = domain_lowlights
         .iter()
         .filter_map(|(source, target)| {
@@ -628,7 +633,7 @@ where
         })
         .collect();
 
-    viewport_graph
+    routed_window_graph
         .edges()
         .filter(|(_, _, bundle)| {
             !bundle.is_empty()
@@ -646,7 +651,7 @@ where
 }
 
 fn resolve_node_lowlights<G>(
-    viewport_graph: &ViewportGraph,
+    routed_window_graph: &RoutedWindowGraph,
     graph: &G,
     domain_node_lowlights: &[G::NodeId],
 ) -> Vec<WorldPos>
@@ -654,12 +659,12 @@ where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash,
 {
-    let window_nodes = window_node_indices(viewport_graph, graph);
+    let window_nodes = window_node_indices(routed_window_graph, graph);
     domain_node_lowlights
         .iter()
         .filter_map(|node_id| {
             let node_index = window_nodes.get(node_id)?;
-            viewport_graph.node_positions.get(node_index).copied()
+            routed_window_graph.node_positions.get(node_index).copied()
         })
         .collect()
 }
@@ -764,7 +769,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        edge_ports::EdgeKey,
+        edge_ports::PortedEdge,
         geometry::{LocalPos, WorldRect},
         layout::{LayoutEdge, LayoutNode, WindowGeometry},
         layout_engine::LayoutEngine,
@@ -797,7 +802,7 @@ mod tests {
         graph.add_node(20);
         let first = NodeIndex::new(<_ as NodeIndexable>::to_index(&graph, 10));
         let second = NodeIndex::new(<_ as NodeIndexable>::to_index(&graph, 20));
-        let mut viewport = ViewportGraph::empty();
+        let mut viewport = RoutedWindowGraph::empty();
         viewport.node_positions.insert(first, WorldPos::new(0, 0));
         viewport.node_positions.insert(second, WorldPos::new(8, 0));
 
@@ -813,13 +818,13 @@ mod tests {
         let mut graph = MockDomainGraph::new();
         let domain_index = graph.add_node(());
         let position = WorldPos::new(0, 0);
-        let mut viewport = ViewportGraph::empty();
+        let mut viewport = RoutedWindowGraph::empty();
         viewport.node_positions.insert(domain_index, position);
         viewport
             .graph
             .add_edge(position, position, vec![(domain_index, domain_index)]);
-        viewport.pinned_edges = [NodeSide::West, NodeSide::East]
-            .map(|side| PinnedEdge {
+        viewport.domain_edges = [NodeSide::West, NodeSide::East]
+            .map(|side| PortedEdge {
                 source: domain_index,
                 target: domain_index,
                 ports: EdgePorts::new(side, side),
@@ -832,7 +837,7 @@ mod tests {
             apply_edge_highlight(
                 &viewport,
                 &graph,
-                EdgeSelector::Exact(EdgeKey::new(
+                EdgeSelector::Exact(PortedEdge::new(
                     domain_index,
                     domain_index,
                     EdgePorts::new(side, side),
@@ -1029,9 +1034,9 @@ mod tests {
 
         fn render_text(
             graph: MockDomainGraph,
-            edge_style: EdgeStyle,
+            layout_mode: LayoutMode,
             area: Rect,
-        ) -> (String, Vec<EdgeShape>) {
+        ) -> (String, Vec<OverlayPrimitive>) {
             let mut engine = LayoutEngine::new(graph);
             let anchor = engine.default_anchor().expect("should have graph nodes");
             let window = engine
@@ -1044,18 +1049,19 @@ mod tests {
                 hard_zone: 2,
             };
             let mut buffer = Buffer::empty(area);
-            let RenderedWindow { lines, .. } =
-                GraphPainter::new(window, engine.graph(), &BoxVisual)
-                    .spacing(&GapSizes {
-                        data_data_x: |_| 2,
-                        data_data_y: |_| 1,
-                        data_routing_x: |_| 1,
-                        data_routing_y: |_| 0,
-                        routing_routing_x: |_| 0,
-                        routing_routing_y: |_| 0,
-                    })
-                    .edge_style(edge_style)
-                    .render(area, &mut buffer, &camera, &Highlights::default());
+            let RenderedWindow {
+                overlay_primitives, ..
+            } = GraphPainter::new(window, engine.graph(), &BoxVisual)
+                .spacing(&GapPolicy {
+                    data_data_x: |_| 2,
+                    data_data_y: |_| 1,
+                    data_routing_x: |_| 1,
+                    data_routing_y: |_| 0,
+                    routing_routing_x: |_| 0,
+                    routing_routing_y: |_| 0,
+                })
+                .layout_mode(layout_mode)
+                .render(area, &mut buffer, &camera, &Highlights::default());
             let text = (0..area.height)
                 .map(|row| {
                     (0..area.width)
@@ -1066,14 +1072,14 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            (text, lines)
+            (text, overlay_primitives)
         }
 
         #[test]
         fn test_curved_edges_report_shapes_instead_of_drawing_them() {
-            let (text, shapes) = render_text(
+            let (text, overlay_primitives) = render_text(
                 TestGraphs::domain_complex_dag(),
-                EdgeStyle::Curved,
+                LayoutMode::Curved,
                 Rect::new(0, 0, 100, 30),
             );
             assert!(
@@ -1084,22 +1090,22 @@ mod tests {
             );
             assert!(!text.contains(['─', '│', '┼', '├', '┤', '┬', '┴']));
             assert!(
-                shapes
+                overlay_primitives
                     .iter()
-                    .any(|shape| matches!(shape, EdgeShape::Bezier(_)))
+                    .any(|primitive| matches!(primitive, OverlayPrimitive::Bezier(_)))
             );
         }
 
         #[test]
         fn test_curved_edges_leave_forward_horizontal_routes_unmarked() {
-            let (_, shapes) = render_text(
+            let (_, overlay_primitives) = render_text(
                 TestGraphs::domain_simple_chain(),
-                EdgeStyle::Curved,
+                LayoutMode::Curved,
                 Rect::new(0, 0, 100, 15),
             );
-            let arrows = shapes
+            let arrows = overlay_primitives
                 .iter()
-                .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+                .filter(|primitive| matches!(primitive, OverlayPrimitive::Arrow(_)))
                 .count();
             assert_eq!(
                 arrows, 0,
@@ -1107,7 +1113,7 @@ mod tests {
             );
             let (rectilinear, _) = render_text(
                 TestGraphs::domain_simple_chain(),
-                EdgeStyle::Rectilinear,
+                LayoutMode::Rectilinear,
                 Rect::new(0, 0, 100, 15),
             );
             assert!(!rectilinear.contains('▶'));
@@ -1116,10 +1122,10 @@ mod tests {
         #[test]
         fn test_curve_leaves_a_node_from_its_border_at_its_row() {
             let area = Rect::new(0, 0, 60, 10);
-            let (text, lines) =
-                render_text(TestGraphs::domain_simple_chain(), EdgeStyle::Curved, area);
+            let (text, overlay_primitives) =
+                render_text(TestGraphs::domain_simple_chain(), LayoutMode::Curved, area);
             assert!(
-                lines.len() >= 6,
+                overlay_primitives.len() >= 6,
                 "side ports should split the chain edges:\n{text}"
             );
             let row_of = |label: &str| {
@@ -1132,10 +1138,10 @@ mod tests {
                 let row = text.lines().find(|line| line.contains(label)).unwrap();
                 (row.find(label).unwrap() + label.len()) as f64
             };
-            let first = lines
+            let first = overlay_primitives
                 .iter()
                 .find_map(|edge| match edge {
-                    EdgeShape::Bezier(curve)
+                    OverlayPrimitive::Bezier(curve)
                         if (curve.from.0 - right_border("[ 0 ]")).abs() < 1e-9 =>
                     {
                         Some(curve)
@@ -1158,8 +1164,8 @@ mod tests {
             let assembled_edges = window.graph.edge_count();
             let geometry = build_window_geometry_with_anchors(
                 window,
-                &GapSizes::default(),
-                EdgeStyle::Curved,
+                &GapPolicy::default(),
+                LayoutMode::Curved,
                 |role| match role {
                     NodeRole::Data(_) => (5, 1),
                     _ => (1, 1),
@@ -1202,8 +1208,8 @@ mod tests {
                 .expect("should build a window");
             let geometry = build_window_geometry_with_anchors(
                 window,
-                &GapSizes::default(),
-                EdgeStyle::Curved,
+                &GapPolicy::default(),
+                LayoutMode::Curved,
                 |role| match role {
                     NodeRole::Data(index) if index.index() % 2 == 0 => (11, 1),
                     NodeRole::Data(_) => (3, 1),
@@ -1253,8 +1259,8 @@ mod tests {
                 .expect("should build a window");
             let geometry = build_window_geometry_with_anchors(
                 window,
-                &GapSizes::default(),
-                EdgeStyle::Curved,
+                &GapPolicy::default(),
+                LayoutMode::Curved,
                 |role| match role {
                     NodeRole::Data(_) => (5, 1),
                     _ => (1, 1),
@@ -1302,8 +1308,8 @@ mod tests {
                 .expect("should build a window");
             let geometry = build_window_geometry_with_anchors(
                 window,
-                &GapSizes::default(),
-                EdgeStyle::Curved,
+                &GapPolicy::default(),
+                LayoutMode::Curved,
                 |role| match role {
                     NodeRole::Data(_) => (5, 1),
                     _ => (1, 1),
@@ -1344,8 +1350,8 @@ mod tests {
                     .expect("should build a window");
                 let geometry = build_window_geometry_with_anchors(
                     window,
-                    &GapSizes::default(),
-                    EdgeStyle::Curved,
+                    &GapPolicy::default(),
+                    LayoutMode::Curved,
                     |role| match role {
                         NodeRole::Data(_) => (5, 1),
                         _ => (1, 1),
@@ -1370,7 +1376,7 @@ mod tests {
         use ratatui::style::Color;
 
         use super::*;
-        use crate::edge_ports::{EdgeKey, EdgePorts, NodeSide};
+        use crate::edge_ports::{EdgePorts, NodeSide, PortedEdge};
 
         const EAST_TO_EAST: EdgePorts = EdgePorts::new(NodeSide::East, NodeSide::East);
         const WEST_TO_WEST: EdgePorts = EdgePorts::new(NodeSide::West, NodeSide::West);
@@ -1455,7 +1461,7 @@ mod tests {
         }
 
         fn exact(ports: EdgePorts) -> impl Fn(NodeIndex, NodeIndex) -> EdgeSelector<NodeIndex> {
-            move |source, target| EdgeSelector::Exact(EdgeKey::new(source, target, ports))
+            move |source, target| EdgeSelector::Exact(PortedEdge::new(source, target, ports))
         }
 
         fn between(source: NodeIndex, target: NodeIndex) -> EdgeSelector<NodeIndex> {

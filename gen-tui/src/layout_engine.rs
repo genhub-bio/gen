@@ -21,7 +21,7 @@ use crate::{
         PreferredWormholeDoors, StructuralSubgraph, build_window_graph_with_order, crawl_batch,
         subgraph_for,
     },
-    curved::EdgeStyle,
+    curved::LayoutMode,
     layout::NodeRole,
 };
 
@@ -167,8 +167,8 @@ where
     /// The left to right order a caller wants for the nodes it knows one for; see
     /// [`Self::set_order_hint`].
     order_hint: Option<Arc<OrderHintFn<G>>>,
-    /// The style the worlds in `world_cache` were built for; see [`Self::set_edge_style`].
-    edge_style: EdgeStyle,
+    /// The layout mode the worlds in `world_cache` were built for; see [`Self::set_layout_mode`].
+    layout_mode: LayoutMode,
     /// Every batch claimed so far, indexed by `BatchId`.
     batches: Vec<Batch<G::NodeId>>,
     /// Which batch each claimed node belongs to.
@@ -242,7 +242,7 @@ where
             explicit_backward_edges: None,
             edge_ports: None,
             order_hint: None,
-            edge_style: EdgeStyle::default(),
+            layout_mode: LayoutMode::default(),
             batches: Vec::new(),
             batch_of: HashMap::new(),
             world_cache: Vec::new(),
@@ -279,19 +279,19 @@ where
         self.order_hint = Some(order_hint);
     }
 
-    /// Build worlds for `edge_style`. Curved edges route sideways edges themselves instead
+    /// Build worlds for `layout_mode`. Curved edges route sideways edges themselves instead
     /// of through left and right pins, so a change of style drops the cached worlds and
     /// rebuilds the active one.
-    pub fn set_edge_style(&mut self, edge_style: EdgeStyle) {
-        if edge_style == self.edge_style {
+    pub fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
+        if layout_mode == self.layout_mode {
             return;
         }
-        self.edge_style = edge_style;
+        self.layout_mode = layout_mode;
         self.world_cache.clear();
         if let Some(batch) = self.active_batch
             && let Err(error) = self.activate_batch(batch)
         {
-            log::error!("LayoutEngine: rebuilding the world for {edge_style:?} failed: {error}");
+            log::error!("LayoutEngine: rebuilding the world for {layout_mode:?} failed: {error}");
         }
     }
 
@@ -445,12 +445,12 @@ where
         if let Some(edge_ports) = self.edge_ports {
             subgraph.assign_edge_ports(&self.graph, edge_ports);
         }
-        let (window, pinned_edges) = build_window_graph_with_order(
+        let (window, domain_edges) = build_window_graph_with_order(
             &subgraph,
             &self.graph,
             self.explicit_backward_edges.as_ref(),
             self.order_hint.as_deref(),
-            self.edge_style,
+            self.layout_mode,
         )?;
         #[cfg(test)]
         {
@@ -487,7 +487,7 @@ where
                 side: edge.side,
             })
             .collect();
-        layout.pinned_edges = pinned_edges;
+        layout.domain_edges = domain_edges;
 
         self.world_cache.push(LoadedWorld {
             batch,

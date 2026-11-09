@@ -7,8 +7,8 @@ use gen_diff::{
 };
 use gen_graph::{GenGraph, GraphNode};
 use gen_tui::{
-    LineStyle, distribute_nodes::GapSizes, edge_ports::EdgeKey, graph_view::GraphViewState,
-    layout::VisualDetail, plotter::PathStyle,
+    LineStyle, edge_ports::PortedEdge, graph_view::GraphViewState, layout::VisualDetail,
+    layout_compaction::GapPolicy, plotter::PathStyle,
 };
 use petgraph::Direction;
 use ratatui::{
@@ -23,7 +23,7 @@ pub struct DiffGraphComponent {
     pub title: String,
     pub graph: GenGraph,
     pub highlighted_nodes: Vec<(GraphNode, Color)>,
-    pub highlighted_edges: Vec<(EdgeKey<GraphNode>, Color)>,
+    pub highlighted_edges: Vec<(PortedEdge<GraphNode>, Color)>,
 }
 
 impl DiffGraphComponent {
@@ -89,7 +89,7 @@ impl DiffLegend {
 /// state alone does not bind zoom, so each viewer routes its keys through here.
 pub fn zoom_for_key<R>(
     view_state: &mut GraphViewState<GraphNode>,
-    zoom_levels: &[(VisualDetail, R, GapSizes)],
+    zoom_levels: &[(VisualDetail, R, GapPolicy)],
     key: KeyEvent,
 ) -> bool {
     match key.code {
@@ -103,7 +103,7 @@ pub fn zoom_for_key<R>(
 /// Apply one key to a diff viewer's graph: zoom for the zoom keys, navigation otherwise.
 pub fn handle_diff_key<R>(
     view_state: &mut GraphViewState<GraphNode>,
-    zoom_levels: &[(VisualDetail, R, GapSizes)],
+    zoom_levels: &[(VisualDetail, R, GapPolicy)],
     key: KeyEvent,
 ) {
     if !zoom_for_key(view_state, zoom_levels, key) {
@@ -287,7 +287,7 @@ fn displayed_edge_kind(
 
 /// One highlight per changed edge, keyed with its strands so a parallel edge that did not change
 /// stays unlit.
-fn collect_highlight_edges(diff_graph: &DiffGenGraph) -> Vec<(EdgeKey<GraphNode>, Color)> {
+fn collect_highlight_edges(diff_graph: &DiffGenGraph) -> Vec<(PortedEdge<GraphNode>, Color)> {
     let mut edges = Vec::new();
     for (source, target, edge_data) in diff_graph.all_edges() {
         for diff_edge in edge_data {

@@ -19,13 +19,13 @@ use ratatui::{
 use crate::{
     assembly::AssembledLayout,
     crawl::{EagerSource, GraphSource},
-    curved::{EdgeShape, EdgeStyle},
-    distribute_nodes::GapSizes,
+    curved::{LayoutMode, OverlayPrimitive},
     edge_ports::EdgeSelector,
     frame_index::{Direction, FrameIndex},
     geometry::{Point, WorldPos, WorldRect},
     graph_painter::{Camera, HighlightKind, Highlights, RenderedWindow, WindowScene, snap_camera},
     layout::NodeRole,
+    layout_compaction::GapPolicy,
     layout_engine::{BatchId, LayoutEngine},
     navigator::{CursorOverlay, CursorState, Navigator},
     plotter::{NodeRenderer, PathStyle},
@@ -38,14 +38,14 @@ const DEFAULT_HARD_ZONE: u16 = 2;
 const DOOR_ENTRY_MARGIN: i64 = 5;
 
 /// Everything a [`WindowScene`] depends on besides the camera: which build of which world,
-/// the zoom step (standing in for its `GapSizes`, whose function pointers can't be compared),
+/// the zoom step (standing in for its `GapPolicy`, whose function pointers can't be compared),
 /// and the renderer's node sizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SceneKey {
     world_revision: u64,
     zoom_index: usize,
     size_generation: u64,
-    edge_style: EdgeStyle,
+    layout_mode: LayoutMode,
 }
 
 /// A domain node's local (pre-offset) position within an already-assembled window, if it's
@@ -166,7 +166,7 @@ fn min_shift_to_avoid_left_clip(
 
 /// Navigation, camera, zoom, and highlighting state retained between renders.
 ///
-/// `zoom_index` is an opaque position into whatever renderer/`GapSizes` table the owning
+/// `zoom_index` is an opaque position into whatever renderer/`GapPolicy` table the owning
 /// widget/event loop maintains - `gen-tui` has no notion of which concrete zoom levels
 /// exist; it only tracks which position in that (external) table this view is currently
 /// showing, and applies `gaps` as told.
@@ -186,14 +186,14 @@ pub struct GraphViewState<N> {
     pan_since_render: (i64, i64),
     pub zoom_index: usize,
     /// Minimum inter-node gap for each axis - the current zoom level's target distance,
-    /// enforced by compaction (see `distribute_nodes::compact_layout`).
-    pub gaps: GapSizes,
+    /// enforced by compaction (see `layout_compaction::compact_layout`).
+    pub gaps: GapPolicy,
     /// How edges are routed and drawn. Changing it rebuilds the geometry on the next render.
-    pub edge_style: EdgeStyle,
-    /// Edge shapes the last render left for the caller to draw, in cell units relative to the
-    /// top-left of the buffer rendered into. Only the curved edge style fills it; see
-    /// [`EdgeShape`].
-    pub edge_shapes: Vec<EdgeShape>,
+    pub layout_mode: LayoutMode,
+    /// Overlay primitives the last render left for the caller to draw, in cell units relative to the
+    /// top-left of the buffer rendered into. Only the curved layout mode fills it; see
+    /// [`OverlayPrimitive`].
+    pub overlay_primitives: Vec<OverlayPrimitive>,
     pub highlights: Highlights<N>,
     /// The area passed to the most recent `GraphView::render` call. Used for click-to-world
     /// conversion and the `snap_camera` hard-zone boundary - facts knowable only from the
@@ -233,9 +233,9 @@ impl<N> Default for GraphViewState<N> {
             camera: None,
             pan_since_render: (0, 0),
             zoom_index: 0,
-            gaps: GapSizes::default(),
-            edge_style: EdgeStyle::default(),
-            edge_shapes: Vec::new(),
+            gaps: GapPolicy::default(),
+            layout_mode: LayoutMode::default(),
+            overlay_primitives: Vec::new(),
             highlights: Highlights::default(),
             last_area: Rect::new(0, 0, 0, 0),
             go_to_pending: false,
@@ -735,7 +735,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
             .push((HighlightKind::Node(node), style));
     }
 
-    /// Highlight one edge, named in full by an [`EdgeKey`] or, as a `(source, target)` pair, by
+    /// Highlight one edge, named in full by an [`PortedEdge`] or, as a `(source, target)` pair, by
     /// its endpoints alone (see [`EdgeSelector`] for which edge that picks).
     pub fn set_edge_highlight(&mut self, edge: impl Into<EdgeSelector<N>>, style: PathStyle) {
         self.highlights
@@ -857,7 +857,7 @@ where
         // it, so no pan is outstanding against it afterwards.
         state.pan_since_render = (0, 0);
 
-        self.engine.set_edge_style(state.edge_style);
+        self.engine.set_layout_mode(state.layout_mode);
         let node_budget = self
             .engine
             .neighborhood_node_budget(inner_area.width as usize);
@@ -1086,7 +1086,7 @@ where
         let Some(mut camera) = state.camera else {
             state.frame = FrameIndex::empty();
             state.wormhole = Vec::new();
-            state.edge_shapes = Vec::new();
+            state.overlay_primitives = Vec::new();
             return;
         };
 
@@ -1095,7 +1095,7 @@ where
             world_revision,
             zoom_index: state.zoom_index,
             size_generation: self.visual.size_generation(),
-            edge_style: state.edge_style,
+            layout_mode: state.layout_mode,
         };
         let scene = match &mut state.scene {
             Some((cached_key, scene)) if *cached_key == key => scene,
@@ -1106,7 +1106,7 @@ where
                     graph,
                     self.visual,
                     &state.gaps,
-                    state.edge_style,
+                    state.layout_mode,
                 );
                 &mut slot.insert((key, scene)).1
             }
@@ -1121,7 +1121,7 @@ where
         let RenderedWindow {
             frame,
             wormhole,
-            lines,
+            overlay_primitives,
         } = scene.paint(
             graph,
             self.visual,
@@ -1164,7 +1164,7 @@ where
         CursorOverlay::render(inner_area, buf, &state.cursor, &frame);
         state.frame = frame;
         state.wormhole = wormhole;
-        state.edge_shapes = lines;
+        state.overlay_primitives = overlay_primitives;
     }
 }
 
@@ -1176,8 +1176,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        graph_widget::NODE_GLYPH,
         testing::mocks::{MockDomainGraph, TestGraphs},
+        window_geometry::NODE_GLYPH,
     };
 
     #[derive(Clone)]
@@ -1649,7 +1649,7 @@ mod tests {
         render(&mut state, area);
         assert_eq!(state.geometry_revision(), first_revision + 2);
 
-        state.edge_style = EdgeStyle::Curved;
+        state.layout_mode = LayoutMode::Curved;
         render(&mut state, area);
         assert_eq!(state.geometry_revision(), first_revision + 3);
     }
@@ -1827,7 +1827,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
         use super::*;
-        use crate::{graph_widget::NODE_GLYPH, testing::mocks::MockDomainGraph};
+        use crate::{testing::mocks::MockDomainGraph, window_geometry::NODE_GLYPH};
 
         /// Draws every node 3x1 except `hidden`, which is left for its edges to meet at.
         struct HiddenNodeVisual {
@@ -2092,10 +2092,10 @@ mod tests {
 
         use super::*;
         use crate::{
-            graph_widget::NODE_GLYPH,
             plotter::CursorColumns,
             testing::mocks::{MockDomainGraph, TestGraphs},
             viewport_state::WorldBuffer,
+            window_geometry::NODE_GLYPH,
         };
 
         /// The row `RowHoldingVisual` holds the cursor to, off-center so it can't be mistaken
