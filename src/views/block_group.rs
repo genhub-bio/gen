@@ -11,7 +11,9 @@ use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, history::dolt::active_branch};
 use gen_tui::{
-    crawl::GraphSource, graph_view::GraphViewState, layout_engine::LayoutEngine,
+    crawl::GraphSource,
+    graph_view::GraphViewState,
+    layout_engine::{BatchId, LayoutEngine},
     theme::current_theme,
 };
 use log::warn;
@@ -941,6 +943,8 @@ pub fn view_block_group<'a>(
     // earn a redraw.
     let mut needs_redraw = true;
     let mut annotation_loads_were_busy = false;
+    // The batch the active annotation files were last projected onto.
+    let mut annotation_files_batch: Option<BatchId> = None;
     // Set when a key or click takes a door. Input after it is left unread until the new world
     // is drawn, then discarded.
     let mut entered_door = false;
@@ -1458,6 +1462,36 @@ pub fn view_block_group<'a>(
                     query_window: Some(query_window),
                 };
                 annotation_loads.queue_reload(annotation_file_load_spec(&context, entry));
+            }
+        }
+
+        // A file's features are projected onto the nodes of the batch that was active when it
+        // loaded, so entering another batch through a door reloads every active file against
+        // the new batch. Indexed files need this too: their loaded window can still cover the
+        // new batch's coordinates while its nodes are not the ones that were projected.
+        let active_batch = controller.engine().active_batch();
+        if !is_loading
+            && active_batch.is_some()
+            && active_batch != annotation_files_batch
+            && let Some(block_group) = current_block_group.as_ref()
+        {
+            annotation_files_batch = active_batch;
+            let node_filter = active_neighborhood_node_ids(controller.engine());
+            let query_window =
+                active_neighborhood_coordinate_window(controller.engine()).map(expand_query_window);
+            let context = AnnotationFileActivationContext {
+                history_ref,
+                collection_name: &current_collection_name,
+                block_group,
+                node_filter: &node_filter,
+                query_window,
+            };
+            for entry in &explorer.data.annotation_files {
+                let id = entry.file_addition.id;
+                if explorer_state.is_annotation_file_active(&id) {
+                    annotation_file_loaded_windows.remove(&id);
+                    annotation_loads.queue_reload(annotation_file_load_spec(&context, entry));
+                }
             }
         }
 
