@@ -2,7 +2,7 @@ use std::{collections::HashMap, hash::Hash};
 
 use crate::{
     geometry::{Point, WorldRect},
-    plotter::CursorColumns,
+    node_renderer::CursorColumns,
 };
 
 /// Horizontal/vertical navigation direction over placed nodes: `Left`/`Right` cross to the

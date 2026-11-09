@@ -18,7 +18,7 @@ use core::cmp::Reverse;
 use gen_graph::{GraphNode, PackedGenGraph};
 use gen_tui::{
     frame_index::FrameIndex,
-    plotter::{ColumnRun, NodeRenderer},
+    node_renderer::{ColumnRun, NodeRenderer},
     theme::current_theme,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};

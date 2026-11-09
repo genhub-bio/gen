@@ -5,7 +5,7 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{db::GraphConnection, edge::Edge, path::Path};
 use gen_tui::{
     edge_ports::{EdgePorts, PortedEdge},
-    plotter::{LineStyle, PathStyle},
+    highlight_style::{LineStyle, PathStyle},
     theme::current_theme,
 };
 use itertools::Itertools;

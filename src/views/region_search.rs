@@ -28,7 +28,7 @@ use gen_models::{
     reference_alias::ReferenceAlias,
     region::{GenRegionError, ResolvedGenRegion, ResolvedRegionKind},
 };
-use gen_tui::{LineStyle, plotter::PathStyle};
+use gen_tui::{LineStyle, highlight_style::PathStyle};
 use intervaltree::IntervalTree;
 use ratatui::style::Color;
 
@@ -956,7 +956,7 @@ mod tests {
     use gen_annotations::projection::AnnotationSegment;
     use gen_core::{HashId, Strand, range::Range, region::Region};
     use gen_models::annotations::AnnotationFileChecksumOverrides;
-    use gen_tui::plotter::PathStyle;
+    use gen_tui::highlight_style::PathStyle;
     use ratatui::style::Color;
     use tempfile::tempdir;
 

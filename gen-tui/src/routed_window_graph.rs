@@ -72,12 +72,12 @@ impl RoutedWindowGraph {
     /// Build a `RoutedWindowGraph` from an already-assembled window geometry.
     ///
     /// The window is a single coordinate space produced by
-    /// [`crate::assembly::assemble_window`] + [`crate::layout::WindowGeometry::new`], so
+    /// [`crate::assembly::assemble_window`] + [`crate::window_geometry::WindowGeometry::new`], so
     /// layout positions *are* world positions (identity mapping): there is no per-window
     /// origin to add and no spatial query to run. Every node and edge in the geometry is inside
     /// the window by construction, so this iterates the whole layout graph.
     pub fn from_window_geometry(
-        geometry: &crate::layout::WindowGeometry,
+        geometry: &crate::window_geometry::WindowGeometry,
         domain_edges: &[PortedEdge<NodeIndex>],
     ) -> Self {
         let mut this = Self::empty();
@@ -235,7 +235,9 @@ impl RoutedWindowGraph {
 
     /// Create a new RoutedWindowGraph from a list of visual (rectilinear) edges.
     /// This is useful for creating temporary graphs for highlighting.
-    pub fn from_visual_edges(edges: &[((WorldPos, WorldPos), crate::plotter::PathStyle)]) -> Self {
+    pub fn from_visual_edges(
+        edges: &[((WorldPos, WorldPos), crate::highlight_style::PathStyle)],
+    ) -> Self {
         let mut new_graph = Self::empty();
         for ((source, target), _) in edges {
             new_graph.graph.add_edge(*source, *target, Vec::new());

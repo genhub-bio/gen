@@ -19,11 +19,11 @@ use crate::{
     compaction::{
         AxisPlacement, Constraint, compact_axis_with_centering, constraints_are_satisfied,
     },
-    curved::{
-        HAIRPIN_ARC_RESERVED_CELLS, LayoutMode, LoopbackNeighbors, loopback_neighbors,
-        loopback_reach,
+    curved_edges::{
+        HAIRPIN_ARC_RESERVED_CELLS, LoopbackNeighbors, loopback_neighbors, loopback_reach,
     },
     layout::{LayoutEdge, LayoutNode, NodeRole},
+    layout_mode::LayoutMode,
 };
 
 /// Cells of horizontal run a curved edge gets per row of vertical drop. A row is about

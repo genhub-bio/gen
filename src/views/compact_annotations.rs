@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gen_core::{HashId, Strand};
 use gen_graph::GraphNode;
-use gen_tui::plotter::ColumnRun;
+use gen_tui::node_renderer::ColumnRun;
 use ratatui::style::Color;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;

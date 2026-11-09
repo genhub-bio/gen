@@ -1,14 +1,13 @@
 use std::hash::Hash;
 
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use crate::{
     frame_index::{Direction, FrameIndex},
     geometry::{Point, WorldPos, WorldRect, floor_half},
-    plotter::CursorColumns,
-    theme::current_theme,
-    viewport_state::{ViewportState, WorldBuffer},
-    window_geometry::style_cursor_cell,
+    node_renderer::CursorColumns,
+    theme::{Theme, current_theme},
+    world_buffer::{WorldBuffer, WorldViewport},
 };
 
 const NO_NEXT_LAYER_ERR: &str = "No next layer";
@@ -240,19 +239,53 @@ impl CursorOverlay {
             return;
         };
 
-        // Build a throwaway ViewportState whose camera maps `frame`'s screen-space (origin at
+        // Build a throwaway WorldViewport whose camera maps `frame`'s screen-space (origin at
         // area's bottom-left, Y-up) directly onto `area`'s terminal cells.
         let half_width = floor_half(area.width as i64);
         let half_height = floor_half(area.height as i64);
-        let mut viewport_state = ViewportState::new();
-        viewport_state.camera_current = WorldPos::new(half_width, half_height);
-        viewport_state.viewport_bounds = area;
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.camera_current = WorldPos::new(half_width, half_height);
+        world_viewport.viewport_bounds = area;
 
         let theme = current_theme();
-        let mut cursor_buffer = WorldBuffer::new(buf, &viewport_state);
+        let mut cursor_buffer = WorldBuffer::new(buf, &world_viewport);
 
         let Point { x, y } = rect.point_at_fraction(cursor.fractional);
         style_cursor_cell(&mut cursor_buffer, WorldPos::new(x, y), &theme);
+    }
+}
+
+/// Arrow drawn above an accent-styled cursor cell.
+pub const CURSOR_ARROW: char = '↓';
+
+/// Fill the cursor's cell with the theme's cursor accent, keeping its character, and point an
+/// arrow at it from the cell above. The arrow never replaces a letter or digit, so a node's
+/// sequence or label is not overwritten by it.
+pub(crate) fn style_cursor_cell(buffer: &mut WorldBuffer, pos: WorldPos, theme: &Theme) {
+    let accent = theme[0x0D];
+    if let Some((ch, style)) = buffer.get_char_styled(pos) {
+        buffer.set_char_styled(
+            pos,
+            ch,
+            Style {
+                fg: Some(theme[0x00]),
+                bg: Some(accent),
+                ..style
+            },
+        );
+    }
+    let above = WorldPos::new(pos.x, pos.y + 1);
+    if let Some((ch, style)) = buffer.get_char_styled(above)
+        && !ch.is_alphanumeric()
+    {
+        buffer.set_char_styled(
+            above,
+            CURSOR_ARROW,
+            Style {
+                fg: Some(accent),
+                ..style
+            },
+        );
     }
 }
 
@@ -513,5 +546,37 @@ mod tests {
                 "should leave the cursor in place"
             );
         }
+    }
+
+    #[test]
+    fn test_cursor_fills_the_cell_and_points_at_it_from_above() {
+        let area = Rect::new(0, 0, 5, 5);
+        let mut viewport = WorldViewport::new();
+        viewport.camera_current = WorldPos::new(2, 2);
+        viewport.viewport_bounds = area;
+        let theme = current_theme();
+        let mut buffer = Buffer::empty(area);
+        let cursor = WorldPos::new(2, 2);
+        let letter_above = WorldPos::new(4, 3);
+
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport);
+        world_buffer.set_char_styled(
+            cursor,
+            'C',
+            Style::default().fg(theme[0x00]).bg(theme[0x05]),
+        );
+        world_buffer.set_char_styled(letter_above, 'G', Style::default());
+        style_cursor_cell(&mut world_buffer, cursor, &theme);
+        style_cursor_cell(&mut world_buffer, WorldPos::new(4, 2), &theme);
+
+        assert_eq!(buffer[(2, 2)].symbol(), "C");
+        assert_eq!(buffer[(2, 2)].bg, theme[0x0D]);
+        assert_eq!(buffer[(2, 1)].symbol(), CURSOR_ARROW.to_string());
+        assert_eq!(buffer[(2, 1)].fg, theme[0x0D]);
+        assert_eq!(
+            buffer[(4, 1)].symbol(),
+            "G",
+            "should not overwrite a letter with the arrow"
+        );
     }
 }

@@ -20,7 +20,7 @@ use crate::{
         EagerSource, EdgePortsFn, GraphCursor, GraphSource, OrderHintFn, PreferredWormholeDoors,
         StructuralSubgraph, WormholeDoor, build_window_graph_with_order, crawl_batch, subgraph_for,
     },
-    curved::LayoutMode,
+    layout_mode::LayoutMode,
 };
 
 /// Identifies one batch: a chunk of the domain graph claimed by a single crawl. Batches never

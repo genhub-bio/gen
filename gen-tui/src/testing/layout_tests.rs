@@ -506,7 +506,7 @@ fn test_layer_coordinate_alignment_and_ordering() {
     use crate::{
         layout::NodeRole,
         layout_engine::LayoutEngine,
-        plotter::NodeRenderer,
+        node_renderer::NodeRenderer,
         routed_window_graph::RoutedWindowGraph,
         testing::mocks::{FixedNodeSizer, MockDomainGraph, TestGraphs},
     };
@@ -856,7 +856,7 @@ fn test_skip_layer_edges_carry_bundles() {
     use crate::{
         layout::NodeRole,
         layout_engine::LayoutEngine,
-        plotter::NodeRenderer,
+        node_renderer::NodeRenderer,
         routed_window_graph::RoutedWindowGraph,
         testing::mocks::{FixedNodeSizer, TestGraphs},
     };
@@ -1271,7 +1271,7 @@ fn test_complex_multipath_dag() {
     impl MockRenderer<MockDomainGraph> for AlphabeticRenderer {
         fn render_node(
             &self,
-            buffer: &mut crate::viewport_state::WorldBuffer,
+            buffer: &mut crate::world_buffer::WorldBuffer,
             area: crate::geometry::WorldRect,
             node_id: &petgraph::stable_graph::NodeIndex<u32>,
             _scale: VisualDetail,
@@ -1440,7 +1440,7 @@ fn test_grid_row_spacing_follows_data_gap_policy() {
     let _ = env_logger::try_init();
 
     use crate::{
-        layout::NodeRole, layout_engine::LayoutEngine, plotter::NodeRenderer,
+        layout::NodeRole, layout_engine::LayoutEngine, node_renderer::NodeRenderer,
         routed_window_graph::RoutedWindowGraph, testing::mocks::FixedNodeSizer,
     };
 
@@ -1624,7 +1624,7 @@ fn test_large_node_rendering_with_zoom() {
             create_test_terminal,
             mocks::{MockDomainGraph, MockRenderer, MockVisual},
         },
-        viewport_state::WorldBuffer,
+        world_buffer::WorldBuffer,
     };
 
     // 1. Create a 3-node chain graph: 0 -> 1 -> 2

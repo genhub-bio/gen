@@ -14,13 +14,14 @@ use gen_tui::{
     frame_index::FrameIndex,
     geometry::{WorldPos, WorldRect, floor_half},
     graph_view::GraphViewState,
+    highlight_style::PathStyle,
     layout::{VerticalAnchor, VisualDetail},
     layout_compaction::{GapPolicy, MINIMUM_ROUTING_GAP_Y},
     layout_engine::{BatchId, LayoutEngine},
-    plotter::{ColumnRun, CursorColumns, NodeRenderer, PathStyle},
+    node_renderer::{ColumnRun, CursorColumns, NodeRenderer},
     theme::current_theme,
-    viewport_state::WorldBuffer,
     window_geometry::NODE_GLYPH,
+    world_buffer::WorldBuffer,
 };
 use ratatui::{
     buffer::Buffer,
@@ -2298,9 +2299,9 @@ mod tests {
     use gen_tui::{
         geometry::{WorldPos, WorldRect},
         graph_view::GraphView,
-        plotter::LineStyle,
+        highlight_style::LineStyle,
         testing::{TestGraphs, create_test_terminal, mocks::MockDomainGraph},
-        viewport_state::{ViewportState, WorldBuffer},
+        world_buffer::{WorldBuffer, WorldViewport},
     };
     use petgraph::graph::NodeIndex;
     use ratatui::{backend::TestBackend, widgets::StatefulWidget as _};
@@ -2491,18 +2492,18 @@ mod tests {
     #[test]
     fn test_coordinate_overflow_with_large_genomic_sequences() {
         // Set up a viewport for rendering genomic data
-        let mut viewport_state = ViewportState::new();
-        viewport_state.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 20);
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.viewport_bounds = ratatui::layout::Rect::new(0, 0, 80, 20);
 
         // Position camera to simulate viewing a region of a large genome
         // where sequence coordinates naturally reach high values
         let camera_center = WorldPos::new(40000, 0);
-        viewport_state.camera_current = camera_center;
+        world_viewport.camera_current = camera_center;
 
         let backend = TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut buffer = terminal.current_buffer_mut().clone();
-        let world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+        let world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
 
         // Test a coordinate representing the end of a 100K base pair genomic sequence
         // Such large sequences are common in genomics (genes, regulatory regions, etc.)
@@ -2882,7 +2883,7 @@ mod tests {
             assert_ne!(renderer.size_generation(), generation);
             let area = VerticalAnchor::Top.rect(WorldPos::new(30, 10), size);
             let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
-            let mut viewport = ViewportState::new();
+            let mut viewport = WorldViewport::new();
             viewport.camera_current = WorldPos::new(40, 10);
             viewport.viewport_bounds = buffer.area;
             let mut world = WorldBuffer::new(&mut buffer, &viewport);
@@ -2989,7 +2990,7 @@ mod tests {
             assert!(width <= node.length() as u64);
             assert_eq!(height, 3);
             let area = WorldRect::from_coords(25, 2, 25 + width as i64 - 1, 4);
-            let mut viewport = ViewportState::new();
+            let mut viewport = WorldViewport::new();
             viewport.viewport_bounds = Rect::new(0, 0, 100, 20);
             viewport.camera_current = WorldPos::new(50, 10);
             let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3033,7 +3034,7 @@ mod tests {
             ..NodeAnnotationLayout::default()
         };
         let area = WorldRect::from_coords(2, 2, 12, 8);
-        let mut viewport = ViewportState::new();
+        let mut viewport = WorldViewport::new();
         viewport.viewport_bounds = Rect::new(0, 0, 100, 20);
         viewport.camera_current = WorldPos::new(50, 10);
         let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3267,7 +3268,7 @@ mod tests {
         let renderer = GenGraphTruncatedRenderer::with_layer(RepeatingSequenceSource, layer);
         let (width, height) = renderer.get_node_size(&node);
         let area = WorldRect::from_coords(2, 2, width as i64 + 1, height as i64 + 1);
-        let mut viewport = ViewportState::new();
+        let mut viewport = WorldViewport::new();
         viewport.viewport_bounds = Rect::new(0, 0, 40, 12);
         viewport.camera_current = WorldPos::new(20, 6);
         let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3327,7 +3328,7 @@ mod tests {
                 let (width, height) = renderer.get_node_size(&node);
                 assert!(width >= length as u64);
                 let area = WorldRect::from_coords(2, 2, width as i64 + 1, height as i64 + 1);
-                let mut viewport = ViewportState::new();
+                let mut viewport = WorldViewport::new();
                 viewport.viewport_bounds = Rect::new(0, 0, 40, 12);
                 viewport.camera_current = WorldPos::new(20, 6);
                 let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3385,7 +3386,7 @@ mod tests {
         assert_eq!(renderer.get_node_size(&short_node), (2, 3));
 
         let area = WorldRect::from_coords(2, 2, 3, 4);
-        let mut viewport = ViewportState::new();
+        let mut viewport = WorldViewport::new();
         viewport.viewport_bounds = Rect::new(0, 0, 40, 12);
         viewport.camera_current = WorldPos::new(20, 6);
         let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3443,7 +3444,7 @@ mod tests {
         let renderer = GenGraphTruncatedRenderer::with_layer(RepeatingSequenceSource, layer);
         assert_eq!(renderer.get_node_size(&one_base), (1, 2));
         let area = WorldRect::from_coords(2, 2, 2, 3);
-        let mut viewport = ViewportState::new();
+        let mut viewport = WorldViewport::new();
         viewport.viewport_bounds = Rect::new(0, 0, 40, 12);
         viewport.camera_current = WorldPos::new(20, 6);
         let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3504,7 +3505,7 @@ mod tests {
         let renderer = GenGraphTruncatedRenderer::with_layer(RepeatingSequenceSource, layer);
         let (width, height) = renderer.get_node_size(&middle);
         let area = WorldRect::from_coords(2, 2, 1 + width as i64, 1 + height as i64);
-        let mut viewport = ViewportState::new();
+        let mut viewport = WorldViewport::new();
         viewport.viewport_bounds = Rect::new(0, 0, 80, 12);
         viewport.camera_current = WorldPos::new(40, 6);
         let mut buffer = Buffer::empty(viewport.viewport_bounds);
@@ -3906,8 +3907,8 @@ mod tests {
             GraphViewState, VerticalAnchor,
             frame_index::Direction,
             graph_view::GraphView,
+            highlight_style::{LineStyle, PathStyle},
             layout::VisualDetail,
-            plotter::{LineStyle, PathStyle},
             testing::create_test_terminal,
         };
         use ratatui::{
@@ -4767,7 +4768,7 @@ mod tests {
         use gen_tui::{
             edge_ports::{EdgePorts, NodeSide, PortedEdge},
             graph_view::GraphView,
-            plotter::PathStyle,
+            highlight_style::PathStyle,
             testing::create_test_terminal,
         };
         use ratatui::{style::Color, widgets::StatefulWidget as _};

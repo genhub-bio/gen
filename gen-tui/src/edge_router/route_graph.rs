@@ -12,8 +12,8 @@ use petgraph::{
 use super::{
     RoutingError,
     center_doglegs::center_doglegs,
-    layout_graph_process::{BundledLeg, BundledLegEdges, simplify_graph},
     route_layer::route_layer,
+    route_simplification::{BundledLeg, BundledLegEdges, simplify_graph},
 };
 use crate::{
     geometry::LocalPos,

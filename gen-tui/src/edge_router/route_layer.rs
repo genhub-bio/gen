@@ -5,8 +5,8 @@ use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
 use super::{
     NodeData, RoutingError,
-    layout_graph_process::{BundledLegEdges, simplify_graph},
     route_channel::ChannelRouter,
+    route_simplification::{BundledLegEdges, simplify_graph},
     temp_graph::TempGraph,
 };
 use crate::{

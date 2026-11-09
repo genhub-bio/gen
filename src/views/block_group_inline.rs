@@ -12,8 +12,8 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     LineStyle,
     graph_view::{GraphView, GraphViewState},
+    highlight_style::PathStyle,
     layout_engine::LayoutEngine,
-    plotter::PathStyle,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,

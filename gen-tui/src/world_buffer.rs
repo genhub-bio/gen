@@ -8,7 +8,7 @@ use crate::geometry::{ViewportPos, WorldPos, WorldRect};
 /// and the render area. It is built fresh for every frame (see `graph_painter`), not kept between
 /// frames, and flips Y between the Y-up world and the Y-down terminal.
 #[derive(Clone)]
-pub struct ViewportState {
+pub struct WorldViewport {
     /// Camera's current world offset (viewport center in world coordinates).
     pub camera_current: WorldPos,
 
@@ -16,15 +16,15 @@ pub struct ViewportState {
     pub viewport_bounds: Rect,
 }
 
-impl Default for ViewportState {
+impl Default for WorldViewport {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ViewportState {
+impl WorldViewport {
     pub fn new() -> Self {
-        ViewportState {
+        WorldViewport {
             camera_current: WorldPos::ZERO,
             viewport_bounds: Rect::new(0, 0, 0, 0), // Will be set during rendering
         }
@@ -125,30 +125,30 @@ impl ViewportState {
 /// Handles coordinate conversion and automatic clipping.
 pub struct WorldBuffer<'a> {
     buffer: &'a mut Buffer,
-    viewport_state: &'a ViewportState,
+    world_viewport: &'a WorldViewport,
 }
 
 impl<'a> WorldBuffer<'a> {
     /// Create a new WorldBuffer
-    pub fn new(buffer: &'a mut Buffer, state: &'a ViewportState) -> Self {
+    pub fn new(buffer: &'a mut Buffer, world_viewport: &'a WorldViewport) -> Self {
         Self {
             buffer,
-            viewport_state: state,
+            world_viewport,
         }
     }
 
     /// Get the currently visible world rectangle.
     pub fn visible_world_area(&self) -> WorldRect {
-        self.viewport_state.camera_rect()
+        self.world_viewport.camera_rect()
     }
 
     /// The world cells that map onto the terminal, or `None` while the viewport has no area.
     pub(crate) fn visible_cells(&self) -> Option<WorldRect> {
-        let bounds = self.viewport_state.viewport_bounds;
+        let bounds = self.world_viewport.viewport_bounds;
         if bounds.width == 0 || bounds.height == 0 {
             return None;
         }
-        let origin = self.viewport_state.camera_rect().min;
+        let origin = self.world_viewport.camera_rect().min;
         Some(WorldRect::from_coords(
             origin.x,
             origin.y,
@@ -165,12 +165,12 @@ impl<'a> WorldBuffer<'a> {
 
     /// Convert a world position to a viewport position
     pub fn world_to_viewport(&self, world_pos: WorldPos) -> Option<ViewportPos> {
-        self.viewport_state.world_to_viewport(world_pos)
+        self.world_viewport.world_to_viewport(world_pos)
     }
 
-    /// See [`ViewportState::world_to_terminal_continuous`].
+    /// See [`WorldViewport::world_to_terminal_continuous`].
     pub(crate) fn world_to_terminal_continuous(&self, world: (f64, f64)) -> (f64, f64) {
-        self.viewport_state.world_to_terminal_continuous(world)
+        self.world_viewport.world_to_terminal_continuous(world)
     }
 
     /// Set a single character at the specified world position.
@@ -180,7 +180,7 @@ impl<'a> WorldBuffer<'a> {
 
     /// Set a single character with style at the specified world position.
     pub fn set_char_styled(&mut self, world_pos: WorldPos, ch: char, style: Style) {
-        let Some((buffer_x, buffer_y)) = self.viewport_state.world_to_terminal(world_pos) else {
+        let Some((buffer_x, buffer_y)) = self.world_viewport.world_to_terminal(world_pos) else {
             return;
         };
 
@@ -221,7 +221,7 @@ impl<'a> WorldBuffer<'a> {
         for grapheme in text.graphemes(true) {
             let width = grapheme.width() as i64;
             if let Some((buffer_x, buffer_y)) = self
-                .viewport_state
+                .world_viewport
                 .world_to_terminal(WorldPos::new(column, world_pos.y))
                 && let Some(cell) = self.buffer.cell_mut((buffer_x, buffer_y))
             {
@@ -258,7 +258,7 @@ impl<'a> WorldBuffer<'a> {
     /// Get a single character at the specified world position.
     /// Returns Some(char) if the position is within viewport bounds, None otherwise.
     pub fn get_char(&self, world_pos: WorldPos) -> Option<char> {
-        let (buffer_x, buffer_y) = self.viewport_state.world_to_terminal(world_pos)?;
+        let (buffer_x, buffer_y) = self.world_viewport.world_to_terminal(world_pos)?;
         let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
         Some(cell.symbol().chars().next().unwrap_or(' '))
     }
@@ -266,7 +266,7 @@ impl<'a> WorldBuffer<'a> {
     /// Get a single character and its style at the specified world position.
     /// Returns Some((char, Style)) if the position is within viewport bounds, None otherwise.
     pub fn get_char_styled(&self, world_pos: WorldPos) -> Option<(char, Style)> {
-        let (buffer_x, buffer_y) = self.viewport_state.world_to_terminal(world_pos)?;
+        let (buffer_x, buffer_y) = self.world_viewport.world_to_terminal(world_pos)?;
         let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
         let ch = cell.symbol().chars().next().unwrap_or(' ');
         Some((ch, cell.style()))
@@ -281,48 +281,48 @@ mod tests {
 
     #[test]
     fn test_coordinate_conversions() {
-        let mut state = ViewportState::new();
-        state.camera_current = WorldPos::new(100, 100);
-        state.viewport_bounds = Rect::new(0, 0, 10, 10);
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.camera_current = WorldPos::new(100, 100);
+        world_viewport.viewport_bounds = Rect::new(0, 0, 10, 10);
 
         // Camera rect origin: (100, 100) - ((10-1)/2, (10-1)/2) = (100, 100) - (4, 4) = (96, 96)
-        let origin = state.camera_rect().min;
+        let origin = world_viewport.camera_rect().min;
         assert_eq!(origin, WorldPos::new(96, 96));
 
         // World to viewport conversion
         // world_pos - origin = (104, 103) - (96, 96) = (8, 7)
         let world_pos = WorldPos::new(104, 103);
-        let viewport_pos = state.world_to_viewport(world_pos);
+        let viewport_pos = world_viewport.world_to_viewport(world_pos);
         assert_eq!(viewport_pos, Some(ViewportPos::new(8, 7)));
 
         // Viewport to world conversion
         // origin + screen_pos = (96, 96) + (5, 2) = (101, 98)
         let screen_pos = ViewportPos::new(5, 2);
-        let world_pos = state.viewport_to_world(screen_pos);
+        let world_pos = world_viewport.viewport_to_world(screen_pos);
         assert_eq!(world_pos, WorldPos::new(101, 98));
 
         // Round-trip test
         let original = WorldPos::new(99, 104);
-        if let Some(screen) = state.world_to_viewport(original) {
-            let back_to_world = state.viewport_to_world(screen);
+        if let Some(screen) = world_viewport.world_to_viewport(original) {
+            let back_to_world = world_viewport.viewport_to_world(screen);
             assert_eq!(back_to_world, original);
         }
     }
 
-    fn small_viewport_state() -> ViewportState {
-        ViewportState {
+    fn small_world_viewport() -> WorldViewport {
+        WorldViewport {
             camera_current: WorldPos::new(5, 0),
             viewport_bounds: Rect::new(0, 0, 11, 1),
-            ..ViewportState::default()
+            ..WorldViewport::default()
         }
     }
 
     #[test]
     fn test_set_string_styled_draws_only_the_visible_part_of_a_long_string() {
-        let state = small_viewport_state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let world_viewport = small_world_viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
         let text: String = "ACGT".chars().cycle().take(2_000_000).collect();
-        WorldBuffer::new(&mut buffer, &state).set_string_styled(
+        WorldBuffer::new(&mut buffer, &world_viewport).set_string_styled(
             WorldPos::new(-1_000_000, 0),
             &text,
             Style::default(),
@@ -337,9 +337,9 @@ mod tests {
 
     #[test]
     fn test_set_string_styled_clips_at_both_edges() {
-        let state = small_viewport_state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        WorldBuffer::new(&mut buffer, &state).set_string_styled(
+        let world_viewport = small_world_viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        WorldBuffer::new(&mut buffer, &world_viewport).set_string_styled(
             WorldPos::new(8, 0),
             "ACGTACGT",
             Style::default(),
@@ -352,9 +352,9 @@ mod tests {
 
     #[test]
     fn test_fill_rect_styled_fills_only_the_visible_part_of_a_huge_rect() {
-        let state = small_viewport_state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        WorldBuffer::new(&mut buffer, &state).fill_rect_styled(
+        let world_viewport = small_world_viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        WorldBuffer::new(&mut buffer, &world_viewport).fill_rect_styled(
             WorldRect::from_coords(-5_000_000_000, 0, 5_000_000_000, 0),
             '#',
             Style::default(),
@@ -367,32 +367,32 @@ mod tests {
 
     #[test]
     fn test_world_to_viewport_does_not_wrap_large_coordinates() {
-        let mut state = ViewportState::new();
-        state.viewport_bounds = Rect::new(0, 0, 80, 20);
-        state.camera_current = WorldPos::new(40_000, 0);
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.viewport_bounds = Rect::new(0, 0, 80, 20);
+        world_viewport.camera_current = WorldPos::new(40_000, 0);
 
         // This point is far outside the visible range but would wrap into range with a u16 cast.
         // With viewport width 80 and camera origin ~39961, adding 131_082 makes relative_x = 131_121,
         // which wraps to 49 if cast to u16.
         let wrapped_candidate = WorldPos::new(171_082, 0);
-        assert_eq!(state.world_to_viewport(wrapped_candidate), None);
-        assert_eq!(state.world_to_terminal(wrapped_candidate), None);
+        assert_eq!(world_viewport.world_to_viewport(wrapped_candidate), None);
+        assert_eq!(world_viewport.world_to_terminal(wrapped_candidate), None);
 
         // Visible points still convert correctly.
-        let visible = state.camera_current;
-        assert!(state.world_to_viewport(visible).is_some());
-        assert!(state.world_to_terminal(visible).is_some());
+        let visible = world_viewport.camera_current;
+        assert!(world_viewport.world_to_viewport(visible).is_some());
+        assert!(world_viewport.world_to_terminal(visible).is_some());
     }
 
     #[test]
     fn test_world_buffer_writer_coordinate_conversion() {
-        let mut state = ViewportState::new();
-        state.camera_current = WorldPos::new(10, 10);
-        state.viewport_bounds = Rect::new(0, 0, 20, 10);
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.camera_current = WorldPos::new(10, 10);
+        world_viewport.viewport_bounds = Rect::new(0, 0, 20, 10);
 
         let area = Rect::new(0, 0, 20, 10);
         let mut buffer = Buffer::empty(area);
-        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        let mut writer = WorldBuffer::new(&mut buffer, &world_viewport);
 
         // Write at world position (15, 12)
         // Camera is at (10, 10) with viewport 20x10
@@ -407,11 +407,11 @@ mod tests {
 
     #[test]
     fn test_world_buffer_writer_string_operations() {
-        let mut state = ViewportState::new();
-        state.viewport_bounds = Rect::new(0, 0, 20, 10); // Set viewport bounds
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.viewport_bounds = Rect::new(0, 0, 20, 10); // Set viewport bounds
         let area = Rect::new(0, 0, 20, 10);
         let mut buffer = Buffer::empty(area);
-        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        let mut writer = WorldBuffer::new(&mut buffer, &world_viewport);
 
         // Write a string
         writer.set_string(WorldPos::new(5, 3), "Hello");
@@ -426,10 +426,10 @@ mod tests {
 
     #[test]
     fn test_world_buffer_graphemes_keep_terminal_columns() {
-        let mut state = ViewportState::new();
-        state.viewport_bounds = Rect::new(0, 0, 20, 10);
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.viewport_bounds = Rect::new(0, 0, 20, 10);
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut writer = WorldBuffer::new(&mut buffer, &world_viewport);
         writer.set_graphemes_styled(
             WorldPos::new(0, 0),
             "e\u{301}漢B",
@@ -440,16 +440,18 @@ mod tests {
         assert_eq!(writer.get_char(WorldPos::new(2, 0)), Some(' '));
         assert_eq!(writer.get_char(WorldPos::new(3, 0)), Some('B'));
         drop(writer);
-        let (column, row) = state.world_to_terminal(WorldPos::new(0, 0)).unwrap();
+        let (column, row) = world_viewport
+            .world_to_terminal(WorldPos::new(0, 0))
+            .unwrap();
         assert_eq!(buffer[(column, row)].symbol(), "e\u{301}");
     }
 
     #[test]
     fn test_world_buffer_writer_clipping() {
-        let state = ViewportState::new();
+        let world_viewport = WorldViewport::new();
         let area = Rect::new(0, 0, 5, 5);
         let mut buffer = Buffer::empty(area);
-        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        let mut writer = WorldBuffer::new(&mut buffer, &world_viewport);
 
         // Try to write outside bounds
         writer.set_char(WorldPos::new(10, 10), 'X');
@@ -465,11 +467,11 @@ mod tests {
 
     #[test]
     fn test_world_buffer_writer_read_write_consistency() {
-        let mut state = ViewportState::new();
-        state.viewport_bounds = Rect::new(0, 0, 8, 8); // Set viewport bounds
+        let mut world_viewport = WorldViewport::new();
+        world_viewport.viewport_bounds = Rect::new(0, 0, 8, 8); // Set viewport bounds
         let area = Rect::new(0, 0, 8, 8);
         let mut buffer = Buffer::empty(area);
-        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        let mut writer = WorldBuffer::new(&mut buffer, &world_viewport);
 
         // Write and read back
         // With camera at (0,0) and viewport 8x8, visible range is [-4, 4) x [-4, 4)

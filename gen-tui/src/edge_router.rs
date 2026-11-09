@@ -1,10 +1,10 @@
 use thiserror::Error;
 
 pub mod center_doglegs;
-pub mod layout_graph_process;
 pub mod route_channel;
 pub mod route_graph;
 pub mod route_layer;
+pub mod route_simplification;
 #[cfg(test)]
 pub mod router_tests;
 pub mod temp_graph;

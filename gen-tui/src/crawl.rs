@@ -15,13 +15,13 @@ use petgraph::{
 };
 
 use crate::{
-    curved::LayoutMode,
     cycle_removal::remove_cycles,
     edge_ports::{EdgePorts, NodeSide, PortedEdge},
     layout::{PinSide, WindowStructureBuilder},
+    layout_mode::LayoutMode,
     pinning::{
         LegEnd, OrderingConstraint, PinPlan, ordering_constraint, plan_curved_bends, plan_hairpin,
-        plan_hairpin_arc, plan_horizontal_bends, plan_vertical_bends,
+        plan_hairpin_arc, plan_lateral_bends, plan_vertical_bends,
     },
     window_graph::{WindowEdge, WindowGraph, WindowNode},
 };
@@ -344,7 +344,7 @@ struct DeclaredEdge<NodeId> {
 ///
 /// Nodes are first ordered by the edges that ask for an order (cycle removal breaks any cycle
 /// among them). Each edge is then drawn directly when its sides agree with that order, and
-/// otherwise routed through left and right pins (see `plan_horizontal_bends`). Every pin joins
+/// otherwise routed through left and right pins (see `plan_lateral_bends`). Every pin joins
 /// the Sugiyama input, along with a temporary edge between the endpoints of each pinned route
 /// that keeps their ranks in the chosen order; the builder removes it once layers are known.
 /// Boundary edges become layered wormhole nodes. `explicit_backward_edges` names node pairs to
@@ -507,7 +507,7 @@ where
                     edge.source == edge.target,
                 )
             } else {
-                plan_horizontal_bends(edge.ports, target_follows_source)
+                plan_lateral_bends(edge.ports, target_follows_source)
             }
         })
         .collect();

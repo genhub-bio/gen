@@ -58,9 +58,9 @@ pub(crate) fn drop_orphaned_routing_nodes(graph: &mut LayoutGraph) {
     }
 }
 
-/// What [`insert_horizontal_bend_nodes`] added to the layout.
+/// What [`insert_lateral_bend_nodes`] added to the layout.
 #[derive(Default)]
-pub(crate) struct HorizontalBendNodes {
+pub(crate) struct LateralBendNodes {
     /// The pins that put each loop back after compaction.
     pub(crate) pins: Vec<DetachedPin>,
     /// Each self edge's routing node with the node it serves, which have to stay together.
@@ -106,10 +106,10 @@ impl LayerOrder {
 /// An end is on the wrong side when its edge continues to a later layer from a west side or to
 /// an earlier layer from an east side. A self edge between a node's two sides has no chain, so
 /// one routing node serves both of its ends.
-pub(crate) fn insert_horizontal_bend_nodes(
+pub(crate) fn insert_lateral_bend_nodes(
     graph: &mut LayoutGraph,
     domain_edges: &[PortedEdge<NodeIndex>],
-) -> HorizontalBendNodes {
+) -> LateralBendNodes {
     let node_of: HashMap<NodeIndex, NodeIndex<u32>> = graph
         .node_indices()
         .filter_map(|index| match graph[index].role {
@@ -117,7 +117,7 @@ pub(crate) fn insert_horizontal_bend_nodes(
             _ => None,
         })
         .collect();
-    let mut horizontal_bend_edges = Vec::new();
+    let mut lateral_bend_edges = Vec::new();
     let mut self_loops = Vec::new();
     for edge in domain_edges {
         let (Some(&source), Some(&target)) = (node_of.get(&edge.source), node_of.get(&edge.target))
@@ -134,7 +134,7 @@ pub(crate) fn insert_horizontal_bend_nodes(
         let source_loops = on_wrong_side(edge.ports.source, target_layer > source_layer);
         let target_loops = on_wrong_side(edge.ports.target, source_layer > target_layer);
         if source_layer != target_layer && (source_loops || target_loops) {
-            horizontal_bend_edges.push((edge, [source_loops, target_loops]));
+            lateral_bend_edges.push((edge, [source_loops, target_loops]));
         }
     }
 
@@ -143,7 +143,7 @@ pub(crate) fn insert_horizontal_bend_nodes(
     let mut detached = Vec::new();
     let mut self_loop_nodes = Vec::new();
     let mut claimed: HashMap<EdgeIndex<u32>, usize> = HashMap::new();
-    for (edge, loops) in horizontal_bend_edges {
+    for (edge, loops) in lateral_bend_edges {
         let pair = (edge.source, edge.target);
         let (source, target) = (node_of[&edge.source], node_of[&edge.target]);
         let Some((chain, first_hop)) = claim_chain(graph, &claimed, [source, target], pair) else {
@@ -218,7 +218,7 @@ pub(crate) fn insert_horizontal_bend_nodes(
         }
     }
     seat_in_layers(graph, &order, &seats);
-    HorizontalBendNodes {
+    LateralBendNodes {
         pins: detached,
         self_loops: self_loop_nodes,
     }
@@ -229,12 +229,9 @@ pub(crate) fn insert_horizontal_bend_nodes(
 /// with no edge to another layer anywhere in its gap of the layer order, which can leave rows
 /// between it and its node for other edges to cross the loop through. Compaction keeps the
 /// distance it is given only as a minimum, so each also records a tie that holds it there.
-pub(crate) fn tether_self_loops(
-    graph: &mut LayoutGraph,
-    horizontal_bend_nodes: &HorizontalBendNodes,
-) {
+pub(crate) fn tether_self_loops(graph: &mut LayoutGraph, lateral_bend_nodes: &LateralBendNodes) {
     let mut by_node: BTreeMap<NodeIndex<u32>, Vec<NodeIndex<u32>>> = BTreeMap::new();
-    for &(node, routing) in &horizontal_bend_nodes.self_loops {
+    for &(node, routing) in &lateral_bend_nodes.self_loops {
         by_node.entry(node).or_default().push(routing);
     }
     for (node, mut routing_nodes) in by_node {
@@ -641,7 +638,7 @@ mod tests {
             EdgePorts::new(NodeSide::East, NodeSide::West),
         )];
         assert!(
-            insert_horizontal_bend_nodes(&mut graph, &edges)
+            insert_lateral_bend_nodes(&mut graph, &edges)
                 .pins
                 .is_empty()
         );
@@ -653,7 +650,7 @@ mod tests {
         let (mut graph, first, second) = two_nodes();
         // From 0 east to 1 east: 1 continues west toward 0 from its east side, so it loops.
         let edges = [ported_edge(0, 1, EAST_EAST)];
-        let detached = insert_horizontal_bend_nodes(&mut graph, &edges).pins;
+        let detached = insert_lateral_bend_nodes(&mut graph, &edges).pins;
         assert_eq!(detached.len(), 1);
         let [routing] = routing_nodes(&graph)[..] else {
             panic!("should add one routing node");
@@ -676,7 +673,7 @@ mod tests {
         let last = graph.add_node(data(3, 0, 2));
         graph.add_edge(node, middle, LayoutEdge::new(domain(0), domain(1)));
         graph.add_edge(other, last, LayoutEdge::new(domain(2), domain(3)));
-        insert_horizontal_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]);
+        insert_lateral_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]);
         let [routing] = routing_nodes(&graph)[..] else {
             panic!("should add one routing node");
         };
@@ -692,8 +689,7 @@ mod tests {
         let first = graph.add_node(data(0, 0, 0));
         let second = graph.add_node(data(1, 1, 0));
         graph.add_edge(second, first, LayoutEdge::new(domain(0), domain(1)));
-        let detached =
-            insert_horizontal_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]).pins;
+        let detached = insert_lateral_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]).pins;
         assert_eq!(detached.len(), 1);
         assert_eq!(routing_nodes(&graph).len(), 1);
     }
@@ -701,7 +697,7 @@ mod tests {
     #[test]
     fn test_routing_node_prefers_the_gap_beside_its_node_when_none_crosses_less() {
         let (mut graph, _, second) = two_nodes();
-        insert_horizontal_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]);
+        insert_lateral_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]);
         let [routing] = routing_nodes(&graph)[..] else {
             panic!("should add one routing node");
         };
@@ -713,7 +709,7 @@ mod tests {
         let mut graph = LayoutGraph::default();
         let node = graph.add_node(data(0, 0, 0));
         let edges = [ported_edge(0, 0, WEST_EAST)];
-        let detached = insert_horizontal_bend_nodes(&mut graph, &edges).pins;
+        let detached = insert_lateral_bend_nodes(&mut graph, &edges).pins;
         assert_eq!(detached.len(), 2);
         assert_eq!(routing_nodes(&graph).len(), 1);
         reattach_loopback_pins(&mut graph, detached);
@@ -733,8 +729,7 @@ mod tests {
     #[test]
     fn test_reattached_pins_use_cells_no_other_node_uses() {
         let (mut graph, _, _) = two_nodes();
-        let detached =
-            insert_horizontal_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]).pins;
+        let detached = insert_lateral_bend_nodes(&mut graph, &[ported_edge(0, 1, EAST_EAST)]).pins;
         reattach_loopback_pins(&mut graph, detached);
         let positions: Vec<_> = graph
             .node_weights()

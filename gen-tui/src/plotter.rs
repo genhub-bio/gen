@@ -3,10 +3,7 @@
 //! Rectilinear edges, junction glyphs, arrows and highlights are drawn into the buffer; a curved
 //! layout mode instead returns overlay primitives for `pixel_overlay` to draw at pixel resolution.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
-    sync::Arc,
-};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 
 use petgraph::{
     graph::NodeIndex,
@@ -18,17 +15,18 @@ use ratatui::{
 };
 
 use crate::{
-    curved::{
-        ArrowMark, LayoutMode, NodeGlow, OverlayPrimitive, StraightSegment, SymbolGlow, bend_arch,
-        hairpin_arc_arrow, hairpin_edge_arcs, routed_edge_curve,
-    },
+    curved_edges::{bend_arch, hairpin_arc_arrow, hairpin_edge_arcs, routed_edge_curve},
     edge_ports::{NodeSide, PortedEdge},
     geometry::{WorldPos, WorldRect},
-    layout::{JunctionSymbol, NodeRole, VerticalAnchor},
+    highlight_style::{CellHighlight, LineStyle, PathStyle},
+    layout::{JunctionSymbol, NodeRole},
+    layout_mode::LayoutMode,
+    node_renderer::NodeRenderer,
+    overlay_primitive::{ArrowMark, NodeGlow, OverlayPrimitive, StraightSegment, SymbolGlow},
     routed_window_graph::RoutedWindowGraph,
     theme::Theme,
-    viewport_state::WorldBuffer,
     window_geometry::NODE_GLYPH,
+    world_buffer::WorldBuffer,
 };
 
 /// Rectilinear routes retain their established marker rhythm.
@@ -42,331 +40,6 @@ const MIN_ARROW_RUN_CELLS: i64 = 4;
 /// How far, in cells, a curved edge can stray from the box around its endpoints: the widest
 /// loopback bulges 5 cells and a hairpin arc 4.75, and a stroke's halo adds a couple more.
 const EDGE_REACH_CELLS: i64 = 8;
-
-/// Line style for path highlighting
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LineStyle {
-    /// Normal weight box-drawing characters
-    Normal,
-    /// Heavy weight box-drawing characters
-    Bold,
-    /// Dashed box-drawing characters
-    Dashed,
-}
-
-/// Style specification for highlighted paths
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PathStyle {
-    /// Color to use for tinting (Color::Reset means brighten instead)
-    pub color: Color,
-    /// Line weight style for edges and routing nodes
-    pub line_style: LineStyle,
-    /// Whether to merge glyphs with the glyph already drawn in the cell or replace them outright
-    pub merge_glyphs: bool,
-}
-
-pub(crate) type CellHighlight = (WorldPos, (i64, i64), (i64, i64), PathStyle);
-
-impl PathStyle {
-    /// Create a new PathStyle with default settings
-    pub fn new(color: Color) -> Self {
-        Self {
-            color,
-            line_style: LineStyle::Normal,
-            merge_glyphs: false,
-        }
-    }
-
-    /// Set the line style
-    pub fn with_line_style(mut self, line_style: LineStyle) -> Self {
-        self.line_style = line_style;
-        self
-    }
-
-    /// Set whether to merge glyphs
-    pub fn with_merge_glyphs(mut self, merge_glyphs: bool) -> Self {
-        self.merge_glyphs = merge_glyphs;
-        self
-    }
-}
-
-/// A stretch of a node's raw offsets and the columns it is drawn in. A stretch drawn as one
-/// cell, such as an omitted run of bases, has `column_end == column_start + 1`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ColumnRun {
-    pub raw_start: i64,
-    pub raw_end: i64,
-    pub column_start: i64,
-    pub column_end: i64,
-}
-
-/// Sequence columns available to the cursor, excluding decorative padding and omitted runs.
-#[derive(Clone, Debug)]
-pub enum CursorColumns {
-    /// Every column in this inclusive range is a sequence character.
-    Range(i64, i64),
-    /// Only these ordered columns contain retained sequence characters.
-    Positions(Vec<i64>),
-}
-
-impl CursorColumns {
-    /// First and last accessible column, inclusive.
-    pub fn bounds(&self) -> (i64, i64) {
-        match self {
-            Self::Range(first, last) => (*first, *last),
-            Self::Positions(columns) => (
-                *columns.first().unwrap_or(&0),
-                *columns.last().unwrap_or(&0),
-            ),
-        }
-    }
-
-    /// Closest accessible column, preferring the left column on ties.
-    pub fn nearest(&self, column: i64) -> i64 {
-        match self {
-            Self::Range(first, last) => column.clamp(*first, *last),
-            Self::Positions(columns) => columns
-                .iter()
-                .copied()
-                .min_by_key(|candidate| candidate.abs_diff(column))
-                .unwrap_or(0),
-        }
-    }
-
-    /// First accessible column at or beyond a requested column in the travel direction.
-    pub fn next(&self, column: i64, forward: bool) -> Option<i64> {
-        match self {
-            Self::Range(first, last) => (*first..=*last).contains(&column).then_some(column),
-            Self::Positions(columns) => {
-                if forward {
-                    columns
-                        .iter()
-                        .copied()
-                        .find(|candidate| *candidate >= column)
-                } else {
-                    columns
-                        .iter()
-                        .rev()
-                        .copied()
-                        .find(|candidate| *candidate <= column)
-                }
-            }
-        }
-    }
-}
-
-/// Domain-side trait bundling node sizing and rendering for a single, fixed
-/// level of detail. The application picks which concrete `NodeRenderer`
-/// is active (e.g. per zoom level) and borrows it immutably for rendering.
-pub trait NodeRenderer<G>
-where
-    G: GraphBase,
-{
-    /// Get the dimensions (width, height) for a node.
-    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64);
-
-    /// Row used for layout alignment and edge attachment. Top-anchored renderers draw their
-    /// sequence on the top row and grow decoration downward. Changes invalidate cached sizes.
-    fn vertical_anchor(&self, _node: &G::NodeId) -> VerticalAnchor {
-        VerticalAnchor::Center
-    }
-
-    /// Map a raw node-local coordinate to a displayed column.
-    fn map_column(&self, _node: &G::NodeId, raw: i64) -> i64 {
-        raw
-    }
-
-    /// Map a displayed column back to a raw node-local coordinate.
-    fn raw_column(&self, _node: &G::NodeId, column: i64) -> i64 {
-        column
-    }
-
-    /// How the node's raw offsets are spread over its columns, in offset order, when the
-    /// renderer compresses some stretches into a single cell. `None` means the offsets map
-    /// evenly from `map_column`'s first to last column, so a scale along the node can
-    /// interpolate. A renderer that compresses must answer, or such a scale misplaces every
-    /// position that follows a compressed stretch.
-    fn column_runs(&self, _node: &G::NodeId) -> Option<Vec<ColumnRun>> {
-        None
-    }
-
-    /// Get default dimensions for dummy/routing nodes
-    fn get_dummy_size(&self) -> (u64, u64) {
-        (1, 1)
-    }
-
-    /// Render a node in its allocated world area.
-    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId);
-
-    /// Whether `node` is drawn. An invisible node is still placed in the layout, so its edges
-    /// meet at it, but it is drawn as a junction of those edges rather than as a node.
-    fn is_visible(&self, _node: &G::NodeId) -> bool {
-        true
-    }
-
-    /// The one row of `node` the cursor may sit on, counted up from the bottom of its rect, or
-    /// `None` to let the cursor use every row. A renderer that draws decoration around a node's
-    /// content (e.g. annotation lanes above and below a sequence row) names the content row, so
-    /// cursor moves, clicks, and jumps always land on it.
-    fn cursor_row(&self, _node: &G::NodeId) -> Option<u64> {
-        None
-    }
-
-    /// Columns containing sequence characters; `None` permits every column of the node.
-    fn cursor_columns(&self, _node: &G::NodeId) -> Option<CursorColumns> {
-        None
-    }
-
-    /// The node-local sequence rectangle that may receive highlights and dimming.
-    /// Decoration outside this rectangle leaves previously painted edges untouched.
-    fn content_rect(&self, node: &G::NodeId) -> WorldRect {
-        let (width, height) = self.get_node_size(node);
-        let (left, right) = self
-            .cursor_columns(node)
-            .map_or((0, width.saturating_sub(1) as i64), |columns| {
-                columns.bounds()
-            });
-        let (bottom, top) = self
-            .cursor_row(node)
-            .map_or((0, height.saturating_sub(1) as i64), |row| {
-                (row as i64, row as i64)
-            });
-        WorldRect::from_coords(left, bottom, right, top)
-    }
-
-    /// Whether the attachment row of `node` should sit at y = 0. Layout aligns nodes across layers while
-    /// preserving within-layer spacing and straight routing chains where feasible. A renderer
-    /// marks e.g. the reference sequence so the main path reads as a straight line.
-    fn is_aligned(&self, _node: &G::NodeId) -> bool {
-        false
-    }
-
-    /// A counter that changes whenever `get_node_size`, `get_dummy_size`, or `vertical_anchor` may answer
-    /// differently than before. Views reuse a window's routed geometry until it changes, so a
-    /// renderer whose sizes depend on mutable state (e.g. annotation lanes under each node) must
-    /// bump it on every real change; a renderer with fixed sizes keeps the default.
-    fn size_generation(&self) -> u64 {
-        0
-    }
-}
-
-/// Forward rendering through a boxed renderer.
-impl<G, T> NodeRenderer<G> for Box<T>
-where
-    G: GraphBase,
-    T: NodeRenderer<G> + ?Sized,
-{
-    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
-        (**self).get_node_size(node)
-    }
-
-    fn vertical_anchor(&self, node: &G::NodeId) -> VerticalAnchor {
-        (**self).vertical_anchor(node)
-    }
-
-    fn get_dummy_size(&self) -> (u64, u64) {
-        (**self).get_dummy_size()
-    }
-
-    fn map_column(&self, node: &G::NodeId, raw: i64) -> i64 {
-        (**self).map_column(node, raw)
-    }
-
-    fn raw_column(&self, node: &G::NodeId, column: i64) -> i64 {
-        (**self).raw_column(node, column)
-    }
-
-    fn column_runs(&self, node: &G::NodeId) -> Option<Vec<ColumnRun>> {
-        (**self).column_runs(node)
-    }
-
-    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
-        (**self).render_node(buffer, area, node_id);
-    }
-
-    fn is_visible(&self, node: &G::NodeId) -> bool {
-        (**self).is_visible(node)
-    }
-
-    fn cursor_row(&self, node: &G::NodeId) -> Option<u64> {
-        (**self).cursor_row(node)
-    }
-
-    fn cursor_columns(&self, node: &G::NodeId) -> Option<CursorColumns> {
-        (**self).cursor_columns(node)
-    }
-
-    fn content_rect(&self, node: &G::NodeId) -> WorldRect {
-        (**self).content_rect(node)
-    }
-
-    fn is_aligned(&self, node: &G::NodeId) -> bool {
-        (**self).is_aligned(node)
-    }
-
-    fn size_generation(&self) -> u64 {
-        (**self).size_generation()
-    }
-}
-
-/// Forward rendering through a shared renderer.
-impl<G, T> NodeRenderer<G> for Arc<T>
-where
-    G: GraphBase,
-    T: NodeRenderer<G> + ?Sized,
-{
-    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
-        (**self).get_node_size(node)
-    }
-
-    fn vertical_anchor(&self, node: &G::NodeId) -> VerticalAnchor {
-        (**self).vertical_anchor(node)
-    }
-
-    fn get_dummy_size(&self) -> (u64, u64) {
-        (**self).get_dummy_size()
-    }
-
-    fn map_column(&self, node: &G::NodeId, raw: i64) -> i64 {
-        (**self).map_column(node, raw)
-    }
-
-    fn raw_column(&self, node: &G::NodeId, column: i64) -> i64 {
-        (**self).raw_column(node, column)
-    }
-
-    fn column_runs(&self, node: &G::NodeId) -> Option<Vec<ColumnRun>> {
-        (**self).column_runs(node)
-    }
-
-    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
-        (**self).render_node(buffer, area, node_id);
-    }
-
-    fn is_visible(&self, node: &G::NodeId) -> bool {
-        (**self).is_visible(node)
-    }
-
-    fn cursor_row(&self, node: &G::NodeId) -> Option<u64> {
-        (**self).cursor_row(node)
-    }
-
-    fn cursor_columns(&self, node: &G::NodeId) -> Option<CursorColumns> {
-        (**self).cursor_columns(node)
-    }
-
-    fn content_rect(&self, node: &G::NodeId) -> WorldRect {
-        (**self).content_rect(node)
-    }
-
-    fn is_aligned(&self, node: &G::NodeId) -> bool {
-        (**self).is_aligned(node)
-    }
-
-    fn size_generation(&self) -> u64 {
-        (**self).size_generation()
-    }
-}
 
 pub(crate) struct PlotDecorations<'a> {
     pub(crate) node_highlights: &'a [(WorldPos, PathStyle)],
@@ -1627,13 +1300,14 @@ mod curved_highlight_tests {
         NodeRenderer, PathStyle, PlotDecorations, plot_routed_window_graph_with_highlights,
     };
     use crate::{
-        curved::{LayoutMode, OverlayPrimitive},
         geometry::{LocalPos, WorldPos, WorldRect},
         layout::{LayoutNode, NodeRole},
+        layout_mode::LayoutMode,
+        overlay_primitive::OverlayPrimitive,
         routed_window_graph::RoutedWindowGraph,
         theme::current_theme,
-        viewport_state::{ViewportState, WorldBuffer},
         window_geometry::NODE_GLYPH,
+        world_buffer::{WorldBuffer, WorldViewport},
     };
 
     /// Draws every node as a single glyph, regardless of domain data.
@@ -1690,15 +1364,15 @@ mod curved_highlight_tests {
         highlights: &[((WorldPos, WorldPos), PathStyle)],
         lowlights: &[(WorldPos, WorldPos)],
     ) -> (Buffer, Vec<OverlayPrimitive>) {
-        let state = ViewportState {
+        let world_viewport = WorldViewport {
             camera_current: WorldPos::new(5, 3),
             viewport_bounds: Rect::new(0, 0, 12, 8),
-            ..ViewportState::default()
+            ..WorldViewport::default()
         };
-        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
         let theme = current_theme();
         let overlay_primitives = {
-            let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
             plot_routed_window_graph_with_highlights::<
                 MinimalNodeRenderer,
                 petgraph::graph::DiGraph<(), ()>,
@@ -1725,7 +1399,8 @@ mod curved_highlight_tests {
     #[test]
     fn test_overlay_primitives_list_highlights_last_and_lowlights_first() {
         let (graph, points) = crossing_graph();
-        let bold_red = PathStyle::new(Color::Red).with_line_style(crate::plotter::LineStyle::Bold);
+        let bold_red =
+            PathStyle::new(Color::Red).with_line_style(crate::highlight_style::LineStyle::Bold);
         let (buffer, overlay_primitives) = plot(
             &graph,
             &[((points[0], points[1]), bold_red)],
@@ -1744,9 +1419,12 @@ mod curved_highlight_tests {
             panic!("should report a curve");
         };
         assert_eq!(dimmed.color, theme[0x04], "dimmed edge first");
-        assert_eq!(dimmed.line_style, crate::plotter::LineStyle::Dashed);
+        assert_eq!(dimmed.line_style, crate::highlight_style::LineStyle::Dashed);
         assert_eq!(highlighted.color, Color::Red, "highlight last");
-        assert_eq!(highlighted.line_style, crate::plotter::LineStyle::Bold);
+        assert_eq!(
+            highlighted.line_style,
+            crate::highlight_style::LineStyle::Bold
+        );
     }
 
     /// One edge between two routing points on row 3, which the camera of [`plot`] looks at.
@@ -1821,16 +1499,16 @@ mod curved_highlight_tests {
             );
             graph.graph.add_node(position);
         }
-        let state = ViewportState {
+        let world_viewport = WorldViewport {
             camera_current: WorldPos::new(5, 3),
             viewport_bounds: Rect::new(0, 0, 12, 8),
-            ..ViewportState::default()
+            ..WorldViewport::default()
         };
-        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
         let renderer = CountingRenderer {
             rendered: std::cell::Cell::new(0),
         };
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         plot_routed_window_graph_with_highlights(
             &graph,
             &mut world_buffer,
@@ -1863,12 +1541,13 @@ mod tests {
         draw_arrows as draw_route_arrows, draw_rectilinear_segment, edge_route,
     };
     use crate::{
-        curved::{LayoutMode, OverlayPrimitive},
         edge_ports::{EdgePorts, NodeSide, PortedEdge},
         geometry::{LocalPos, WorldPos},
         layout::{LayoutNode, NodeRole, PinSide},
+        layout_mode::LayoutMode,
+        overlay_primitive::OverlayPrimitive,
         routed_window_graph::RoutedWindowGraph,
-        viewport_state::{ViewportState, WorldBuffer},
+        world_buffer::{WorldBuffer, WorldViewport},
     };
 
     fn ported_edge(
@@ -1930,10 +1609,13 @@ mod tests {
         (graph, source, target)
     }
 
-    fn rendered_arrows(points: &[WorldPos], state: &ViewportState) -> Vec<(WorldPos, char)> {
+    fn rendered_arrows(
+        points: &[WorldPos],
+        world_viewport: &WorldViewport,
+    ) -> Vec<(WorldPos, char)> {
         let (graph, source, target) = routed_edge(points);
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, state);
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, world_viewport);
         for (start, end, _) in graph.edges() {
             draw_rectilinear_segment(&mut world_buffer, start, end, Color::Red, LineStyle::Bold);
         }
@@ -1982,9 +1664,9 @@ mod tests {
                 LayoutNode::new(role, LocalPos::new_xy(position.x, position.y), (1, 1), None),
             );
         }
-        let state = viewport();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let world_viewport = viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
@@ -2013,9 +1695,9 @@ mod tests {
                 LayoutNode::routing(LocalPos::new_xy(position.x, position.y), (1, 1)),
             );
         }
-        let state = viewport();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let world_viewport = viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
@@ -2059,9 +1741,9 @@ mod tests {
                 LayoutNode::routing(LocalPos::new_xy(position.x, position.y), (1, 1)),
             );
         }
-        let state = viewport();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let world_viewport = viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
@@ -2089,10 +1771,10 @@ mod tests {
         assert_eq!(centers, expected);
     }
 
-    fn viewport() -> ViewportState {
-        ViewportState {
+    fn viewport() -> WorldViewport {
+        WorldViewport {
             viewport_bounds: Rect::new(0, 0, 100, 80),
-            ..ViewportState::default()
+            ..WorldViewport::default()
         }
     }
 
@@ -2100,9 +1782,9 @@ mod tests {
     fn test_rectilinear_arrows_preserve_corners_and_junctions() {
         let points = [WorldPos::new(8, 0), WorldPos::new(0, 0)];
         let (graph, source, target) = routed_edge(&points);
-        let state = viewport();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let world_viewport = viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         draw_rectilinear_segment(
             &mut world_buffer,
             points[1],
@@ -2145,9 +1827,9 @@ mod tests {
                 LayoutNode::routing(LocalPos::new_xy(position.x, position.y), (1, 1)),
             );
         }
-        let state = viewport();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let world_viewport = viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
@@ -2185,9 +1867,9 @@ mod tests {
                 ),
             );
         }
-        let state = viewport();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let world_viewport = viewport();
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         draw_arrows(
             &mut world_buffer,
             &graph,
@@ -2241,13 +1923,13 @@ mod tests {
     #[test]
     fn test_loopback_route_reports_three_arrows() {
         let (graph, source, target, _) = loopback_route(-20);
-        let state = ViewportState {
+        let world_viewport = WorldViewport {
             camera_current: WorldPos::new(5, -5),
             viewport_bounds: Rect::new(0, 0, 55, 16),
-            ..ViewportState::default()
+            ..WorldViewport::default()
         };
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
         let mut overlay_primitives = Vec::new();
         draw_arrows(
             &mut world_buffer,
@@ -2438,9 +2120,9 @@ mod tests {
     #[test]
     fn test_arrows_keep_spacing_when_route_is_clipped() {
         let points = [WorldPos::new(40, 0), WorldPos::new(-40, 0)];
-        let small_viewport = ViewportState {
+        let small_viewport = WorldViewport {
             viewport_bounds: Rect::new(0, 0, 20, 10),
-            ..ViewportState::default()
+            ..WorldViewport::default()
         };
         let expected: Vec<_> = rendered_arrows(&points, &viewport())
             .into_iter()
@@ -2577,9 +2259,9 @@ mod tests {
             }
             let edge = ported_edge(source, source, EdgePorts::new(side, side));
             graph.domain_edges = vec![edge];
-            let state = viewport();
-            let mut buffer = Buffer::empty(state.viewport_bounds);
-            let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+            let world_viewport = viewport();
+            let mut buffer = Buffer::empty(world_viewport.viewport_bounds);
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &world_viewport);
             let mut overlay_primitives = Vec::new();
             draw_arrows(
                 &mut world_buffer,

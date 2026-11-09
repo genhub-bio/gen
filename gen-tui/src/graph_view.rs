@@ -19,16 +19,18 @@ use ratatui::{
 use crate::{
     assembly::AssembledLayout,
     crawl::{EagerSource, GraphSource},
-    curved::{LayoutMode, OverlayPrimitive},
     edge_ports::EdgeSelector,
     frame_index::{Direction, FrameIndex},
     geometry::{Point, WorldPos, WorldRect},
     graph_painter::{Camera, HighlightKind, Highlights, RenderedWindow, WindowScene, snap_camera},
+    highlight_style::PathStyle,
     layout::NodeRole,
     layout_compaction::GapPolicy,
     layout_engine::{BatchId, LayoutEngine},
+    layout_mode::LayoutMode,
     navigator::{CursorOverlay, CursorState, Navigator},
-    plotter::{NodeRenderer, PathStyle},
+    node_renderer::NodeRenderer,
+    overlay_primitive::OverlayPrimitive,
     theme::current_theme,
 };
 
@@ -1196,7 +1198,7 @@ mod tests {
 
         fn render_node(
             &self,
-            buffer: &mut crate::viewport_state::WorldBuffer,
+            buffer: &mut crate::world_buffer::WorldBuffer,
             area: crate::geometry::WorldRect,
             _node_id: &petgraph::graph::NodeIndex,
         ) {
@@ -1338,7 +1340,7 @@ mod tests {
 
         fn render_node(
             &self,
-            buffer: &mut crate::viewport_state::WorldBuffer,
+            buffer: &mut crate::world_buffer::WorldBuffer,
             area: crate::geometry::WorldRect,
             _node_id: &petgraph::graph::NodeIndex,
         ) {
@@ -1606,7 +1608,7 @@ mod tests {
 
         fn render_node(
             &self,
-            buffer: &mut crate::viewport_state::WorldBuffer,
+            buffer: &mut crate::world_buffer::WorldBuffer,
             area: crate::geometry::WorldRect,
             _node_id: &NodeIndex,
         ) {
@@ -1847,7 +1849,7 @@ mod tests {
 
             fn render_node(
                 &self,
-                buffer: &mut crate::viewport_state::WorldBuffer,
+                buffer: &mut crate::world_buffer::WorldBuffer,
                 area: crate::geometry::WorldRect,
                 _node_id: &NodeIndex,
             ) {
@@ -2098,10 +2100,10 @@ mod tests {
 
         use super::*;
         use crate::{
-            plotter::CursorColumns,
+            node_renderer::CursorColumns,
             testing::mocks::{MockDomainGraph, TestGraphs},
-            viewport_state::WorldBuffer,
             window_geometry::NODE_GLYPH,
+            world_buffer::WorldBuffer,
         };
 
         /// The row `RowHoldingVisual` holds the cursor to, off-center so it can't be mistaken

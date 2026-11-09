@@ -25,8 +25,8 @@ use tiny_skia::{
 };
 
 use crate::{
-    curved::{ArrowMark, BezierCurve, NodeGlow, OverlayPrimitive, SymbolGlow},
-    plotter::LineStyle,
+    highlight_style::LineStyle,
+    overlay_primitive::{ArrowMark, BezierCurve, NodeGlow, OverlayPrimitive, SymbolGlow},
     raster_config::{RasterConfig, color_to_rgb},
     window_geometry::NODE_GLYPH,
 };
@@ -1034,7 +1034,7 @@ mod tests {
         ArrowMark, BAND_PADDING, BezierCurve, CellMask, OverlayPrimitive, PixelOverlay,
         SYMBOL_RADIUS, SymbolGlow, arrow_horizontal_span, draw_paths, prepare_paths,
     };
-    use crate::{plotter::LineStyle, raster_config::RasterConfig};
+    use crate::{highlight_style::LineStyle, raster_config::RasterConfig};
 
     fn curve(
         from: (f64, f64),
@@ -1124,7 +1124,7 @@ mod tests {
             background: [0; 3],
             ..RasterConfig::default()
         };
-        let edge = OverlayPrimitive::NodeGlow(crate::curved::NodeGlow {
+        let edge = OverlayPrimitive::NodeGlow(crate::overlay_primitive::NodeGlow {
             top_left: (5.0, 2.0),
             bottom_right: (10.0, 3.0),
             clip_left: false,
@@ -1172,7 +1172,7 @@ mod tests {
             background: [0; 3],
             ..RasterConfig::default()
         };
-        let edge = OverlayPrimitive::NodeGlow(crate::curved::NodeGlow {
+        let edge = OverlayPrimitive::NodeGlow(crate::overlay_primitive::NodeGlow {
             top_left: (5.0, 2.0),
             bottom_right: (10.0, 3.0),
             clip_left: true,
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_overlay_straight_segments_are_not_dropped() {
-        let edge = OverlayPrimitive::Line(crate::curved::StraightSegment {
+        let edge = OverlayPrimitive::Line(crate::overlay_primitive::StraightSegment {
             from: (1.0, 1.0),
             to: (8.0, 1.0),
             color: Color::Red,

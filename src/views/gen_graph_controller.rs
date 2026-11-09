@@ -19,11 +19,13 @@ use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, path::Path, port_crawl::LocateError};
 use gen_tui::{
-    curved::{LayoutMode, OverlayPrimitive},
     graph_view::{GraphView, GraphViewState},
+    highlight_style::{LineStyle, PathStyle},
     layout::VisualDetail,
     layout_engine::{BatchId, LayoutEngine},
-    plotter::{LineStyle, NodeRenderer, PathStyle},
+    layout_mode::LayoutMode,
+    node_renderer::NodeRenderer,
+    overlay_primitive::OverlayPrimitive,
     theme::current_theme,
 };
 use log::warn;
@@ -1193,8 +1195,8 @@ mod tests {
     use gen_models::{db::get_connection, path::Path};
     use gen_tui::{
         LayoutMode, VerticalAnchor,
-        curved::{BezierCurve, OverlayPrimitive},
-        plotter::LineStyle,
+        highlight_style::LineStyle,
+        overlay_primitive::{BezierCurve, OverlayPrimitive},
     };
     use ratatui::{
         Terminal,
@@ -1562,8 +1564,8 @@ mod tests {
         use gen_models::{db::GraphConnection, port_crawl::LocateError};
         use gen_tui::{
             geometry::WorldRect,
+            highlight_style::{LineStyle, PathStyle},
             layout::VisualDetail,
-            plotter::{LineStyle, PathStyle},
         };
         use petgraph::Direction;
         use ratatui::{buffer::Buffer, layout::Rect, style::Color};

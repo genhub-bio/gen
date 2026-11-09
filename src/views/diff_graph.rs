@@ -7,8 +7,8 @@ use gen_diff::{
 };
 use gen_graph::{GenGraph, GraphNode};
 use gen_tui::{
-    LineStyle, edge_ports::PortedEdge, graph_view::GraphViewState, layout::VisualDetail,
-    layout_compaction::GapPolicy, plotter::PathStyle,
+    LineStyle, edge_ports::PortedEdge, graph_view::GraphViewState, highlight_style::PathStyle,
+    layout::VisualDetail, layout_compaction::GapPolicy,
 };
 use petgraph::Direction;
 use ratatui::{

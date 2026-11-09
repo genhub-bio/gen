@@ -11,20 +11,20 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use crate::{
     assembly::AssembledLayout,
-    curved::{LayoutMode, OverlayPrimitive},
     edge_ports::{EdgePorts, EdgeSelector, NodeSide, PortedEdge},
     frame_index::{FrameIndex, PlacedNode},
     geometry::{WorldPos, WorldRect, floor_half},
-    layout::{LayoutNode, NodeRole, WindowGeometry},
+    highlight_style::{CellHighlight, PathStyle},
+    layout::{LayoutNode, NodeRole},
     layout_compaction::GapPolicy,
-    plotter::{
-        CellHighlight, NodeRenderer, PathStyle, PlotDecorations, highlighted_edge_route,
-        plot_routed_window_graph_with_highlights,
-    },
+    layout_mode::LayoutMode,
+    node_renderer::NodeRenderer,
+    overlay_primitive::OverlayPrimitive,
+    plotter::{PlotDecorations, highlighted_edge_route, plot_routed_window_graph_with_highlights},
     routed_window_graph::RoutedWindowGraph,
     theme::current_theme,
-    viewport_state::{ViewportState, WorldBuffer},
-    window_geometry::build_window_geometry_with_anchors,
+    window_geometry::{WindowGeometry, build_window_geometry_with_anchors},
+    world_buffer::{WorldBuffer, WorldViewport},
 };
 
 /// Every placed wormhole (`NodeRole::Wormhole`) stub's screen rect, boundary node, and
@@ -288,9 +288,9 @@ where
     let half_height = floor_half(area.height as i64);
     let camera_current = WorldPos::new(half_width - offset.x, half_height - offset.y);
 
-    let mut viewport_state = ViewportState::new();
-    viewport_state.camera_current = camera_current;
-    viewport_state.viewport_bounds = area;
+    let mut world_viewport = WorldViewport::new();
+    world_viewport.camera_current = camera_current;
+    world_viewport.viewport_bounds = area;
 
     let mut node_highlights = Vec::new();
     let mut edge_highlights = Vec::new();
@@ -341,7 +341,7 @@ where
         resolve_node_lowlights(routed_window_graph, graph, &highlights.node_lowlights);
 
     let theme = current_theme();
-    let mut world_buffer = WorldBuffer::new(buffer, &viewport_state);
+    let mut world_buffer = WorldBuffer::new(buffer, &world_viewport);
     plot_routed_window_graph_with_highlights(
         routed_window_graph,
         &mut world_buffer,
@@ -678,7 +678,7 @@ mod tests {
     use crate::{
         edge_ports::PortedEdge,
         geometry::{LocalPos, WorldRect},
-        layout::{LayoutEdge, LayoutNode, WindowGeometry},
+        layout::{LayoutEdge, LayoutNode},
         layout_engine::LayoutEngine,
         testing::mocks::{MockDomainGraph, TestGraphs},
     };

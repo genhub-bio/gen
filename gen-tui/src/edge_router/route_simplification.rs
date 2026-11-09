@@ -1,3 +1,6 @@
+//! Simplification of the layout graph around rectilinear routing: port assignment, contraction
+//! of collinear edge chains, and pruning of pin stubs.
+
 use std::collections::{HashMap, HashSet};
 
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};

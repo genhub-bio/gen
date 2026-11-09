@@ -20,10 +20,8 @@ use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, Workspace, is_terminal, range::Range};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    LayoutMode, LineStyle,
-    layout::VisualDetail,
-    plotter::{NodeRenderer, PathStyle},
-    theme::current_theme,
+    LayoutMode, LineStyle, highlight_style::PathStyle, layout::VisualDetail,
+    node_renderer::NodeRenderer, theme::current_theme,
 };
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
@@ -1620,7 +1618,7 @@ mod tests {
         sample::{NewSample, Sample},
         sequence::Sequence,
     };
-    use gen_tui::plotter::PathStyle;
+    use gen_tui::highlight_style::PathStyle;
     use pyo3::{exceptions::PyValueError, prelude::*};
     use ratatui::{layout::Rect, style::Color};
     use serde_json::Value;
