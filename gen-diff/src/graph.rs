@@ -100,6 +100,7 @@ use gen_models::{
     block_group::BlockGroup,
     block_group_edge::{AugmentedEdge, BlockGroupEdge},
     db::GraphConnection,
+    edge::Edge,
 };
 use petgraph::graphmap::DiGraphMap;
 
@@ -1040,6 +1041,14 @@ pub(crate) fn build_diff_input_graph(
             ))
             .copied();
         if let (Some(source_node), Some(target_node)) = (source_node, target_node) {
+            // Editing a node stores explicit edges between its consecutive
+            // slices, but a sample that never edited the node has none. Both
+            // describe the same unbroken sequence, so they share the neutral
+            // continuation identity instead of showing up as added/removed.
+            if is_slice_continuation(&augmented_edge.edge) {
+                insert_continuation_edge(&mut graph, &mut edge_metadata, source_node, target_node);
+                continue;
+            }
             let graph_edge = GraphEdge {
                 edge_id: augmented_edge.edge.id,
                 source_strand: augmented_edge.edge.source_strand,
@@ -1152,38 +1161,62 @@ fn add_continuation_edges(
             if source_node.sequence_end != target_node.sequence_start {
                 continue;
             }
-            let synthetic_edge = GraphEdge {
-                edge_id: HashId::convert_str(&format!(
-                    "diff-continuation:{}:{}:{}:{}:{}",
-                    span.node_id,
-                    source_node.sequence_start,
-                    source_node.sequence_end,
-                    target_node.sequence_start,
-                    target_node.sequence_end
-                )),
-                source_strand: Strand::Forward,
-                target_strand: Strand::Forward,
-                chromosome_index: NO_CHROMOSOME_INDEX,
-                phased: 0,
-                created_on: 0,
-            };
-            if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
-                if existing_edges.contains(&synthetic_edge) {
-                    continue;
-                }
-                existing_edges.push(synthetic_edge);
-            } else {
-                graph.add_edge(source_node, target_node, vec![synthetic_edge]);
-            }
-            edge_metadata.insert(
-                GraphEdgeKey::new(source_node, target_node, synthetic_edge),
-                DiffInputEdgeMetadata {
-                    change: DiffChange::unchanged(),
-                    origin: EdgeOrigin::Continuation,
-                },
-            );
+            insert_continuation_edge(graph, edge_metadata, source_node, target_node);
         }
     }
+}
+
+/// Reports whether a stored edge only joins two consecutive slices of one node.
+///
+/// Used by `build_diff_input_graph` to recognise the bookkeeping edges that
+/// edits leave behind inside a split node; they carry no graph choice.
+fn is_slice_continuation(edge: &Edge) -> bool {
+    edge.source_node_id == edge.target_node_id
+        && edge.source_coordinate == edge.target_coordinate
+        && edge.source_strand == Strand::Forward
+        && edge.target_strand == Strand::Forward
+}
+
+/// Adds the neutral edge joining two adjacent slices of one backing node.
+///
+/// The edge id depends only on the node and slice bounds, so every input graph
+/// produces the identical edge for the same unbroken span.
+fn insert_continuation_edge(
+    graph: &mut GenGraph,
+    edge_metadata: &mut HashMap<GraphEdgeKey, DiffInputEdgeMetadata>,
+    source_node: GraphNode,
+    target_node: GraphNode,
+) {
+    let synthetic_edge = GraphEdge {
+        edge_id: HashId::convert_str(&format!(
+            "diff-continuation:{}:{}:{}:{}:{}",
+            source_node.node_id,
+            source_node.sequence_start,
+            source_node.sequence_end,
+            target_node.sequence_start,
+            target_node.sequence_end
+        )),
+        source_strand: Strand::Forward,
+        target_strand: Strand::Forward,
+        chromosome_index: NO_CHROMOSOME_INDEX,
+        phased: 0,
+        created_on: 0,
+    };
+    if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
+        if existing_edges.contains(&synthetic_edge) {
+            return;
+        }
+        existing_edges.push(synthetic_edge);
+    } else {
+        graph.add_edge(source_node, target_node, vec![synthetic_edge]);
+    }
+    edge_metadata.insert(
+        GraphEdgeKey::new(source_node, target_node, synthetic_edge),
+        DiffInputEdgeMetadata {
+            change: DiffChange::unchanged(),
+            origin: EdgeOrigin::Continuation,
+        },
+    );
 }
 
 /// Removes non-terminal slices that no mapped or continuation edge reaches.

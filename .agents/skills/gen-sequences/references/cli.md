@@ -152,6 +152,7 @@ gen list-samples
 gen list-graphs --sample ref
 gen view <graph-name> --sample ref
 gen view <graph-name> --sample ref --full
+gen view <graph-name> --sample ref --png plot.png    # image file, no terminal needed
 gen get-sequence --sample ref --graph chr1 --start 100 --end 160
 gen get-sequence --sample ref --region chr1:100-160
 gen search ATGCGTACGTAG --sample ref
@@ -302,3 +303,7 @@ The root crate reexports the major internal crates from `src/lib.rs`:
 - `gen::get_connection`, `gen::get_operation_connection`, and `gen::track_database` for database setup.
 
 Use the CLI for ordinary user workflows. Use Rust APIs for scripts, tests, integrations, or when a user asks to build a new capability on top of Gen.
+
+Compact graph rendering uses one period (`.`) per skipped sequence run and `N.N`
+for unannotated long nodes. Annotation tails have brackets, directed heads use
+`<` or `>`, and undirected features have brackets at both ends.

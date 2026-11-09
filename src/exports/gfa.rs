@@ -6,7 +6,7 @@ use std::{
 };
 
 use gen_core::{HashId, Workspace, is_terminal, strand::Strand};
-use gen_graph::{GenGraph, project_path};
+use gen_graph::{GenGraph, GraphEdge, GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::BlockGroupEdge,
@@ -19,7 +19,10 @@ use gen_models::{
 use itertools::Itertools;
 use thiserror::Error;
 
-use crate::gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments};
+use crate::{
+    gfa::{Link, Path as GFAPath, Segment, path_line, write_links, write_segments},
+    views::junction_projection::project_junctions,
+};
 
 #[derive(Debug, Error)]
 pub enum GfaExportError {
@@ -105,13 +108,19 @@ pub fn export_gfa(
             .map(|(src, dest, weight)| (src, dest, weight.clone())),
     );
 
+    // Zero-width junctions have no sequence, so GFA would emit empty segments that break aligners.
+    // Links come from the viewer's junction projection, while the original graph still drives
+    // path projection and has junctions dropped from each walk afterwards.
+    let link_graph = project_junctions(&graph).graph;
+    let original_endpoints = edge_endpoints(&graph);
+
     let file = File::create(filename)?;
     let mut writer = BufWriter::new(file);
 
     let mut segments = BTreeSet::new();
     let mut split_segments = HashMap::new();
     for block in &blocks {
-        if !is_terminal(block.node_id) {
+        if !is_terminal(block.node_id) && block.start != block.end {
             if block.end - block.start > chunk_size {
                 let mut sub_segments = vec![];
                 let block_sequence = block.sequence();
@@ -150,8 +159,12 @@ pub fn export_gfa(
     }
 
     let mut links = BTreeSet::new();
-    for (source, target, edge_info) in graph.all_edges() {
+    for (source, target, edge_info) in link_graph.all_edges() {
         if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
+            // A link that replaced a junction bundles edges from several hops, so each end's
+            // strand comes from an edge that originally touched that end.
+            let (source_strand, target_strand) =
+                link_strands(&original_endpoints, source, target, edge_info);
             let source_segment = if let Some(splits) = split_segments.get(&source.node_id) {
                 let last_split = splits.last().unwrap();
                 Segment {
@@ -159,7 +172,7 @@ pub fn export_gfa(
                     node_id: source.node_id,
                     sequence_start: last_split.0,
                     sequence_end: last_split.1,
-                    strand: edge_info[0].source_strand,
+                    strand: source_strand,
                 }
             } else {
                 Segment {
@@ -167,7 +180,7 @@ pub fn export_gfa(
                     node_id: source.node_id,
                     sequence_start: source.sequence_start,
                     sequence_end: source.sequence_end,
-                    strand: edge_info[0].source_strand,
+                    strand: source_strand,
                 }
             };
 
@@ -178,7 +191,7 @@ pub fn export_gfa(
                     node_id: target.node_id,
                     sequence_start: first_split.0,
                     sequence_end: first_split.1,
-                    strand: edge_info[0].source_strand,
+                    strand: source_strand,
                 }
             } else {
                 Segment {
@@ -186,15 +199,15 @@ pub fn export_gfa(
                     node_id: target.node_id,
                     sequence_start: target.sequence_start,
                     sequence_end: target.sequence_end,
-                    strand: edge_info[0].target_strand,
+                    strand: target_strand,
                 }
             };
 
             links.insert(Link {
                 source_segment_id: source_segment.segment_id(),
-                source_strand: edge_info[0].source_strand,
+                source_strand,
                 target_segment_id: target_segment.segment_id(),
-                target_strand: edge_info[0].target_strand,
+                target_strand,
             });
         }
     }
@@ -230,6 +243,47 @@ pub fn export_gfa(
     write_paths(&mut writer, paths)?;
 
     Ok(())
+}
+
+/// Original (source, target) node pairs for every edge, used to recover per-end strands after
+/// junction edges are bundled together.
+fn edge_endpoints(graph: &GenGraph) -> HashMap<GraphEdge, Vec<(GraphNode, GraphNode)>> {
+    let mut endpoints: HashMap<GraphEdge, Vec<(GraphNode, GraphNode)>> = HashMap::new();
+    for (source, target, edges) in graph.all_edges() {
+        for edge in edges {
+            endpoints.entry(*edge).or_default().push((source, target));
+        }
+    }
+    endpoints
+}
+
+/// Strands for a link from `source` to `target`. A link that replaced a junction bundles edges
+/// from several hops, so each end's strand comes from an edge that originally touched that end.
+fn link_strands(
+    endpoints: &HashMap<GraphEdge, Vec<(GraphNode, GraphNode)>>,
+    source: GraphNode,
+    target: GraphNode,
+    edges: &[GraphEdge],
+) -> (Strand, Strand) {
+    let source_strand = edges
+        .iter()
+        .find(|edge| {
+            endpoints
+                .get(edge)
+                .is_some_and(|pairs| pairs.iter().any(|pair| pair.0 == source))
+        })
+        .unwrap_or(&edges[0])
+        .source_strand;
+    let target_strand = edges
+        .iter()
+        .find(|edge| {
+            endpoints
+                .get(edge)
+                .is_some_and(|pairs| pairs.iter().any(|pair| pair.1 == target))
+        })
+        .unwrap_or(&edges[0])
+        .target_strand;
+    (source_strand, target_strand)
 }
 
 fn get_paths(
@@ -269,7 +323,7 @@ fn get_paths(
                 projected_path
                     .iter()
                     .filter_map(|(node, strand)| {
-                        if !is_terminal(node.node_id) {
+                        if !is_terminal(node.node_id) && node.sequence_start != node.sequence_end {
                             if let Some(splits) = split_segments.get(&node.node_id) {
                                 Some(
                                     splits
@@ -333,7 +387,7 @@ fn write_paths(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs};
 
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
     use gen_graph::GraphNode;
@@ -680,23 +734,25 @@ mod tests {
         };
 
         assert!(
-            gfa_lines.contains(&format!("S\t{}\t", segment_id(junction))),
-            "the exported links should have a zero-width junction segment as their endpoint"
+            !gfa_lines.contains(&format!("S\t{}\t", segment_id(junction))),
+            "zero-width junctions should not be exported as empty segments"
+        );
+        assert!(
+            gfa_lines
+                .iter()
+                .all(|line| !line.contains(&segment_id(junction))),
+            "no link or path should reference the junction"
         );
         for upstream_part in upstream_parts {
             assert!(
-                gfa_lines.contains(&link_line(upstream_part, junction)),
-                "each combinatorial prefix should link to the exported junction"
+                gfa_lines.contains(&link_line(upstream_part, original_first_base)),
+                "each combinatorial prefix should link to the reference-healing route"
+            );
+            assert!(
+                gfa_lines.contains(&link_line(upstream_part, deleted_target)),
+                "each combinatorial prefix should link to the front-deletion route"
             );
         }
-        assert!(
-            gfa_lines.contains(&link_line(junction, original_first_base)),
-            "GFA export should retain the reference-healing route through the junction"
-        );
-        assert!(
-            gfa_lines.contains(&link_line(junction, deleted_target)),
-            "GFA export should retain the front-deletion route through the junction"
-        );
     }
 
     #[test]
@@ -1102,5 +1158,100 @@ mod tests {
         // The 10-length A and T sequences have now been split in two, but since the T sequences was
         // split in half, there's just one new TTTTT sequence shared by 2 nodes
         assert_eq!(node_hashes2.len(), 6);
+    }
+
+    #[test]
+    fn test_deletion_export_has_no_empty_segments_and_round_trips() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let fasta_path = fasta_path
+            .to_str()
+            .expect("should have a UTF-8 path")
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "deleted",
+            "m123:5-8",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let graph = BlockGroup::get_graph(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, collection, "deleted").id,
+            None,
+        )
+        .unwrap();
+        assert!(
+            graph
+                .nodes()
+                .filter(
+                    |node| !is_terminal(node.node_id) && node.sequence_start == node.sequence_end
+                )
+                .count()
+                >= 2,
+            "the deletion should leave zero-width junctions on both sides"
+        );
+        let temp_dir = tempdir().expect("should create a temporary directory");
+        let gfa_path = temp_dir.path().join("deleted.gfa");
+        export_gfa(
+            conn,
+            context.workspace(),
+            collection,
+            &gfa_path,
+            "deleted",
+            None,
+            None,
+        )
+        .unwrap();
+        let gfa = fs::read_to_string(&gfa_path).expect("should read the exported GFA");
+        let segment_ids = gfa
+            .lines()
+            .filter(|line| line.starts_with("S\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                assert!(!fields[2].is_empty() && fields[2] != "*");
+                fields[1].to_string()
+            })
+            .collect::<HashSet<_>>();
+        for line in gfa.lines().filter(|line| line.starts_with("L\t")) {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert!(segment_ids.contains(fields[1]) && segment_ids.contains(fields[3]));
+        }
+        for line in gfa.lines().filter(|line| line.starts_with("P\t")) {
+            let walk = line.split('\t').nth(2).expect("should have a walk");
+            for step in walk.split(',') {
+                assert!(segment_ids.contains(&step[..step.len() - 1]));
+            }
+        }
+
+        let block_group = get_sample_bg(conn, collection, "deleted");
+        let expected =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        import_gfa(&context, &gfa_path, "reimported", Sample::DEFAULT_NAME)
+            .expect("should import the exported GFA");
+        let reimported = Collection::get_block_groups(conn, "reimported", None)
+            .pop()
+            .unwrap();
+        let actual =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &reimported.id, false)
+                .unwrap();
+        assert_eq!(expected, actual);
     }
 }

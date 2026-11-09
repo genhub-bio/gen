@@ -1,0 +1,41 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##fileDate=29/01/2022 - 14:31:41
+##source=shapeit4.2.2
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Phased genotypes">
+##contig=<ID=HBB_region,length=6000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	HG00096	NA12878	NA18501	HG00403
+HBB_region	176	.	G	C	.	.	.	GT	0|1	0|0	1|0	0|0
+HBB_region	277	.	G	A	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	770	.	C	T	.	.	.	GT	0|1	0|0	0|0	0|0
+HBB_region	812	.	G	C	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	973	.	A	C	.	.	.	GT	0|1	0|0	0|0	0|0
+HBB_region	994	.	A	G	.	.	.	GT	0|0	0|0	1|0	0|0
+HBB_region	1126	.	T	A	.	.	.	GT	1|0	0|1	0|1	0|1
+HBB_region	1282	.	T	G	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	1284	.	C	T	.	.	.	GT	0|0	1|0	0|0	1|0
+HBB_region	1911	.	G	A	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	2503	.	A	C	.	.	.	GT	0|1	0|0	0|0	0|0
+HBB_region	2561	.	C	G	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	3002	.	T	A	.	.	.	GT	0|0	0|0	0|1	0|0
+HBB_region	3013	.	A	G	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	3411	.	G	A	.	.	.	GT	1|1	0|1	1|1	0|1
+HBB_region	3540	.	G	A	.	.	.	GT	1|1	1|1	1|1	1|1
+HBB_region	3562	.	T	G	.	.	.	GT	0|0	0|0	1|1	0|0
+HBB_region	3591	.	AG	A	.	.	.	GT	0|0	0|0	0|0	1|0
+HBB_region	3592	.	GA	G	.	.	.	GT	0|0	0|0	1|1	0|0
+HBB_region	3597	.	A	AAT	.	.	.	GT	1|0	1|1	0|0	0|0
+HBB_region	3599	.	T	A	.	.	.	GT	0|1	0|0	0|0	0|0
+HBB_region	3612	.	G	A	.	.	.	GT	1|1	1|1	1|1	1|1
+HBB_region	3614	.	G	A	.	.	.	GT	0|0	0|0	1|1	0|0
+HBB_region	3622	.	A	G	.	.	.	GT	1|0	1|1	0|0	0|1
+HBB_region	3774	.	A	G	.	.	.	GT	1|0	1|1	0|0	0|1
+HBB_region	3851	.	T	A	.	.	.	GT	0|0	0|0	1|0	0|0
+HBB_region	4060	.	G	C	.	.	.	GT	0|0	1|0	0|1	0|0
+HBB_region	4140	.	C	T	.	.	.	GT	0|0	0|0	1|1	0|0
+HBB_region	4458	.	C	CAAAAT	.	.	.	GT	0|0	0|1	0|0	0|0
+HBB_region	4938	.	G	A	.	.	.	GT	0|0	0|0	1|0	1|1
+HBB_region	5719	.	A	AAC	.	.	.	GT	1|0	0|0	0|0	0|0
+HBB_region	5719	.	AAC	A	.	.	.	GT	0|0	0|0	0|0	1|0
+HBB_region	5719	.	AACAC	A	.	.	.	GT	0|0	0|0	0|0	0|1
+HBB_region	5719	.	AACACACACACACACACACACAC	A	.	.	.	GT	0|0	0|0	1|0	0|0

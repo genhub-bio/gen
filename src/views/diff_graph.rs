@@ -5,36 +5,36 @@ use gen_diff::{
     operations::{BlockGroupChangeKind, BlockGroupDiff},
 };
 use gen_graph::{GenGraph, GraphNode};
-use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
+use gen_tui::{LineStyle, edge_ports::EdgeKey, graph_view::GraphViewState, plotter::PathStyle};
 use petgraph::Direction;
 use ratatui::style::Color;
 
-use crate::views::gen_graph_widget::GenGraphNodeSizer;
+use crate::views::gen_graph_widget::stored_edge_key;
 
 #[derive(Clone)]
 pub struct DiffGraphComponent {
     pub title: String,
     pub graph: GenGraph,
     pub highlighted_nodes: Vec<(GraphNode, Color)>,
-    pub highlighted_edges: Vec<((GraphNode, GraphNode), Color)>,
+    pub highlighted_edges: Vec<(EdgeKey<GraphNode>, Color)>,
 }
 
-/// Apply diff highlights (nodes and edges) to a graph controller.
+/// Apply diff highlights (nodes and edges) to a graph view's state.
 pub fn apply_diff_highlights(
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    view_state: &mut GraphViewState<GraphNode>,
     component: &DiffGraphComponent,
 ) {
     for &(node, color) in &component.highlighted_nodes {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        controller.set_node_highlight(node, style);
+        view_state.set_node_highlight(node, style);
     }
-    for &((src, target), color) in &component.highlighted_edges {
+    for &(edge, color) in &component.highlighted_edges {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        controller.set_edge_highlight((src, target), style);
+        view_state.set_edge_highlight(edge, style);
     }
 }
 
@@ -175,26 +175,22 @@ pub fn build_diff_graph_component(diff_graph: &DiffGenGraph, title: String) -> D
     }
 }
 
-fn collect_highlight_edges(diff_graph: &DiffGenGraph) -> Vec<((GraphNode, GraphNode), Color)> {
+/// One highlight per changed edge, keyed with its strands so a parallel edge that did not change
+/// stays unlit.
+fn collect_highlight_edges(diff_graph: &DiffGenGraph) -> Vec<(EdgeKey<GraphNode>, Color)> {
     let mut edges = Vec::new();
-    for (src, dest, edge_data) in diff_graph.all_edges() {
-        if edge_data
-            .iter()
-            .any(|edge| edge.change.kind == DiffChangeKind::Added)
-        {
-            edges.push(((src.node, dest.node), Color::Green));
-        }
-        if edge_data
-            .iter()
-            .any(|edge| edge.change.kind == DiffChangeKind::Removed)
-        {
-            edges.push(((src.node, dest.node), Color::Red));
-        }
-        if edge_data
-            .iter()
-            .any(|edge| edge.change.kind == DiffChangeKind::Modified)
-        {
-            edges.push(((src.node, dest.node), Color::Yellow));
+    for (source, target, edge_data) in diff_graph.all_edges() {
+        for diff_edge in edge_data {
+            let color = match diff_edge.change.kind {
+                DiffChangeKind::Added => Color::Green,
+                DiffChangeKind::Removed => Color::Red,
+                DiffChangeKind::Modified => Color::Yellow,
+                DiffChangeKind::Unchanged => continue,
+            };
+            let key = stored_edge_key(source.node, target.node, &diff_edge.edge);
+            if !edges.contains(&(key, color)) {
+                edges.push((key, color));
+            }
         }
     }
     edges

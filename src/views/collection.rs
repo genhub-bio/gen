@@ -456,6 +456,7 @@ impl CollectionExplorer {
             || self.data.sample_roots != new_data.sample_roots
             || self.data.sample_children != new_data.sample_children
             || self.data.sample_parents != new_data.sample_parents
+            || self.data.annotation_files != new_data.annotation_files
             || self.data.annotation_groups != new_data.annotation_groups;
         self.data = new_data;
         changed
@@ -1029,15 +1030,78 @@ impl StatefulWidget for &CollectionExplorer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use crossterm::event::KeyModifiers;
+    use gen_core::HashId;
     use gen_models::{
+        annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         block_group::{BlockGroup, NewBlockGroup},
+        file_types::FileTypes,
         history::dolt::commit_all,
         sample::{NewSample, Sample},
     };
 
     use super::*;
-    use crate::test_helpers::{setup_gen, setup_gen_on_disk};
+    use crate::{
+        test_helpers::{setup_gen, setup_gen_on_disk},
+        views::annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
+    };
+
+    fn annotation_file_entry(name: &str) -> AnnotationFileEntry {
+        AnnotationFileEntry {
+            file_addition: AnnotationAssetEntry {
+                id: HashId::convert_str(name),
+                asset_uri: name.to_string(),
+                file_type: FileTypes::Gff3,
+                checksum: None,
+            },
+            index_file_addition: None,
+            attribute_index_file_addition: None,
+            name: Some(name.to_string()),
+            display_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_retain_annotation_files_drops_files_missing_from_the_list() {
+        let first = annotation_file_entry("first.gff");
+        let second = annotation_file_entry("second.gff");
+        let mut state = CollectionExplorerState::new();
+        state.active_annotation_files.insert(first.file_addition.id);
+        state
+            .active_annotation_files
+            .insert(second.file_addition.id);
+
+        state.retain_annotation_files(std::slice::from_ref(&second));
+
+        assert!(!state.is_annotation_file_active(&first.file_addition.id));
+        assert!(state.is_annotation_file_active(&second.file_addition.id));
+    }
+
+    #[test]
+    fn test_collection_refresh_detects_added_annotation_file() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let mut explorer =
+            CollectionExplorer::new(conn, context.config().conn(), None, None, "test", None);
+        assert!(explorer.data.annotation_files.is_empty());
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        add_annotation_file(
+            &context,
+            fixture_path.to_str().expect("should encode fixture path"),
+            None,
+            None,
+            Some("fixture-track"),
+            Some("add-annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should add annotation file");
+
+        assert!(explorer.refresh(conn, context.config().conn(), None, None, "test", None,));
+        assert_eq!(explorer.data.annotation_files.len(), 1);
+    }
 
     #[test]
     fn test_collection_explorer_resolves_block_groups_from_history_ref() {

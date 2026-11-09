@@ -15,6 +15,7 @@ use gen_annotations::{
     AnnotationTranslationContext, translate_bed_annotation, translate_gff_annotation,
 };
 use gen_core::{HashId, NodeIntervalBlock, Sha256Hash, Strand, Workspace, region::Region};
+#[cfg(test)]
 use gen_graph::GenGraph;
 #[cfg(test)]
 use gen_models::{annotations::add_annotation, sample::Sample};
@@ -24,28 +25,22 @@ use gen_models::{
     db::GraphConnection,
     file_types::FileTypes,
     interval_tree::IntervalTreeSource as _,
-    locus::GraphLocus,
     reference_alias::ReferenceAlias,
     region::{GenRegionError, ResolvedGenRegion, ResolvedRegionKind},
 };
-use gen_tui::{
-    LineStyle, geometry::WorldPos, graph_controller::GraphController, layout::VisualDetail,
-    plotter::PathStyle,
-};
+use gen_tui::{LineStyle, plotter::PathStyle};
 use intervaltree::IntervalTree;
-use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::style::Color;
 
 #[cfg(test)]
 use crate::test_helpers::TestContext;
+#[cfg(test)]
+use crate::views::graph_database::GraphDatabase;
 use crate::views::{
     annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
-    annotation_track::{
-        AnnotationSegment, AnnotationSpan, annotation_span_from_resolved_region,
-        graph_locus_from_annotation_span,
-    },
+    annotation_track::{AnnotationSpan, annotation_span_from_resolved_region},
     annotations::resolve_annotation_search_paths,
-    gen_graph_widget::{GenGraphNodeSizer, locus_midpoint},
+    gen_graph_controller::GenGraphController,
     graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
     helpers::open_worker_connection,
 };
@@ -793,12 +788,13 @@ pub(super) fn remove_search_overlay(overlays: &mut Vec<GraphOverlay>) {
     overlays.retain(|overlay| !matches!(&overlay.source, OverlaySource::Search));
 }
 
-fn fallback_locus_for_empty_span(
+/// A zero-width region has no span to take a midpoint of, so it resolves to the backing-node
+/// coordinate where the region would sit.
+fn fallback_position_for_empty_span(
     region: &ResolvedGenRegion,
     conn: &GraphConnection,
     workspace: &Workspace,
-    graph: &GenGraph,
-) -> Result<GraphLocus, String> {
+) -> Result<(HashId, i64), String> {
     let midpoint = region
         .start
         .saturating_add(region.end.saturating_sub(region.start) / 2);
@@ -810,141 +806,54 @@ fn fallback_locus_for_empty_span(
         .start_anchors
         .and_then(|positions| positions.into_iter().next())
         .ok_or_else(|| "region did not map to a graph position".to_string())?;
-    let coordinate = position.coordinate();
-
-    // A zero-width point has no interval to project. Represent it as a one-base span at the
-    // resolved backing-node coordinate so the normal graph projection handles displayed slices.
-    for (start, end) in [
-        (coordinate, coordinate.saturating_add(1)),
-        (coordinate.saturating_sub(1), coordinate),
-    ] {
-        if start >= end {
-            continue;
-        }
-        let point_span = AnnotationSpan {
-            id: HashId::convert_str("region-search-point"),
-            name: String::new(),
-            segments: vec![AnnotationSegment {
-                node_id: position.graph_node.node_id,
-                start,
-                end,
-                strand: Strand::Forward,
-            }],
-        };
-        if let Some(locus) = graph_locus_from_annotation_span(&point_span, graph) {
-            return Ok(locus);
-        }
-    }
-
-    Err("region did not map to a graph position".to_string())
+    Ok((position.graph_node.node_id, position.coordinate()))
 }
 
+/// The base halfway through the span in reading order, as a backing-node coordinate. A reverse
+/// segment counts down from its end, matching `GraphLocus::midpoint`.
+fn span_midpoint(span: &AnnotationSpan) -> Option<(HashId, i64)> {
+    let length: i64 = span
+        .segments
+        .iter()
+        .map(|segment| segment.range.end - segment.range.start)
+        .sum();
+    let mut offset = length / 2;
+    for segment in &span.segments {
+        let width = segment.range.end - segment.range.start;
+        if offset < width {
+            let coordinate = if segment.strand == Strand::Reverse {
+                segment.range.end - 1 - offset
+            } else {
+                segment.range.start + offset
+            };
+            return Some((segment.node_id, coordinate));
+        }
+        offset -= width;
+    }
+    None
+}
+
+/// Move the viewer to a search match and highlight it. The target is a backing-node coordinate,
+/// so the controller locates it itself and a match in a batch the crawl has not reached opens
+/// that batch. The zoom level is left as the user set it.
 pub(super) fn activate_search_match(
-    graph_controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
-    overlays: &mut Vec<GraphOverlay>,
+    controller: &mut GenGraphController,
     search_match: &RegionSearchMatch,
     conn: &GraphConnection,
     workspace: &Workspace,
 ) -> Result<(), String> {
     let region = search_match.resolved_region()?;
     let span = annotation_span_from_resolved_region(conn, workspace, region)?;
-    let locus = if span.segments.is_empty() {
-        fallback_locus_for_empty_span(region, conn, workspace, graph_controller.graph())?
+    let (node_id, coordinate) = if span.segments.is_empty() {
+        fallback_position_for_empty_span(region, conn, workspace)?
     } else {
-        graph_locus_from_annotation_span(&span, graph_controller.graph())
-            .ok_or_else(|| "region did not map to a graph position".to_string())?
+        span_midpoint(&span).ok_or_else(|| "region did not map to a graph position".to_string())?
     };
-    navigate_to_search_locus(graph_controller, &locus)?;
-    replace_search_overlay(overlays, span);
+    if !controller.go_to_coordinate(node_id, coordinate, true) {
+        return Err("region did not map to a graph position".to_string());
+    }
+    replace_search_overlay(controller.overlays_mut(), span);
     Ok(())
-}
-
-fn navigate_to_search_locus(
-    graph_controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
-    locus: &GraphLocus,
-) -> Result<(), String> {
-    let (midpoint_slice, midpoint_offset) = locus_midpoint(locus)
-        .ok_or_else(|| "region did not map to a graph position".to_string())?;
-    let was_base_resolution = graph_controller.get_detail_level() == VisualDetail::Full;
-    let region_is_visible = was_base_resolution && search_locus_is_visible(graph_controller, locus);
-    graph_controller.set_detail_level(VisualDetail::Full);
-    if region_is_visible {
-        return Ok(());
-    }
-
-    let locus_length = locus
-        .slices
-        .iter()
-        .map(|slice| slice.end.saturating_sub(slice.start))
-        .sum::<usize>();
-    let viewport_width = graph_controller.viewport_state.viewport_bounds.width as usize;
-    let leading_slice = locus
-        .slices
-        .first()
-        .ok_or_else(|| "region did not map to a graph position".to_string())?;
-    let target = if locus_length > viewport_width {
-        (leading_slice, leading_slice.start, true)
-    } else {
-        (&midpoint_slice, midpoint_offset, false)
-    };
-    let node_index = NodeIndex::new(<GenGraph as NodeIndexable>::to_index(
-        graph_controller.graph(),
-        target.0.block,
-    ));
-    let node_length = target.0.block.length();
-    let fraction = if node_length == 0 {
-        0.5
-    } else {
-        (target.1 as f64 / node_length as f64).clamp(0.0, 1.0)
-    };
-    graph_controller.go_to_node(node_index, (fraction, 0.5));
-    if target.2 {
-        graph_controller.queue_snap_left();
-    }
-    graph_controller.rebuild_viewport_graph()?;
-    if !target.2 && !search_locus_is_visible(graph_controller, locus) {
-        let node_index = NodeIndex::new(<GenGraph as NodeIndexable>::to_index(
-            graph_controller.graph(),
-            leading_slice.block,
-        ));
-        let node_length = leading_slice.block.length();
-        let fraction = if node_length == 0 {
-            0.5
-        } else {
-            (leading_slice.start as f64 / node_length as f64).clamp(0.0, 1.0)
-        };
-        graph_controller.go_to_node(node_index, (fraction, 0.5));
-        graph_controller.queue_snap_left();
-        graph_controller.rebuild_viewport_graph()?;
-    }
-    Ok(())
-}
-
-fn search_locus_is_visible(
-    graph_controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-    locus: &GraphLocus,
-) -> bool {
-    let camera_rect = graph_controller.viewport_state.camera_rect();
-    let viewport_graph = graph_controller.get_viewport_graph();
-    locus.slices.iter().all(|slice| {
-        let node_index = NodeIndex::new(<GenGraph as NodeIndexable>::to_index(
-            graph_controller.graph(),
-            slice.block,
-        ));
-        let Some(node_center) = viewport_graph.node_positions.get(&node_index) else {
-            return false;
-        };
-        let node_width = slice.block.length();
-        if node_width <= 0 {
-            return false;
-        }
-        let node_start = node_center.x - (node_width.saturating_sub(1) / 2);
-        let slice_start = i64::try_from(slice.start).unwrap_or(i64::MAX);
-        let slice_end = i64::try_from(slice.end.saturating_sub(1)).unwrap_or(i64::MAX);
-        let first_base = WorldPos::new(node_start + slice_start, node_center.y);
-        let last_base = WorldPos::new(node_start + slice_end, node_center.y);
-        camera_rect.contains(first_base) && camera_rect.contains(last_base)
-    })
 }
 
 #[cfg(test)]
@@ -975,6 +884,18 @@ impl RegionSearchFixture {
 
     pub(super) fn workspace(&self) -> &Workspace {
         self.context.workspace()
+    }
+
+    /// A controller opened on the fixture's block group, the way the viewer holds one.
+    pub(super) fn controller(&self) -> GenGraphController {
+        let database =
+            GraphDatabase::for_connection(self.context.graph().conn(), self.context.workspace())
+                .expect("should open the search fixture database");
+        let mut controller = GenGraphController::new(database, None);
+        controller
+            .open_block_group(&self.block_group.id)
+            .expect("should open the search fixture block group");
+        controller
     }
 }
 
@@ -1032,29 +953,21 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
 mod tests {
     use std::{collections::HashSet, fs, path::PathBuf};
 
-    use gen_core::{HashId, Strand, region::Region};
-    use gen_graph::GenGraph;
-    use gen_models::{
-        annotations::AnnotationFileChecksumOverrides,
-        locus::{GraphLocus, GraphNodeSlice},
-    };
-    use gen_tui::{geometry::WorldPos, layout::VisualDetail, plotter::PathStyle};
-    use petgraph::visit::NodeIndexable;
-    use ratatui::{layout::Rect, style::Color};
+    use gen_annotations::projection::AnnotationSegment;
+    use gen_core::{HashId, Strand, range::Range, region::Region};
+    use gen_models::annotations::AnnotationFileChecksumOverrides;
+    use gen_tui::plotter::PathStyle;
+    use ratatui::style::Color;
     use tempfile::tempdir;
 
     use super::{
-        RegionSearchFixture, RegionSearchMatch, activate_search_match, navigate_to_search_locus,
-        query_annotation_file, remove_search_overlay, resolve_region_search_matches,
-        resolve_selected_search_match, search_locus_is_visible, search_request_fixture,
-        translate_user_region,
+        RegionSearchFixture, RegionSearchMatch, activate_search_match, query_annotation_file,
+        remove_search_overlay, resolve_region_search_matches, resolve_selected_search_match,
+        search_request_fixture, span_midpoint, translate_user_region,
     };
     use crate::views::{
-        annotation_track::{
-            AnnotationSpan, annotation_span_from_resolved_region, graph_locus_from_annotation_span,
-        },
-        gen_graph_widget::create_gen_graph_controller,
-        graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
+        annotation_track::{AnnotationSpan, annotation_span_from_resolved_region},
+        graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, PathMembership},
     };
 
     fn match_for_query(fixture: &RegionSearchFixture, query: &str) -> RegionSearchMatch {
@@ -1159,234 +1072,110 @@ mod tests {
         assert_eq!(path_match.label, "chr1:20-30 (path)");
         let path_span = span_for_match(&request, &path_match);
         assert_eq!(path_span.segments.len(), 1);
-        assert_eq!(path_span.segments[0].start, 19);
-        assert_eq!(path_span.segments[0].end, 30);
+        assert_eq!(path_span.segments[0].range.start, 19);
+        assert_eq!(path_span.segments[0].range.end, 30);
 
-        let mut controller = create_gen_graph_controller(request.graph.clone());
-        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 80, 24);
-        controller.set_detail_level(VisualDetail::Truncated);
-        controller
-            .rebuild_viewport_graph()
-            .expect("should render the starting locus at truncated detail");
-        let mut overlays = Vec::new();
+        let mut controller = request.controller();
         activate_search_match(
             &mut controller,
-            &mut overlays,
             &path_match,
             request.context.graph().conn(),
             request.workspace(),
         )
         .expect("should select and center the path match");
-        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
-        controller
-            .rebuild_viewport_graph()
-            .expect("should rebuild the full-detail search viewport");
-        assert!(search_locus_is_visible(
-            &controller,
-            &graph_locus_from_annotation_span(&path_span, &request.graph)
-                .expect("should map path search span to a graph locus"),
-        ));
-        controller.viewport_state.camera_current.x += 3;
-        controller.viewport_state.camera_target = controller.viewport_state.camera_current;
-        controller
-            .rebuild_viewport_graph()
-            .expect("should rebuild after a small pan");
-        let panned_camera = controller.viewport_state.camera_current;
-        activate_search_match(
-            &mut controller,
-            &mut overlays,
-            &path_match,
-            request.context.graph().conn(),
-            request.workspace(),
-        )
-        .expect("should keep an already-visible search locus in place");
-        controller
-            .rebuild_viewport_graph()
-            .expect("should rebuild the already-visible locus without recentering");
-        assert_eq!(controller.viewport_state.camera_current, panned_camera);
-
-        controller.set_detail_level(VisualDetail::Truncated);
-        controller
-            .rebuild_viewport_graph()
-            .expect("should render the selected locus at truncated detail");
-        activate_search_match(
-            &mut controller,
-            &mut overlays,
-            &path_match,
-            request.context.graph().conn(),
-            request.workspace(),
-        )
-        .expect("should return a selected region to base detail");
-        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
-        controller
-            .rebuild_viewport_graph()
-            .expect("should rebuild the base-detail search viewport");
-        assert!(search_locus_is_visible(
-            &controller,
-            &graph_locus_from_annotation_span(&path_span, &request.graph)
-                .expect("should map the selected path to a graph locus"),
-        ));
-
-        let selected_index = controller
+        let selected_node = controller
+            .view_state()
             .cursor
-            .node_idx()
+            .node
             .expect("should select the resolved graph node");
-        let selected_node =
-            <&GenGraph as NodeIndexable>::from_index(&controller.graph(), selected_index.index());
-        assert_eq!(selected_node.sequence_start, 0);
-        let (selected_fraction, _) = controller.cursor.fractional_pos();
-        assert!((selected_fraction - (24.0 / 34.0)).abs() < f64::EPSILON);
-        assert_eq!(overlays.len(), 1);
-        assert!(matches!(overlays[0].source, OverlaySource::Search));
+        let path_segment = &path_span.segments[0];
+        assert_eq!(selected_node.node_id, path_segment.node_id);
+        assert!(
+            (selected_node.sequence_start..selected_node.sequence_end).contains(&24),
+            "the cursor should land on the midpoint base of the path match"
+        );
+        assert_eq!(controller.overlays().len(), 1);
+        assert!(matches!(
+            controller.overlays()[0].source,
+            OverlaySource::Search
+        ));
 
         let path_slice_match = match_for_query(&request, "chr1:5-10");
         let path_slice_span = span_for_match(&request, &path_slice_match);
         assert_eq!(path_slice_span.segments.len(), 1);
-        assert_eq!(path_slice_span.segments[0].start, 4);
-        assert_eq!(path_slice_span.segments[0].end, 10);
+        assert_eq!(path_slice_span.segments[0].range.start, 4);
+        assert_eq!(path_slice_span.segments[0].range.end, 10);
 
         let single_base_match = match_for_query(&request, "chr1:5-5");
         let single_base_span = span_for_match(&request, &single_base_match);
         assert_eq!(single_base_span.segments.len(), 1);
-        assert_eq!(single_base_span.segments[0].start, 4);
-        assert_eq!(single_base_span.segments[0].end, 5);
+        assert_eq!(single_base_span.segments[0].range.start, 4);
+        assert_eq!(single_base_span.segments[0].range.end, 5);
 
         let model_match = match_for_query(&request, "model-gene:5-10");
         assert_eq!(model_match.label, "model-gene:5-10 (model annotation)");
         let model_span = span_for_match(&request, &model_match);
         assert_eq!(model_span.segments.len(), 1);
-        assert_eq!(model_span.segments[0].start, 9);
-        assert_eq!(model_span.segments[0].end, 15);
+        assert_eq!(model_span.segments[0].range.start, 9);
+        assert_eq!(model_span.segments[0].range.end, 15);
 
         let model_slice_match = match_for_query(&request, "model-gene:1-4");
         let model_slice_span = span_for_match(&request, &model_slice_match);
         assert_eq!(model_slice_span.segments.len(), 1);
-        assert_eq!(model_slice_span.segments[0].start, 5);
-        assert_eq!(model_slice_span.segments[0].end, 9);
+        assert_eq!(model_slice_span.segments[0].range.start, 5);
+        assert_eq!(model_slice_span.segments[0].range.end, 9);
 
         let model_single_base_match = match_for_query(&request, "model-gene:5-5");
         let model_single_base_span = span_for_match(&request, &model_single_base_match);
-        assert_eq!(model_single_base_span.segments[0].start, 9);
-        assert_eq!(model_single_base_span.segments[0].end, 10);
+        assert_eq!(model_single_base_span.segments[0].range.start, 9);
+        assert_eq!(model_single_base_span.segments[0].range.end, 10);
 
         let block_group_match = match_for_query(&request, "m123:20-30");
         assert_eq!(block_group_match.label, "m123:20-30 (block group)");
         let block_group_span = span_for_match(&request, &block_group_match);
         assert_eq!(block_group_span.segments.len(), 1);
-        assert_eq!(block_group_span.segments[0].start, 19);
-        assert_eq!(block_group_span.segments[0].end, 30);
+        assert_eq!(block_group_span.segments[0].range.start, 19);
+        assert_eq!(block_group_span.segments[0].range.end, 30);
 
         let zero_match = match_for_query(&request, "chr1:0-1");
         let zero_span = span_for_match(&request, &zero_match);
-        assert_eq!(zero_span.segments[0].start, 0);
-        assert_eq!(zero_span.segments[0].end, 1);
-    }
-
-    #[test]
-    fn test_reverse_locus_wider_than_viewport_starts_at_visual_lower_bound() {
-        let request = search_request_fixture();
-        let path_match = match_for_query(&request, "chr1:20-30");
-        let path_span = span_for_match(&request, &path_match);
-        let graph_locus = graph_locus_from_annotation_span(&path_span, &request.graph)
-            .expect("should map path search span to a graph locus");
-        let block = graph_locus
-            .slices
-            .first()
-            .expect("should find one graph slice for the path search")
-            .block;
-        let reverse_locus = GraphLocus {
-            slices: vec![GraphNodeSlice {
-                block,
-                start: 0,
-                end: block.length() as usize,
-                strand: Strand::Reverse,
-            }],
-        };
-        let viewport_width = 12;
-        let mut controller = create_gen_graph_controller(request.graph.clone());
-        controller.viewport_state.viewport_bounds = Rect::new(0, 0, viewport_width, 24);
-
-        navigate_to_search_locus(&mut controller, &reverse_locus)
-            .expect("should navigate to a wide reverse locus");
-
-        assert_eq!(controller.get_detail_level(), VisualDetail::Full);
-        let node_index = petgraph::graph::NodeIndex::new(<GenGraph as NodeIndexable>::to_index(
-            controller.graph(),
-            block,
-        ));
-        let node_center = controller
-            .get_viewport_graph()
-            .node_positions
-            .get(&node_index)
-            .expect("the selected reverse locus should be in the viewport graph");
-        let node_start = node_center.x - (block.length().saturating_sub(1) / 2);
-        let lower_bound = WorldPos::new(node_start, node_center.y);
-        let camera_rect = controller.viewport_state.camera_rect();
-        assert!(
-            camera_rect.contains(lower_bound),
-            "the visual lower bound should remain visible at Full detail"
-        );
-        let visible_bases = camera_rect
-            .right()
-            .min(node_start + block.length() - 1)
-            .saturating_sub(camera_rect.left().max(node_start))
-            + 1;
-        assert!(
-            visible_bases >= i64::from(viewport_width / 2),
-            "the camera should show a substantial part of the selected span"
-        );
+        assert_eq!(zero_span.segments[0].range.start, 0);
+        assert_eq!(zero_span.segments[0].range.end, 1);
     }
 
     #[test]
     fn test_region_search_activates_zero_and_negative_points() {
         let request = search_request_fixture();
         let zero_match = match_for_query(&request, "chr1:0");
-        let mut zero_controller = create_gen_graph_controller(request.graph.clone());
-        let mut zero_overlays = Vec::new();
+        let mut zero_view_state = request.controller();
 
         activate_search_match(
-            &mut zero_controller,
-            &mut zero_overlays,
+            &mut zero_view_state,
             &zero_match,
             request.context.graph().conn(),
             request.workspace(),
         )
         .expect("zero coordinate should navigate to the graph boundary");
-        assert!(zero_controller.cursor.node_idx().is_some());
-        assert_eq!(zero_overlays.len(), 1);
+        assert!(zero_view_state.view_state().cursor.node.is_some());
+        assert_eq!(zero_view_state.overlays().len(), 1);
         assert!(matches!(
-            &zero_overlays[0].content,
+            &zero_view_state.overlays()[0].content,
             OverlayContent::Span(span) if span.segments.is_empty()
         ));
 
         let negative_match = match_for_query(&request, "model-gene:-3");
-        assert_eq!(
-            (
-                negative_match
-                    .resolved_region()
-                    .expect("should resolve negative search match")
-                    .start,
-                negative_match
-                    .resolved_region()
-                    .expect("should resolve negative search match")
-                    .end,
-            ),
-            (-3, -3)
-        );
-        let mut negative_controller = create_gen_graph_controller(request.graph.clone());
-        let mut negative_overlays = Vec::new();
+        let mut negative_view_state = request.controller();
         activate_search_match(
-            &mut negative_controller,
-            &mut negative_overlays,
+            &mut negative_view_state,
             &negative_match,
             request.context.graph().conn(),
             request.workspace(),
         )
         .expect("negative model annotation coordinate should navigate upstream");
-        assert!(negative_controller.cursor.node_idx().is_some());
-        assert_eq!(negative_overlays.len(), 1);
+        assert!(negative_view_state.view_state().cursor.node.is_some());
+        assert_eq!(negative_view_state.overlays().len(), 1);
         assert!(matches!(
-            &negative_overlays[0].content,
+            &negative_view_state.overlays()[0].content,
             OverlayContent::Span(span) if span.segments.is_empty()
         ));
     }
@@ -1518,30 +1307,28 @@ mod tests {
             full_span
                 .segments
                 .iter()
-                .map(|segment| segment.end - segment.start)
+                .map(|segment| segment.range.end - segment.range.start)
                 .sum::<i64>(),
             16
         );
 
-        let mut controller = create_gen_graph_controller(fixture.graph.clone());
-        let mut overlays = Vec::new();
+        let mut controller = fixture.controller();
         activate_search_match(
             &mut controller,
-            &mut overlays,
             &selected_name_match,
             fixture.context.graph().conn(),
             fixture.workspace(),
         )
         .expect("should activate selected file annotation on the current graph");
-        assert!(controller.cursor.node_idx().is_some());
+        assert!(controller.view_state().cursor.node.is_some());
         assert!(matches!(
-            &overlays[0].content,
+            &controller.overlays()[0].content,
             OverlayContent::Span(span)
                 if span.segments.len() > 1
                     && span
                         .segments
                         .iter()
-                        .map(|segment| segment.end - segment.start)
+                        .map(|segment| segment.range.end - segment.range.start)
                         .sum::<i64>() == 16
         ));
 
@@ -1582,28 +1369,26 @@ mod tests {
             gene_name_span
                 .segments
                 .iter()
-                .map(|segment| segment.end - segment.start)
+                .map(|segment| segment.range.end - segment.range.start)
                 .sum::<i64>(),
             6
         );
-        let mut gene_name_controller = create_gen_graph_controller(fixture.graph.clone());
-        let mut gene_name_overlays = Vec::new();
+        let mut gene_name_controller = fixture.controller();
         activate_search_match(
             &mut gene_name_controller,
-            &mut gene_name_overlays,
             &selected_gene_name_match,
             fixture.context.graph().conn(),
             fixture.workspace(),
         )
         .expect("should activate selected gene_name-only file annotation");
-        assert!(gene_name_controller.cursor.node_idx().is_some());
+        assert!(gene_name_controller.view_state().cursor.node.is_some());
         assert!(matches!(
-            &gene_name_overlays[0].content,
+            &gene_name_controller.overlays()[0].content,
             OverlayContent::Span(span)
                 if span
                     .segments
                     .iter()
-                    .map(|segment| segment.end - segment.start)
+                    .map(|segment| segment.range.end - segment.range.start)
                     .sum::<i64>() == 6
         ));
         assert!(resolve_region_search_matches(&fixture.request(), "private-id-gene-name").is_err());
@@ -1625,7 +1410,7 @@ mod tests {
             sliced_span
                 .segments
                 .iter()
-                .map(|segment| segment.end - segment.start)
+                .map(|segment| segment.range.end - segment.range.start)
                 .sum::<i64>(),
             3
         );
@@ -1633,7 +1418,7 @@ mod tests {
             sliced_span
                 .segments
                 .iter()
-                .map(|segment| (segment.start, segment.end))
+                .map(|segment| (segment.range.start, segment.range.end))
                 .collect::<Vec<_>>(),
             vec![(6, 8), (0, 1)]
         );
@@ -1706,7 +1491,7 @@ mod tests {
                 full_span
                     .segments
                     .iter()
-                    .map(|segment| (segment.start, segment.end, segment.strand))
+                    .map(|segment| (segment.range.start, segment.range.end, segment.strand))
                     .collect::<Vec<_>>(),
                 expected_full_segments
             );
@@ -1727,7 +1512,7 @@ mod tests {
                 sliced_span
                     .segments
                     .iter()
-                    .map(|segment| (segment.start, segment.end, segment.strand))
+                    .map(|segment| (segment.range.start, segment.range.end, segment.strand))
                     .collect::<Vec<_>>(),
                 expected_slice_segments,
                 "the annotation-relative slice should cross the boundary between the two source records"
@@ -1775,29 +1560,27 @@ mod tests {
         assert_eq!(
             span.segments
                 .iter()
-                .map(|segment| segment.end - segment.start)
+                .map(|segment| segment.range.end - segment.range.start)
                 .sum::<i64>(),
             16
         );
 
-        let mut controller = create_gen_graph_controller(fixture.graph.clone());
-        let mut overlays = Vec::new();
+        let mut controller = fixture.controller();
         activate_search_match(
             &mut controller,
-            &mut overlays,
             &selected_match,
             fixture.context.graph().conn(),
             fixture.workspace(),
         )
         .expect("should activate selected simple GFF file annotation");
-        assert!(controller.cursor.node_idx().is_some());
+        assert!(controller.view_state().cursor.node.is_some());
         assert!(matches!(
-            &overlays[0].content,
+            &controller.overlays()[0].content,
             OverlayContent::Span(span)
                 if span
                     .segments
                     .iter()
-                    .map(|segment| segment.end - segment.start)
+                    .map(|segment| segment.range.end - segment.range.start)
                     .sum::<i64>() == 16
         ));
         assert!(resolve_region_search_matches(&fixture.request(), "gene-a0001").is_err());
@@ -1946,7 +1729,10 @@ mod tests {
         assert!(matches[0].needs_selection_resolution());
         let span = span_for_match(&fixture, &matches[0]);
         assert_eq!(span.segments.len(), 1);
-        assert_eq!((span.segments[0].start, span.segments[0].end), (4, 20));
+        assert_eq!(
+            (span.segments[0].range.start, span.segments[0].range.end),
+            (4, 20)
+        );
     }
 
     #[test]
@@ -1963,7 +1749,7 @@ mod tests {
                 style: PathStyle::new(Color::Cyan),
             },
             GraphOverlay {
-                content: OverlayContent::Path(vec![]),
+                content: OverlayContent::Path(PathMembership::default()),
                 source: OverlaySource::Path,
                 style: PathStyle::new(Color::Blue),
             },
@@ -2006,5 +1792,49 @@ mod tests {
                 .iter()
                 .any(|overlay| matches!(overlay.source, OverlaySource::Search))
         );
+    }
+
+    fn span_of(segments: Vec<(&str, i64, i64, Strand)>) -> AnnotationSpan {
+        AnnotationSpan {
+            id: HashId::convert_str("span"),
+            name: String::new(),
+            segments: segments
+                .into_iter()
+                .map(|(label, start, end, strand)| AnnotationSegment {
+                    node_id: HashId::convert_str(label),
+                    range: Range { start, end },
+                    strand,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_span_midpoint_counts_down_from_the_end_of_a_reverse_segment() {
+        let forward = span_of(vec![("a", 4, 10, Strand::Forward)]);
+        let reverse = span_of(vec![("a", 4, 10, Strand::Reverse)]);
+        let odd_reverse = span_of(vec![("a", 4, 9, Strand::Reverse)]);
+
+        assert_eq!(span_midpoint(&forward), Some((HashId::convert_str("a"), 7)));
+        assert_eq!(span_midpoint(&reverse), Some((HashId::convert_str("a"), 6)));
+        assert_eq!(
+            span_midpoint(&odd_reverse),
+            Some((HashId::convert_str("a"), 6))
+        );
+    }
+
+    #[test]
+    fn test_span_midpoint_walks_segments_in_reading_order() {
+        let span = span_of(vec![
+            ("a", 0, 3, Strand::Forward),
+            ("b", 10, 15, Strand::Forward),
+        ]);
+
+        assert_eq!(span_midpoint(&span), Some((HashId::convert_str("b"), 11)));
+    }
+
+    #[test]
+    fn test_span_midpoint_is_none_for_an_empty_span() {
+        assert_eq!(span_midpoint(&span_of(Vec::new())), None);
     }
 }

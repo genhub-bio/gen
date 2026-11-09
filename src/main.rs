@@ -2,7 +2,7 @@
 use std::{
     fmt::Debug,
     fs::File,
-    io::{self, BufReader, IsTerminal},
+    io::{self, BufReader, BufWriter, IsTerminal},
     ops::Deref,
     path::PathBuf,
     str,
@@ -28,8 +28,11 @@ use r#gen::{
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group,
-        block_group_inline::{show_inline_block_group_widget, show_inline_diff_graph_widget},
+        block_group::{BlockGroupViewOptions, view_block_group},
+        block_group_inline::{
+            InlineOutcome, PlotSize, show_inline_block_group_widget, write_block_group_png,
+            write_diff_graph_png,
+        },
         diff::{view_diff, view_diff_graph},
         operations::view_operations,
         patch::view_patch,
@@ -294,6 +297,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             position,
             full,
             height,
+            png,
+            png_columns,
+            png_rows,
         }) => {
             let collection_name = &resolve_initial_collection(
                 graph_conn,
@@ -315,22 +321,54 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     history_ref.as_deref(),
                 )?;
                 let title = format!("{graph_name}: query {query_name} against base {base_name}");
-                if full {
-                    view_diff_graph(graph_conn, db_context.workspace(), &diff.graph, title)?;
-                } else {
-                    match show_inline_diff_graph_widget(
+                if let Some(png_path) = png {
+                    let mut file = BufWriter::new(File::create(&png_path)?);
+                    write_diff_graph_png(
                         graph_conn,
-                        db_context.workspace(),
+                        &workspace,
                         &diff.graph,
-                        clamp_inline_view_height(height),
-                    ) {
-                        Ok(true) => {
-                            view_diff_graph(graph_conn, db_context.workspace(), &diff.graph, title)?
-                        }
-                        Ok(false) => {}
-                        Err(error) => eprintln!("Error showing inline widget: {error}"),
-                    }
+                        PlotSize {
+                            columns: png_columns,
+                            rows: png_rows,
+                        },
+                        &mut file,
+                    )?;
+                    println!("Wrote {}", png_path.display());
+                    return Ok(());
                 }
+                view_diff_graph(graph_conn, &workspace, &diff.graph, title)?;
+                return Ok(());
+            }
+
+            if let Some(png_path) = png {
+                let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) else {
+                    return Err(anyhow!("--png needs a graph name and --sample").into());
+                };
+                let block_group = BlockGroup::get_by_name(
+                    graph_conn,
+                    collection_name,
+                    sample_name,
+                    name,
+                    history_ref.as_deref(),
+                )
+                .map_err(|_| {
+                    anyhow!(
+                        "No block group found with name {name:?} and sample {sample_name:?} in collection {collection_name}"
+                    )
+                })?;
+                let mut file = BufWriter::new(File::create(&png_path)?);
+                write_block_group_png(
+                    graph_conn,
+                    &workspace,
+                    block_group.id,
+                    history_ref.as_deref(),
+                    PlotSize {
+                        columns: png_columns,
+                        rows: png_rows,
+                    },
+                    &mut file,
+                )?;
+                println!("Wrote {}", png_path.display());
                 return Ok(());
             }
 
@@ -353,26 +391,30 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         )?;
                         match show_inline_block_group_widget(
                             graph_conn,
-                            db_context.workspace(),
+                            &workspace,
                             bg.id,
                             vec![current_path],
                             clamp_inline_view_height(height),
                             history_ref.as_deref(),
                         ) {
-                            Ok(true) => {
-                                // User requested upgrade to full TUI
+                            Ok(InlineOutcome::OpenFullViewer(controller)) => {
+                                // User requested upgrade to full TUI, which keeps drawing the
+                                // inline widget's graph
                                 view_block_group(
                                     graph_conn,
                                     config_conn,
                                     &workspace,
-                                    graph,
-                                    sample,
-                                    collection_name,
-                                    position,
-                                    history_ref.as_deref(),
+                                    BlockGroupViewOptions {
+                                        name: graph,
+                                        sample_name: sample,
+                                        collection_name,
+                                        position,
+                                        history_ref: history_ref.as_deref(),
+                                        controller: Some(controller),
+                                    },
                                 )?;
                             }
-                            Ok(false) => {}
+                            Ok(InlineOutcome::Closed) => {}
                             Err(e) => {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
@@ -391,11 +433,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     graph_conn,
                     config_conn,
                     &workspace,
-                    graph,
-                    sample,
-                    collection_name,
-                    position,
-                    history_ref.as_deref(),
+                    BlockGroupViewOptions {
+                        name: graph,
+                        sample_name: sample,
+                        collection_name,
+                        position,
+                        history_ref: history_ref.as_deref(),
+                        controller: None,
+                    },
                 )?;
             }
             Ok(())

@@ -3,7 +3,6 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, SyncSender, TrySendError},
     thread,
-    time::{Duration, Instant},
 };
 
 use gen_core::{HashId, Workspace};
@@ -117,12 +116,10 @@ impl AnnotationLoadWorker {
 
 struct InFlightAnnotationLoad {
     identity: AnnotationLoadIdentity,
-    started_at: Instant,
 }
 
 pub(super) struct AnnotationLoadStatus {
     pub display_name: String,
-    pub elapsed: Duration,
     pub waiting: bool,
 }
 
@@ -266,10 +263,7 @@ impl AnnotationLoadCoordinator {
             let identity = job.identity.clone();
             match self.worker.try_send(job) {
                 Ok(()) => {
-                    self.in_flight = Some(InFlightAnnotationLoad {
-                        identity,
-                        started_at: Instant::now(),
-                    });
+                    self.in_flight = Some(InFlightAnnotationLoad { identity });
                     return;
                 }
                 Err(TrySendError::Full(job)) => {
@@ -292,7 +286,6 @@ impl AnnotationLoadCoordinator {
         {
             return Some(AnnotationLoadStatus {
                 display_name: in_flight.identity.entry.display_name.clone(),
-                elapsed: in_flight.started_at.elapsed(),
                 waiting: false,
             });
         }
@@ -301,7 +294,6 @@ impl AnnotationLoadCoordinator {
             .find(|pending| self.is_current(&pending.identity))
             .map(|pending| AnnotationLoadStatus {
                 display_name: pending.identity.entry.display_name.clone(),
-                elapsed: Duration::ZERO,
                 waiting: true,
             })
     }
@@ -475,7 +467,12 @@ mod tests {
                         .segments
                         .iter()
                         .map(|segment| {
-                            (segment.node_id, segment.start, segment.end, segment.strand)
+                            (
+                                segment.node_id,
+                                segment.range.start,
+                                segment.range.end,
+                                segment.strand,
+                            )
                         })
                         .collect(),
                 )

@@ -71,10 +71,9 @@ fn generate_dot_debug(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u3
                     let glyph_index = compute_routing_glyph_index(graph, idx);
                     format!("R{:04b}", glyph_index)
                 }
-                NodeRole::Stitch(side) => match side {
-                    gen_tui::partition::StitchSide::Left => "S_L".to_string(),
-                    gen_tui::partition::StitchSide::Right => "S_R".to_string(),
-                },
+                NodeRole::Pin(_) => "PIN".to_string(),
+                NodeRole::HairPin(_) => "HAIRPIN".to_string(),
+                NodeRole::Wormhole(target) => format!("->{}", target.index()),
             };
 
             let label = format!("{}\\n({},{})", node_title, x, y);
@@ -83,7 +82,9 @@ fn generate_dot_debug(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u3
             let (shape, color) = match &node.role {
                 NodeRole::Data(_) => ("box", "lightblue"),
                 NodeRole::Routing => ("circle", "lightgreen"),
-                NodeRole::Stitch(_) => ("diamond", "orange"),
+                NodeRole::Pin(_) => ("triangle", "purple"),
+                NodeRole::HairPin(_) => ("box", "hotpink"),
+                NodeRole::Wormhole(_) => ("triangle", "gray"),
             };
 
             writeln!(

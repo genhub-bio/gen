@@ -1,0 +1,17 @@
+---
+source: src/views/gen_graph_widget.rs
+expression: snapshot
+---
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"  ╟──ACGTACGTACGTACGT──ACGT──╢                                        "
+"          [═>                                                         "
+"  first long feature                                                  "
+"            <═]                                                       "
+"    second long feature                                               "
+"                                                                      "
+"                                                                      "

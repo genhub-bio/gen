@@ -17,51 +17,38 @@ use std::{
 
 use flate2::read::MultiGzDecoder;
 use gen_annotations::{
-    projection as annotation_projection,
+    projection::{self as annotation_projection, AnnotationSegment},
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, Workspace, is_terminal};
-use gen_graph::{GenGraph, GraphNode};
+use gen_core::{HashId, Strand, Workspace, range::Range};
+use gen_graph::GenGraph;
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationError},
     assets::{AssetUri, ChecksummedReader, LocalAssetUri},
-    block_group::BlockGroup,
     db::GraphConnection,
     file_types::FileTypes,
     reference_alias::ReferenceAlias,
 };
 use noodles::{bed, bgzf, core::Region, csi, gff, tabix};
-use petgraph::Direction;
 use tempfile::NamedTempFile;
 
 use crate::views::{
     annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
     annotation_groups::AnnotationGroupEntry,
-    annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
+    annotation_track::{AnnotationSpan, AnnotationTrack},
 };
 
 pub struct AnnotationGroupTrackRequest<'a> {
     pub conn: &'a GraphConnection,
-    pub workspace: &'a Workspace,
     pub history_ref: Option<&'a str>,
-    pub current_block_group: &'a BlockGroup,
     pub entry: &'a AnnotationGroupEntry,
+    /// The graph the viewer has loaded so far, which the annotations are clipped onto. A lazily
+    /// crawled graph only carries the slices crawled so far, so segments over unloaded slices
+    /// are dropped until the crawl loads them and the groups reload.
+    pub projection_graph: &'a GenGraph,
     /// Node IDs to restrict results to — typically the viewport's visible nodes.
     pub node_ids: &'a HashSet<HashId>,
-}
-
-pub fn load_annotations_for_group(
-    request: &AnnotationGroupTrackRequest<'_>,
-) -> Result<Vec<AnnotationSpan>, AnnotationError> {
-    load_group_annotations(
-        request.conn,
-        request.workspace,
-        request.current_block_group,
-        request.entry,
-        request.node_ids,
-        request.history_ref,
-    )
 }
 
 /// Clip `accession_segments` (stored in per-node absolute sequence coordinates, from
@@ -80,7 +67,7 @@ pub fn load_annotations_for_group(
 /// that carries a fragment of it — e.g. every candidate in a combinatorial library, not
 /// only whichever one happens to be "the" current path.
 fn clip_segments_to_graph(
-    accession_segments: &[annotation_projection::AnnotationSegment],
+    accession_segments: &[AnnotationSegment],
     graph: &GenGraph,
 ) -> Vec<AnnotationSegment> {
     let mut clipped = Vec::new();
@@ -96,8 +83,10 @@ fn clip_segments_to_graph(
             }
             clipped.push(AnnotationSegment {
                 node_id: node.node_id,
-                start: overlap_start,
-                end: overlap_end,
+                range: Range {
+                    start: overlap_start,
+                    end: overlap_end,
+                },
                 strand: segment.strand,
             });
         }
@@ -105,67 +94,29 @@ fn clip_segments_to_graph(
     clipped
 }
 
-/// True if `segments` cover the block group graph end to end. Root/leaf are resolved past
-/// any zero-length PATH_START_NODE_ID/PATH_END_NODE_ID sentinel to the real content node.
-fn spans_whole_block_group(segments: &[AnnotationSegment], graph: &GenGraph) -> bool {
-    let mut root = None;
-    let mut leaf = None;
-    for node in graph.nodes() {
-        if graph
-            .neighbors_directed(node, Direction::Incoming)
-            .next()
-            .is_none()
-        {
-            root = Some(node);
-        }
-        if graph
-            .neighbors_directed(node, Direction::Outgoing)
-            .next()
-            .is_none()
-        {
-            leaf = Some(node);
-        }
-    }
-
-    let boundary_nodes = |node: GraphNode, direction: Direction| -> Vec<GraphNode> {
-        if is_terminal(node.node_id) {
-            graph.neighbors_directed(node, direction).collect()
-        } else {
-            vec![node]
-        }
-    };
-
-    let starts_at_root = root.is_some_and(|root| {
-        boundary_nodes(root, Direction::Outgoing)
-            .into_iter()
-            .any(|boundary| {
-                segments.iter().any(|segment| {
-                    segment.node_id == boundary.node_id && segment.start <= boundary.sequence_start
-                })
-            })
-    });
-    let ends_at_leaf = leaf.is_some_and(|leaf| {
-        boundary_nodes(leaf, Direction::Incoming)
-            .into_iter()
-            .any(|boundary| {
-                segments.iter().any(|segment| {
-                    segment.node_id == boundary.node_id && segment.end >= boundary.sequence_end
-                })
-            })
-    });
-    starts_at_root && ends_at_leaf
+/// True for a feature the viewers leave out: a GenBank or GFF `source` feature describes the
+/// whole record (organism, molecule type) rather than a region of it, so drawing it only buries
+/// the features under it. Every viewer loads group annotations through
+/// [`load_annotations_for_group`], so skipping them there also keeps them out of the `w`/`b`
+/// annotation stops.
+fn is_hidden_feature(annotation: &Annotation) -> bool {
+    annotation
+        .feature_type()
+        .is_some_and(|feature_type| feature_type.eq_ignore_ascii_case("source"))
 }
 
-fn load_group_annotations(
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    current_block_group: &BlockGroup,
-    entry: &AnnotationGroupEntry,
-    node_ids: &HashSet<HashId>,
-    history_ref: Option<&str>,
+pub fn load_annotations_for_group(
+    request: &AnnotationGroupTrackRequest<'_>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
-    // The entry identifies the block group that owns the annotations. The current
-    // selection below is only the graph onto which those annotations are projected.
+    let AnnotationGroupTrackRequest {
+        conn,
+        history_ref,
+        entry,
+        projection_graph,
+        node_ids,
+    } = *request;
+    // The entry identifies the block group that owns the annotations. The projection graph
+    // below is only the graph onto which those annotations are projected.
     let annotations = Annotation::query_by_group_and_block_group(
         conn,
         &entry.name,
@@ -176,13 +127,12 @@ fn load_group_annotations(
     // Annotations are stored against the node(s) they were created on, which may since
     // have been split by later edits (a library insertion, a sequence update, ...), or may
     // live on a branch other than whichever one is "the" current path (e.g. one option in
-    // a combinatorial library). Clip them onto the block group's full graph so an
+    // a combinatorial library). Clip them onto every loaded slice of the viewed graph so an
     // annotation still covers every surviving fragment of its original range, on every
     // branch, with a gap wherever an edit spliced in unrelated sequence.
-    let graph = BlockGroup::get_graph(conn, workspace, &current_block_group.id, history_ref)
-        .unwrap_or_else(|_| GenGraph::new());
     Ok(annotations
         .into_iter()
+        .filter(|annotation| !is_hidden_feature(annotation))
         .filter_map(|annotation| {
             let select = Accession::select(conn).with_ref(history_ref);
             let _ = select
@@ -190,23 +140,12 @@ fn load_group_annotations(
                 .expect("should load accession by id")?;
             let accession_segments =
                 annotation_projection::annotation_segments(conn, &annotation, history_ref);
-            let clipped_segments = clip_segments_to_graph(&accession_segments, &graph);
+            let clipped_segments = clip_segments_to_graph(&accession_segments, projection_graph);
             let full_segments = if clipped_segments.is_empty() {
                 accession_segments
-                    .iter()
-                    .map(|segment| AnnotationSegment {
-                        node_id: segment.node_id,
-                        start: segment.range.start,
-                        end: segment.range.end,
-                        strand: segment.strand,
-                    })
-                    .collect()
             } else {
                 clipped_segments
             };
-            if spans_whole_block_group(&full_segments, &graph) {
-                return None;
-            }
             let segments = full_segments
                 .into_iter()
                 .filter(|segment| node_ids.contains(&segment.node_id))
@@ -336,8 +275,10 @@ pub fn parse_translated_gff<R: BufRead>(
             .or_default()
             .push(AnnotationSegment {
                 node_id,
-                start: seg_start,
-                end: seg_end,
+                range: Range {
+                    start: seg_start,
+                    end: seg_end,
+                },
                 strand: record.strand().into(),
             });
     }
@@ -402,8 +343,10 @@ pub fn parse_translated_bed<R: BufRead>(
             .or_default()
             .push(AnnotationSegment {
                 node_id,
-                start: seg_start,
-                end: seg_end,
+                range: Range {
+                    start: seg_start,
+                    end: seg_end,
+                },
                 strand,
             });
     }
@@ -994,24 +937,31 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_core::{HashId, Sha256Hash, Strand};
+    use gen_annotations::projection::AnnotationSegment;
+    use gen_core::{HashId, PATH_START_NODE_ID, Sha256Hash, Strand, range::Range};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
-        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+        ForeignKeyCache,
+        annotations::{
+            Annotation, AnnotationExtra, AnnotationFileChecksumOverrides, GenBankExtra, GffExtra,
+            add_annotation, add_annotation_file,
+        },
         block_group::BlockGroup,
+        db::GraphConnection,
         file_types::FileTypes,
         operations::commit_operation_summary,
+        port_crawl::PortCrawler,
         sample::Sample,
     };
     use noodles::{bgzf, core::Position, csi, tabix};
+    use petgraph::Direction;
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{
         AnnotationCoordinateIndex, AnnotationFileTrackRequest, AnnotationGroupTrackRequest,
-        AnnotationSegment, annotation_index_is_coordinate_index, coordinate_index_path,
+        annotation_index_is_coordinate_index, coordinate_index_path, is_hidden_feature,
         load_annotation_file_track, load_annotation_index, load_annotations_for_group,
         load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
-        spans_whole_block_group,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -1025,6 +975,26 @@ mod tests {
             annotation_groups::load_annotation_group_entries,
         },
     };
+
+    /// The part of a block group a viewer has loaded after walking `budget` nodes past
+    /// `PATH_START`'s first content slices, the way a lazy crawl grows its graph.
+    fn crawl_from_path_start(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        budget: usize,
+    ) -> GenGraph {
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(start);
+        PortCrawler::new(*block_group_id, false)
+            .expand(conn, &mut graph, &[start], Direction::Outgoing, budget)
+            .expect("should crawl from PATH_START");
+        graph
+    }
 
     fn serve_http_content(
         contents: &[u8],
@@ -1099,8 +1069,8 @@ mod tests {
         assert_eq!(spans[0].name, "feature-a");
         assert_eq!(spans[0].segments.len(), 1);
         assert_eq!(spans[0].segments[0].node_id, node_id);
-        assert_eq!(spans[0].segments[0].start, 5);
-        assert_eq!(spans[0].segments[0].end, 8);
+        assert_eq!(spans[0].segments[0].range.start, 5);
+        assert_eq!(spans[0].segments[0].range.end, 8);
         assert_eq!(spans[0].segments[0].strand, Strand::Reverse);
     }
 
@@ -1111,15 +1081,15 @@ mod tests {
     fn clip_segments_to_graph_leaves_a_gap_over_an_inserted_block() {
         use gen_graph::{GenGraph, GraphNode};
 
-        use super::{annotation_projection, clip_segments_to_graph};
+        use super::clip_segments_to_graph;
 
         let original_node_id = HashId::convert_str("original");
         let inserted_node_id = HashId::convert_str("inserted");
 
         // The annotation was created before the split, covering the whole original node.
-        let accession_segments = vec![annotation_projection::AnnotationSegment {
+        let accession_segments = vec![AnnotationSegment {
             node_id: original_node_id,
-            range: gen_core::range::Range {
+            range: Range {
                 start: 0,
                 end: 2686,
             },
@@ -1146,20 +1116,21 @@ mod tests {
         });
 
         let mut segments = clip_segments_to_graph(&accession_segments, &graph);
-        segments.sort_by_key(|s| s.start);
+        segments.sort_by_key(|s| s.range.start);
 
         assert_eq!(segments.len(), 2, "no segment over the inserted block");
         assert_eq!(segments[0].node_id, original_node_id);
-        assert_eq!(segments[0].start, 0);
-        assert_eq!(segments[0].end, 395);
+        assert_eq!(segments[0].range.start, 0);
+        assert_eq!(segments[0].range.end, 395);
         assert_eq!(segments[1].node_id, original_node_id);
-        assert_eq!(segments[1].start, 483);
-        assert_eq!(segments[1].end, 2686);
+        assert_eq!(segments[1].range.start, 483);
+        assert_eq!(segments[1].range.end, 2686);
     }
 
-    /// pUC19's `source 1..2686` feature spans the whole plasmid and should be hidden.
+    /// pUC19's `source 1..2686` feature describes the whole record and is hidden by its type,
+    /// while `ori`, which wraps the origin, and the other features are shown.
     #[test]
-    fn load_annotations_for_group_hides_puc19_whole_plasmid_source_annotation() {
+    fn test_load_annotations_for_group_hides_puc19_source_and_shows_origin_feature() {
         use std::{fs::File, io::BufReader, path::PathBuf};
 
         use gen_models::{
@@ -1213,25 +1184,43 @@ mod tests {
             origin: AnnotationGroupOrigin::CurrentSample,
         };
 
-        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
-            conn,
-            workspace: context.workspace(),
-            history_ref: None,
-            current_block_group: block_group,
-            entry: &entry,
-            node_ids: &node_ids,
-        })
-        .unwrap();
+        // The plasmid's own start only, as a lazily crawling viewer first loads it.
+        let partial_graph = crawl_from_path_start(conn, &block_group.id, 0);
+        assert!(partial_graph.node_count() < graph.node_count());
 
-        let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            !names.contains(&"source"),
-            "expected the whole-plasmid `source` feature to be hidden, got {names:?}"
-        );
-        assert!(
-            names.contains(&"AmpR"),
-            "real features should still resolve, got {names:?}"
-        );
+        for projection_graph in [&graph, &partial_graph] {
+            let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+                conn,
+                history_ref: None,
+                entry: &entry,
+                projection_graph,
+                node_ids: &node_ids,
+            })
+            .unwrap();
+
+            let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                !names.contains(&"source"),
+                "the `source` feature should be hidden, got {names:?}"
+            );
+            let ori = spans
+                .iter()
+                .find(|span| span.name == "ori")
+                .unwrap_or_else(|| panic!("the `ori` feature should be shown, got {names:?}"));
+            // `join(2315..2686,1..217)`: the half running off the end comes first, so it is
+            // drawn without an end cap and the half at the start without a start cap.
+            assert_eq!(
+                ori.segments
+                    .iter()
+                    .map(|segment| (segment.range.start, segment.range.end))
+                    .collect::<Vec<_>>(),
+                vec![(2314, 2686), (0, 217)]
+            );
+            assert!(
+                names.contains(&"AmpR"),
+                "real features should still resolve, got {names:?}"
+            );
+        }
     }
 
     /// Each option in a combinatorial library gets its own annotation on its own graph
@@ -1292,10 +1281,9 @@ mod tests {
 
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
-            workspace: context.workspace(),
             history_ref: None,
-            current_block_group: block_group,
             entry: &entry,
+            projection_graph: &graph,
             node_ids: &node_ids,
         })
         .unwrap();
@@ -1308,6 +1296,228 @@ mod tests {
             "every combinatorial candidate's annotation should resolve, not just the one \
              on the current path"
         );
+    }
+
+    /// A viewer only loads part of the graph at a time. Projected onto that partial graph, the
+    /// annotations over its fully loaded nodes come out exactly as they do on the full graph.
+    #[test]
+    fn test_load_annotations_for_group_on_partial_graph_matches_full_graph() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let library_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let fasta_path = fasta_path.to_str().unwrap().to_string();
+        let parts_path = parts_path.to_str().unwrap().to_string();
+        let library_path = library_path.to_str().unwrap().to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            &collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        add_annotation(
+            &context,
+            &collection,
+            "SITE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:7-20",
+        )
+        .unwrap();
+        // Annotates the sequence end to end.
+        add_annotation(
+            &context,
+            &collection,
+            "WHOLE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:0-34",
+        )
+        .unwrap();
+        update_with_library(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "design",
+            "SITE",
+            parse_library(&parts_path, &library_path).unwrap(),
+            Some(&parts_path),
+            Some(&library_path),
+        )
+        .unwrap();
+
+        let block_group = Sample::get_block_groups(conn, &collection, "design", None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should contain the design m123 block group");
+        let full_graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let partial_graph = crawl_from_path_start(conn, &block_group.id, 3);
+        assert!(
+            partial_graph.node_count() < full_graph.node_count(),
+            "the crawl should stop short of the whole graph"
+        );
+        let fully_loaded_node_ids: HashSet<HashId> = partial_graph
+            .nodes()
+            .map(|node| node.node_id)
+            .filter(|node_id| {
+                full_graph
+                    .nodes()
+                    .filter(|node| node.node_id == *node_id)
+                    .all(|node| partial_graph.contains_node(node))
+            })
+            .collect();
+        assert!(!fully_loaded_node_ids.is_empty());
+
+        let entries = load_annotation_group_entries(conn, &block_group, None);
+        assert!(
+            entries.iter().any(|entry| entry.name == "default"),
+            "the group holding the end-to-end annotation should be listed"
+        );
+        let mut compared_span_count = 0;
+        for entry in entries {
+            let load = |projection_graph: &GenGraph| {
+                let mut spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+                    conn,
+                    history_ref: None,
+                    entry: &entry,
+                    projection_graph,
+                    node_ids: &fully_loaded_node_ids,
+                })
+                .unwrap()
+                .into_iter()
+                .map(|span| {
+                    let mut segments = span
+                        .segments
+                        .iter()
+                        .map(|segment| (segment.node_id, segment.range.start, segment.range.end))
+                        .collect::<Vec<_>>();
+                    segments.sort();
+                    (span.name, segments)
+                })
+                .collect::<Vec<_>>();
+                spans.sort();
+                spans
+            };
+            let full_spans = load(&full_graph);
+            let partial_spans = load(&partial_graph);
+            assert_eq!(
+                partial_spans, full_spans,
+                "group {} should project the same onto the loaded nodes",
+                entry.name
+            );
+            compared_span_count += full_spans.len();
+        }
+        assert!(
+            compared_span_count > 0,
+            "some annotation should land on the loaded nodes"
+        );
+    }
+
+    /// Only the feature type decides what is hidden, in any case, whether it came from GenBank
+    /// or GFF; an annotation without a type is always shown.
+    #[test]
+    fn test_is_hidden_feature_matches_source_type_case_insensitively() {
+        let annotation = |extra: Option<AnnotationExtra>| Annotation {
+            id: HashId::convert_str("annotation"),
+            name: "source".to_string(),
+            group: "group".to_string(),
+            accession_id: HashId::convert_str("accession"),
+            cached_accession: ForeignKeyCache::default(),
+            cached_interval_tree: None,
+            history_ref: None,
+            extra,
+        };
+        let genbank = |kind: &str| {
+            Some(AnnotationExtra {
+                genbank: Some(GenBankExtra {
+                    kind: kind.to_string(),
+                    ..GenBankExtra::default()
+                }),
+                ..AnnotationExtra::default()
+            })
+        };
+        let gff = |ty: &str| {
+            Some(AnnotationExtra {
+                gff: Some(GffExtra {
+                    ty: ty.to_string(),
+                    ..GffExtra::default()
+                }),
+                ..AnnotationExtra::default()
+            })
+        };
+
+        assert!(is_hidden_feature(&annotation(genbank("source"))));
+        assert!(is_hidden_feature(&annotation(genbank("Source"))));
+        assert!(is_hidden_feature(&annotation(gff("SOURCE"))));
+        assert!(!is_hidden_feature(&annotation(genbank("CDS"))));
+        assert!(!is_hidden_feature(&annotation(gff("region"))));
+        assert!(
+            !is_hidden_feature(&annotation(None)),
+            "an annotation named `source` without a feature type is shown"
+        );
+    }
+
+    /// An annotation covering the whole sequence end to end is shown when its type is not
+    /// `source`.
+    #[test]
+    fn test_load_annotations_for_group_shows_whole_length_non_source_annotation() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            &collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        add_annotation(
+            &context,
+            &collection,
+            "WHOLE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:0-34",
+        )
+        .unwrap();
+
+        let block_group = Sample::get_block_groups(conn, &collection, Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should contain the m123 block group");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let node_ids: HashSet<HashId> = graph.nodes().map(|node| node.node_id).collect();
+
+        let names: Vec<String> = load_annotation_group_entries(conn, &block_group, None)
+            .iter()
+            .flat_map(|entry| {
+                load_annotations_for_group(&AnnotationGroupTrackRequest {
+                    conn,
+                    history_ref: None,
+                    entry,
+                    projection_graph: &graph,
+                    node_ids: &node_ids,
+                })
+                .unwrap()
+            })
+            .map(|span| span.name)
+            .collect();
+        assert_eq!(names, vec!["WHOLE".to_string()]);
     }
 
     #[test]
@@ -1385,10 +1595,9 @@ mod tests {
 
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
-            workspace: context.workspace(),
             history_ref: None,
-            current_block_group: &selected_block_group,
             entry: &entry,
+            projection_graph: &selected_graph,
             node_ids: &node_ids,
         })
         .unwrap();
@@ -1403,40 +1612,6 @@ mod tests {
             ["cds1", "cds2", "cds3", "p1", "p2", "p3"],
             "annotations should be queried with the entry source ID and projected onto the selected graph"
         );
-    }
-
-    /// A full-length annotation between sentinel-wrapped root/leaf should be hidden.
-    #[test]
-    fn spans_whole_block_group_hides_full_length_annotation_on_single_node_graph() {
-        use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
-
-        let node_id = HashId::convert_str("only-node");
-        let start = GraphNode {
-            node_id: PATH_START_NODE_ID,
-            sequence_start: 0,
-            sequence_end: 0,
-        };
-        let content = GraphNode {
-            node_id,
-            sequence_start: 0,
-            sequence_end: 100,
-        };
-        let end = GraphNode {
-            node_id: PATH_END_NODE_ID,
-            sequence_start: 0,
-            sequence_end: 0,
-        };
-        let mut graph = GenGraph::new();
-        graph.add_edge(start, content, Vec::new());
-        graph.add_edge(content, end, Vec::new());
-
-        let segments = vec![AnnotationSegment {
-            node_id,
-            start: 0,
-            end: 100,
-            strand: Strand::Forward,
-        }];
-        assert!(spans_whole_block_group(&segments, &graph));
     }
 
     #[test]
