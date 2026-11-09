@@ -17,22 +17,22 @@ use crate::{
     compaction::{
         AxisPlacement, Constraint, compact_axis_with_centering, constraints_are_satisfied,
     },
-    diagonal::{
+    curved::{
         EdgeStyle, HAIRPIN_ARC_RESERVED_CELLS, LoopbackNeighbors, loopback_neighbors,
         loopback_reach,
     },
     layout::{LayoutEdge, LayoutNode, NodeRole},
 };
 
-/// Cells of horizontal run an unrouted diagonal edge gets per row of vertical drop. A row is about
+/// Cells of horizontal run an curved edge gets per row of vertical drop. A row is about
 /// twice as tall as a cell is wide, so two cells per row keeps edges near 45 degrees as drawn.
 /// Compaction widens the gap between two layers until their steepest edge fits, so a dense layer
 /// does not turn its edges into near-vertical strokes that overprint each other.
-const DIAGONAL_RUN_CELLS_PER_ROW: i64 = 2;
+const CURVED_RUN_CELLS_PER_ROW: i64 = 2;
 
-/// Longest horizontal run compaction adds for the sake of a diagonal edge's slope. Beyond this the
+/// Longest horizontal run compaction adds for the sake of a curved edge's slope. Beyond this the
 /// edge is allowed to be steep: a few outlier edges should not stretch the whole window.
-const MAX_DIAGONAL_RUN: i64 = 20;
+const MAX_CURVED_RUN: i64 = 20;
 
 /// Extents on either side of a discrete center; `lo` receives the extra cell for odd sizes.
 #[derive(Clone, Copy, Debug)]
@@ -300,7 +300,7 @@ pub fn compact_layout(
 
 /// Tight placement uses minimum Y gaps and packs toward `vertical_anchor`.
 ///
-/// A diagonal `edge_style` has no routed channels to give layers room, so compaction keeps each
+/// A curved `edge_style` has no routed channels to give layers room, so compaction keeps each
 /// layer a rigid column and spaces columns by the slope of the edges between them.
 pub(crate) fn compact_layout_with_vertical_placement(
     graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
@@ -405,8 +405,8 @@ fn solve_axis(
         }
     }
     // Without routing nodes to tie a layer together, keep its nodes in one column.
-    let diagonal_columns = edge_style.is_diagonal() && axis == Axis::X;
-    if diagonal_columns {
+    let curved_columns = edge_style.is_curved() && axis == Axis::X;
+    if curved_columns {
         let mut first_in_column: HashMap<i64, usize> = HashMap::new();
         for (dense, &node_idx) in nodes.iter().enumerate() {
             let first = *first_in_column
@@ -505,7 +505,7 @@ fn solve_axis(
         }
     }
 
-    if diagonal_columns {
+    if curved_columns {
         for &index in &nodes {
             let port = &graph[index];
             let Some(anchor) = port.padding_anchor else {
@@ -526,7 +526,7 @@ fn solve_axis(
         }
     }
 
-    // Diagonal edges (routed directly rather than through rectilinear dummies)
+    // Curved edges (routed directly rather than through rectilinear dummies)
     // carry no spacing requirement, but their endpoint order on each axis must
     // survive compaction.
     for edge in graph.edge_references() {
@@ -543,11 +543,11 @@ fn solve_axis(
         // Nodes on one row are spaced by their collision constraints, so an edge along a row has
         // nothing to add unless a hairpin arc needs room between its ends.
         let along_row = axis.perp_pos(source) == axis.perp_pos(target);
-        if along_row && !(diagonal_columns && hairpin_run(graph, (lower, upper)) > 0) {
+        if along_row && !(curved_columns && hairpin_run(graph, (lower, upper)) > 0) {
             continue;
         }
-        let gap = if diagonal_columns {
-            diagonal_column_gap(graph, gaps, incoming_positions, (lower, upper))
+        let gap = if curved_columns {
+            curved_column_gap(graph, gaps, incoming_positions, (lower, upper))
         } else {
             0
         };
@@ -579,9 +579,9 @@ fn solve_axis(
     }
 }
 
-/// Center distance two columns need for the diagonal edge from `lower` (left) to `upper`: the
+/// Center distance two columns need for the curved edge from `lower` (left) to `upper`: the
 /// zoom level's gap between the pair, widened so the edge's drop fits its horizontal run.
-fn diagonal_column_gap(
+fn curved_column_gap(
     graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     gaps: &GapSizes,
     incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
@@ -607,7 +607,7 @@ fn diagonal_column_gap(
         return policy.max(touching);
     }
     let drop = (left.pos.y - right.pos.y).abs();
-    let slope_run = (drop * DIAGONAL_RUN_CELLS_PER_ROW).min(MAX_DIAGONAL_RUN);
+    let slope_run = (drop * CURVED_RUN_CELLS_PER_ROW).min(MAX_CURVED_RUN);
     // An edge along a row has no drop, so only a hairpin arc asks anything of it.
     policy.max(touching + slope_run.max(hairpin_run(graph, (lower, upper))))
 }
@@ -902,7 +902,6 @@ mod tests {
     use super::*;
     use crate::{
         cross_coordinates::{align_layers, assign_cross_coordinates},
-        diagonal::DiagonalDrawing,
         geometry::{LocalPos, WorldPos},
         layout::{PinSide, VerticalAnchor},
     };
@@ -933,7 +932,7 @@ mod tests {
             .node_indices()
             .map(|index| (index, (graph[index].pos.x, graph[index].pos.y)))
             .collect();
-        diagonal_column_gap(
+        curved_column_gap(
             &graph,
             &GapSizes::default(),
             &incoming,
@@ -1401,7 +1400,7 @@ mod tests {
                 &GapSizes::default(),
                 VerticalPlacement::Balanced,
                 None,
-                EdgeStyle::Bezier(DiagonalDrawing::Deferred),
+                EdgeStyle::Curved,
             );
             let height = (graph[anchor].pos.y - graph[returning].pos.y).abs();
             let anchor_border = graph[anchor].pos.x + halves(5).hi + 1;

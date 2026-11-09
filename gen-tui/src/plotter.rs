@@ -15,10 +15,9 @@ use ratatui::{
 };
 
 use crate::{
-    diagonal::{
-        ArrowMark, DeferredEdge, DiagonalDrawing, EdgeStyle, NodeGlow, SymbolGlow, bend_arch,
-        draw_braille_bezier, draw_braille_line, hairpin_arc_arrow, hairpin_edge_arcs, is_braille,
-        routed_edge_curve, segment_endpoints,
+    curved::{
+        ArrowMark, EdgeShape, EdgeStyle, NodeGlow, StraightSegment, SymbolGlow, bend_arch,
+        hairpin_arc_arrow, hairpin_edge_arcs, routed_edge_curve,
     },
     edge_ports::NodeSide,
     geometry::{WorldPos, WorldRect},
@@ -32,13 +31,18 @@ use crate::{
 
 /// Rectilinear routes retain their established marker rhythm.
 const ARROW_GAPS: i64 = 10;
-/// Diagonal routes mark every edge, so repeat markers less often along long runs.
-const DIAGONAL_ARROW_GAPS: i64 = 20;
-/// A diagonal run with fewer free cells than this is too short to carry a readable arrow when it
+/// Curved runs are drawn smoothly and read easily, so repeat markers less often along them.
+const CURVED_ARROW_GAPS: i64 = 20;
+/// A curved run with fewer free cells than this is too short to carry a readable arrow when it
 /// starts or ends at a data node, where forward and reverse routes share the same few cells.
 const MIN_ARROW_RUN_CELLS: i64 = 4;
+
+/// How far, in cells, a curved edge can stray from the box around its endpoints: the widest
+/// loopback bulges 5 cells and a hairpin arc 4.75, and a stroke's halo adds a couple more.
+const EDGE_REACH_CELLS: i64 = 8;
+
 /// Line style for path highlighting
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineStyle {
     /// Normal weight box-drawing characters
     Normal,
@@ -378,8 +382,8 @@ fn cell_glow(
     rect: WorldRect,
     container: WorldRect,
     color: Color,
-) -> DeferredEdge {
-    DeferredEdge::NodeGlow(NodeGlow {
+) -> EdgeShape {
+    EdgeShape::NodeGlow(NodeGlow {
         top_left: buffer.world_to_terminal_continuous((rect.min.x as f64, rect.max.y as f64 + 1.0)),
         bottom_right: buffer
             .world_to_terminal_continuous((rect.max.x as f64 + 1.0, rect.min.y as f64)),
@@ -396,7 +400,7 @@ fn highlight_glow(
     rect: WorldRect,
     container: WorldRect,
     color: Color,
-) -> DeferredEdge {
+) -> EdgeShape {
     let is_symbol = rect.min == rect.max
         && buffer
             .get_char_styled(rect.min)
@@ -404,7 +408,7 @@ fn highlight_glow(
     if !is_symbol {
         return cell_glow(buffer, rect, container, color);
     }
-    DeferredEdge::SymbolGlow(SymbolGlow {
+    EdgeShape::SymbolGlow(SymbolGlow {
         center: buffer
             .world_to_terminal_continuous((rect.min.x as f64 + 0.5, rect.min.y as f64 + 0.5)),
         color,
@@ -413,8 +417,8 @@ fn highlight_glow(
 
 /// Plot a viewport graph with resolved highlights and lowlights.
 ///
-/// Returns the lines of a [`DiagonalDrawing::Deferred`] edge style, which the buffer does not
-/// contain; every other style draws all of its edges into the buffer and returns none.
+/// Returns the shapes of a curved edge style, which the buffer does not contain; the rectilinear
+/// style draws all of its edges into the buffer and returns none.
 pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
     viewport_graph: &ViewportGraph,
     buffer: &mut WorldBuffer<'_>,
@@ -423,7 +427,7 @@ pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
     decorations: PlotDecorations<'_>,
     theme: &Theme,
     edge_style: EdgeStyle,
-) -> Vec<DeferredEdge>
+) -> Vec<EdgeShape>
 where
     V: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
@@ -442,7 +446,7 @@ where
     let content_rects: HashMap<_, _> = viewport_graph
         .nodes()
         .filter_map(|(position, node)| {
-            if !edge_style.is_diagonal() {
+            if !edge_style.is_curved() {
                 return None;
             }
             let NodeRole::Data(domain_index) = node.role else {
@@ -463,102 +467,95 @@ where
         })
         .collect();
 
-    let glows_deferred = matches!(
-        edge_style,
-        EdgeStyle::Diagonal(DiagonalDrawing::Deferred)
-            | EdgeStyle::Bezier(DiagonalDrawing::Deferred)
-    );
     let ordinary_color = theme[0x05];
     let lowlight_color = theme[0x04];
-    let mut deferred_lines = Vec::new();
+    let visible_cells = buffer.visible_cells();
+    // An edge is worth building only if the box around its endpoints, grown by how far a curve
+    // can stray from them, meets the viewport. Edges whose endpoints are both off screen still
+    // pass when they cross it.
+    let may_reach_view = |endpoints: [WorldPos; 2]| {
+        let Some(visible) = visible_cells else {
+            return false;
+        };
+        let region = endpoints
+            .into_iter()
+            .map(|position| {
+                content_rects.get(&position).copied().unwrap_or_else(|| {
+                    WorldRect::from_coords(position.x, position.y, position.x, position.y)
+                })
+            })
+            .reduce(|first, second| {
+                WorldRect::from_coords(
+                    first.min.x.min(second.min.x),
+                    first.min.y.min(second.min.y),
+                    first.max.x.max(second.max.x),
+                    first.max.y.max(second.max.y),
+                )
+            })
+            .expect("should have two endpoints");
+        let margin = EDGE_REACH_CELLS;
+        visible.intersects(&WorldRect::from_coords(
+            region.min.x - margin,
+            region.min.y - margin,
+            region.max.x + margin,
+            region.max.y + margin,
+        ))
+    };
+    let mut edge_shapes = Vec::new();
     let mut stroke = |buffer: &mut WorldBuffer<'_>,
                       source: WorldPos,
                       target: WorldPos,
                       color: Color,
                       line_style: LineStyle| {
-        let drawing = match edge_style {
-            EdgeStyle::Diagonal(drawing) | EdgeStyle::Bezier(drawing) => drawing,
-            EdgeStyle::Rectilinear => {
-                draw_edge_with_style(buffer, source, target, color, line_style);
-                return;
-            }
-        };
+        if !edge_style.is_curved() {
+            draw_edge_with_style(buffer, source, target, color, line_style);
+            return;
+        }
         let (Some(source_node), Some(target_node)) = (
             viewport_graph.node_data_by_pos.get(&source),
             viewport_graph.node_data_by_pos.get(&target),
         ) else {
             return;
         };
-        if let EdgeStyle::Bezier(_) = edge_style {
-            // An arch through an up or down pin is drawn once, with the pin's west half.
-            let bend_pin = [source, target].into_iter().find(|&position| {
-                bend_arch(viewport_graph, position, &content_rects, color, line_style).is_some()
-            });
-            if let Some(pin) = bend_pin
-                && [source, target].iter().any(|position| position.x > pin.x)
-            {
-                return;
-            }
-            let routed = routed_edge_curve(
-                viewport_graph,
-                (source, source_node),
-                (target, target_node),
-                &content_rects,
-                color,
-                line_style,
-            );
-            let curve = routed
-                .curve
-                .mapped(|point| buffer.world_to_terminal_continuous(point));
-            match drawing {
-                DiagonalDrawing::Braille => {
-                    if let Some(stub) = routed.stub {
-                        draw_braille_line(
-                            buffer,
-                            buffer.world_to_terminal_continuous(stub.from),
-                            buffer.world_to_terminal_continuous(stub.to),
-                            color,
-                            line_style,
-                        );
-                    }
-                    draw_braille_bezier(buffer, &curve);
-                }
-                DiagonalDrawing::Deferred => {
-                    if let Some(stub) = routed.stub {
-                        deferred_lines.push(DeferredEdge::Line(crate::diagonal::DiagonalLine {
-                            from: buffer.world_to_terminal_continuous(stub.from),
-                            to: buffer.world_to_terminal_continuous(stub.to),
-                            ..stub
-                        }));
-                    }
-                    deferred_lines.push(DeferredEdge::Bezier(curve));
-                }
-            }
-        } else {
-            let (from, to) =
-                segment_endpoints((source, source_node), (target, target_node), &content_rects);
-            let from = buffer.world_to_terminal_continuous(from);
-            let to = buffer.world_to_terminal_continuous(to);
-            match drawing {
-                DiagonalDrawing::Braille => draw_braille_line(buffer, from, to, color, line_style),
-                DiagonalDrawing::Deferred => {
-                    deferred_lines.push(DeferredEdge::Line(crate::diagonal::DiagonalLine {
-                        from,
-                        to,
-                        color,
-                        line_style,
-                    }))
-                }
-            }
+        if !may_reach_view([source, target]) {
+            return;
         }
+        // An arch through an up or down pin is drawn once, with the pin's west half.
+        let bend_pin = [source, target].into_iter().find(|&position| {
+            bend_arch(viewport_graph, position, &content_rects, color, line_style).is_some()
+        });
+        if let Some(pin) = bend_pin
+            && [source, target].iter().any(|position| position.x > pin.x)
+        {
+            return;
+        }
+        let routed = routed_edge_curve(
+            viewport_graph,
+            (source, source_node),
+            (target, target_node),
+            &content_rects,
+            color,
+            line_style,
+        );
+        if let Some(stub) = routed.stub {
+            edge_shapes.push(EdgeShape::Line(StraightSegment {
+                from: buffer.world_to_terminal_continuous(stub.from),
+                to: buffer.world_to_terminal_continuous(stub.to),
+                ..stub
+            }));
+        }
+        edge_shapes.push(EdgeShape::Bezier(
+            routed
+                .curve
+                .mapped(|point| buffer.world_to_terminal_continuous(point)),
+        ));
     };
 
     // Draw edges first so nodes appear on top
     let mut edges: Vec<_> = viewport_graph.edges().collect();
-    if edge_style.is_diagonal() {
-        // Straight lines cross and share braille cells, where the last one drawn wins the
-        // color: draw dimmed edges first and highlighted ones last so a highlight is never
-        // painted over.
+    if edge_style.is_curved() {
+        // Curves are painted in order, so draw dimmed edges first and highlighted ones last: a
+        // highlight is never painted over.
         let is_pair = |(s, t): &(WorldPos, WorldPos), source: WorldPos, target: WorldPos| {
             (*s == source && *t == target) || (*s == target && *t == source)
         };
@@ -608,14 +605,14 @@ where
         }
     };
     for (source, target, bundle) in edges {
-        if matches!(edge_style, EdgeStyle::Bezier(_)) && source == target {
+        if edge_style.is_curved() && source == target {
             continue;
         }
         let (color, line_style) = edge_look(source, target, !bundle.is_empty());
         stroke(buffer, source, target, color, line_style);
     }
 
-    if let EdgeStyle::Bezier(drawing) = edge_style {
+    if edge_style.is_curved() {
         let mut hairpins: Vec<_> = viewport_graph
             .pinned_edges
             .iter()
@@ -640,6 +637,9 @@ where
             let Some(node) = viewport_graph.node_data_by_pos.get(&position) else {
                 continue;
             };
+            if !may_reach_view([position, position]) {
+                continue;
+            }
             let highlighted_style = hairpin_highlights
                 .iter()
                 .filter(|((domain_index, side), _)| {
@@ -675,28 +675,24 @@ where
                 line_style,
             )
             .map(|arc| arc.mapped(|point| buffer.world_to_terminal_continuous(point)));
-            match drawing {
-                DiagonalDrawing::Braille => {
-                    arcs.iter().for_each(|arc| draw_braille_bezier(buffer, arc));
-                }
-                DiagonalDrawing::Deferred => {
-                    deferred_lines.push(DeferredEdge::Arrow(hairpin_arc_arrow(
-                        &arcs,
-                        ordinary_color,
-                    )));
-                    deferred_lines.extend(arcs.into_iter().map(DeferredEdge::Bezier));
-                }
-            }
+            edge_shapes.push(EdgeShape::Arrow(hairpin_arc_arrow(&arcs, ordinary_color)));
+            edge_shapes.extend(arcs.into_iter().map(EdgeShape::Bezier));
         }
     }
 
-    // Draw nodes
+    // Draw nodes. The layout window holds more nodes than fit on screen, and rendering one reads
+    // its sequence from the database, so nodes outside the viewport are left alone.
+    let visible_cells = buffer.visible_cells();
     for (world_pos, node) in viewport_graph.nodes() {
         match &node.role {
             NodeRole::Data(domain_idx) => {
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = node.vertical_anchor.rect(*world_pos, node.size);
-                renderer.render_node(buffer, world_rect, &node_id);
+                let is_on_screen =
+                    visible_cells.is_some_and(|visible| visible.intersects(&world_rect));
+                if is_on_screen {
+                    renderer.render_node(buffer, world_rect, &node_id);
+                }
                 let content = renderer.content_rect(&node_id);
                 let content_rect = WorldRect::from_coords(
                     world_rect.min.x + content.min.x,
@@ -707,21 +703,8 @@ where
 
                 // If lowlighted, dim the node background to theme[0x04].
                 // Applied before highlights so highlights take priority.
-                if node_lowlights.contains(world_pos) {
-                    let dim = lowlight_color;
-                    for y in content_rect.min.y..=content_rect.max.y {
-                        for x in content_rect.min.x..=content_rect.max.x {
-                            let pos = WorldPos::new(x, y);
-                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
-                                let new_style = if ch == NODE_GLYPH {
-                                    style.fg(dim)
-                                } else {
-                                    style.bg(dim)
-                                };
-                                buffer.set_char_styled(pos, ch, new_style);
-                            }
-                        }
-                    }
+                if is_on_screen && node_lowlights.contains(world_pos) {
+                    tint_cells(buffer, content_rect, lowlight_color);
                 }
 
                 // Check if this node is highlighted
@@ -737,21 +720,11 @@ where
                         Color::Reset => theme[0x07],
                         c => c,
                     };
-                    for y in content_rect.min.y..=content_rect.max.y {
-                        for x in content_rect.min.x..=content_rect.max.x {
-                            let pos = WorldPos::new(x, y);
-                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
-                                let new_style = if ch == NODE_GLYPH {
-                                    style.fg(hl)
-                                } else {
-                                    style.bg(hl)
-                                };
-                                buffer.set_char_styled(pos, ch, new_style);
-                            }
-                        }
+                    if is_on_screen {
+                        tint_cells(buffer, content_rect, hl);
                     }
-                    if glows_deferred {
-                        deferred_lines.push(highlight_glow(buffer, content_rect, content_rect, hl));
+                    if edge_style.is_curved() {
+                        edge_shapes.push(highlight_glow(buffer, content_rect, content_rect, hl));
                     }
                 }
 
@@ -768,21 +741,11 @@ where
                     let x1 = (world_rect.min.x + br.0).min(content_rect.max.x);
                     let y0 = (world_rect.min.y + tl.1).max(content_rect.min.y);
                     let y1 = (world_rect.min.y + br.1).min(content_rect.max.y);
-                    for y in y0..=y1 {
-                        for x in x0..=x1 {
-                            let pos = WorldPos::new(x, y);
-                            if let Some((ch, style)) = buffer.get_char_styled(pos) {
-                                let new_style = if ch == NODE_GLYPH {
-                                    style.fg(hl)
-                                } else {
-                                    style.bg(hl)
-                                };
-                                buffer.set_char_styled(pos, ch, new_style);
-                            }
-                        }
+                    if is_on_screen && x0 <= x1 && y0 <= y1 {
+                        tint_cells(buffer, WorldRect::from_coords(x0, y0, x1, y1), hl);
                     }
-                    if glows_deferred && x0 <= x1 && y0 <= y1 {
-                        deferred_lines.push(highlight_glow(
+                    if edge_style.is_curved() && x0 <= x1 && y0 <= y1 {
+                        edge_shapes.push(highlight_glow(
                             buffer,
                             WorldRect::from_coords(x0, y0, x1, y1),
                             content_rect,
@@ -793,7 +756,7 @@ where
             }
             NodeRole::Routing | NodeRole::Pin(_) | NodeRole::HairPin(_) | NodeRole::Wormhole(_) => {
                 // Straight lines meet at routing points without a junction glyph.
-                if edge_style.is_diagonal() && !matches!(node.role, NodeRole::Wormhole(_)) {
+                if edge_style.is_curved() && !matches!(node.role, NodeRole::Wormhole(_)) {
                     continue;
                 }
                 let edge_color = ordinary_color;
@@ -893,63 +856,222 @@ where
         }
     }
 
-    // Diagonal edges all carry direction markers; rectilinear edges retain markers only when
-    // their routing would otherwise make the direction ambiguous.
-    let two_way_cells = cells_in_both_directions(viewport_graph);
-    for pinned_edge in &viewport_graph.pinned_edges {
+    // Edges are marked only where their route runs against the left-to-right flow. Routes are
+    // traced once and shared by every pass below.
+    let routes: Vec<Option<Vec<WorldPos>>> = viewport_graph
+        .pinned_edges
+        .iter()
+        .map(|pinned_edge| pinned_edge_route(viewport_graph, pinned_edge))
+        .collect();
+    let obstacles = ArrowObstacles::new(viewport_graph, &routes);
+    for (pinned_edge, route) in viewport_graph.pinned_edges.iter().zip(&routes) {
+        let Some(route) = route else {
+            continue;
+        };
         // A Bezier hairpin carries its arrow on the bend itself.
-        if matches!(edge_style, EdgeStyle::Bezier(_))
+        if edge_style.is_curved()
             && pinned_edge.source == pinned_edge.target
             && pinned_edge.ports.source == pinned_edge.ports.target
         {
             continue;
         }
-        if !edge_style.is_diagonal() && !route_runs_against_flow(viewport_graph, pinned_edge) {
+        if !route_runs_against_flow(viewport_graph, route) {
             continue;
         }
         draw_arrows(
             buffer,
             viewport_graph,
-            pinned_edge,
-            if edge_style.is_diagonal() {
-                DIAGONAL_ARROW_GAPS
+            route,
+            if edge_style.is_curved() {
+                CURVED_ARROW_GAPS
             } else {
                 ARROW_GAPS
             },
             (edge_style, &content_rects, ordinary_color),
-            &two_way_cells,
-            &mut deferred_lines,
+            &obstacles,
+            &mut edge_shapes,
         );
     }
-    deferred_lines
+    edge_shapes
 }
 
-/// The cells that routes run through in both horizontal directions, such as the bus a hairpin
-/// shares with the edges beside it. An arrow there would point one way along a wire that carries
-/// both, so none is drawn on them.
-fn cells_in_both_directions(viewport_graph: &ViewportGraph) -> HashSet<WorldPos> {
-    let mut rightward = HashSet::new();
-    let mut leftward = HashSet::new();
-    for pinned_edge in &viewport_graph.pinned_edges {
-        let Some(route) = pinned_edge_route(viewport_graph, pinned_edge) else {
-            continue;
-        };
-        for segment in route.windows(2) {
-            let (start, end) = (segment[0], segment[1]);
-            if start.y != end.y {
-                continue;
+/// Recolor the on-screen cells of a node region: sequence glyphs take the color as foreground and
+/// everything else as background. Cells outside the viewport are never visited, so a node
+/// megabases wide costs no more than the screen.
+fn tint_cells(buffer: &mut WorldBuffer<'_>, region: WorldRect, color: Color) {
+    let Some(visible) = buffer
+        .visible_cells()
+        .and_then(|visible| visible.intersection(&region))
+    else {
+        return;
+    };
+    for y in visible.min.y..=visible.max.y {
+        for x in visible.min.x..=visible.max.x {
+            let position = WorldPos::new(x, y);
+            if let Some((character, style)) = buffer.get_char_styled(position) {
+                let new_style = if character == NODE_GLYPH {
+                    style.fg(color)
+                } else {
+                    style.bg(color)
+                };
+                buffer.set_char_styled(position, character, new_style);
             }
-            let cells = if end.x > start.x {
-                &mut rightward
-            } else {
-                &mut leftward
-            };
-            cells.extend(
-                (start.x.min(end.x)..=start.x.max(end.x)).map(|x| WorldPos::new(x, start.y)),
-            );
         }
     }
-    rightward.intersection(&leftward).copied().collect()
+}
+
+/// Inclusive x-spans per row, sorted and merged. Arrows reason about whole stretches of wire
+/// rather than single cells, since a route can run to the center of a node megabases wide.
+type RowSpans = HashMap<i64, Vec<(i64, i64)>>;
+
+/// Sort `spans` and merge those that overlap or touch.
+fn merge_spans(spans: &mut Vec<(i64, i64)>) {
+    spans.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for &(first, last) in spans.iter() {
+        match merged.last_mut() {
+            Some((_, previous_last)) if first <= *previous_last + 1 => {
+                *previous_last = (*previous_last).max(last);
+            }
+            _ => merged.push((first, last)),
+        }
+    }
+    *spans = merged;
+}
+
+/// The spans covered by both of two sorted, merged lists.
+fn intersect_spans(first: &[(i64, i64)], second: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut overlap = Vec::new();
+    let (mut first_index, mut second_index) = (0, 0);
+    while first_index < first.len() && second_index < second.len() {
+        let low = first[first_index].0.max(second[second_index].0);
+        let high = first[first_index].1.min(second[second_index].1);
+        if low <= high {
+            overlap.push((low, high));
+        }
+        if first[first_index].1 < second[second_index].1 {
+            first_index += 1;
+        } else {
+            second_index += 1;
+        }
+    }
+    overlap
+}
+
+/// What an arrow cannot sit on: the data nodes, and the stretches of wire that routes run
+/// through in both horizontal directions, such as the bus a hairpin shares with the edges
+/// beside it. An arrow there would point one way along a wire that carries both.
+struct ArrowObstacles {
+    data_nodes: RowSpans,
+    two_way: RowSpans,
+}
+
+impl ArrowObstacles {
+    fn new(viewport_graph: &ViewportGraph, routes: &[Option<Vec<WorldPos>>]) -> Self {
+        let mut data_nodes = RowSpans::new();
+        for (center, node) in viewport_graph.nodes() {
+            if !matches!(node.role, NodeRole::Data(_)) {
+                continue;
+            }
+            let rect = node.vertical_anchor.rect(*center, node.size);
+            for row in rect.min.y..=rect.max.y {
+                data_nodes
+                    .entry(row)
+                    .or_default()
+                    .push((rect.min.x, rect.max.x));
+            }
+        }
+        data_nodes.values_mut().for_each(merge_spans);
+
+        let mut rightward = RowSpans::new();
+        let mut leftward = RowSpans::new();
+        for route in routes.iter().flatten() {
+            for segment in route.windows(2) {
+                let (start, end) = (segment[0], segment[1]);
+                if start.y != end.y {
+                    continue;
+                }
+                let spans = if end.x > start.x {
+                    &mut rightward
+                } else {
+                    &mut leftward
+                };
+                spans
+                    .entry(start.y)
+                    .or_default()
+                    .push((start.x.min(end.x), start.x.max(end.x)));
+            }
+        }
+        let mut two_way = RowSpans::new();
+        for (row, mut right_spans) in rightward {
+            let Some(mut left_spans) = leftward.remove(&row) else {
+                continue;
+            };
+            merge_spans(&mut right_spans);
+            merge_spans(&mut left_spans);
+            let overlap = intersect_spans(&right_spans, &left_spans);
+            if !overlap.is_empty() {
+                two_way.insert(row, overlap);
+            }
+        }
+        Self {
+            data_nodes,
+            two_way,
+        }
+    }
+
+    fn is_inside_node(&self, position: WorldPos) -> bool {
+        self.data_nodes.get(&position.y).is_some_and(|spans| {
+            spans
+                .iter()
+                .any(|&(first, last)| first <= position.x && position.x <= last)
+        })
+    }
+
+    /// The spans of `first..=last` on `row` where an arrow may go, in ascending order.
+    fn free_spans(&self, row: i64, first: i64, last: i64) -> Vec<(i64, i64)> {
+        let mut blocked: Vec<(i64, i64)> = [&self.data_nodes, &self.two_way]
+            .into_iter()
+            .filter_map(|spans| spans.get(&row))
+            .flatten()
+            .copied()
+            .filter(|&(blocked_first, blocked_last)| blocked_last >= first && blocked_first <= last)
+            .collect();
+        merge_spans(&mut blocked);
+        let mut free = Vec::new();
+        let mut next = first;
+        for (blocked_first, blocked_last) in blocked {
+            if blocked_first > next {
+                free.push((next, blocked_first - 1));
+            }
+            next = next.max(blocked_last + 1);
+        }
+        if next <= last {
+            free.push((next, last));
+        }
+        free
+    }
+}
+
+/// How many of `spans`' cells lie west of column `x`.
+fn cells_west_of(spans: &[(i64, i64)], x: i64) -> i64 {
+    spans
+        .iter()
+        .map(|&(first, last)| (last.min(x - 1) - first + 1).max(0))
+        .sum()
+}
+
+/// The column of the `index`th cell, counted from the west, of `spans`.
+fn column_of_cell(spans: &[(i64, i64)], index: i64) -> Option<i64> {
+    let mut remaining = index;
+    for &(first, last) in spans {
+        let length = last - first + 1;
+        if remaining < length {
+            return Some(first + remaining);
+        }
+        remaining -= length;
+    }
+    None
 }
 
 /// Returns true if both `point_a` and `point_b` lie on the axis-aligned segment
@@ -1063,17 +1185,16 @@ fn draw_edge_with_style(
 }
 
 /// Whether a domain edge's route runs against the layout's left-to-right flow, through a pin or
-/// along a segment heading west, so a rectilinear drawing needs arrows to show its direction.
-fn route_runs_against_flow(viewport_graph: &ViewportGraph, pinned_edge: &PinnedEdge) -> bool {
-    pinned_edge_route(viewport_graph, pinned_edge).is_some_and(|route| {
-        let passes_pin = route.iter().any(|position| {
-            viewport_graph
-                .node_data_by_pos
-                .get(position)
-                .is_some_and(|node| matches!(node.role, NodeRole::Pin(_)))
-        });
-        passes_pin || route.windows(2).any(|segment| segment[1].x < segment[0].x)
-    })
+/// along a segment heading west. Only such edges need arrows: rightward flow is the default
+/// reading direction, so an arrow is worth drawing where that implication fails.
+fn route_runs_against_flow(viewport_graph: &ViewportGraph, route: &[WorldPos]) -> bool {
+    let passes_pin = route.iter().any(|position| {
+        viewport_graph
+            .node_data_by_pos
+            .get(position)
+            .is_some_and(|node| matches!(node.role, NodeRole::Pin(_)))
+    });
+    passes_pin || route.windows(2).any(|segment| segment[1].x < segment[0].x)
 }
 
 /// Trace a domain edge's routed segments in source-to-target order, leaving its source
@@ -1242,7 +1363,7 @@ fn horizontal_runs(
     edge_style: EdgeStyle,
     content_rects: &HashMap<WorldPos, WorldRect>,
 ) -> Vec<(WorldPos, WorldPos)> {
-    if !edge_style.is_diagonal() {
+    if !edge_style.is_curved() {
         return straight_runs(route)
             .into_iter()
             .filter(|(start, end)| start.y == end.y)
@@ -1295,61 +1416,52 @@ fn horizontal_runs(
     runs
 }
 
-/// Mark the direction of a domain edge on each horizontal run of its route (see
-/// [`horizontal_runs`]). A run carries at least one arrow, unless it is shorter than
-/// [`MIN_ARROW_RUN_CELLS`] free cells and touches a data node, with additional arrows exactly
-/// `gaps` cells apart. The unused distance is split between the two ends. Vertical and slanted
-/// stretches are left bare. A rectilinear route marks only its westward runs, with `◀`; a
-/// diagonal one marks every run. An arrow replaces only the wire of a
-/// rectilinear route, or the blank and braille cells of a curved one.
+/// Mark the direction of a domain edge on each westward horizontal run of its route (see
+/// [`horizontal_runs`]), with `◀`. Eastward runs are the default reading direction and stay
+/// bare, so an arrow only appears where that implication fails. A run carries at least one
+/// arrow, unless it is shorter than [`MIN_ARROW_RUN_CELLS`] free cells and touches a data node,
+/// with additional arrows exactly `gaps` cells apart. The unused distance is split between the
+/// two ends. Vertical and slanted stretches are left bare. An arrow replaces only the wire of a
+/// rectilinear route, or the blank cells of a curved one.
+///
+/// Runs are handled as spans, and only the arrows that fall inside the viewport are visited, so
+/// the cost follows the screen and not the length of the run.
 fn draw_arrows(
     buffer: &mut WorldBuffer,
     viewport_graph: &ViewportGraph,
-    pinned_edge: &PinnedEdge,
+    route: &[WorldPos],
     gaps: i64,
     (edge_style, content_rects, color): (EdgeStyle, &HashMap<WorldPos, WorldRect>, Color),
-    two_way_cells: &HashSet<WorldPos>,
-    deferred: &mut Vec<DeferredEdge>,
+    obstacles: &ArrowObstacles,
+    shapes: &mut Vec<EdgeShape>,
 ) {
-    let Some(route) = pinned_edge_route(viewport_graph, pinned_edge) else {
+    let Some(visible) = buffer.visible_cells() else {
         return;
     };
-    let accepts = if edge_style.is_diagonal() {
-        is_blank_or_braille
+    let accepts = if edge_style.is_curved() {
+        is_blank
     } else {
         is_horizontal_wire
     };
-    let is_inside_node = |position: WorldPos| {
-        viewport_graph.nodes().any(|(center, node)| {
-            matches!(node.role, NodeRole::Data(_))
-                && node
-                    .vertical_anchor
-                    .rect(*center, node.size)
-                    .contains(position)
-        })
-    };
-    if edge_style.is_diagonal() {
+    if edge_style.is_curved() {
         draw_bend_arrows(
             buffer,
             viewport_graph,
-            &route,
-            (edge_style, content_rects, color),
-            deferred,
+            route,
+            (content_rects, color),
+            shapes,
         );
     }
-    for (start, end) in horizontal_runs(viewport_graph, &route, edge_style, content_rects) {
+    for (start, end) in horizontal_runs(viewport_graph, route, edge_style, content_rects) {
         let direction = WorldPos::new((end.x - start.x).signum(), 0);
-        // Rightward flow is the default reading direction of a rectilinear drawing, so only
-        // runs against it need an arrow. Diagonal drawings mark every run.
-        if !edge_style.is_diagonal() && direction.x > 0 {
+        if direction.x > 0 || start.y < visible.min.y || start.y > visible.max.y {
             continue;
         }
-        let length = (end.x - start.x).abs();
-        let free_cells: Vec<WorldPos> = (0..=length)
-            .map(|distance| start + direction * distance)
-            .filter(|&position| !is_inside_node(position) && !two_way_cells.contains(&position))
-            .collect();
-        let free_count = free_cells.len() as i64;
+        let free_spans = obstacles.free_spans(start.y, end.x.min(start.x), end.x.max(start.x));
+        let free_count: i64 = free_spans
+            .iter()
+            .map(|&(first, last)| last - first + 1)
+            .sum();
         if free_count == 0 {
             continue;
         }
@@ -1358,80 +1470,99 @@ fn draw_arrows(
         // directions leave and enter it over the same cells.
         let touches_data_node = [start - direction, start, end, end + direction]
             .into_iter()
-            .any(is_inside_node);
-        if edge_style.is_diagonal() && free_count < MIN_ARROW_RUN_CELLS && touches_data_node {
+            .any(|position| obstacles.is_inside_node(position));
+        if edge_style.is_curved() && free_count < MIN_ARROW_RUN_CELLS && touches_data_node {
             continue;
         }
-        let arrow = if direction.x > 0 { '▶' } else { '◀' };
-        for slot in arrow_slots(free_count, gaps, direction.x > 0) {
-            // A slot outside the view stays skipped. One that lands on a corner or junction moves to
-            // the nearest cell that can take the arrow.
-            let Some((slot_character, _)) = buffer.get_char_styled(free_cells[slot as usize])
-            else {
+        // Free cells are numbered from the west. The first and last ones on screen bound the
+        // arrows worth looking at: a slot outside the view stays skipped.
+        let first_visible = cells_west_of(&free_spans, visible.min.x);
+        let last_visible = cells_west_of(&free_spans, visible.max.x + 1) - 1;
+        let layout = ArrowLayout::new(free_count, gaps);
+        for slot in layout.slots_between(first_visible, last_visible) {
+            let Some(column) = column_of_cell(&free_spans, slot) else {
                 continue;
             };
-            let index = if accepts(slot_character) {
-                slot
-            } else {
-                let Some(nearest) = (0..free_count)
-                    .filter(|&index| {
-                        buffer
-                            .get_char_styled(free_cells[index as usize])
-                            .is_some_and(|(character, _)| accepts(character))
-                    })
-                    .min_by_key(|&index| (index - slot).abs())
-                else {
-                    continue;
-                };
-                nearest
+            // A slot that lands on a corner or junction moves to the nearest cell that can take
+            // the arrow. Leftward travel breaks ties toward the east, where its run begins.
+            let accepts_cell = |index: i64| {
+                column_of_cell(&free_spans, index)
+                    .and_then(|column| buffer.get_char_styled(WorldPos::new(column, start.y)))
+                    .is_some_and(|(character, _)| accepts(character))
             };
-            let position = free_cells[index as usize];
-            if let Some((_, style)) = buffer.get_char_styled(position) {
-                if edge_style.is_deferred() {
-                    deferred.push(DeferredEdge::Arrow(ArrowMark {
-                        center: buffer.world_to_terminal_continuous((
-                            position.x as f64 + 0.5,
-                            position.y as f64 + 0.5,
-                        )),
-                        direction: (if direction.x > 0 { 1.0 } else { -1.0 }, 0.0),
-                        color,
-                    }));
-                } else {
-                    buffer.set_char_styled(position, arrow, style);
-                }
+            if buffer
+                .get_char_styled(WorldPos::new(column, start.y))
+                .is_none()
+            {
+                continue;
+            }
+            let nearest = (0..=gaps)
+                .flat_map(|distance| [slot + distance, slot - distance])
+                .find(|&index| (0..free_count).contains(&index) && accepts_cell(index));
+            let Some(index) = nearest else {
+                continue;
+            };
+            let Some(column) = column_of_cell(&free_spans, index) else {
+                continue;
+            };
+            let position = WorldPos::new(column, start.y);
+            if edge_style.is_curved() {
+                shapes.push(EdgeShape::Arrow(ArrowMark {
+                    center: buffer.world_to_terminal_continuous((
+                        position.x as f64 + 0.5,
+                        position.y as f64 + 0.5,
+                    )),
+                    direction: (-1.0, 0.0),
+                    color,
+                }));
+            } else if let Some((_, style)) = buffer.get_char_styled(position) {
+                buffer.set_char_styled(position, '◀', style);
             }
         }
     }
 }
 
-/// Indices into a run's free cells, ordered along its direction of travel, that carry an
-/// arrow. The leftover distance is split by integer division, so the odd cell must always fall
-/// on the same physical side: otherwise a rightward edge and the leftward edge over the same
-/// cells round opposite ways and their arrows sit one cell apart. The layout is computed
-/// left to right and mirrored for leftward runs.
-fn arrow_slots(free_count: i64, gaps: i64, points_right: bool) -> Vec<i64> {
-    let arrow_count = ((free_count - 1) / gaps).max(1);
-    let first_slot = (free_count - 1 - (arrow_count - 1) * gaps) / 2;
-    (0..arrow_count)
-        .map(|arrow_index| {
-            let slot = first_slot + arrow_index * gaps;
-            if points_right {
-                slot
-            } else {
-                free_count - 1 - slot
-            }
-        })
-        .collect()
+/// Where a run's arrows sit among its free cells, numbered from the west. The leftover
+/// distance is split by integer division, so the odd cell always falls on the same physical
+/// side: a rightward edge and the leftward edge over the same cells would otherwise round
+/// opposite ways and their arrows would sit one cell apart.
+struct ArrowLayout {
+    first_slot: i64,
+    arrow_count: i64,
+    gaps: i64,
 }
 
-/// Mark bend arches at their level midpoint. A bitmap renderer gets an arrow mark on the curve; a
-/// terminal gets a glyph on the cell it falls in.
+impl ArrowLayout {
+    fn new(free_count: i64, gaps: i64) -> Self {
+        let arrow_count = ((free_count - 1) / gaps).max(1);
+        let first_slot = (free_count - 1 - (arrow_count - 1) * gaps) / 2;
+        Self {
+            first_slot,
+            arrow_count,
+            gaps,
+        }
+    }
+
+    /// The slots among cells `first..=last`, in ascending order.
+    fn slots_between(&self, first: i64, last: i64) -> impl Iterator<Item = i64> + use<> {
+        let Self {
+            first_slot,
+            arrow_count,
+            gaps,
+        } = *self;
+        let low = (first - first_slot + gaps - 1).div_euclid(gaps).max(0);
+        let high = (last - first_slot).div_euclid(gaps).min(arrow_count - 1);
+        (low..=high).map(move |arrow_index| first_slot + arrow_index * gaps)
+    }
+}
+
+/// Mark bend arches at their level midpoint with an arrow mark on the curve.
 fn draw_bend_arrows(
     buffer: &mut WorldBuffer,
     viewport_graph: &ViewportGraph,
     route: &[WorldPos],
-    (edge_style, content_rects, color): (EdgeStyle, &HashMap<WorldPos, WorldRect>, Color),
-    deferred: &mut Vec<DeferredEdge>,
+    (content_rects, color): (&HashMap<WorldPos, WorldRect>, Color),
+    shapes: &mut Vec<EdgeShape>,
 ) {
     for window in route.windows(3) {
         let [before, pin, after] = window else {
@@ -1446,23 +1577,16 @@ fn draw_bend_arrows(
         ) else {
             continue;
         };
-        let points_right = after.x >= before.x;
-        let midpoint = arch.midpoint();
-        if edge_style.is_deferred() {
-            deferred.push(DeferredEdge::Arrow(ArrowMark {
-                center: buffer.world_to_terminal_continuous(midpoint),
-                direction: (if points_right { 1.0 } else { -1.0 }, 0.0),
-                color,
-            }));
+        // As on straight runs, an arch heading east needs no arrow.
+        if after.x >= before.x {
             continue;
         }
-        let position = WorldPos::new(midpoint.0.floor() as i64, midpoint.1.floor() as i64);
-        let arrow = if points_right { '▶' } else { '◀' };
-        if let Some((character, style)) = buffer.get_char_styled(position)
-            && is_blank_or_braille(character)
-        {
-            buffer.set_char_styled(position, arrow, style);
-        }
+        let midpoint = arch.midpoint();
+        shapes.push(EdgeShape::Arrow(ArrowMark {
+            center: buffer.world_to_terminal_continuous(midpoint),
+            direction: (-1.0, 0.0),
+            color,
+        }));
     }
 }
 
@@ -1471,20 +1595,20 @@ fn is_horizontal_wire(character: char) -> bool {
     matches!(character, '─' | '━' | '╌' | '┄' | '┈')
 }
 
-/// Whether a curved route's cell is blank or holds braille an arrow may replace.
-fn is_blank_or_braille(character: char) -> bool {
-    character == ' ' || is_braille(character)
+/// Whether a curved route's cell is blank, where an arrow mark may be placed.
+fn is_blank(character: char) -> bool {
+    character == ' '
 }
 
 #[cfg(test)]
-mod diagonal_highlight_tests {
+mod curved_highlight_tests {
     use petgraph::graph::NodeIndex;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-    use super::{PathStyle, PlotDecorations, plot_viewport_graph_with_highlights};
+    use super::{NodeRenderer, PathStyle, PlotDecorations, plot_viewport_graph_with_highlights};
     use crate::{
-        diagonal::{DeferredEdge, DiagonalDrawing, EdgeStyle, is_braille},
-        geometry::{LocalPos, WorldPos},
+        curved::{EdgeShape, EdgeStyle},
+        geometry::{LocalPos, WorldPos, WorldRect},
         graph_widget::MinimalNodeRenderer,
         layout::{LayoutNode, NodeRole},
         theme::current_theme,
@@ -1529,10 +1653,9 @@ mod diagonal_highlight_tests {
 
     fn plot(
         graph: &ViewportGraph,
-        drawing: DiagonalDrawing,
         highlights: &[((WorldPos, WorldPos), PathStyle)],
         lowlights: &[(WorldPos, WorldPos)],
-    ) -> (Buffer, Vec<DeferredEdge>) {
+    ) -> (Buffer, Vec<EdgeShape>) {
         let state = ViewportState {
             camera_current: WorldPos::new(5, 3),
             viewport_bounds: Rect::new(0, 0, 12, 8),
@@ -1559,87 +1682,153 @@ mod diagonal_highlight_tests {
                     node_lowlights: &[],
                 },
                 &theme,
-                EdgeStyle::Diagonal(drawing),
+                EdgeStyle::Curved,
             )
         };
         (buffer, lines)
     }
 
-    fn colors(buffer: &Buffer) -> Vec<Color> {
-        buffer
-            .content
-            .iter()
-            .filter(|cell| cell.symbol().chars().any(is_braille))
-            .map(|cell| cell.fg)
-            .collect()
-    }
-
     #[test]
-    fn test_highlighted_edge_keeps_its_color_where_edges_cross() {
-        let (graph, points) = crossing_graph();
-        for highlighted in [(points[0], points[1]), (points[2], points[3])] {
-            let style = PathStyle::new(Color::Red);
-            let (buffer, _) = plot(
-                &graph,
-                DiagonalDrawing::Braille,
-                &[(highlighted, style)],
-                &[],
-            );
-            let red = colors(&buffer).iter().filter(|c| **c == Color::Red).count();
-            // The highlighted line has the same dots whichever edge is stored first, and its
-            // crossing cells keep its color.
-            assert!(
-                red >= 8,
-                "highlight should stay visible, got {red} red cells"
-            );
-        }
-    }
-
-    #[test]
-    fn test_deferred_lines_list_highlights_last_and_lowlights_first() {
+    fn test_shapes_list_highlights_last_and_lowlights_first() {
         let (graph, points) = crossing_graph();
         let bold_red = PathStyle::new(Color::Red).with_line_style(crate::plotter::LineStyle::Bold);
         let (buffer, lines) = plot(
             &graph,
-            DiagonalDrawing::Deferred,
             &[((points[0], points[1]), bold_red)],
             &[(points[2], points[3])],
         );
         assert!(
-            colors(&buffer).is_empty(),
-            "deferred drawing leaves no dots"
+            buffer.content.iter().all(|cell| cell.symbol() == " "),
+            "curved drawing leaves the buffer empty"
         );
         assert_eq!(lines.len(), 2);
         let theme = current_theme();
-        let DeferredEdge::Line(dimmed) = lines[0] else {
-            panic!("should defer a line");
+        let EdgeShape::Bezier(dimmed) = lines[0] else {
+            panic!("should report a curve");
         };
-        let DeferredEdge::Line(highlighted) = lines[1] else {
-            panic!("should defer a line");
+        let EdgeShape::Bezier(highlighted) = lines[1] else {
+            panic!("should report a curve");
         };
         assert_eq!(dimmed.color, theme[0x04], "dimmed edge first");
         assert_eq!(dimmed.line_style, crate::plotter::LineStyle::Dashed);
         assert_eq!(highlighted.color, Color::Red, "highlight last");
         assert_eq!(highlighted.line_style, crate::plotter::LineStyle::Bold);
     }
+
+    /// One edge between two routing points on row 3, which the camera of [`plot`] looks at.
+    fn edge_along_row(from_x: i64, to_x: i64) -> ViewportGraph {
+        let mut graph = ViewportGraph::empty();
+        let points = [WorldPos::new(from_x, 3), WorldPos::new(to_x, 3)];
+        for point in &points {
+            graph.node_data_by_pos.insert(
+                *point,
+                LayoutNode::new(
+                    NodeRole::Routing,
+                    LocalPos::new_xy(point.x, point.y),
+                    (1, 1),
+                    None,
+                ),
+            );
+            graph.graph.add_node(*point);
+        }
+        graph.graph.add_edge(
+            points[0],
+            points[1],
+            vec![(NodeIndex::new(0), NodeIndex::new(1))],
+        );
+        graph
+    }
+
+    #[test]
+    fn test_edge_far_from_the_viewport_builds_no_shapes() {
+        let (_, shapes) = plot(&edge_along_row(1_000, 1_100), &[], &[]);
+        assert!(shapes.is_empty());
+    }
+
+    #[test]
+    fn test_edge_crossing_the_viewport_keeps_its_shape_when_both_endpoints_are_off_screen() {
+        let (_, shapes) = plot(&edge_along_row(-1_000, 1_000), &[], &[]);
+        assert!(
+            shapes
+                .iter()
+                .any(|shape| matches!(shape, EdgeShape::Bezier(_)))
+        );
+    }
+
+    /// Counts how many nodes it is asked to draw.
+    struct CountingRenderer {
+        rendered: std::cell::Cell<usize>,
+    }
+
+    impl NodeRenderer<petgraph::graph::DiGraph<(), ()>> for CountingRenderer {
+        fn get_node_size(&self, _node: &NodeIndex) -> (u64, u64) {
+            (1, 1)
+        }
+
+        fn render_node(&self, _buffer: &mut WorldBuffer, _area: WorldRect, _node_id: &NodeIndex) {
+            self.rendered.set(self.rendered.get() + 1);
+        }
+    }
+
+    #[test]
+    fn test_nodes_outside_the_viewport_are_not_rendered() {
+        let mut graph = ViewportGraph::empty();
+        for (index, x) in [(0, 3), (1, 5_000)] {
+            let position = WorldPos::new(x, 3);
+            graph.node_data_by_pos.insert(
+                position,
+                LayoutNode::new(
+                    NodeRole::Data(NodeIndex::new(index)),
+                    LocalPos::new_xy(position.x, position.y),
+                    (1, 1),
+                    None,
+                ),
+            );
+            graph.graph.add_node(position);
+        }
+        let state = ViewportState {
+            camera_current: WorldPos::new(5, 3),
+            viewport_bounds: Rect::new(0, 0, 12, 8),
+            ..ViewportState::default()
+        };
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let renderer = CountingRenderer {
+            rendered: std::cell::Cell::new(0),
+        };
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        plot_viewport_graph_with_highlights(
+            &graph,
+            &mut world_buffer,
+            &renderer,
+            &petgraph::graph::DiGraph::<(), ()>::new(),
+            PlotDecorations {
+                node_highlights: &[],
+                edge_highlights: &[],
+                hairpin_highlights: &[],
+                cell_highlights: &[],
+                lowlights: &[],
+                node_lowlights: &[],
+            },
+            &current_theme(),
+            EdgeStyle::Curved,
+        );
+        assert_eq!(renderer.rendered.get(), 1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     use petgraph::graph::NodeIndex;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     use super::{
-        ARROW_GAPS, DIAGONAL_ARROW_GAPS, LineStyle, cells_in_both_directions, draw_arrows,
-        draw_edge_with_style, pinned_edge_route,
+        ARROW_GAPS, ArrowLayout, ArrowObstacles, CURVED_ARROW_GAPS, LineStyle,
+        draw_arrows as draw_route_arrows, draw_edge_with_style, pinned_edge_route,
     };
     use crate::{
-        diagonal::{
-            DeferredEdge, DiagonalDrawing, EdgeStyle, draw_braille_bezier, draw_braille_line,
-            routed_edge_curve,
-        },
+        curved::{EdgeShape, EdgeStyle},
         edge_ports::{EdgePorts, NodeSide},
         geometry::{LocalPos, WorldPos},
         layout::{LayoutNode, NodeRole, PinSide},
@@ -1653,6 +1842,28 @@ mod tests {
             source,
             target,
             ports,
+        }
+    }
+
+    /// Draw the arrows of one pinned edge, with the route traced and obstacles gathered the way
+    /// painting does for the whole graph.
+    fn draw_arrows(
+        buffer: &mut WorldBuffer,
+        graph: &ViewportGraph,
+        pinned_edge: &PinnedEdge,
+        gaps: i64,
+        style: (
+            EdgeStyle,
+            &HashMap<WorldPos, crate::geometry::WorldRect>,
+            Color,
+        ),
+        shapes: &mut Vec<EdgeShape>,
+    ) {
+        let route = pinned_edge_route(graph, pinned_edge);
+        let routes = [route.clone()];
+        let obstacles = ArrowObstacles::new(graph, &routes);
+        if let Some(route) = route {
+            draw_route_arrows(buffer, graph, &route, gaps, style, &obstacles, shapes);
         }
     }
 
@@ -1692,7 +1903,6 @@ mod tests {
             &pinned(source, target, ports),
             ARROW_GAPS,
             (EdgeStyle::Rectilinear, &HashMap::new(), Color::Reset),
-            &HashSet::new(),
             &mut Vec::new(),
         );
         let mut arrows = Vec::new();
@@ -1711,10 +1921,12 @@ mod tests {
         arrows
     }
 
-    /// The arrows a diagonal route along one row carries when `end_nodes` stand at its two ends.
-    fn diagonal_arrows_between(end_nodes: [NodeRole; 2], length: i64) -> usize {
+    /// The arrows a westward curved route along one row carries when `end_nodes` stand at its
+    /// two ends, the western one first. Eastward runs carry none (see
+    /// `test_curved_eastward_run_has_no_arrow`).
+    fn curved_arrows_between(end_nodes: [NodeRole; 2], length: i64) -> usize {
         let (mut graph, source, target) =
-            routed_edge(&[WorldPos::new(0, 0), WorldPos::new(length, 0)]);
+            routed_edge(&[WorldPos::new(length, 0), WorldPos::new(0, 0)]);
         for (position, role) in [WorldPos::new(0, 0), WorldPos::new(length, 0)]
             .into_iter()
             .zip(end_nodes)
@@ -1727,49 +1939,74 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut shapes = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(source, target, EdgePorts::default()),
-            DIAGONAL_ARROW_GAPS,
-            (
-                EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-                &HashMap::new(),
-                Color::Reset,
+            &pinned(
+                source,
+                target,
+                EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
-            &HashSet::new(),
-            &mut Vec::new(),
+            CURVED_ARROW_GAPS,
+            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
+            &mut shapes,
         );
-        (-5..=length + 5)
-            .filter(|&x| matches!(world_buffer.get_char(WorldPos::new(x, 0)), Some('▶' | '◀')))
+        shapes
+            .iter()
+            .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
             .count()
     }
 
     #[test]
-    fn test_short_diagonal_run_between_routing_nodes_keeps_its_arrow() {
+    fn test_curved_eastward_run_has_no_arrow() {
+        let (mut graph, source, target) = routed_edge(&[WorldPos::new(0, 0), WorldPos::new(30, 0)]);
+        for position in [WorldPos::new(0, 0), WorldPos::new(30, 0)] {
+            graph.node_data_by_pos.insert(
+                position,
+                LayoutNode::routing(LocalPos::new_xy(position.x, position.y), (1, 1)),
+            );
+        }
+        let state = viewport();
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut shapes = Vec::new();
+        draw_arrows(
+            &mut world_buffer,
+            &graph,
+            &pinned(source, target, EdgePorts::default()),
+            CURVED_ARROW_GAPS,
+            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
+            &mut shapes,
+        );
+        assert!(shapes.is_empty());
+    }
+
+    #[test]
+    fn test_short_curved_run_between_routing_nodes_keeps_its_arrow() {
         assert_eq!(
-            diagonal_arrows_between([NodeRole::Routing, NodeRole::Routing], 3),
+            curved_arrows_between([NodeRole::Routing, NodeRole::Routing], 3),
             1
         );
     }
 
     #[test]
-    fn test_short_diagonal_run_at_a_data_node_has_no_arrow() {
+    fn test_short_curved_run_at_a_data_node_has_no_arrow() {
         let data = |index| NodeRole::Data(NodeIndex::new(index));
-        assert_eq!(diagonal_arrows_between([data(0), NodeRole::Routing], 3), 0);
-        assert_eq!(diagonal_arrows_between([NodeRole::Routing, data(1)], 3), 0);
-        assert_eq!(diagonal_arrows_between([data(0), data(1)], 3), 0);
+        assert_eq!(curved_arrows_between([data(0), NodeRole::Routing], 3), 0);
+        assert_eq!(curved_arrows_between([NodeRole::Routing, data(1)], 3), 0);
+        assert_eq!(curved_arrows_between([data(0), data(1)], 3), 0);
     }
 
     #[test]
-    fn test_long_diagonal_run_at_a_data_node_keeps_its_arrow() {
+    fn test_long_curved_run_at_a_data_node_keeps_its_arrow() {
         let data = |index| NodeRole::Data(NodeIndex::new(index));
-        assert_eq!(diagonal_arrows_between([data(0), data(1)], 12), 1);
+        assert_eq!(curved_arrows_between([data(0), data(1)], 12), 1);
     }
 
     #[test]
-    fn test_diagonal_direction_markers_use_wider_repeat_spacing() {
-        let (mut graph, source, target) = routed_edge(&[WorldPos::new(0, 0), WorldPos::new(60, 0)]);
+    fn test_curved_direction_markers_use_wider_repeat_spacing() {
+        let (mut graph, source, target) = routed_edge(&[WorldPos::new(60, 0), WorldPos::new(0, 0)]);
         for position in [WorldPos::new(0, 0), WorldPos::new(60, 0)] {
             graph.node_data_by_pos.insert(
                 position,
@@ -1779,23 +2016,31 @@ mod tests {
         let state = viewport();
         let mut buffer = Buffer::empty(state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut shapes = Vec::new();
         draw_arrows(
             &mut world_buffer,
             &graph,
-            &pinned(source, target, EdgePorts::default()),
-            DIAGONAL_ARROW_GAPS,
-            (
-                EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-                &HashMap::new(),
-                Color::Reset,
+            &pinned(
+                source,
+                target,
+                EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
-            &HashSet::new(),
-            &mut Vec::new(),
+            CURVED_ARROW_GAPS,
+            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
+            &mut shapes,
         );
-        let positions: Vec<_> = (0..=60)
-            .filter(|&x| world_buffer.get_char(WorldPos::new(x, 0)) == Some('▶'))
+        let centers: Vec<_> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                EdgeShape::Arrow(mark) => Some(mark.center),
+                _ => None,
+            })
             .collect();
-        assert_eq!(positions, [10, 30, 50]);
+        let expected: Vec<_> = [10, 30, 50]
+            .into_iter()
+            .map(|x| world_buffer.world_to_terminal_continuous((x as f64 + 0.5, 0.5)))
+            .collect();
+        assert_eq!(centers, expected);
     }
 
     fn viewport() -> ViewportState {
@@ -1836,13 +2081,47 @@ mod tests {
             ),
             1,
             (EdgeStyle::Rectilinear, &HashMap::new(), Color::Reset),
-            &HashSet::new(),
             &mut Vec::new(),
         );
         for (x, glyph) in [(2, '╮'), (4, '┼'), (6, '┬')] {
             assert_eq!(world_buffer.get_char(WorldPos::new(x, 0)), Some(glyph));
         }
         assert!((0..=8).any(|x| world_buffer.get_char(WorldPos::new(x, 0)) == Some('◀')));
+    }
+
+    #[test]
+    fn test_arrows_on_a_run_millions_of_cells_long_stay_on_screen() {
+        let (mut graph, source, target) =
+            routed_edge(&[WorldPos::new(5_000_000, 0), WorldPos::new(-5_000_000, 0)]);
+        for position in [WorldPos::new(5_000_000, 0), WorldPos::new(-5_000_000, 0)] {
+            graph.node_data_by_pos.insert(
+                position,
+                LayoutNode::routing(LocalPos::new_xy(position.x, position.y), (1, 1)),
+            );
+        }
+        let state = viewport();
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut shapes = Vec::new();
+        draw_arrows(
+            &mut world_buffer,
+            &graph,
+            &pinned(
+                source,
+                target,
+                EdgePorts::new(NodeSide::West, NodeSide::East),
+            ),
+            CURVED_ARROW_GAPS,
+            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
+            &mut shapes,
+        );
+        let visible = world_buffer.visible_world_area();
+        let width = visible.max.x - visible.min.x + 1;
+        let arrows = shapes
+            .iter()
+            .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+            .count() as i64;
+        assert!(arrows >= 1 && arrows <= width / CURVED_ARROW_GAPS + 1);
     }
 
     #[test]
@@ -1872,12 +2151,7 @@ mod tests {
                 EdgePorts::new(NodeSide::West, NodeSide::East),
             ),
             ARROW_GAPS,
-            (
-                EdgeStyle::Bezier(DiagonalDrawing::Deferred),
-                &HashMap::new(),
-                Color::Reset,
-            ),
-            &HashSet::new(),
+            (EdgeStyle::Curved, &HashMap::new(), Color::Reset),
             &mut Vec::new(),
         );
         for x in -25..25 {
@@ -1917,65 +2191,33 @@ mod tests {
     }
 
     #[test]
-    fn test_loopback_braille_path_and_arrows_snapshot() {
-        let (graph, source, target, [anchor, pin, returning]) = loopback_route(-20);
+    fn test_loopback_route_reports_three_arrows() {
+        let (graph, source, target, _) = loopback_route(-20);
         let state = ViewportState {
             camera_current: WorldPos::new(5, -5),
             viewport_bounds: Rect::new(0, 0, 55, 16),
             ..ViewportState::default()
         };
         let mut buffer = Buffer::empty(state.viewport_bounds);
-        {
-            let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-            for (first, second) in [(anchor, pin), (pin, returning)] {
-                let routed = routed_edge_curve(
-                    &graph,
-                    (first, &graph.node_data_by_pos[&first]),
-                    (second, &graph.node_data_by_pos[&second]),
-                    &HashMap::new(),
-                    Color::Red,
-                    LineStyle::Normal,
-                );
-                if let Some(stub) = routed.stub {
-                    let from = world_buffer.world_to_terminal_continuous(stub.from);
-                    let to = world_buffer.world_to_terminal_continuous(stub.to);
-                    draw_braille_line(&mut world_buffer, from, to, Color::Red, LineStyle::Normal);
-                }
-                let curve = routed
-                    .curve
-                    .mapped(|point| world_buffer.world_to_terminal_continuous(point));
-                draw_braille_bezier(&mut world_buffer, &curve);
-            }
-            draw_arrows(
-                &mut world_buffer,
-                &graph,
-                &pinned(
-                    source,
-                    target,
-                    EdgePorts::new(NodeSide::East, NodeSide::East),
-                ),
-                ARROW_GAPS,
-                (
-                    EdgeStyle::Bezier(DiagonalDrawing::Braille),
-                    &HashMap::new(),
-                    Color::Red,
-                ),
-                &HashSet::new(),
-                &mut Vec::new(),
-            );
-        }
-        let rows = (0..16)
-            .map(|row| {
-                (0..55)
-                    .map(|column| buffer[(column, row)].symbol().to_string())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(rows.matches('◀').count(), 3);
-        insta::assert_snapshot!("loopback_braille_path_and_arrows", rows);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
+        let mut shapes = Vec::new();
+        draw_arrows(
+            &mut world_buffer,
+            &graph,
+            &pinned(
+                source,
+                target,
+                EdgePorts::new(NodeSide::East, NodeSide::East),
+            ),
+            ARROW_GAPS,
+            (EdgeStyle::Curved, &HashMap::new(), Color::Red),
+            &mut shapes,
+        );
+        let arrows = shapes
+            .iter()
+            .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+            .count();
+        assert_eq!(arrows, 3);
     }
 
     #[test]
@@ -2106,26 +2348,28 @@ mod tests {
     }
 
     #[test]
-    fn test_arrow_slots_mirror_for_leftward_runs() {
-        for free_count in 1..=60 {
-            let rightward = super::arrow_slots(free_count, 10, true);
-            let mut leftward_mirrored: Vec<i64> = super::arrow_slots(free_count, 10, false)
-                .into_iter()
-                .map(|slot| free_count - 1 - slot)
-                .collect();
-            leftward_mirrored.sort_unstable();
-            assert_eq!(rightward, leftward_mirrored, "free count {free_count}");
-        }
+    fn test_arrow_layout_rounds_toward_the_same_physical_side() {
+        // Twelve free cells leave an odd cell over: the arrow goes on cell 5 from the west,
+        // whichever way the run travels.
+        let slots = |free_count| {
+            ArrowLayout::new(free_count, 10)
+                .slots_between(0, free_count - 1)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(slots(12), vec![5]);
+        assert_eq!(slots(25), vec![7, 17]);
     }
 
     #[test]
-    fn test_arrow_slots_round_toward_the_same_physical_side() {
-        // Twelve free cells leave an odd cell over: rightward travel puts the arrow on cell 5 from
-        // the left, and leftward travel must put it on the same cell, which is 6 from its start.
-        assert_eq!(super::arrow_slots(12, 10, true), vec![5]);
-        assert_eq!(super::arrow_slots(12, 10, false), vec![6]);
-        assert_eq!(super::arrow_slots(25, 10, true), vec![7, 17]);
-        assert_eq!(super::arrow_slots(25, 10, false), vec![17, 7]);
+    fn test_arrow_layout_visits_only_slots_in_range() {
+        let layout = ArrowLayout::new(1_000_005, 10);
+        let visible: Vec<_> = layout.slots_between(500_000, 500_030).collect();
+        assert!(visible.len() <= 4);
+        assert!(
+            visible
+                .iter()
+                .all(|slot| (500_000..=500_030).contains(slot))
+        );
     }
 
     #[test]
@@ -2257,12 +2501,10 @@ mod tests {
     }
 
     #[test]
-    fn test_hairpin_arrows_leave_on_the_top_row_and_return_on_the_bottom() {
-        // Route arrows follow both legs; the Bezier arc uses its own single bend arrow.
-        for (bus, width, side, top_points_right) in [
-            (4, 3, NodeSide::East, true),
-            (-4, -3, NodeSide::West, false),
-        ] {
+    fn test_hairpin_arrows_mark_only_the_leg_running_west() {
+        // The leg that leaves eastward is implied; the one that returns westward gets an arrow.
+        // The Bezier arc uses its own single bend arrow.
+        for (bus, width, side) in [(4, 3, NodeSide::East), (-4, -3, NodeSide::West)] {
             let (mut graph, source, corners, hub) = hairpin_route(bus, width);
             let origin = WorldPos::new(0, 0);
             graph.node_data_by_pos.insert(
@@ -2290,26 +2532,21 @@ mod tests {
                 &mut world_buffer,
                 &graph,
                 &pinned_edge,
-                DIAGONAL_ARROW_GAPS,
-                (
-                    EdgeStyle::Bezier(DiagonalDrawing::Deferred),
-                    &HashMap::new(),
-                    Color::Red,
-                ),
-                &cells_in_both_directions(&graph),
+                CURVED_ARROW_GAPS,
+                (EdgeStyle::Curved, &HashMap::new(), Color::Red),
                 &mut deferred,
             );
 
             let mut arrows: Vec<_> = deferred
                 .iter()
                 .filter_map(|edge| match edge {
-                    DeferredEdge::Arrow(mark) => Some(*mark),
+                    EdgeShape::Arrow(mark) => Some(*mark),
                     _ => None,
                 })
                 .collect();
             arrows.sort_by(|first, second| first.center.1.total_cmp(&second.center.1));
             let directions: Vec<bool> = arrows.iter().map(|mark| mark.direction.0 > 0.0).collect();
-            assert_eq!(directions, vec![top_points_right, !top_points_right]);
+            assert_eq!(directions, vec![false]);
         }
     }
 }

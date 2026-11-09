@@ -21,7 +21,7 @@ use crate::{
         PreferredWormholeDoors, StructuralSubgraph, build_window_graph_with_order, crawl_batch,
         subgraph_for,
     },
-    diagonal::EdgeStyle,
+    curved::EdgeStyle,
     layout::NodeRole,
 };
 
@@ -279,12 +279,11 @@ where
         self.order_hint = Some(order_hint);
     }
 
-    /// Build worlds for `edge_style`. The curved styles route sideways edges themselves instead
-    /// of through left and right pins, so a change between curved and rectilinear drops the
-    /// cached worlds and rebuilds the active one.
+    /// Build worlds for `edge_style`. Curved edges route sideways edges themselves instead
+    /// of through left and right pins, so a change of style drops the cached worlds and
+    /// rebuilds the active one.
     pub fn set_edge_style(&mut self, edge_style: EdgeStyle) {
-        if edge_style.is_diagonal() == self.edge_style.is_diagonal() {
-            self.edge_style = edge_style;
+        if edge_style == self.edge_style {
             return;
         }
         self.edge_style = edge_style;

@@ -5,10 +5,11 @@ pub mod assembly;
 pub mod compaction;
 pub mod crawl;
 pub mod cross_coordinates;
+pub mod curved;
 pub mod cycle_removal;
-pub mod diagonal;
 pub mod distribute_nodes;
 pub mod dot_export;
+pub mod edge_layer;
 pub mod edge_ports;
 pub mod edge_router;
 pub mod frame_index;
@@ -16,6 +17,8 @@ pub mod geometry;
 pub mod graph_painter;
 pub mod graph_view;
 pub mod graph_widget;
+#[cfg(feature = "crossterm")]
+pub mod kitty_graphics;
 pub mod layout;
 pub mod layout_engine;
 pub(crate) mod loopback_pins;
@@ -29,9 +32,8 @@ pub mod viewport_graph;
 pub mod viewport_state;
 pub mod window_graph;
 
-pub use diagonal::{
-    ArrowMark, BezierCurve, DeferredEdge, DiagonalDrawing, DiagonalLine, EdgeStyle, NodeGlow,
-    SymbolGlow,
+pub use curved::{
+    ArrowMark, BezierCurve, EdgeShape, EdgeStyle, NodeGlow, StraightSegment, SymbolGlow,
 };
 pub use edge_ports::{EdgeKey, EdgePorts, EdgeSelector, NodeSide};
 pub use geometry::WorldPos;

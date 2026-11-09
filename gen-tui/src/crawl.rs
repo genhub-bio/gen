@@ -15,8 +15,8 @@ use petgraph::{
 };
 
 use crate::{
+    curved::EdgeStyle,
     cycle_removal::remove_cycles,
-    diagonal::EdgeStyle,
     edge_ports::{EdgePorts, NodeSide},
     layout::{PinSide, WindowStructureBuilder},
     pinning::{
@@ -490,7 +490,7 @@ where
             // An edge that leaves a side of a node and returns to it is a hairpin, which a hair
             // pin beside that side turns around.
             if edge.source == edge.target && edge.ports.source == edge.ports.target {
-                return if matches!(edge_style, EdgeStyle::Bezier(_)) {
+                return if edge_style.is_curved() {
                     plan_hairpin_arc()
                 } else {
                     plan_hairpin(edge.ports.source)
@@ -504,7 +504,7 @@ where
                 !edge.forced_backward
                     && position_in_order[&edge.target] > position_in_order[&edge.source]
             };
-            if edge_style.is_diagonal() {
+            if edge_style.is_curved() {
                 plan_curved_bends(
                     edge.ports,
                     target_follows_source,

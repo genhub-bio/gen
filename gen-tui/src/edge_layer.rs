@@ -1,19 +1,33 @@
-//! PNG export of graphs drawn with deferred Bézier edges.
+//! The curved edges of a graph rasterized at pixel resolution.
 //!
-//! The viewer places every node exactly as it does in a terminal but leaves the edges out of the
-//! buffer (see `DiagonalDrawing::Deferred`) and reports them as paths. The text is rasterized by
-//! `PngRenderer`; the curves are drawn behind the text with antialiased tiny-skia strokes.
+//! A curved edge style leaves the edges out of the cell buffer and reports them as
+//! [`EdgeShape`]s. An [`EdgeLayer`] draws those shapes with antialiased strokes onto a
+//! transparent image laid over the buffer's cell grid, which a terminal can display through the
+//! Kitty graphics protocol (see `kitty_graphics`) and the PNG export composites onto its text.
+//!
+//! Both routes show the same picture because the layer is cut out of every cell that holds text
+//! or a node background. Edges attach at node borders, so the cut leaves them visible, and it
+//! means the layer can sit on top of the cells without anyone deciding which layer the nodes
+//! are on.
 
-use std::io::{self, Write};
-
-use gen_tui::{
-    ArrowMark, BezierCurve, DeferredEdge, LineStyle, NodeGlow, SymbolGlow,
-    graph_widget::NODE_GLYPH,
-    png_export::{PngConfig, PngRenderer, color_to_rgb},
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+    thread::{available_parallelism, scope},
 };
+
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use tiny_skia::{
-    FillRule, LineCap, Paint, Path, PathBuilder, PathSegment, Pixmap, Stroke, Transform,
+    FillRule, IntSize, LineCap, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapMut, Stroke,
+    Transform,
+};
+
+use crate::{
+    curved::{ArrowMark, BezierCurve, EdgeShape, NodeGlow, SymbolGlow},
+    graph_widget::NODE_GLYPH,
+    plotter::LineStyle,
+    png_export::{PngConfig, color_to_rgb},
 };
 
 // Rasterize beyond each band before cropping, so antialiasing at the clip edge cannot
@@ -60,60 +74,316 @@ fn glow_opacity(peak: f32, ring: usize) -> f32 {
 const DASH_CELLS: f32 = 0.6;
 const GAP_CELLS: f32 = 0.4;
 
-/// Write `buffer` as a PNG cropped to its content, with `lines` (in cells of `buffer`) drawn
-/// behind its glyphs. Every length is multiplied by `scale` image pixels per logical pixel, so a
-/// scale of 2 gives the same picture on twice as many pixels.
-pub fn write_png_with_lines(
-    buffer: &Buffer,
-    lines: &[DeferredEdge],
-    scale: usize,
-    output: &mut impl Write,
-) -> io::Result<()> {
-    write_png_with_lines_inner(buffer, lines, scale, output, true)
+/// The cells of a buffer whose pixels the layer must leave clear: those with text, or with a
+/// background other than the canvas.
+struct CellMask {
+    columns: usize,
+    cell_width: usize,
+    cell_height: usize,
+    occupied: Vec<bool>,
 }
 
-/// Write a full viewport PNG without trimming its terminal-cell geometry.
-pub fn write_png_with_lines_full_viewport(
-    buffer: &Buffer,
-    lines: &[DeferredEdge],
-    scale: usize,
-    output: &mut impl Write,
-) -> io::Result<()> {
-    write_png_with_lines_inner(buffer, lines, scale, output, false)
+impl CellMask {
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self {
+            columns: 0,
+            cell_width: 0,
+            cell_height: 0,
+            occupied: Vec::new(),
+        }
+    }
+
+    fn of(buffer: &Buffer, config: PngConfig) -> Self {
+        let occupied = buffer
+            .content
+            .iter()
+            .map(|cell| {
+                !cell.symbol().trim().is_empty()
+                    || color_to_rgb(cell.bg, config.background) != config.background
+            })
+            .collect();
+        Self {
+            columns: usize::from(buffer.area.width),
+            cell_width: config.cell_width,
+            cell_height: config.cell_height,
+            occupied,
+        }
+    }
+
+    /// Clear the occupied cells' pixels in `row`, one RGBA row of the image at `image_row`.
+    fn clear_row(&self, row: &mut [u8], image_row: usize) {
+        if self.columns == 0 {
+            return;
+        }
+        let cells = image_row / self.cell_height * self.columns;
+        let Some(cells_in_row) = self.occupied.get(cells..cells + self.columns) else {
+            return;
+        };
+        for (column, _) in cells_in_row.iter().enumerate().filter(|(_, taken)| **taken) {
+            let start = column * self.cell_width * 4;
+            row[start..start + self.cell_width * 4].fill(0);
+        }
+    }
 }
 
-fn write_png_with_lines_inner(
-    buffer: &Buffer,
-    lines: &[DeferredEdge],
-    scale: usize,
-    output: &mut impl Write,
-    crop_to_content: bool,
-) -> io::Result<()> {
-    let config = PngConfig::default().with_scale(scale);
-    let mut renderer = PngRenderer::new(config).map_err(io::Error::other)?;
-    let crop = if crop_to_content {
-        renderer.content_crop(buffer, lines_bounds(lines, buffer.area))
-    } else {
-        buffer.area
+/// The most horizontal strips a full raster is split into, one thread each.
+const MAX_STRIPS: usize = 8;
+
+/// Fewer shapes than this are prepared on the calling thread, where spawning would cost more
+/// than it saves.
+const PARALLEL_PREPARE_SHAPES: usize = 256;
+
+/// Edge shapes ready to rasterize over a buffer. The strokes are built on first use, so a caller
+/// can compare [`Self::digest`] with the previous frame's and skip the work entirely.
+pub struct EdgeLayer {
+    visible: Vec<EdgeShape>,
+    origin: (u16, u16),
+    paths: OnceLock<Vec<EdgePath>>,
+    mask: CellMask,
+    config: PngConfig,
+    digest: u64,
+}
+
+impl EdgeLayer {
+    /// Prepare `shapes`, in cells with `origin` as the top-left corner of the image, over
+    /// `buffer`. One cell of `config` is one cell of the buffer, so the image is
+    /// `buffer.area.width * config.cell_width` pixels wide. Shapes that cannot reach the
+    /// buffer are dropped before any stroke is built: a window holds every placed edge, usually
+    /// far more than the screen shows.
+    pub fn new(
+        shapes: &[EdgeShape],
+        buffer: &Buffer,
+        origin: (u16, u16),
+        config: PngConfig,
+    ) -> Self {
+        let visible: Vec<EdgeShape> = shapes
+            .iter()
+            .filter(|shape| reaches_view(shape, origin, buffer.area))
+            .copied()
+            .collect();
+        let mask = CellMask::of(buffer, config);
+        let mut hasher = DefaultHasher::new();
+        (origin, config.cell_width, config.cell_height, config.scale).hash(&mut hasher);
+        config.foreground.hash(&mut hasher);
+        config.background.hash(&mut hasher);
+        mask.columns.hash(&mut hasher);
+        mask.occupied.hash(&mut hasher);
+        for shape in &visible {
+            hash_shape(shape, &mut hasher);
+        }
+        Self {
+            visible,
+            origin,
+            paths: OnceLock::new(),
+            mask,
+            config,
+            digest: hasher.finish(),
+        }
+    }
+
+    /// Identifies what the layer draws: equal digests mean equal pictures, so a caller that
+    /// already showed one need not draw it again.
+    pub const fn digest(&self) -> u64 {
+        self.digest
+    }
+
+    /// Whether the layer draws nothing.
+    pub fn is_empty(&self) -> bool {
+        self.visible.is_empty()
+    }
+
+    /// The strokes of the visible shapes, in paint order. A large frame is prepared on several
+    /// threads, each taking a run of shapes, and the runs are joined back in order.
+    fn paths(&self) -> &[EdgePath] {
+        self.paths.get_or_init(|| {
+            let threads = available_parallelism()
+                .map_or(1, usize::from)
+                .min(MAX_STRIPS);
+            if self.visible.len() < PARALLEL_PREPARE_SHAPES || threads == 1 {
+                return prepare_paths(&self.visible, self.origin, self.config);
+            }
+            let run = self.visible.len().div_ceil(threads);
+            scope(|workers| {
+                let handles: Vec<_> = self
+                    .visible
+                    .chunks(run)
+                    .map(|shapes| workers.spawn(|| prepare_paths(shapes, self.origin, self.config)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("should prepare strokes"))
+                    .collect()
+            })
+        })
+    }
+
+    /// A scratch pixmap for [`Self::composite_band`] covering `width` pixels and `rows` image
+    /// rows, with the margin that keeps antialiasing at a band's edge from changing coverage.
+    pub fn band_pixmap(&self, width: usize, rows: usize) -> Option<Pixmap> {
+        let padding = BAND_PADDING * self.config.scale as u32;
+        Pixmap::new(width as u32, rows as u32 + 2 * padding)
+    }
+
+    /// Composite the layer onto `pixels`, the RGB rows of the image starting at image row `top`,
+    /// using `scratch` from [`Self::band_pixmap`]. Bands may arrive in any order.
+    pub fn composite_band(&self, pixels: &mut [u8], top: usize, scratch: &mut Pixmap) {
+        draw_paths(pixels, top, (self.paths(), &self.mask), scratch);
+    }
+
+    /// The whole layer as a transparent pixmap, or `None` when nothing is drawn. Pixels are
+    /// premultiplied RGBA. Horizontal strips are drawn on separate threads.
+    pub fn rasterize(&self, columns: u16, rows: u16) -> Option<Pixmap> {
+        let strips = available_parallelism()
+            .map_or(1, usize::from)
+            .min(MAX_STRIPS);
+        self.rasterize_in_strips(columns, rows, strips)
+    }
+
+    fn rasterize_in_strips(&self, columns: u16, rows: u16, strips: usize) -> Option<Pixmap> {
+        let paths = self.paths();
+        if paths.is_empty() {
+            return None;
+        }
+        let width = usize::from(columns) * self.config.cell_width;
+        let height = usize::from(rows) * self.config.cell_height;
+        let size = IntSize::from_wh(width as u32, height as u32)?;
+        let row_bytes = width * 4;
+        let mut data = vec![0_u8; row_bytes * height];
+        // Strips are whole cell rows, so every thread owns a disjoint block of image rows.
+        let strip_rows = usize::from(rows).div_ceil(strips.max(1)) * self.config.cell_height;
+        scope(|threads| {
+            for (index, block) in data.chunks_mut(strip_rows * row_bytes).enumerate() {
+                let top = index * strip_rows;
+                threads.spawn(move || self.draw_strip(block, top, (width, row_bytes), paths));
+            }
+        });
+        Pixmap::from_vec(data, size)
+    }
+
+    /// Draw the paths that reach the image rows from `top` into `block`, those rows' RGBA, then
+    /// clear the occupied cells.
+    fn draw_strip(
+        &self,
+        block: &mut [u8],
+        top: usize,
+        (width, row_bytes): (usize, usize),
+        paths: &[EdgePath],
+    ) {
+        let rows = block.len() / row_bytes;
+        let Some(mut strip) = PixmapMut::from_bytes(block, width as u32, rows as u32) else {
+            return;
+        };
+        let transform = Transform::from_translate(0.0, -(top as f32));
+        for edge in paths {
+            let bounds = edge.path.bounds();
+            if bounds.bottom() + edge.reach < top as f32
+                || bounds.top() - edge.reach > (top + rows) as f32
+            {
+                continue;
+            }
+            strip.fill_path(&edge.path, &edge.paint, FillRule::Winding, transform, None);
+        }
+        for (row, bytes) in block.chunks_exact_mut(row_bytes).enumerate() {
+            self.mask.clear_row(bytes, top + row);
+        }
+    }
+}
+
+/// Feed everything that decides how `shape` is drawn into `hasher`.
+fn hash_shape(shape: &EdgeShape, hasher: &mut impl Hasher) {
+    let mut point = |(x, y): (f64, f64)| {
+        x.to_bits().hash(hasher);
+        y.to_bits().hash(hasher);
     };
-    let mut cropped = PngRenderer::crop(buffer, crop);
+    match shape {
+        EdgeShape::Line(line) => {
+            point(line.from);
+            point(line.to);
+            (0_u8, line.color, line.line_style).hash(hasher);
+        }
+        EdgeShape::Bezier(curve) => {
+            for control in [curve.from, curve.control1, curve.control2, curve.to] {
+                point(control);
+            }
+            (1_u8, curve.color, curve.line_style).hash(hasher);
+        }
+        EdgeShape::Arrow(mark) => {
+            point(mark.center);
+            point(mark.direction);
+            (2_u8, mark.color).hash(hasher);
+        }
+        EdgeShape::NodeGlow(glow) => {
+            point(glow.top_left);
+            point(glow.bottom_right);
+            (3_u8, glow.clip_left, glow.clip_right, glow.color).hash(hasher);
+        }
+        EdgeShape::SymbolGlow(glow) => {
+            point(glow.center);
+            (4_u8, glow.color).hash(hasher);
+        }
+    }
+}
+
+/// How far, in cells, a stroke's halo and antialiasing reach beyond its path.
+const REACH_MARGIN_CELLS: f64 = 2.0;
+
+/// Whether `shape` can touch the view: `area`'s cells, whose top-left cell sits at `origin`. A
+/// curve stays inside the box of its control points, so that box decides without sampling it.
+fn reaches_view(shape: &EdgeShape, origin: (u16, u16), area: Rect) -> bool {
+    let points: &[(f64, f64)] = match shape {
+        EdgeShape::Line(line) => &[line.from, line.to],
+        EdgeShape::Bezier(curve) => &[curve.from, curve.control1, curve.control2, curve.to],
+        EdgeShape::Arrow(mark) => &[mark.center],
+        EdgeShape::NodeGlow(glow) => &[glow.top_left, glow.bottom_right],
+        EdgeShape::SymbolGlow(glow) => &[glow.center],
+    };
+    let (mut left, mut top) = (f64::INFINITY, f64::INFINITY);
+    let (mut right, mut bottom) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in points {
+        left = left.min(x);
+        right = right.max(x);
+        top = top.min(y);
+        bottom = bottom.max(y);
+    }
+    let view_left = f64::from(origin.0);
+    let view_top = f64::from(origin.1);
+    let view_right = view_left + f64::from(area.width);
+    let view_bottom = view_top + f64::from(area.height);
+    right + REACH_MARGIN_CELLS >= view_left
+        && left - REACH_MARGIN_CELLS <= view_right
+        && bottom + REACH_MARGIN_CELLS >= view_top
+        && top - REACH_MARGIN_CELLS <= view_bottom
+}
+
+/// Recolor the cells of highlighted nodes in `buffer` (whose top-left cell is at `origin`) the
+/// way the picture shows them: a node's background is lightened toward contrast where an
+/// [`EdgeShape::NodeGlow`] covers it, and a minimal highlighted node loses its glyph so the
+/// glow's disc is the whole node. Call this before building the [`EdgeLayer`] so the recolored
+/// cells are cut out of it.
+pub fn apply_highlight_cells(
+    buffer: &mut Buffer,
+    shapes: &[EdgeShape],
+    origin: (u16, u16),
+    config: PngConfig,
+) {
+    let width = buffer.area.width;
+    let height = buffer.area.height;
     let light_theme = luminance(config.background) > luminance(config.foreground);
-    for glow in lines.iter().filter_map(|line| match line {
-        DeferredEdge::NodeGlow(glow) => Some(glow),
+    for glow in shapes.iter().filter_map(|shape| match shape {
+        EdgeShape::NodeGlow(glow) => Some(glow),
         _ => None,
     }) {
         let original = color_to_rgb(glow.color, config.foreground);
         let [red, green, blue] = highlight_color(original, EDGE_CORE_BRIGHTNESS, light_theme);
-        let left = (glow.top_left.0.floor() as i32 - i32::from(crop.x)).max(0);
-        let top = (glow.top_left.1.floor() as i32 - i32::from(crop.y)).max(0);
-        let right =
-            (glow.bottom_right.0.ceil() as i32 - i32::from(crop.x)).min(i32::from(crop.width));
+        let left = (glow.top_left.0.floor() as i32 - i32::from(origin.0)).max(0);
+        let top = (glow.top_left.1.floor() as i32 - i32::from(origin.1)).max(0);
+        let right = (glow.bottom_right.0.ceil() as i32 - i32::from(origin.0)).min(i32::from(width));
         let bottom =
-            (glow.bottom_right.1.ceil() as i32 - i32::from(crop.y)).min(i32::from(crop.height));
+            (glow.bottom_right.1.ceil() as i32 - i32::from(origin.1)).min(i32::from(height));
         for row in top..bottom {
             for column in left..right {
-                let cell =
-                    &mut cropped.content[row as usize * usize::from(crop.width) + column as usize];
+                let cell = &mut buffer.content[row as usize * usize::from(width) + column as usize];
                 // Preserve the winning highlight where multiple loci overlap.
                 if color_to_rgb(cell.bg, config.background) == original {
                     cell.set_bg(Color::Rgb(red, green, blue));
@@ -122,36 +392,20 @@ fn write_png_with_lines_inner(
         }
     }
     // A minimal highlighted node is drawn as a disc by SymbolGlow. Keep its text glyph
-    // out of the PNG so the disc and halo are the whole visible node.
-    for glow in lines.iter().filter_map(|line| match line {
-        DeferredEdge::SymbolGlow(glow) => Some(glow),
+    // out of the picture so the disc and halo are the whole visible node.
+    for glow in shapes.iter().filter_map(|shape| match shape {
+        EdgeShape::SymbolGlow(glow) => Some(glow),
         _ => None,
     }) {
-        let column = glow.center.0.floor() as i32 - i32::from(crop.x);
-        let row = glow.center.1.floor() as i32 - i32::from(crop.y);
-        if column >= 0 && row >= 0 && column < i32::from(crop.width) && row < i32::from(crop.height)
-        {
-            let index = row as usize * usize::from(crop.width) + column as usize;
-            if cropped.content[index].symbol() == NODE_GLYPH.to_string() {
-                cropped.content[index].set_symbol(" ");
+        let column = glow.center.0.floor() as i32 - i32::from(origin.0);
+        let row = glow.center.1.floor() as i32 - i32::from(origin.1);
+        if column >= 0 && row >= 0 && column < i32::from(width) && row < i32::from(height) {
+            let index = row as usize * usize::from(width) + column as usize;
+            if buffer.content[index].symbol() == NODE_GLYPH.to_string() {
+                buffer.content[index].set_symbol(" ");
             }
         }
     }
-    let paths = prepare_paths(lines, (crop.x, crop.y), config);
-    if paths.is_empty() {
-        return renderer
-            .write_png(&cropped, output)
-            .map_err(io::Error::other);
-    }
-    let width = usize::from(cropped.area.width) * config.cell_width;
-    let band_padding = BAND_PADDING * config.scale as u32;
-    let mut pixmap = Pixmap::new(width as u32, config.cell_height as u32 + 2 * band_padding)
-        .ok_or_else(|| io::Error::other("could not allocate PNG edge band"))?;
-    renderer
-        .write_png_with_overlay(&cropped, output, |pixels, _, top| {
-            draw_paths(pixels, top, &paths, &mut pixmap);
-        })
-        .map_err(io::Error::other)
 }
 
 struct EdgePath {
@@ -163,7 +417,7 @@ struct EdgePath {
 
 // Build geometry once per export. Each band clips the original path, rather than splitting
 // curves, so tangents and dash phase remain continuous across PNG rows.
-fn prepare_paths(lines: &[DeferredEdge], origin: (u16, u16), config: PngConfig) -> Vec<EdgePath> {
+fn prepare_paths(lines: &[EdgeShape], origin: (u16, u16), config: PngConfig) -> Vec<EdgePath> {
     // A cell's center falls on a pixel center only when its size is odd; an even size needs half
     // a pixel to put one-pixel strokes on the middle pixel row or column, like the text glyphs.
     // A stroke that is an even number of pixels wide is centered on a pixel boundary already.
@@ -184,28 +438,28 @@ fn prepare_paths(lines: &[DeferredEdge], origin: (u16, u16), config: PngConfig) 
     };
     let mut paths = Vec::new();
     for edge in lines {
-        if let DeferredEdge::Arrow(mark) = edge {
+        if let EdgeShape::Arrow(mark) = edge {
             push_arrow(mark, point(mark.center), config, &mut paths);
             continue;
         }
-        if let DeferredEdge::NodeGlow(glow) = edge {
+        if let EdgeShape::NodeGlow(glow) = edge {
             push_node_glow(glow, point, config, &mut paths);
             continue;
         }
-        if let DeferredEdge::SymbolGlow(glow) = edge {
+        if let EdgeShape::SymbolGlow(glow) = edge {
             push_symbol_glow(glow, point(glow.center), config, &mut paths);
             continue;
         }
         let mut builder = PathBuilder::new();
         let (color, line_style) = match edge {
-            DeferredEdge::Line(line) => {
+            EdgeShape::Line(line) => {
                 let from = point(line.from);
                 let to = point(line.to);
                 builder.move_to(from.0, from.1);
                 builder.line_to(to.0, to.1);
                 (line.color, line.line_style)
             }
-            DeferredEdge::Bezier(curve) => {
+            EdgeShape::Bezier(curve) => {
                 let from = point(curve.from);
                 let control1 = point(curve.control1);
                 let control2 = point(curve.control2);
@@ -214,7 +468,7 @@ fn prepare_paths(lines: &[DeferredEdge], origin: (u16, u16), config: PngConfig) 
                 builder.cubic_to(control1.0, control1.1, control2.0, control2.1, to.0, to.1);
                 (curve.color, curve.line_style)
             }
-            DeferredEdge::Arrow(_) | DeferredEdge::NodeGlow(_) | DeferredEdge::SymbolGlow(_) => {
+            EdgeShape::Arrow(_) | EdgeShape::NodeGlow(_) | EdgeShape::SymbolGlow(_) => {
                 continue;
             }
         };
@@ -632,19 +886,19 @@ fn curve_points(curve: &BezierCurve) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// The cells that `lines` cross, clipped to `area`, or `None` without lines.
-fn lines_bounds(lines: &[DeferredEdge], area: Rect) -> Option<Rect> {
+/// The cells that `shapes` cross, clipped to `area`, or `None` without shapes.
+pub fn shapes_bounds(shapes: &[EdgeShape], area: Rect) -> Option<Rect> {
     let cell = |value: f64, limit: u16| value.floor().clamp(0.0, f64::from(limit)) as u16;
-    lines
+    shapes
         .iter()
         .flat_map(|edge| match edge {
-            DeferredEdge::Line(line) => vec![line.from, line.to],
+            EdgeShape::Line(line) => vec![line.from, line.to],
             // The control points of a loop that bulges far can lie well outside the curve, so
             // the curve's own points bound it, not its control polygon.
-            DeferredEdge::Bezier(curve) => curve_points(curve),
-            DeferredEdge::Arrow(mark) => vec![mark.center],
-            DeferredEdge::SymbolGlow(glow) => vec![glow.center],
-            DeferredEdge::NodeGlow(glow) => vec![glow.top_left, glow.bottom_right],
+            EdgeShape::Bezier(curve) => curve_points(curve),
+            EdgeShape::Arrow(mark) => vec![mark.center],
+            EdgeShape::SymbolGlow(glow) => vec![glow.center],
+            EdgeShape::NodeGlow(glow) => vec![glow.top_left, glow.bottom_right],
         })
         .map(|(x, y)| {
             Rect::new(
@@ -657,7 +911,15 @@ fn lines_bounds(lines: &[DeferredEdge], area: Rect) -> Option<Rect> {
         .reduce(|bounds, point| bounds.union(point))
 }
 
-fn draw_paths(pixels: &mut [u8], top: usize, paths: &[EdgePath], pixmap: &mut Pixmap) {
+/// Draw `paths` for the image rows from `top` into `pixmap`, which has `BAND_PADDING` scaled rows
+/// of margin above and below the band, cut out of the cells `mask` holds, and composite the
+/// result onto `pixels`, the band's RGB rows.
+fn draw_paths(
+    pixels: &mut [u8],
+    top: usize,
+    (paths, mask): (&[EdgePath], &CellMask),
+    pixmap: &mut Pixmap,
+) {
     pixmap.data_mut().fill(0);
     // The pixmap has the same padding above and below the band's rows.
     let band_rows = pixels.len() / (3 * pixmap.width() as usize);
@@ -675,6 +937,11 @@ fn draw_paths(pixels: &mut [u8], top: usize, paths: &[EdgePath], pixmap: &mut Pi
         // Fill a precomputed stroke outline instead of using the hairline fast path, whose
         // clipping can change cubic coverage between bands. Dashing and stroking happen once.
         pixmap.fill_path(&edge.path, &edge.paint, FillRule::Winding, transform, None);
+    }
+    let row_bytes = pixmap.width() as usize * 4;
+    for row in 0..band_rows {
+        let start = (band_padding + row) * row_bytes;
+        mask.clear_row(&mut pixmap.data_mut()[start..start + row_bytes], top + row);
     }
 
     for (pixel, rgba) in pixels.as_chunks_mut::<3>().0.iter_mut().zip(
@@ -723,16 +990,14 @@ fn shift_toward_contrast(color: [u8; 3], amount: f32, light_theme: bool) -> [u8;
 
 #[cfg(test)]
 mod tests {
-    use gen_tui::{
-        ArrowMark, BezierCurve, DeferredEdge, LineStyle, SymbolGlow, png_export::PngConfig,
-    };
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use tiny_skia::Pixmap;
 
     use super::{
-        BAND_PADDING, SYMBOL_RADIUS, arrow_horizontal_span, draw_paths, prepare_paths,
-        write_png_with_lines, write_png_with_lines_full_viewport,
+        ArrowMark, BAND_PADDING, BezierCurve, CellMask, EdgeLayer, EdgeShape, SYMBOL_RADIUS,
+        SymbolGlow, arrow_horizontal_span, draw_paths, prepare_paths,
     };
+    use crate::{plotter::LineStyle, png_export::PngConfig};
 
     fn curve(
         from: (f64, f64),
@@ -776,11 +1041,11 @@ mod tests {
         config: PngConfig,
     ) -> Vec<u8> {
         let mut pixels = config.background.repeat(width * height);
-        let edges: Vec<_> = curves.iter().copied().map(DeferredEdge::Bezier).collect();
+        let edges: Vec<_> = curves.iter().copied().map(EdgeShape::Bezier).collect();
         let paths = prepare_paths(&edges, (0, 0), config);
         let mut pixmap = Pixmap::new(width as u32, height as u32 + 2 * BAND_PADDING)
             .expect("should allocate test band");
-        draw_paths(&mut pixels, top, &paths, &mut pixmap);
+        draw_paths(&mut pixels, top, (&paths, &CellMask::empty()), &mut pixmap);
         pixels
     }
 
@@ -818,7 +1083,7 @@ mod tests {
             background: [0; 3],
             ..PngConfig::default()
         };
-        let edge = DeferredEdge::NodeGlow(gen_tui::NodeGlow {
+        let edge = EdgeShape::NodeGlow(crate::curved::NodeGlow {
             top_left: (5.0, 2.0),
             bottom_right: (10.0, 3.0),
             clip_left: false,
@@ -828,7 +1093,7 @@ mod tests {
         let paths = prepare_paths(&[edge], (0, 0), config);
         let mut pixmap = Pixmap::new(200, 84 + 2 * BAND_PADDING).expect("should allocate band");
         let mut pixels = canvas(200, 84);
-        draw_paths(&mut pixels, 0, &paths, &mut pixmap);
+        draw_paths(&mut pixels, 0, (&paths, &CellMask::empty()), &mut pixmap);
         let pixel = |x: usize, y: usize| pixels[(y * 200 + x) * 3];
         let node_left = 5 * config.cell_width;
         let row = 2 * config.cell_height + config.cell_height / 2;
@@ -843,14 +1108,14 @@ mod tests {
             background: [0; 3],
             ..PngConfig::default()
         };
-        let edge = DeferredEdge::SymbolGlow(SymbolGlow {
+        let edge = EdgeShape::SymbolGlow(SymbolGlow {
             center: (5.5, 2.5),
             color: Color::Red,
         });
         let paths = prepare_paths(&[edge], (0, 0), config);
         let mut pixmap = Pixmap::new(200, 84 + 2 * BAND_PADDING).expect("should allocate band");
         let mut pixels = canvas(200, 84);
-        draw_paths(&mut pixels, 0, &paths, &mut pixmap);
+        draw_paths(&mut pixels, 0, (&paths, &CellMask::empty()), &mut pixmap);
         let pixel = |x: usize, y: usize| pixels[(y * 200 + x) * 3];
         let center_x = 5 * config.cell_width + config.cell_width / 2;
         let row = 2 * config.cell_height + config.cell_height / 2;
@@ -866,7 +1131,7 @@ mod tests {
             background: [0; 3],
             ..PngConfig::default()
         };
-        let edge = DeferredEdge::NodeGlow(gen_tui::NodeGlow {
+        let edge = EdgeShape::NodeGlow(crate::curved::NodeGlow {
             top_left: (5.0, 2.0),
             bottom_right: (10.0, 3.0),
             clip_left: true,
@@ -876,7 +1141,7 @@ mod tests {
         let paths = prepare_paths(&[edge], (0, 0), config);
         let mut pixmap = Pixmap::new(200, 84 + 2 * BAND_PADDING).expect("should allocate band");
         let mut pixels = canvas(200, 84);
-        draw_paths(&mut pixels, 0, &paths, &mut pixmap);
+        draw_paths(&mut pixels, 0, (&paths, &CellMask::empty()), &mut pixmap);
         let pixel = |x: usize, y: usize| pixels[(y * 200 + x) * 3];
         let node_left = 5 * config.cell_width;
         let node_right = 10 * config.cell_width;
@@ -888,7 +1153,7 @@ mod tests {
 
     #[test]
     fn test_deferred_straight_edges_are_not_dropped() {
-        let edge = DeferredEdge::Line(gen_tui::DiagonalLine {
+        let edge = EdgeShape::Line(crate::curved::StraightSegment {
             from: (1.0, 1.0),
             to: (8.0, 1.0),
             color: Color::Red,
@@ -898,7 +1163,7 @@ mod tests {
         let mut pixmap =
             Pixmap::new(120, 44 + 2 * BAND_PADDING).expect("should allocate test band");
         let mut pixels = canvas(120, 44);
-        draw_paths(&mut pixels, 0, &paths, &mut pixmap);
+        draw_paths(&mut pixels, 0, (&paths, &CellMask::empty()), &mut pixmap);
         assert!(pixels.iter().any(|&value| value > 0));
     }
 
@@ -1041,51 +1306,6 @@ mod tests {
     }
 
     #[test]
-    fn test_png_with_bezier_is_cropped_around_the_curve_not_its_control_points() {
-        let area = Rect::new(0, 0, 40, 20);
-        let buffer = Buffer::empty(area);
-        let curves = [DeferredEdge::Bezier(curve(
-            (5.0, 10.0),
-            (20.0, 1.0),
-            (30.0, 1.0),
-            (35.0, 10.0),
-            LineStyle::Normal,
-        ))];
-        let mut bytes = Vec::new();
-        write_png_with_lines(&buffer, &curves, 1, &mut bytes).expect("should write the png");
-        let dimension = |start: usize| {
-            u32::from_be_bytes(
-                bytes[start..start + 4]
-                    .try_into()
-                    .expect("should have a header"),
-            ) as usize
-        };
-        let config = PngConfig::default();
-        assert_eq!(dimension(16), (35 - 5 + 1 + 2) * config.cell_width);
-        // The curve peaks at y = 3.25, three quarters of the way to its handles at y = 1.
-        assert_eq!(dimension(20), (10 - 3 + 1 + 2) * config.cell_height);
-    }
-
-    #[test]
-    fn test_full_viewport_png_preserves_cell_dimensions() {
-        let area = Rect::new(0, 0, 40, 20);
-        let buffer = Buffer::empty(area);
-        let mut bytes = Vec::new();
-        write_png_with_lines_full_viewport(&buffer, &[], 1, &mut bytes)
-            .expect("should write the full viewport png");
-        let dimension = |start: usize| {
-            u32::from_be_bytes(
-                bytes[start..start + 4]
-                    .try_into()
-                    .expect("should have a header"),
-            ) as usize
-        };
-        let config = PngConfig::default();
-        assert_eq!(dimension(16), 40 * config.cell_width);
-        assert_eq!(dimension(20), 20 * config.cell_height);
-    }
-
-    #[test]
     fn test_bezier_is_clipped_to_each_band() {
         let curve = curve(
             (4.0, 0.0),
@@ -1117,7 +1337,7 @@ mod tests {
             ..PngConfig::default()
         };
         let render = |points_right: bool| {
-            let mark = DeferredEdge::Arrow(ArrowMark {
+            let mark = EdgeShape::Arrow(ArrowMark {
                 center: (3.37, 2.0),
                 direction: (if points_right { 1.0 } else { -1.0 }, 0.0),
                 color: Color::Red,
@@ -1131,37 +1351,6 @@ mod tests {
         let (forward_left, forward_right) = render(true);
         let (reverse_left, reverse_right) = render(false);
         assert!((forward_left + reverse_right - (forward_right + reverse_left)).abs() < 1e-3);
-    }
-
-    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
-        let read = |start: usize| {
-            u32::from_be_bytes(
-                bytes[start..start + 4]
-                    .try_into()
-                    .expect("should have a header"),
-            )
-        };
-        (read(16), read(20))
-    }
-
-    #[test]
-    fn test_png_with_lines_at_scale_two_doubles_the_pixels() {
-        let area = Rect::new(0, 0, 40, 20);
-        let buffer = Buffer::empty(area);
-        let curves = [DeferredEdge::Bezier(curve(
-            (5.0, 10.0),
-            (20.0, 1.0),
-            (30.0, 1.0),
-            (35.0, 10.0),
-            LineStyle::Bold,
-        ))];
-        let mut normal = Vec::new();
-        write_png_with_lines(&buffer, &curves, 1, &mut normal).expect("should write the png");
-        let mut doubled = Vec::new();
-        write_png_with_lines(&buffer, &curves, 2, &mut doubled)
-            .expect("should write the scaled png");
-        let (width, height) = png_dimensions(&normal);
-        assert_eq!(png_dimensions(&doubled), (width * 2, height * 2));
     }
 
     #[test]
@@ -1189,5 +1378,214 @@ mod tests {
                 "fully lit rows of a stroke at scale {scale}"
             );
         }
+    }
+
+    #[test]
+    fn test_cells_with_text_or_a_node_background_are_cut_out_of_the_layer() {
+        let config = PngConfig {
+            cell_width: 4,
+            cell_height: 8,
+            scale: 1,
+            ..PngConfig::default()
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+        buffer.set_string(1, 0, "A", ratatui::style::Style::default());
+        buffer[(2, 0)].set_bg(Color::Rgb(200, 10, 10));
+        let across = EdgeShape::Bezier(curve(
+            (0.0, 0.5),
+            (1.0, 0.5),
+            (2.0, 0.5),
+            (3.0, 0.5),
+            LineStyle::Bold,
+        ));
+        let layer = EdgeLayer::new(&[across], &buffer, (0, 0), config);
+
+        let pixmap = layer.rasterize(3, 1).expect("should draw the edge");
+
+        let alpha_at = |x: u32, y: u32| pixmap.pixel(x, y).expect("should be in bounds").alpha();
+        assert!(alpha_at(1, 4) > 0, "the blank first cell keeps the edge");
+        assert_eq!(alpha_at(5, 4), 0, "the cell with text is cut out");
+        assert_eq!(
+            alpha_at(9, 4),
+            0,
+            "the cell with a node background is cut out"
+        );
+    }
+
+    #[test]
+    fn test_full_raster_matches_composited_bands_outside_cut_out_cells() {
+        let config = PngConfig {
+            background: [0; 3],
+            ..PngConfig::default()
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 4));
+        buffer.set_string(2, 1, "N", ratatui::style::Style::default());
+        let edges = [EdgeShape::Bezier(curve(
+            (0.5, 0.5),
+            (4.0, 0.5),
+            (2.0, 3.5),
+            (5.5, 3.5),
+            LineStyle::Normal,
+        ))];
+        let layer = EdgeLayer::new(&edges, &buffer, (0, 0), config);
+        let width = 6 * config.cell_width;
+        let rows = 4 * config.cell_height;
+        let mut scratch = layer
+            .band_pixmap(width, config.cell_height)
+            .expect("should allocate a band");
+        let mut bands = Vec::new();
+        for top in (0..rows).step_by(config.cell_height) {
+            let mut band = vec![0; width * config.cell_height * 3];
+            layer.composite_band(&mut band, top, &mut scratch);
+            bands.extend(band);
+        }
+        let full = layer.rasterize(6, 4).expect("should draw the edge");
+        // Where the full raster is opaque red the bands must be bright too, and inside the
+        // cut-out cell neither draws anything.
+        let cut_pixel = (2 * config.cell_width + 1, config.cell_height + 3);
+        let band_at = |x: usize, y: usize| bands[(y * width + x) * 3];
+        assert_eq!(
+            full.pixel(cut_pixel.0 as u32, cut_pixel.1 as u32)
+                .unwrap()
+                .alpha(),
+            0
+        );
+        assert_eq!(band_at(cut_pixel.0, cut_pixel.1), 0);
+        assert!(bands.iter().any(|&value| value > 100));
+    }
+
+    #[test]
+    fn test_shapes_outside_the_view_are_not_prepared() {
+        let config = PngConfig::default();
+        let buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        let inside = EdgeShape::Bezier(curve(
+            (1.0, 2.5),
+            (8.0, 2.5),
+            (12.0, 2.5),
+            (19.0, 2.5),
+            LineStyle::Normal,
+        ));
+        let far_right = EdgeShape::Bezier(curve(
+            (500.0, 2.5),
+            (510.0, 2.5),
+            (520.0, 2.5),
+            (530.0, 2.5),
+            LineStyle::Normal,
+        ));
+        let far_below = EdgeShape::Bezier(curve(
+            (2.0, 90.0),
+            (4.0, 95.0),
+            (6.0, 95.0),
+            (8.0, 90.0),
+            LineStyle::Normal,
+        ));
+        let straddling = EdgeShape::Bezier(curve(
+            (-30.0, 2.5),
+            (-10.0, 2.5),
+            (10.0, 2.5),
+            (30.0, 2.5),
+            LineStyle::Normal,
+        ));
+
+        let only_outside = EdgeLayer::new(&[far_right, far_below], &buffer, (0, 0), config);
+        let with_inside = EdgeLayer::new(&[far_right, inside, far_below], &buffer, (0, 0), config);
+        let crossing = EdgeLayer::new(&[straddling], &buffer, (0, 0), config);
+
+        assert!(only_outside.is_empty());
+        assert_eq!(
+            with_inside.paths().len(),
+            EdgeLayer::new(&[inside], &buffer, (0, 0), config)
+                .paths()
+                .len()
+        );
+        assert!(
+            !crossing.is_empty(),
+            "an edge that crosses the view is kept"
+        );
+    }
+
+    #[test]
+    fn test_view_follows_the_origin_of_a_cropped_buffer() {
+        let config = PngConfig::default();
+        let buffer = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let at_origin = EdgeShape::Bezier(curve(
+            (100.0, 52.0),
+            (102.0, 52.0),
+            (104.0, 52.0),
+            (106.0, 52.0),
+            LineStyle::Normal,
+        ));
+        assert!(EdgeLayer::new(&[at_origin], &buffer, (0, 0), config).is_empty());
+        assert!(!EdgeLayer::new(&[at_origin], &buffer, (100, 50), config).is_empty());
+    }
+
+    #[test]
+    fn test_digest_changes_with_the_shapes_and_the_cut_out_but_not_with_hidden_shapes() {
+        let config = PngConfig::default();
+        let buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        let shape = EdgeShape::Bezier(curve(
+            (1.0, 2.5),
+            (8.0, 2.5),
+            (12.0, 1.5),
+            (19.0, 1.5),
+            LineStyle::Normal,
+        ));
+        let moved = EdgeShape::Bezier(curve(
+            (1.0, 2.5),
+            (8.0, 2.5),
+            (12.0, 1.5),
+            (19.0, 2.0),
+            LineStyle::Normal,
+        ));
+        let hidden = EdgeShape::Bezier(curve(
+            (900.0, 2.5),
+            (908.0, 2.5),
+            (912.0, 1.5),
+            (919.0, 1.5),
+            LineStyle::Normal,
+        ));
+        let mut with_text = buffer.clone();
+        with_text.set_string(5, 2, "N", ratatui::style::Style::default());
+        let digest = |shapes: &[EdgeShape], buffer: &Buffer| {
+            EdgeLayer::new(shapes, buffer, (0, 0), config).digest()
+        };
+
+        assert_eq!(digest(&[shape], &buffer), digest(&[shape], &buffer));
+        assert_eq!(digest(&[shape], &buffer), digest(&[hidden, shape], &buffer));
+        assert_ne!(digest(&[shape], &buffer), digest(&[moved], &buffer));
+        assert_ne!(digest(&[shape], &buffer), digest(&[shape], &with_text));
+    }
+
+    #[test]
+    fn test_strips_drawn_on_separate_threads_match_one_strip() {
+        let config = PngConfig::default();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 12));
+        buffer.set_string(10, 5, "NNN", ratatui::style::Style::default());
+        let shapes: Vec<_> = (0..40_u32)
+            .map(|index| {
+                let y = f64::from(index % 11) + 0.5;
+                EdgeShape::Bezier(curve(
+                    (1.0, y),
+                    (12.0, y),
+                    (18.0, 11.5 - y),
+                    (29.0, 11.5 - y),
+                    [LineStyle::Normal, LineStyle::Bold, LineStyle::Dashed][index as usize % 3],
+                ))
+            })
+            .collect();
+        let layer = EdgeLayer::new(&shapes, &buffer, (0, 0), config);
+
+        let single = layer.rasterize_in_strips(30, 12, 1).expect("should draw");
+        let split = layer.rasterize_in_strips(30, 12, 5).expect("should draw");
+
+        let worst = single
+            .data()
+            .iter()
+            .zip(split.data())
+            .map(|(left, right)| left.abs_diff(*right))
+            .max()
+            .unwrap_or(0);
+        // The same bound as streamed bands: coverage at a clip edge can shift by a few levels.
+        assert!(worst <= 16, "strips changed a pixel by {worst}");
     }
 }

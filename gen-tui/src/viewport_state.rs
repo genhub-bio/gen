@@ -154,6 +154,21 @@ impl<'a> WorldBuffer<'a> {
         self.viewport_state.camera_rect()
     }
 
+    /// The world cells that map onto the terminal, or `None` while the viewport has no area.
+    pub(crate) fn visible_cells(&self) -> Option<WorldRect> {
+        let bounds = self.viewport_state.viewport_bounds;
+        if bounds.width == 0 || bounds.height == 0 {
+            return None;
+        }
+        let origin = self.viewport_state.camera_rect().min;
+        Some(WorldRect::from_coords(
+            origin.x,
+            origin.y,
+            origin.x + i64::from(bounds.width) - 1,
+            origin.y + i64::from(bounds.height) - 1,
+        ))
+    }
+
     /// Intersect a world-space region with the current visible viewport area.
     #[cfg(test)]
     pub(crate) fn calculate_visible_area(&self, world_area: WorldRect) -> Option<WorldRect> {
@@ -198,9 +213,21 @@ impl<'a> WorldBuffer<'a> {
     }
 
     /// Set a string with style starting at the specified world position, advancing horizontally.
+    ///
+    /// Only the characters that land in the viewport are visited, so the cost follows the screen
+    /// width rather than the length of the text (a node can be megabases long).
     pub fn set_string_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) {
-        for (i, ch) in text.chars().enumerate() {
-            let char_world_pos = WorldPos::new(world_pos.x + i as i64, world_pos.y);
+        let Some(visible) = self.visible_cells() else {
+            return;
+        };
+        if world_pos.y < visible.min.y || world_pos.y > visible.max.y {
+            return;
+        }
+        let first_column = world_pos.x.max(visible.min.x);
+        let skipped = usize::try_from(first_column - world_pos.x).unwrap_or(0);
+        let visible_columns = usize::try_from(visible.max.x - first_column + 1).unwrap_or(0);
+        for (offset, ch) in text.chars().skip(skipped).take(visible_columns).enumerate() {
+            let char_world_pos = WorldPos::new(first_column + offset as i64, world_pos.y);
             self.set_char_styled(char_world_pos, ch, style);
         }
     }
@@ -232,8 +259,14 @@ impl<'a> WorldBuffer<'a> {
 
     /// Fill a rectangular area in world coordinates with the specified character and style.
     pub fn fill_rect_styled(&mut self, world_rect: WorldRect, ch: char, style: Style) {
-        for y in world_rect.min.y..=world_rect.max.y {
-            for x in world_rect.min.x..=world_rect.max.x {
+        let Some(visible) = self
+            .visible_cells()
+            .and_then(|visible| visible.intersection(&world_rect))
+        else {
+            return;
+        };
+        for y in visible.min.y..=visible.max.y {
+            for x in visible.min.x..=visible.max.x {
                 self.set_char_styled(WorldPos::new(x, y), ch, style);
             }
         }
@@ -254,27 +287,6 @@ impl<'a> WorldBuffer<'a> {
         let cell = self.buffer.cell((buffer_x, buffer_y)).unwrap();
         let ch = cell.symbol().chars().next().unwrap_or(' ');
         Some((ch, cell.style()))
-    }
-
-    /// Read a cell using terminal buffer coordinates, as used by braille edge paths.
-    pub(crate) fn get_terminal_char_styled(&self, position: WorldPos) -> Option<(char, Style)> {
-        let (column, row) = (
-            u16::try_from(position.x).ok()?,
-            u16::try_from(position.y).ok()?,
-        );
-        let cell = self.buffer.cell((column, row))?;
-        Some((cell.symbol().chars().next().unwrap_or(' '), cell.style()))
-    }
-
-    /// Write a cell using terminal buffer coordinates.
-    pub(crate) fn set_terminal_char_styled(&mut self, position: WorldPos, ch: char, style: Style) {
-        let (Ok(column), Ok(row)) = (u16::try_from(position.x), u16::try_from(position.y)) else {
-            return;
-        };
-        if let Some(cell) = self.buffer.cell_mut((column, row)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
     }
 }
 
@@ -312,6 +324,62 @@ mod tests {
             let back_to_world = state.viewport_to_world(screen);
             assert_eq!(back_to_world, original);
         }
+    }
+
+    fn small_viewport_state() -> ViewportState {
+        ViewportState {
+            camera_current: WorldPos::new(5, 0),
+            viewport_bounds: Rect::new(0, 0, 11, 1),
+            ..ViewportState::default()
+        }
+    }
+
+    #[test]
+    fn test_set_string_styled_draws_only_the_visible_part_of_a_long_string() {
+        let state = small_viewport_state();
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let text: String = "ACGT".chars().cycle().take(2_000_000).collect();
+        WorldBuffer::new(&mut buffer, &state).set_string_styled(
+            WorldPos::new(-1_000_000, 0),
+            &text,
+            Style::default(),
+        );
+        // Column 0 of the screen is world x = 0, which is 1_000_000 characters in: a multiple
+        // of four, so the string reads "ACGT..." from there.
+        let row: String = (0..11)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert_eq!(row, "ACGTACGTACG");
+    }
+
+    #[test]
+    fn test_set_string_styled_clips_at_both_edges() {
+        let state = small_viewport_state();
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        WorldBuffer::new(&mut buffer, &state).set_string_styled(
+            WorldPos::new(8, 0),
+            "ACGTACGT",
+            Style::default(),
+        );
+        let row: String = (0..11)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert_eq!(row, "        ACG");
+    }
+
+    #[test]
+    fn test_fill_rect_styled_fills_only_the_visible_part_of_a_huge_rect() {
+        let state = small_viewport_state();
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        WorldBuffer::new(&mut buffer, &state).fill_rect_styled(
+            WorldRect::from_coords(-5_000_000_000, 0, 5_000_000_000, 0),
+            '#',
+            Style::default(),
+        );
+        let row: String = (0..11)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert_eq!(row, "###########");
     }
 
     #[test]

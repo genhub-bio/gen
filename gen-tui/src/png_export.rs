@@ -165,8 +165,8 @@ impl PngRenderer {
     }
 
     /// Like [`Self::write_png`], but hands each canvas-colored band to `overlay` before cells
-    /// are drawn, so a caller can draw behind node backgrounds and text (the edges of a deferred
-    /// diagonal graph, see [`crate::diagonal::DiagonalDrawing::Deferred`]) without this module
+    /// are drawn, so a caller can draw behind node backgrounds and text (the edges of a curved
+    /// graph) without this module
     /// knowing what is drawn. `overlay` receives the band's RGB pixels, the image width in
     /// pixels, and the image row of the band's first pixel; the band's height is
     /// `pixels.len() / (3 * width)`, and bands arrive top to bottom.
@@ -232,7 +232,7 @@ impl PngRenderer {
     }
 
     /// The rectangle [`Self::crop_to_content`] keeps, in cells of `buffer`. `extra` names cells
-    /// that hold content the buffer itself does not show, such as deferred edge lines, so
+    /// that hold content the buffer itself does not show, such as curved edge shapes, so
     /// they stay inside the crop.
     pub fn content_crop(&self, buffer: &Buffer, extra: Option<Rect>) -> Rect {
         let columns = usize::from(buffer.area.width);

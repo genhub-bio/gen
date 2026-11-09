@@ -1,12 +1,12 @@
-//! Unrouted edges for graphs too dense for the rectilinear router.
+//! Curved edges, the counterpart of the rectilinear router.
 //!
-//! These modes keep the Sugiyama layers, dummy nodes and loopback pins, but skip `edge_router`.
-//! A terminal approximates their straight or cubic paths with braille dots. A caller that
-//! rasterizes the buffer itself (PNG export) asks for the paths and draws them on its bitmap.
+//! Curved edges keep the Sugiyama layers, dummy nodes and loopback pins, but skip `edge_router`.
+//! The buffer holds only nodes; each edge is reported as an [`EdgeShape`] in buffer cell units,
+//! and the caller draws the shapes at pixel resolution (see `edge_layer`).
 
 use std::collections::HashMap;
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Color;
 
 use crate::{
     edge_ports::NodeSide,
@@ -14,7 +14,6 @@ use crate::{
     layout::{LayoutNode, NodeRole, PinSide},
     plotter::LineStyle,
     viewport_graph::ViewportGraph,
-    viewport_state::WorldBuffer,
 };
 
 /// How a window's edges are routed and drawn.
@@ -23,42 +22,22 @@ pub enum EdgeStyle {
     /// Axis-aligned routed edges drawn with box-drawing characters.
     #[default]
     Rectilinear,
-    /// Straight lines between nodes, bypassing the edge router.
-    Diagonal(DiagonalDrawing),
-    /// Cubic Bézier curves with horizontal entry and exit tangents.
-    Bezier(DiagonalDrawing),
+    /// Cubic Bézier curves with horizontal entry and exit tangents, bypassing the edge router.
+    Curved,
 }
 
 impl EdgeStyle {
     /// Whether edges skip the router.
-    pub const fn is_diagonal(self) -> bool {
-        matches!(self, Self::Diagonal(_) | Self::Bezier(_))
+    pub const fn is_curved(self) -> bool {
+        matches!(self, Self::Curved)
     }
-
-    /// Whether a bitmap renderer draws the edges, so arrows are reported as marks too.
-    pub const fn is_deferred(self) -> bool {
-        matches!(
-            self,
-            Self::Diagonal(DiagonalDrawing::Deferred) | Self::Bezier(DiagonalDrawing::Deferred)
-        )
-    }
-}
-
-/// Who draws the paths of [`EdgeStyle::Diagonal`] or [`EdgeStyle::Bezier`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DiagonalDrawing {
-    /// Draw into the buffer with braille dots.
-    Braille,
-    /// Leave the buffer free of edge marks and report paths as [`DeferredEdge`]s, for callers
-    /// that draw them on a bitmap. Everything else is placed exactly as in `Braille`.
-    Deferred,
 }
 
 /// One straight edge segment, in buffer cell units: the origin is the top-left corner of the
 /// buffer, x grows right and y grows down, and cell `(column, row)` spans
 /// `[column, column + 1) x [row, row + 1)`. Endpoints on a node sit on its border.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DiagonalLine {
+pub struct StraightSegment {
     pub from: (f64, f64),
     pub to: (f64, f64),
     pub color: Color,
@@ -110,10 +89,10 @@ pub struct SymbolGlow {
     pub color: Color,
 }
 
-/// A deferred edge path for bitmap renderers.
+/// A curved-edge shape for bitmap renderers.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DeferredEdge {
-    Line(DiagonalLine),
+pub enum EdgeShape {
+    Line(StraightSegment),
     Bezier(BezierCurve),
     Arrow(ArrowMark),
     NodeGlow(NodeGlow),
@@ -367,7 +346,7 @@ pub(crate) fn bend_arch(
 pub(crate) struct RoutedCurve {
     pub(crate) curve: BezierCurve,
     /// A horizontal departure from a loopback's anchor to its outward bend.
-    pub(crate) stub: Option<DiagonalLine>,
+    pub(crate) stub: Option<StraightSegment>,
     /// True for the curved [`loopback_curve`] half of a loopback, false for the straight return
     /// run and every ordinary S-curve. Arrow placement skips turnarounds and marks only the
     /// exactly horizontal sections of a route.
@@ -650,7 +629,7 @@ fn loopback_edge_curve(
             color,
             line_style,
         );
-        let stub = DiagonalLine {
+        let stub = StraightSegment {
             from: loopback.anchor_end,
             to: loopback.start,
             color,
@@ -703,53 +682,6 @@ pub(crate) fn straight_bezier(
     }
 }
 
-/// Sample a cubic at evenly spaced parameter values for the terminal dot rasterizer.
-pub(crate) fn sample_bezier(curve: &BezierCurve, steps: usize) -> Vec<(f64, f64)> {
-    (0..=steps)
-        .map(|step| {
-            let t = step as f64 / steps as f64;
-            let inverse = 1.0 - t;
-            let weights = (
-                inverse.powi(3),
-                3.0 * inverse.powi(2) * t,
-                3.0 * inverse * t.powi(2),
-                t.powi(3),
-            );
-            (
-                weights.0 * curve.from.0
-                    + weights.1 * curve.control1.0
-                    + weights.2 * curve.control2.0
-                    + weights.3 * curve.to.0,
-                weights.0 * curve.from.1
-                    + weights.1 * curve.control1.1
-                    + weights.2 * curve.control2.1
-                    + weights.3 * curve.to.1,
-            )
-        })
-        .collect()
-}
-
-/// Draw a sampled curve with one dot per raster step and continuous dash spacing.
-pub(crate) fn draw_braille_bezier(buffer: &mut WorldBuffer, curve: &BezierCurve) {
-    let points = sample_bezier(curve, 128);
-    draw_braille_path(buffer, &points, curve.color, curve.line_style);
-}
-
-/// Braille dots per cell, horizontally and vertically.
-const DOTS_X: i64 = 2;
-const DOTS_Y: i64 = 4;
-
-/// Dot bits of a braille cell, indexed `[row from the top][column]`.
-const DOT_BITS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
-
-/// Every fourth path dot is omitted for [`LineStyle::Dashed`].
-const DASH_PERIOD: usize = 4;
-
-/// Whether `character` is a braille pattern, which a line may add dots to.
-pub(crate) fn is_braille(character: char) -> bool {
-    matches!(character, '\u{2800}'..='\u{28FF}')
-}
-
 /// The ends of the straight line for the edge between `from` and `to`, in continuous world
 /// coordinates (cell `(x, y)` spans `[x, x + 1) x [y, y + 1)`, y up). A line leaves a data or
 /// wormhole node from the border facing the other end, at its attachment row. Routing nodes and
@@ -790,150 +722,17 @@ fn attach(
     }
 }
 
-/// Draw the line from `from` to `to` (continuous terminal coordinates) into `buffer` as braille
-/// dots. Dots merge into braille cells already there and never overwrite other glyphs.
-pub(crate) fn draw_braille_line(
-    buffer: &mut WorldBuffer,
-    from: (f64, f64),
-    to: (f64, f64),
-    color: Color,
-    line_style: LineStyle,
-) {
-    draw_braille_path(buffer, &[from, to], color, line_style);
-}
-
-/// The dot axis a path step advances along, which is where it lights exactly one dot per unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DotAxis {
-    Column,
-    Row,
-}
-
-type PathDot = ((i64, i64), DotAxis);
-
-impl DotAxis {
-    const fn major(self, dot: (i64, i64)) -> i64 {
-        match self {
-            Self::Column => dot.0,
-            Self::Row => dot.1,
-        }
-    }
-}
-
-/// Append the dots a segment (in continuous dot units) lights, in path order. The dominant axis
-/// gets one dot per dot line, sampled at the line's center, so shallow stretches stay one dot
-/// thick instead of stair-stepping.
-fn push_segment_dots(dots: &mut Vec<PathDot>, from: (f64, f64), to: (f64, f64)) {
-    let delta_x = to.0 - from.0;
-    let delta_y = to.1 - from.1;
-    let (axis, start, end) = if delta_x.abs() >= delta_y.abs() {
-        (DotAxis::Column, from.0, to.0)
-    } else {
-        (DotAxis::Row, from.1, to.1)
-    };
-    let low = start.min(end);
-    let high = start.max(end);
-    let first = (low - 0.5).ceil() as i64;
-    let last = (high - 0.5).floor() as i64;
-    let lines: Vec<i64> = if start <= end {
-        (first..=last).collect()
-    } else {
-        (first..=last).rev().collect()
-    };
-    for line in lines {
-        let center = line as f64 + 0.5;
-        let fraction = (center - start) / (end - start);
-        let dot = match axis {
-            DotAxis::Column => (line, (from.1 + delta_y * fraction).floor() as i64),
-            DotAxis::Row => ((from.0 + delta_x * fraction).floor() as i64, line),
-        };
-        if dots.last().map(|&(previous, _)| previous) != Some(dot) {
-            dots.push((dot, axis));
-        }
-    }
-}
-
-/// Rasterize a polyline into path-ordered dots. Endpoints are always lit unless their dot line
-/// already holds a dot, so short paths and line ends are not lost.
-fn rasterize_path(points: &[(f64, f64)]) -> Vec<(i64, i64)> {
-    let to_dot_units = |(x, y): (f64, f64)| (x * DOTS_X as f64, y * DOTS_Y as f64);
-    let floor_dot = |point: (f64, f64)| (point.0.floor() as i64, point.1.floor() as i64);
-    let scaled: Vec<(f64, f64)> = points.iter().copied().map(to_dot_units).collect();
-    let mut dots: Vec<PathDot> = Vec::new();
-    for segment in scaled.windows(2) {
-        push_segment_dots(&mut dots, segment[0], segment[1]);
-    }
-    if let (Some(&first), Some(&last)) = (scaled.first(), scaled.last()) {
-        let start = floor_dot(first);
-        let end = floor_dot(last);
-        match (dots.first().copied(), dots.last().copied()) {
-            (Some((head, head_axis)), Some((tail, tail_axis))) => {
-                if head_axis.major(head) != head_axis.major(start) {
-                    dots.insert(0, (start, head_axis));
-                }
-                if tail_axis.major(tail) != tail_axis.major(end) {
-                    dots.push((end, tail_axis));
-                }
-            }
-            _ => dots.push((start, DotAxis::Column)),
-        }
-    }
-    let mut path: Vec<(i64, i64)> = Vec::with_capacity(dots.len());
-    for (dot, _) in dots {
-        if path.last() != Some(&dot) {
-            path.push(dot);
-        }
-    }
-    path
-}
-
-fn draw_braille_path(
-    buffer: &mut WorldBuffer,
-    points: &[(f64, f64)],
-    color: Color,
-    line_style: LineStyle,
-) {
-    let mut cells: HashMap<(i64, i64), u8> = HashMap::new();
-    for (index, (dot_x, dot_y)) in rasterize_path(points).into_iter().enumerate() {
-        if line_style == LineStyle::Dashed && index % DASH_PERIOD == DASH_PERIOD - 1 {
-            continue;
-        }
-        let row_from_top = dot_y.rem_euclid(DOTS_Y) as usize;
-        let column = dot_x.rem_euclid(DOTS_X) as usize;
-        *cells
-            .entry((dot_x.div_euclid(DOTS_X), dot_y.div_euclid(DOTS_Y)))
-            .or_default() |= DOT_BITS[row_from_top][column];
-    }
-
-    for ((x, y), bits) in cells {
-        let position = WorldPos::new(x, y);
-        let Some((existing, _)) = buffer.get_terminal_char_styled(position) else {
-            continue;
-        };
-        let merged = if is_braille(existing) {
-            bits | (existing as u32 - 0x2800) as u8
-        } else if existing == ' ' {
-            bits
-        } else {
-            continue;
-        };
-        let glyph = char::from_u32(0x2800 + u32::from(merged)).unwrap_or(' ');
-        buffer.set_terminal_char_styled(position, glyph, Style::default().fg(color));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use petgraph::graph::NodeIndex;
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::style::Color;
 
     use super::{
-        BendArch, BezierCurve, DOT_BITS, HAIRPIN_ARC_REACH_CELLS, LoopbackNeighbors, LoopbackSide,
-        bend_arch, bezier_curve, draw_braille_bezier, draw_braille_line, hairpin_arc,
-        hairpin_arc_arrow, hairpin_edge_arcs, is_braille, loopback_curve, loopback_neighbors,
-        loopback_reach, routed_edge_curve, sample_bezier, segment_endpoints,
+        BendArch, BezierCurve, HAIRPIN_ARC_REACH_CELLS, LoopbackNeighbors, LoopbackSide, bend_arch,
+        hairpin_arc, hairpin_arc_arrow, hairpin_edge_arcs, loopback_curve, loopback_neighbors,
+        loopback_reach, routed_edge_curve, segment_endpoints,
     };
     use crate::{
         edge_ports::NodeSide,
@@ -941,26 +740,30 @@ mod tests {
         layout::{LayoutNode, NodeRole, PinSide},
         plotter::LineStyle,
         viewport_graph::ViewportGraph,
-        viewport_state::{ViewportState, WorldBuffer},
     };
 
-    fn state() -> ViewportState {
-        ViewportState {
-            viewport_bounds: Rect::new(0, 0, 8, 4),
-            ..ViewportState::default()
-        }
-    }
-
-    fn rendered(from: (f64, f64), to: (f64, f64), line_style: LineStyle) -> Vec<String> {
-        let state = state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        draw_braille_line(&mut world_buffer, from, to, Color::Red, line_style);
-        (0..4)
-            .map(|row| {
-                (0..8)
-                    .map(|col| buffer[(col, row)].symbol().to_string())
-                    .collect()
+    /// Sample a cubic at evenly spaced parameter values.
+    fn sample_bezier(curve: &BezierCurve, steps: usize) -> Vec<(f64, f64)> {
+        (0..=steps)
+            .map(|step| {
+                let t = step as f64 / steps as f64;
+                let inverse = 1.0 - t;
+                let weights = (
+                    inverse.powi(3),
+                    3.0 * inverse.powi(2) * t,
+                    3.0 * inverse * t.powi(2),
+                    t.powi(3),
+                );
+                (
+                    weights.0 * curve.from.0
+                        + weights.1 * curve.control1.0
+                        + weights.2 * curve.control2.0
+                        + weights.3 * curve.to.0,
+                    weights.0 * curve.from.1
+                        + weights.1 * curve.control1.1
+                        + weights.2 * curve.control2.1
+                        + weights.3 * curve.to.1,
+                )
             })
             .collect()
     }
@@ -1245,70 +1048,6 @@ mod tests {
     }
 
     #[test]
-    fn test_variable_width_loopbacks_braille_snapshot() {
-        for (anchor_width, returning_width) in [(20, 2), (2, 30)] {
-            let (mut graph, [anchor, pin, returning]) = loopback_graph(
-                WorldPos::new(20, 2),
-                WorldPos::new(55, 4),
-                WorldPos::new(4, -4),
-            );
-            for (position, width, index) in
-                [(anchor, anchor_width, 0), (returning, returning_width, 1)]
-            {
-                graph.node_data_by_pos.insert(
-                    position,
-                    LayoutNode::new(
-                        NodeRole::Data(NodeIndex::new(index)),
-                        LocalPos::new_xy(position.x, position.y),
-                        (width, 1),
-                        None,
-                    ),
-                );
-            }
-            let turnaround = routed_edge_curve(
-                &graph,
-                (anchor, &graph.node_data_by_pos[&anchor]),
-                (pin, &graph.node_data_by_pos[&pin]),
-                &HashMap::new(),
-                Color::Red,
-                LineStyle::Normal,
-            );
-            let run = curve_between(&graph, pin, returning);
-            let transform = |(x, y): (f64, f64)| (x + 8.0, 8.0 - y);
-            let state = ViewportState {
-                viewport_bounds: Rect::new(0, 0, 55, 14),
-                ..ViewportState::default()
-            };
-            let mut buffer = Buffer::empty(state.viewport_bounds);
-            let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-            let stub = turnaround.stub.expect("should have an anchor stub");
-            draw_braille_line(
-                &mut world_buffer,
-                transform(stub.from),
-                transform(stub.to),
-                Color::Red,
-                LineStyle::Normal,
-            );
-            draw_braille_bezier(&mut world_buffer, &turnaround.curve.mapped(transform));
-            draw_braille_bezier(&mut world_buffer, &run.mapped(transform));
-            let rows = (0..14)
-                .map(|row| {
-                    (0..55)
-                        .map(|column| buffer[(column, row)].symbol().to_string())
-                        .collect::<String>()
-                        .trim_end()
-                        .to_string()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            insta::assert_snapshot!(
-                format!("loopback_anchor_{anchor_width}_returning_{returning_width}"),
-                rows
-            );
-        }
-    }
-
-    #[test]
     fn test_loopback_edges_follow_the_requested_direction() {
         let (graph, [anchor, pin, returning]) = loopback_graph(
             WorldPos::new(0, 0),
@@ -1434,211 +1173,6 @@ mod tests {
             None
         );
         assert_eq!(loopback_neighbors([(1, &data)]), None);
-    }
-
-    #[test]
-    fn test_braille_line_is_connected_and_stays_between_its_endpoints() {
-        let rows = rendered((0.0, 0.5), (8.0, 3.5), LineStyle::Normal);
-        let lit: Vec<(usize, usize)> = rows
-            .iter()
-            .enumerate()
-            .flat_map(|(row, line)| {
-                line.chars()
-                    .enumerate()
-                    .filter(|(_, glyph)| is_braille(*glyph))
-                    .map(move |(column, _)| (row, column))
-            })
-            .collect();
-        assert!(!lit.is_empty());
-        for column in 0..8 {
-            assert!(
-                lit.iter().any(|&(_, lit_column)| lit_column == column),
-                "line should cross column {column}: {rows:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_braille_line_has_one_dot_per_major_axis_step() {
-        let rows = rendered((0.0, 0.5), (8.0, 3.5), LineStyle::Normal);
-        for dot_x in 0..16 {
-            let lit = rows
-                .iter()
-                .flat_map(|row| row.chars().nth(dot_x / 2))
-                .map(|glyph| (glyph as u32).saturating_sub(0x2800) as u8)
-                .map(|bits| {
-                    (0..4)
-                        .filter(|dot_row| bits & DOT_BITS[*dot_row][dot_x % 2] != 0)
-                        .count()
-                })
-                .sum::<usize>();
-            assert_eq!(lit, 1, "line thickness at dot column {dot_x}");
-        }
-    }
-
-    #[test]
-    fn test_braille_line_does_not_overwrite_other_glyphs() {
-        let state = state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        buffer[(3, 1)].set_char('X');
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        draw_braille_line(
-            &mut world_buffer,
-            (0.0, 0.0),
-            (8.0, 4.0),
-            Color::Red,
-            LineStyle::Normal,
-        );
-        assert_eq!(buffer[(3, 1)].symbol(), "X");
-    }
-
-    #[test]
-    fn test_braille_line_uses_terminal_coordinates_and_color() {
-        let mut state = state();
-        state.viewport_bounds = Rect::new(3, 2, 8, 4);
-        state.camera_current = WorldPos::new(100, 100);
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let mut world_buffer = WorldBuffer::new(&mut buffer, &state);
-        draw_braille_line(
-            &mut world_buffer,
-            (3.0, 2.5),
-            (10.0, 2.5),
-            Color::Red,
-            LineStyle::Normal,
-        );
-        for column in 3..=10 {
-            let cell = &buffer[(column, 2)];
-            assert!(is_braille(cell.symbol().chars().next().unwrap_or(' ')));
-            assert_eq!(cell.fg, Color::Red);
-        }
-    }
-
-    #[test]
-    fn test_dashed_line_has_fewer_dots_than_normal_line() {
-        let dots = |rows: Vec<String>| -> u32 {
-            rows.iter()
-                .flat_map(|row| row.chars())
-                .filter(|glyph| is_braille(*glyph))
-                .map(|glyph| (glyph as u32 - 0x2800).count_ones())
-                .sum()
-        };
-        let normal = dots(rendered((0.0, 0.5), (8.0, 0.5), LineStyle::Normal));
-        let dashed = dots(rendered((0.0, 0.5), (8.0, 0.5), LineStyle::Dashed));
-        assert!(dashed < normal);
-    }
-
-    #[test]
-    fn test_dashed_line_omits_only_single_dots() {
-        let rows = rendered((0.0, 0.5), (8.0, 0.5), LineStyle::Dashed);
-        let dot_row = 2;
-        for dot_x in 0..16 {
-            let glyph = rows[0].chars().nth(dot_x / 2).expect("should have a cell");
-            let bits = (glyph as u32).saturating_sub(0x2800) as u8;
-            let lit = bits & DOT_BITS[dot_row][dot_x % 2] != 0;
-            assert_eq!(lit, dot_x % 4 != 3, "dash pattern at dot {dot_x}");
-        }
-    }
-
-    #[test]
-    fn test_dashed_bezier_omits_only_single_dots_across_segments() {
-        let state = state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        let curve = bezier_curve((0.0, 0.5), (8.0, 0.5), Color::Red, LineStyle::Dashed);
-        draw_braille_bezier(&mut WorldBuffer::new(&mut buffer, &state), &curve);
-        for dot_x in 0..16 {
-            let glyph = buffer[(dot_x / 2, 0)]
-                .symbol()
-                .chars()
-                .next()
-                .unwrap_or(' ');
-            let bits = (glyph as u32).saturating_sub(0x2800) as u8;
-            let lit = bits & DOT_BITS[2][usize::from(dot_x % 2)] != 0;
-            assert_eq!(lit, dot_x % 4 != 3, "curve dash at dot {dot_x}");
-        }
-    }
-
-    fn lit_dots(buffer: &Buffer) -> Vec<(i64, i64)> {
-        let area = buffer.area;
-        let mut dots = Vec::new();
-        for row in 0..area.height {
-            for column in 0..area.width {
-                let glyph = buffer[(column, row)].symbol().chars().next().unwrap_or(' ');
-                if !is_braille(glyph) {
-                    continue;
-                }
-                let bits = (glyph as u32 - 0x2800) as u8;
-                for (dot_row, row_bits) in DOT_BITS.iter().enumerate() {
-                    for (dot_column, bit) in row_bits.iter().enumerate() {
-                        if bits & bit != 0 {
-                            dots.push((
-                                i64::from(column) * 2 + dot_column as i64,
-                                i64::from(row) * 4 + dot_row as i64,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        dots
-    }
-
-    fn draw_into_buffer(draw: impl FnOnce(&mut WorldBuffer)) -> Buffer {
-        let state = state();
-        let mut buffer = Buffer::empty(state.viewport_bounds);
-        draw(&mut WorldBuffer::new(&mut buffer, &state));
-        buffer
-    }
-
-    #[test]
-    fn test_shallow_sloped_line_has_one_dot_per_dot_column() {
-        let buffer = draw_into_buffer(|world| {
-            draw_braille_line(world, (0.0, 0.3), (7.5, 2.0), Color::Red, LineStyle::Normal);
-        });
-        let dots = lit_dots(&buffer);
-        for dot_x in 0..15 {
-            let count = dots.iter().filter(|(x, _)| *x == dot_x).count();
-            assert_eq!(count, 1, "dots in dot column {dot_x}: {dots:?}");
-        }
-    }
-
-    #[test]
-    fn test_s_curve_has_one_dot_per_dot_column_where_x_dominant() {
-        let curve = bezier_curve((0.0, 0.5), (8.0, 3.5), Color::Red, LineStyle::Normal);
-        let buffer = draw_into_buffer(|world| draw_braille_bezier(world, &curve));
-        let dots = lit_dots(&buffer);
-        let points = sample_bezier(&curve, 128);
-        let mut checked = 0;
-        for dot_x in 0..16_i64 {
-            let center = dot_x as f64 + 0.5;
-            let steep = points.windows(2).any(|pair| {
-                let (low, high) = (
-                    pair[0].0.min(pair[1].0) * 2.0,
-                    pair[0].0.max(pair[1].0) * 2.0,
-                );
-                let slope_x = (pair[1].0 - pair[0].0).abs() * 2.0;
-                let slope_y = (pair[1].1 - pair[0].1).abs() * 4.0;
-                low <= center + 0.5 && center - 0.5 <= high && slope_y > slope_x
-            });
-            if steep {
-                continue;
-            }
-            checked += 1;
-            let count = dots.iter().filter(|(x, _)| *x == dot_x).count();
-            assert_eq!(count, 1, "dots in dot column {dot_x}: {dots:?}");
-        }
-        assert!(checked > 0);
-    }
-
-    #[test]
-    fn test_vertical_line_has_one_dot_per_dot_row() {
-        let buffer = draw_into_buffer(|world| {
-            draw_braille_line(world, (2.2, 0.0), (2.2, 3.9), Color::Red, LineStyle::Normal);
-        });
-        let dots = lit_dots(&buffer);
-        for dot_y in 0..15 {
-            let count = dots.iter().filter(|(_, y)| *y == dot_y).count();
-            assert_eq!(count, 1, "dots in dot row {dot_y}: {dots:?}");
-        }
     }
 
     #[test]

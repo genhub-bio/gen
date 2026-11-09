@@ -19,7 +19,7 @@ use ratatui::{
 use crate::{
     assembly::AssembledLayout,
     crawl::{EagerSource, GraphSource},
-    diagonal::{DeferredEdge, EdgeStyle},
+    curved::{EdgeShape, EdgeStyle},
     distribute_nodes::GapSizes,
     edge_ports::EdgeSelector,
     frame_index::{Direction, FrameIndex},
@@ -190,12 +190,10 @@ pub struct GraphViewState<N> {
     pub gaps: GapSizes,
     /// How edges are routed and drawn. Changing it rebuilds the geometry on the next render.
     pub edge_style: EdgeStyle,
-    /// Edge lines the last render left for the caller to draw, in cell units relative to the
-    /// top-left of the buffer rendered into. Only a [`DiagonalDrawing::Deferred`] edge style
-    /// fills it; see [`DeferredEdge`].
-    ///
-    /// [`DiagonalDrawing::Deferred`]: crate::diagonal::DiagonalDrawing::Deferred
-    pub diagonal_lines: Vec<DeferredEdge>,
+    /// Edge shapes the last render left for the caller to draw, in cell units relative to the
+    /// top-left of the buffer rendered into. Only the curved edge style fills it; see
+    /// [`EdgeShape`].
+    pub edge_shapes: Vec<EdgeShape>,
     pub highlights: Highlights<N>,
     /// The area passed to the most recent `GraphView::render` call. Used for click-to-world
     /// conversion and the `snap_camera` hard-zone boundary - facts knowable only from the
@@ -237,7 +235,7 @@ impl<N> Default for GraphViewState<N> {
             zoom_index: 0,
             gaps: GapSizes::default(),
             edge_style: EdgeStyle::default(),
-            diagonal_lines: Vec::new(),
+            edge_shapes: Vec::new(),
             highlights: Highlights::default(),
             last_area: Rect::new(0, 0, 0, 0),
             go_to_pending: false,
@@ -1088,7 +1086,7 @@ where
         let Some(mut camera) = state.camera else {
             state.frame = FrameIndex::empty();
             state.wormhole = Vec::new();
-            state.diagonal_lines = Vec::new();
+            state.edge_shapes = Vec::new();
             return;
         };
 
@@ -1166,7 +1164,7 @@ where
         CursorOverlay::render(inner_area, buf, &state.cursor, &frame);
         state.frame = frame;
         state.wormhole = wormhole;
-        state.diagonal_lines = lines;
+        state.edge_shapes = lines;
     }
 }
 
@@ -1651,7 +1649,7 @@ mod tests {
         render(&mut state, area);
         assert_eq!(state.geometry_revision(), first_revision + 2);
 
-        state.edge_style = EdgeStyle::Diagonal(crate::diagonal::DiagonalDrawing::Braille);
+        state.edge_style = EdgeStyle::Curved;
         render(&mut state, area);
         assert_eq!(state.geometry_revision(), first_revision + 3);
     }

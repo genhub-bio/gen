@@ -27,7 +27,7 @@ use crate::views::{
     block_group::{
         active_neighborhood_coordinate_window, discard_pending_input, expand_query_window,
     },
-    diagonal_png::write_png_with_lines,
+    curved_png::write_png_with_edges,
     diff_graph::{DiffLegend, apply_diff_highlights, build_diff_graph_component, handle_diff_key},
     gen_graph_controller::{GenGraphController, GraphKeyOutcome},
     gen_graph_widget::{ZoomLevels, create_gen_graph_engine},
@@ -392,9 +392,7 @@ pub fn write_block_group_png(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut controller = GenGraphController::new(database, history_ref.map(String::from))
         .with_pruned_history(true)
-        .with_edge_style(gen_tui::EdgeStyle::Bezier(
-            gen_tui::DiagonalDrawing::Deferred,
-        ));
+        .with_edge_style(gen_tui::EdgeStyle::Curved);
     controller
         .open_block_group(&block_group_id)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -414,7 +412,7 @@ pub fn write_block_group_png(
         Clear.render(area, &mut buffer);
         draw_flags_under_nodes(&mut controller, &mut buffer, area);
     }
-    write_png_with_lines(&buffer, controller.diagonal_lines(), size.scale, output)
+    write_png_with_edges(&buffer, controller.edge_shapes(), size.scale, output)
 }
 
 /// Write a PNG of a sample diff using the standard added/removed highlights.
@@ -431,10 +429,10 @@ pub fn write_diff_graph_png(
     apply_diff_highlights(&mut view_state, &component);
     let area = Rect::new(0, 0, size.columns, size.rows);
     let mut buffer = Buffer::empty(area);
-    view_state.edge_style = gen_tui::EdgeStyle::Bezier(gen_tui::DiagonalDrawing::Deferred);
+    view_state.edge_style = gen_tui::EdgeStyle::Curved;
     let view = GraphView::new(&mut engine, &zoom_levels[view_state.zoom_index].1);
     StatefulWidget::render(view, area, &mut buffer, &mut view_state);
-    write_png_with_lines(&buffer, &view_state.diagonal_lines, size.scale, output)
+    write_png_with_edges(&buffer, &view_state.edge_shapes, size.scale, output)
 }
 
 fn draw_flags_under_nodes(controller: &mut GenGraphController, buffer: &mut Buffer, area: Rect) {
@@ -547,7 +545,7 @@ fn draw_diff_controls_help(frame: &mut Frame, area: Rect, legend: &Line<'static>
         text_style,
         key_style,
     );
-    frame.render_widget(Paragraph::new(vec![controls.into(), legend.clone()]), area);
+    frame.render_widget(Paragraph::new(vec![controls, legend.clone()]), area);
 }
 
 #[cfg(test)]

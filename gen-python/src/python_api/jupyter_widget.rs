@@ -7,7 +7,7 @@ use r#gen::views::{
     annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
     annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
     annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
-    diagonal_png::{write_png_with_lines, write_png_with_lines_full_viewport},
+    curved_png::{write_png_with_edges, write_png_with_edges_full_viewport},
     gen_graph_controller::{ClickOutcome, GenGraphController},
     graph_database::GraphDatabase,
     graph_overlay::{
@@ -20,7 +20,7 @@ use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, Workspace, is_terminal, range::Range};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    DiagonalDrawing, EdgeStyle, LineStyle,
+    EdgeStyle, LineStyle,
     layout::VisualDetail,
     plotter::{NodeRenderer, PathStyle},
     theme::current_theme,
@@ -1474,7 +1474,7 @@ fn render_png_bytes<'py>(
     let controller = &mut widget.active()?.controller;
     let previous_style = controller.view_state().edge_style;
     let previous_placement = controller.scale_placement();
-    controller.view_state_mut().edge_style = EdgeStyle::Bezier(DiagonalDrawing::Deferred);
+    controller.view_state_mut().edge_style = EdgeStyle::Curved;
     controller.set_scale_placement(if full_viewport {
         ScalePlacement::Bottom
     } else {
@@ -1500,9 +1500,9 @@ fn render_png_bytes<'py>(
     let buffer = buffer_result?;
     let mut bytes = Vec::new();
     let write_result = if full_viewport {
-        write_png_with_lines_full_viewport(&buffer, controller.diagonal_lines(), scale, &mut bytes)
+        write_png_with_edges_full_viewport(&buffer, controller.edge_shapes(), scale, &mut bytes)
     } else {
-        write_png_with_lines(&buffer, controller.diagonal_lines(), scale, &mut bytes)
+        write_png_with_edges(&buffer, controller.edge_shapes(), scale, &mut bytes)
     };
     write_result.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(PyBytes::new(py, &bytes))

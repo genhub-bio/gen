@@ -2200,7 +2200,9 @@ mod tests {
         )
     }
 
-    fn pruning_fixtures() -> Vec<(&'static str, Box<dyn Fn(&GraphConnection) -> HashId>)> {
+    type BlockGroupFixture = Box<dyn Fn(&GraphConnection) -> HashId>;
+
+    fn pruning_fixtures() -> Vec<(&'static str, BlockGroupFixture)> {
         vec![
             (
                 "adjacent deletions",

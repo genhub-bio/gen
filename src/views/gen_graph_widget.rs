@@ -3270,7 +3270,7 @@ mod tests {
                 .iter()
                 .zip(&layout.columns)
                 .find(|(_, event_column)| layout.left_padding + **event_column == local)
-                .map_or('.', |(raw, _)| {
+                .map_or('…', |(raw, _)| {
                     "ACGT".chars().nth(*raw as usize % 4).unwrap()
                 });
             assert_eq!(bar.0, expected);
@@ -3499,7 +3499,7 @@ mod tests {
                     .iter()
                     .zip(&layout.columns)
                     .find(|(_, mapped)| layout.left_padding + **mapped == column - area.min.x)
-                    .map_or('.', |(raw, _)| "ACGT"
+                    .map_or('…', |(raw, _)| "ACGT"
                         .chars()
                         .nth(*raw as usize % 4)
                         .unwrap()),

@@ -19,7 +19,7 @@ use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, path::Path, port_crawl::LocateError};
 use gen_tui::{
-    diagonal::{DeferredEdge, DiagonalDrawing, EdgeStyle},
+    curved::{EdgeShape, EdgeStyle},
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
     layout_engine::{BatchId, LayoutEngine},
@@ -135,6 +135,8 @@ pub struct GenGraphController {
     aligned_path: AlignedPath,
     /// Whether opened block groups align their current path on y = 0 (default).
     align_current_path: bool,
+    /// Whether the curved edge style can be shown; see [`Self::set_curved_edges_available`].
+    curved_edges_available: bool,
     /// Where the position scale of the aligned path is drawn; see [`PathScale`].
     scale_placement: ScalePlacement,
     /// Where annotations start and end on each loaded node, for the `w`/`b`/`e` keys. Rebuilt with the
@@ -206,6 +208,7 @@ impl Clone for GenGraphController {
             node_annotations,
             aligned_path,
             align_current_path: self.align_current_path,
+            curved_edges_available: self.curved_edges_available,
             scale_placement: self.scale_placement,
             annotation_starts: self.annotation_starts.clone(),
             focus_offset: self.focus_offset,
@@ -259,6 +262,7 @@ impl GenGraphController {
             node_annotations,
             aligned_path,
             align_current_path: true,
+            curved_edges_available: true,
             scale_placement: ScalePlacement::default(),
             annotation_starts: AnnotationStarts::default(),
             focus_offset: None,
@@ -304,19 +308,40 @@ impl GenGraphController {
         self
     }
 
-    /// Cycle through routed, straight, and curved edge drawing modes.
-    pub fn toggle_diagonal_edges(&mut self) {
+    /// How edges are routed and drawn.
+    pub fn edge_style(&self) -> EdgeStyle {
+        self.view_state.edge_style
+    }
+
+    /// Whether the curved edge style can be shown. A terminal needs the Kitty graphics protocol
+    /// for it; a PNG always can. Defaults to true.
+    pub fn set_curved_edges_available(&mut self, available: bool) {
+        self.curved_edges_available = available;
+        if !available && self.view_state.edge_style.is_curved() {
+            self.view_state.edge_style = EdgeStyle::Rectilinear;
+        }
+    }
+
+    /// Whether the curved edge style can be shown; see [`Self::set_curved_edges_available`].
+    pub fn curved_edges_available(&self) -> bool {
+        self.curved_edges_available
+    }
+
+    /// Switch between rectilinear and curved edges. Returns false, changing nothing, when the
+    /// curved style is not available.
+    pub fn toggle_curved_edges(&mut self) -> bool {
         self.view_state.edge_style = match self.view_state.edge_style {
-            EdgeStyle::Rectilinear => EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-            EdgeStyle::Diagonal(drawing) => EdgeStyle::Bezier(drawing),
-            EdgeStyle::Bezier(_) => EdgeStyle::Rectilinear,
+            EdgeStyle::Rectilinear if self.curved_edges_available => EdgeStyle::Curved,
+            EdgeStyle::Rectilinear => return false,
+            EdgeStyle::Curved => EdgeStyle::Rectilinear,
         };
+        true
     }
 
     /// The edge lines the last draw left for the caller, in cells of the buffer drawn into.
-    /// Empty unless the edge style uses [`DiagonalDrawing::Deferred`].
-    pub fn diagonal_lines(&self) -> &[DeferredEdge] {
-        &self.view_state.diagonal_lines
+    /// Empty unless the edge style is curved.
+    pub fn edge_shapes(&self) -> &[EdgeShape] {
+        &self.view_state.edge_shapes
     }
 
     /// Align the current path of subsequently opened block groups along y = 0. Variants branch
@@ -385,16 +410,16 @@ impl GenGraphController {
     fn lowest_deferred_edge_row(&self, graph_area: Rect) -> u16 {
         let last_row = f64::from(graph_area.y + graph_area.height - 1);
         self.view_state
-            .diagonal_lines
+            .edge_shapes
             .iter()
             .flat_map(|edge| match edge {
-                DeferredEdge::Line(line) => vec![line.from.1, line.to.1],
-                DeferredEdge::Bezier(curve) => {
+                EdgeShape::Line(line) => vec![line.from.1, line.to.1],
+                EdgeShape::Bezier(curve) => {
                     vec![curve.from.1, curve.control1.1, curve.control2.1, curve.to.1]
                 }
-                DeferredEdge::Arrow(mark) => vec![mark.center.1],
-                DeferredEdge::NodeGlow(glow) => vec![glow.bottom_right.1],
-                DeferredEdge::SymbolGlow(glow) => vec![glow.center.1],
+                EdgeShape::Arrow(mark) => vec![mark.center.1],
+                EdgeShape::NodeGlow(glow) => vec![glow.bottom_right.1],
+                EdgeShape::SymbolGlow(glow) => vec![glow.center.1],
             })
             .fold(f64::from(graph_area.y), f64::max)
             .floor()
@@ -857,8 +882,11 @@ impl GenGraphController {
                 }
             }
             KeyCode::Char('s') => {
-                self.toggle_diagonal_edges();
-                GraphKeyOutcome::Redraw
+                if self.toggle_curved_edges() {
+                    GraphKeyOutcome::Redraw
+                } else {
+                    GraphKeyOutcome::Ignore
+                }
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.zoom_in();
@@ -1174,8 +1202,8 @@ mod tests {
     use gen_core::Workspace;
     use gen_models::{db::get_connection, path::Path};
     use gen_tui::{
-        DiagonalDrawing, EdgeStyle, VerticalAnchor,
-        diagonal::{BezierCurve, DeferredEdge},
+        EdgeStyle, VerticalAnchor,
+        curved::{BezierCurve, EdgeShape},
         plotter::LineStyle,
     };
     use ratatui::{
@@ -1374,8 +1402,8 @@ mod tests {
 
         controller
             .view_state
-            .diagonal_lines
-            .push(DeferredEdge::Bezier(BezierCurve {
+            .edge_shapes
+            .push(EdgeShape::Bezier(BezierCurve {
                 from: (2.0, 3.0),
                 control1: (2.0, 20.5),
                 control2: (30.0, 20.5),
@@ -1442,11 +1470,7 @@ mod tests {
             controller.handle_key(press(KeyCode::Char('p'))),
             GraphKeyOutcome::Ignore
         );
-        for style in [
-            EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-            EdgeStyle::Bezier(DiagonalDrawing::Braille),
-            EdgeStyle::Rectilinear,
-        ] {
+        for style in [EdgeStyle::Curved, EdgeStyle::Rectilinear] {
             assert_eq!(
                 controller.handle_key(press(KeyCode::Char('s'))),
                 GraphKeyOutcome::Redraw

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cross_coordinates::{align_layers, assign_cross_coordinates, orient_aligned_bubbles},
-    diagonal::EdgeStyle,
+    curved::EdgeStyle,
     distribute_nodes::{
         GapSizes, MINIMUM_ROUTING_GAP_Y, VerticalPlacement, base_step,
         compact_layout_with_vertical_placement,
@@ -216,7 +216,7 @@ pub struct LayoutNode {
     pub size: (u64, u64),
     /// Layer information from Sugiyama algorithm. Only valid for Data nodes.
     pub layer: Option<i32>,
-    /// Fixed horizontal offset of a diagonal side port from its layer's center column.
+    /// Fixed horizontal offset of a curved side port from its layer's center column.
     #[serde(default)]
     pub(crate) padding_offset: i64,
     /// Data node whose row and column this side port follows during compaction.
@@ -347,10 +347,10 @@ fn vertical_placement_for_window(
 }
 
 /// Give every data node and every dummy a straight departure on either side of its layer before a
-/// diagonal connection may bend. A dummy is a bypass for a long edge; padding it like a data node
+/// curved connection may bend. A dummy is a bypass for a long edge; padding it like a data node
 /// keeps its slopes in the gutters instead of cutting across the layer's data nodes. All
 /// departures in a layer use the widest node's clearance columns.
-fn pad_diagonal_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
+fn pad_curved_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>) {
     let mut layer_widths = BTreeMap::<i64, (i64, i64)>::new();
     for node in graph.node_weights() {
         let extents = layer_widths.entry(node.pos.x).or_insert((0, 0));
@@ -364,7 +364,7 @@ fn pad_diagonal_data_nodes(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undir
         return;
     }
 
-    // Distinct starting columns are essential: diagonal compaction moves every node that
+    // Distinct starting columns are essential: curved compaction moves every node that
     // starts at the same x as one rigid group.
     let mut columns = HashMap::new();
     let mut offsets_by_center = HashMap::new();
@@ -561,7 +561,7 @@ fn expand_hair_pins(
         // The curve modes return to the neighbour the bus reached, so the S-curve ends where the
         // hair pin was joined to the layout. The terminal's router needs the return to end on the
         // bus at the entry.
-        let return_end = if edge_style.is_diagonal() {
+        let return_end = if edge_style.is_curved() {
             neighbor
         } else {
             entry
@@ -740,7 +740,7 @@ impl WindowGeometry {
     /// `pinned_edges` tell a curved layout which edge ends attach on the side their edge does not
     /// leave toward and need a loop beside their node.
     ///
-    /// With a diagonal `edge_style` the router is skipped: every layer-to-layer segment, dummy
+    /// With a curved `edge_style` the router is skipped: every layer-to-layer segment, dummy
     /// chains and loopback pins included, stays a straight edge, and compaction keeps layers in
     /// columns far enough apart for those edges to slope gently.
     pub fn new(
@@ -758,7 +758,7 @@ impl WindowGeometry {
         // is the sole place either target gap is enforced.
         // A curved drawing has no loopback pins in its layered layout: the ends that need one get a
         // routing node beside their node instead, and the pin returns once compaction is done.
-        let sideways = if edge_style.is_diagonal() {
+        let sideways = if edge_style.is_curved() {
             drop_orphaned_routing_nodes(&mut layout_graph);
             insert_sideways_nodes(&mut layout_graph, pinned_edges)
         } else {
@@ -769,17 +769,17 @@ impl WindowGeometry {
         align_layers(&mut layout_graph, centered);
         tether_self_loops(&mut layout_graph, &sideways);
 
-        if edge_style.is_diagonal() {
-            pad_diagonal_data_nodes(&mut layout_graph);
+        if edge_style.is_curved() {
+            pad_curved_data_nodes(&mut layout_graph);
         }
         // A Bezier drawing turns a hairpin into an arc beside its node. The layered layout cannot
         // carry a loop on one node, so the loop joins the node's side port to itself once the
         // ports exist, which lets compaction, drawing and highlighting treat it as an edge.
-        if matches!(edge_style, EdgeStyle::Bezier(_)) {
+        if edge_style.is_curved() {
             add_hairpin_edges(&mut layout_graph, &hairpin_sides(pinned_edges));
         }
 
-        if !edge_style.is_diagonal()
+        if !edge_style.is_curved()
             && let Err(error) = make_rectilinear(&mut layout_graph)
         {
             log::warn!("Edge routing failed: {:?}", error);
@@ -816,7 +816,7 @@ impl WindowGeometry {
             data_routing_y: |_| 1,
             ..*gaps
         };
-        let gaps = if edge_style.is_diagonal() {
+        let gaps = if edge_style.is_curved() {
             &curved_gaps
         } else {
             gaps
@@ -831,7 +831,7 @@ impl WindowGeometry {
         reattach_loopback_pins(&mut layout_graph, sideways.pins);
         scoot_hair_pins(&mut layout_graph);
         expand_hair_pins(&mut layout_graph, edge_style);
-        if edge_style.is_diagonal() {
+        if edge_style.is_curved() {
             shorten_self_link_detours(&mut layout_graph);
             prune_unused_padding_ports(&mut layout_graph);
         }
@@ -841,8 +841,8 @@ impl WindowGeometry {
                 node.pos.y -= offset;
             }
         }
-        // A diagonal pin is an ordinary vertex of its loop's polyline, not a router stub.
-        if !edge_style.is_diagonal() {
+        // A curved pin is an ordinary vertex of its loop's polyline, not a router stub.
+        if !edge_style.is_curved() {
             prune_pin_stubs(&mut layout_graph);
         }
 
@@ -1413,12 +1413,12 @@ mod tests {
 
     use super::{
         HAIR_PIN_SIZE, LayoutEdge, LayoutNode, NodeRole, PinSide, VerticalAnchor,
-        VerticalPlacement, add_hairpin_edges, expand_hair_pins, pad_diagonal_data_nodes,
+        VerticalPlacement, add_hairpin_edges, expand_hair_pins, pad_curved_data_nodes,
         prune_unused_padding_ports, scoot_hair_pins, shorten_self_link_detours,
         vertical_placement_for_window,
     };
     use crate::{
-        diagonal::{DiagonalDrawing, EdgeStyle},
+        curved::EdgeStyle,
         edge_ports::NodeSide,
         geometry::{LocalPos, WorldPos, WorldRect},
     };
@@ -1611,7 +1611,7 @@ mod tests {
         graph.add_edge(first, pin, LayoutEdge::new(first_domain, first_domain));
         graph.add_edge(first, second, LayoutEdge::new(first_domain, second_domain));
 
-        pad_diagonal_data_nodes(&mut graph);
+        pad_curved_data_nodes(&mut graph);
         let pin_position = graph[pin].pos;
         assert!(graph.find_edge(first, pin).is_some());
         prune_unused_padding_ports(&mut graph);
@@ -1633,7 +1633,7 @@ mod tests {
             (5, 1),
             Some(0),
         ));
-        pad_diagonal_data_nodes(&mut graph);
+        pad_curved_data_nodes(&mut graph);
         add_hairpin_edges(
             &mut graph,
             &HashSet::from([
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_expand_hair_pins_returns_to_the_neighbor_in_the_curve_modes() {
-        let style = EdgeStyle::Bezier(DiagonalDrawing::Braille);
+        let style = EdgeStyle::Curved;
         for side in [NodeSide::East, NodeSide::West] {
             let (mut graph, node, rect) = node_with_hair_pin(side);
 

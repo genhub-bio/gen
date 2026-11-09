@@ -1728,7 +1728,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
- "tiny-skia",
  "tracing",
  "tracing-subscriber",
  "tui-widget-list",
@@ -1871,12 +1870,15 @@ dependencies = [
 name = "gen-tui"
 version = "0.5.1"
 dependencies = [
+ "base64 0.22.1",
  "crossterm",
  "env_logger 0.10.2",
+ "flate2",
  "fontdue",
  "gen-graph",
  "insta",
  "itertools",
+ "libc",
  "log",
  "more-asserts",
  "petgraph 0.6.5",
@@ -1885,6 +1887,7 @@ dependencies = [
  "rust-sugiyama",
  "serde",
  "thiserror 2.0.21",
+ "tiny-skia",
  "unicode-segmentation",
  "unicode-width",
 ]

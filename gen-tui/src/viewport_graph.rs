@@ -30,7 +30,7 @@ pub struct ViewportGraph {
     pub layers: Vec<Vec<NodeIndex>>,
 
     /// Domain edges and their ports (see `crawl::build_window_graph`), copied through so the
-    /// plotter can mark every diagonal route and the selected rectilinear routes.
+    /// plotter can mark every curved route and the selected rectilinear routes.
     pub pinned_edges: Vec<PinnedEdge>,
 
     /// World position pairs whose edge is a backward edge's `left_pin -> right_pin` main

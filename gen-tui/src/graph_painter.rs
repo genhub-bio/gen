@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::{
     assembly::AssembledLayout,
-    diagonal::{DeferredEdge, EdgeStyle},
+    curved::{EdgeShape, EdgeStyle},
     distribute_nodes::GapSizes,
     edge_ports::{EdgePorts, EdgeSelector, NodeSide},
     frame_index::{FrameIndex, PlacedNode},
@@ -43,8 +43,8 @@ pub struct RenderedWindow<NodeId> {
     pub frame: FrameIndex<NodeId>,
     /// Every placed wormhole stub.
     pub wormhole: WormholeStubs<NodeId>,
-    /// Deferred edge paths in buffer cell units. Empty unless drawing is deferred.
-    pub lines: Vec<DeferredEdge>,
+    /// Edge shapes in buffer cell units. Empty unless the edge style is curved.
+    pub lines: Vec<EdgeShape>,
 }
 
 /// Type of element to highlight in the graph.
@@ -205,9 +205,7 @@ where
     /// boundary node, and off-screen domain target - kept separate from `FrameIndex` rather
     /// than folded into it, since `FrameIndex`'s `N` key space is domain node ids only and
     /// wormhole stubs are synthetic routing nodes with no domain id of their own. The third
-    /// element holds the edge lines of a deferred diagonal style (see [`DiagonalDrawing`]).
-    ///
-    /// [`DiagonalDrawing`]: crate::diagonal::DiagonalDrawing
+    /// element holds the edge shapes of the curved style.
     pub fn render(
         self,
         area: Rect,
@@ -380,7 +378,7 @@ fn paint<G, V>(
     graph: &G,
     visual: &V,
     highlights: &Highlights<G::NodeId>,
-) -> Vec<DeferredEdge>
+) -> Vec<EdgeShape>
 where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash,
@@ -1011,11 +1009,10 @@ mod tests {
         )));
     }
 
-    mod diagonal_edges {
+    mod curved_edges {
         use ratatui::{buffer::Buffer, layout::Rect};
 
         use super::*;
-        use crate::diagonal::DiagonalDrawing;
 
         struct BoxVisual;
 
@@ -1034,7 +1031,7 @@ mod tests {
             graph: MockDomainGraph,
             edge_style: EdgeStyle,
             area: Rect,
-        ) -> (String, Vec<DeferredEdge>) {
+        ) -> (String, Vec<EdgeShape>) {
             let mut engine = LayoutEngine::new(graph);
             let anchor = engine.default_anchor().expect("should have graph nodes");
             let window = engine
@@ -1072,79 +1069,42 @@ mod tests {
             (text, lines)
         }
 
-        fn is_braille_glyph(text: &str) -> bool {
-            text.chars().any(crate::diagonal::is_braille)
-        }
-
         #[test]
-        fn test_braille_diagonals_replace_box_drawing_edges() {
-            let area = Rect::new(0, 0, 100, 30);
-            let (text, lines) = render_text(
+        fn test_curved_edges_report_shapes_instead_of_drawing_them() {
+            let (text, shapes) = render_text(
                 TestGraphs::domain_complex_dag(),
-                EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-                area,
+                EdgeStyle::Curved,
+                Rect::new(0, 0, 100, 30),
             );
-            assert!(is_braille_glyph(&text), "edges should be drawn as braille");
             assert!(
-                !text.contains(['─', '│', '┼', '├', '┤', '┬', '┴']),
-                "no routed edge glyphs should remain:\n{text}"
+                !text
+                    .chars()
+                    .any(|glyph| matches!(glyph, '\u{2800}'..='\u{28FF}')),
+                "no edge dots should be drawn into the buffer:\n{text}"
             );
-            assert!(lines.is_empty(), "braille drawing leaves nothing to defer");
+            assert!(!text.contains(['─', '│', '┼', '├', '┤', '┬', '┴']));
+            assert!(
+                shapes
+                    .iter()
+                    .any(|shape| matches!(shape, EdgeShape::Bezier(_)))
+            );
         }
 
         #[test]
-        fn test_deferred_diagonals_report_lines_instead_of_drawing_them() {
-            let area = Rect::new(0, 0, 100, 30);
-            let (braille, _) = render_text(
-                TestGraphs::domain_complex_dag(),
-                EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-                area,
+        fn test_curved_edges_leave_forward_horizontal_routes_unmarked() {
+            let (_, shapes) = render_text(
+                TestGraphs::domain_simple_chain(),
+                EdgeStyle::Curved,
+                Rect::new(0, 0, 100, 15),
             );
-            let (deferred, lines) = render_text(
-                TestGraphs::domain_complex_dag(),
-                EdgeStyle::Diagonal(DiagonalDrawing::Deferred),
-                area,
+            let arrows = shapes
+                .iter()
+                .filter(|shape| matches!(shape, EdgeShape::Arrow(_)))
+                .count();
+            assert_eq!(
+                arrows, 0,
+                "left-to-right edges are implied and carry no marker"
             );
-            assert!(!is_braille_glyph(&deferred));
-            assert!(!deferred.contains(['─', '│', '┼']));
-            assert!(!lines.is_empty());
-            // Everything else sits where the braille drawing put it. A deferred drawing reports
-            // its arrows as marks, so arrow glyphs are not compared.
-            let without_dots = |text: &str| -> String {
-                text.chars()
-                    .map(|glyph| {
-                        if crate::diagonal::is_braille(glyph) || matches!(glyph, '▶' | '◀') {
-                            ' '
-                        } else {
-                            glyph
-                        }
-                    })
-                    .collect::<String>()
-                    .lines()
-                    .map(str::trim_end)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            assert_eq!(without_dots(&braille), without_dots(&deferred));
-        }
-
-        #[test]
-        fn test_diagonal_edges_mark_each_regular_horizontal_route_once() {
-            for edge_style in [
-                EdgeStyle::Diagonal(DiagonalDrawing::Braille),
-                EdgeStyle::Bezier(DiagonalDrawing::Braille),
-            ] {
-                let (text, _) = render_text(
-                    TestGraphs::domain_simple_chain(),
-                    edge_style,
-                    Rect::new(0, 0, 100, 15),
-                );
-                assert_eq!(
-                    text.chars().filter(|&character| character == '▶').count(),
-                    2,
-                    "each forward edge should carry one marker across its side ports:\n{text}"
-                );
-            }
             let (rectilinear, _) = render_text(
                 TestGraphs::domain_simple_chain(),
                 EdgeStyle::Rectilinear,
@@ -1154,13 +1114,10 @@ mod tests {
         }
 
         #[test]
-        fn test_deferred_line_leaves_a_node_from_its_border_at_its_row() {
+        fn test_curve_leaves_a_node_from_its_border_at_its_row() {
             let area = Rect::new(0, 0, 60, 10);
-            let (text, lines) = render_text(
-                TestGraphs::domain_simple_chain(),
-                EdgeStyle::Diagonal(DiagonalDrawing::Deferred),
-                area,
-            );
+            let (text, lines) =
+                render_text(TestGraphs::domain_simple_chain(), EdgeStyle::Curved, area);
             assert!(
                 lines.len() >= 6,
                 "side ports should split the chain edges:\n{text}"
@@ -1177,16 +1134,20 @@ mod tests {
             };
             let first = lines
                 .iter()
-                .find(|edge| matches!(edge, DeferredEdge::Line(line) if (line.from.0 - right_border("[ 0 ]")).abs() < 1e-9))
-                .expect("an edge should leave the first node's right border");
-            let DeferredEdge::Line(first) = first else {
-                panic!("should be a deferred line");
-            };
+                .find_map(|edge| match edge {
+                    EdgeShape::Bezier(curve)
+                        if (curve.from.0 - right_border("[ 0 ]")).abs() < 1e-9 =>
+                    {
+                        Some(curve)
+                    }
+                    _ => None,
+                })
+                .expect("a curve should leave the first node's right border");
             assert_eq!(first.from.1, row_of("[ 0 ]"));
         }
 
         #[test]
-        fn test_diagonal_geometry_keeps_data_layers_in_columns_with_side_ports() {
+        fn test_curved_geometry_keeps_data_layers_in_columns_with_side_ports() {
             let graph = TestGraphs::domain_strut(4, 3);
             let mut engine = LayoutEngine::new(graph);
             let anchor = engine.default_anchor().expect("should have graph nodes");
@@ -1198,7 +1159,7 @@ mod tests {
             let geometry = build_window_geometry_with_anchors(
                 window,
                 &GapSizes::default(),
-                EdgeStyle::Diagonal(DiagonalDrawing::Braille),
+                EdgeStyle::Curved,
                 |role| match role {
                     NodeRole::Data(_) => (5, 1),
                     _ => (1, 1),
@@ -1242,7 +1203,7 @@ mod tests {
             let geometry = build_window_geometry_with_anchors(
                 window,
                 &GapSizes::default(),
-                EdgeStyle::Bezier(DiagonalDrawing::Deferred),
+                EdgeStyle::Curved,
                 |role| match role {
                     NodeRole::Data(index) if index.index() % 2 == 0 => (11, 1),
                     NodeRole::Data(_) => (3, 1),
@@ -1293,7 +1254,7 @@ mod tests {
             let geometry = build_window_geometry_with_anchors(
                 window,
                 &GapSizes::default(),
-                EdgeStyle::Bezier(DiagonalDrawing::Deferred),
+                EdgeStyle::Curved,
                 |role| match role {
                     NodeRole::Data(_) => (5, 1),
                     _ => (1, 1),
@@ -1342,7 +1303,7 @@ mod tests {
             let geometry = build_window_geometry_with_anchors(
                 window,
                 &GapSizes::default(),
-                EdgeStyle::Bezier(DiagonalDrawing::Deferred),
+                EdgeStyle::Curved,
                 |role| match role {
                     NodeRole::Data(_) => (5, 1),
                     _ => (1, 1),
@@ -1384,7 +1345,7 @@ mod tests {
                 let geometry = build_window_geometry_with_anchors(
                     window,
                     &GapSizes::default(),
-                    EdgeStyle::Diagonal(DiagonalDrawing::Braille),
+                    EdgeStyle::Curved,
                     |role| match role {
                         NodeRole::Data(_) => (5, 1),
                         _ => (1, 1),

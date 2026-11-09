@@ -5,7 +5,7 @@ use ratatui::style::Style;
 
 use crate::{
     assembly::AssembledLayout,
-    diagonal::EdgeStyle,
+    curved::EdgeStyle,
     distribute_nodes::GapSizes,
     geometry::{WorldPos, WorldRect},
     layout::{HAIR_PIN_SIZE, NodeRole, VerticalAnchor, WindowGeometry},

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    io::Write,
     time::{Duration, Instant},
 };
 
@@ -13,6 +14,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, history::dolt::ac
 use gen_tui::{
     crawl::GraphSource,
     graph_view::GraphViewState,
+    kitty_graphics::{KittyEdgeOverlay, supports_kitty_graphics},
     layout_engine::{BatchId, LayoutEngine},
     theme::current_theme,
 };
@@ -916,6 +918,12 @@ pub fn view_block_group<'a>(
     let terminal = session.terminal_mut();
 
     // Basic event loop
+    let mut kitty_overlay = KittyEdgeOverlay::default();
+    // The terminal is asked once, in raw mode and before any event is read, because its answer
+    // arrives on standard input. Curved edges are drawn through the Kitty graphics protocol, so
+    // a terminal without it keeps the rectilinear style.
+    let curved_edges_available = supports_kitty_graphics();
+    controller.set_curved_edges_available(curved_edges_available);
     let mut show_panel = false;
     let mut panel_mode = PanelMode::Details;
     let show_sidebar = true;
@@ -1131,8 +1139,17 @@ pub fn view_block_group<'a>(
                             // Zoom, the path toggle, annotation stops and navigation
                             // behave the same in every viewer.
                             _ => {
-                                entered_door =
-                                    controller.handle_key(key) == GraphKeyOutcome::EnteredDoor;
+                                let outcome = controller.handle_key(key);
+                                if key.code == KeyCode::Char('s')
+                                    && outcome == GraphKeyOutcome::Ignore
+                                {
+                                    messages.push_warn(
+                                        "curved edges need a terminal that supports the Kitty graphics protocol"
+                                            .to_string(),
+                                    );
+                                    needs_redraw = true;
+                                }
+                                entered_door = outcome == GraphKeyOutcome::EnteredDoor;
                             }
                         },
                         FocusZone::Panel => match key.code {
@@ -1321,6 +1338,7 @@ pub fn view_block_group<'a>(
                 GraphDatabase::for_connection(conn, workspace)?,
                 history_ref.map(String::from),
             );
+            controller.set_curved_edges_available(curved_edges_available);
             explorer.refresh(
                 conn,
                 config_conn,
@@ -1650,7 +1668,7 @@ pub fn view_block_group<'a>(
         needs_redraw = false;
 
         // Draw the UI
-        terminal.draw(|frame| {
+        let completed_frame = terminal.draw(|frame| {
             let status_bar_height: u16 = 1;
 
             // The outer layout is a vertical split between the main area, optional message bar, and status bar
@@ -2045,6 +2063,21 @@ pub fn view_block_group<'a>(
                 tui_layout_change = false;
             }
         })?;
+
+        // Edges drawn through the Kitty graphics protocol go out after the cells, as one image.
+        if curved_edges_available {
+            let mut escapes = Vec::new();
+            if controller.edge_style().is_curved() {
+                kitty_overlay.update(
+                    &mut escapes,
+                    completed_frame.buffer,
+                    controller.edge_shapes(),
+                )?;
+            } else {
+                kitty_overlay.clear(&mut escapes)?;
+            }
+            terminal.backend_mut().write_all(&escapes)?;
+        }
 
         // The render just above may have claimed a new world, growing the graph and needing
         // that batch's annotation groups; if anything drawn changed, the frame is redrawn

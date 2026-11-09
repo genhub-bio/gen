@@ -1533,7 +1533,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
- "tiny-skia",
  "tui-widget-list",
  "unicode-segmentation",
  "unicode-width",
@@ -1685,10 +1684,13 @@ dependencies = [
 name = "gen-tui"
 version = "0.5.1"
 dependencies = [
+ "base64 0.22.1",
  "crossterm",
+ "flate2",
  "fontdue",
  "gen-graph",
  "itertools 0.14.0",
+ "libc",
  "log",
  "petgraph 0.6.5",
  "png",
@@ -1696,6 +1698,7 @@ dependencies = [
  "rust-sugiyama",
  "serde",
  "thiserror 2.0.18",
+ "tiny-skia",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -2529,9 +2532,9 @@ checksum = "b3a6a8c165077efc8f3a971534c50ea6a1a18b329ef4a66e897a7e3a1494565f"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libdoltlite-sys"
