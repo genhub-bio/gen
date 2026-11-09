@@ -14,6 +14,7 @@ editor_options:
 
 ```{r, include = FALSE}
 knitr::opts_chunk$set(eval = TRUE)
+options(genr.viewer = FALSE)
 ```
 
 The Yeast Toolkit (YTK) and MoClo-yeast workflows use BsmBI (recognition
@@ -181,6 +182,10 @@ cat("Sample:        ", sg$sample_name(), "\n")
 The annotation group added automatically on import labels every part.
 Because `GenPlot` calls `auto_load_annotation_groups()` at construction
 time, the track appears without an explicit `add_track_group()` call.
+At the console, `plot(sg)` opens the interactive viewer directly. Assigning it
+as below keeps the controller available for color configuration, navigation,
+and highlights before it is printed. Use `view(p, viewer = "pane")` or
+`view(p, viewer = "browser")` to select the destination explicitly.
 
 The `colors` parameter accepts a function that receives each annotation
 and returns a hex color string.  Here we map the `role` field stored in

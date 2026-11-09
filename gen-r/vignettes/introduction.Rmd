@@ -14,15 +14,10 @@ editor_options:
 
 ```{r, include = FALSE}
 knitr::opts_chunk$set(eval = TRUE)
-has_anyhtmlwidget <- requireNamespace("anyhtmlwidget", quietly = TRUE)
+options(genr.viewer = FALSE)
 
 maybe_show_plot <- function(plot_obj) {
-  if (has_anyhtmlwidget) {
-    plot_obj
-  } else {
-    cat("Interactive widget preview skipped because anyhtmlwidget is not installed.\n")
-    invisible(NULL)
-  }
+  plot_obj
 }
 ```
 
@@ -80,6 +75,11 @@ cat("Sequence graph:", sg_wt$name(), "| sample:", sg_wt$sample_name(), "\n")
 
 ## Visualise the reference
 
+Calling `plot()` at the console opens the interactive graph viewer. Assigning
+the result creates a reusable controller without opening it immediately; print
+the controller when it is ready to display. Use `view(p, viewer = "pane")` or
+`view(p, viewer = "browser")` when the display destination should be explicit.
+
 ```{r plot-wt}
 p <- plot(sg_wt)
 
@@ -92,14 +92,14 @@ if (length(mcs) > 0) p$go_to(mcs[[1]])
 maybe_show_plot(p)
 ```
 
-The viewer renders a static snapshot of the sequence graph. Annotations
-from the GenBank file (lacZα, bla, the MCS) appear as coloured tracks
-below the sequence. `sg_wt$list_annotations()` returns all named features in
-the database; passing one to `go_to()` centres the viewport on that
-feature with no coordinate look-up required.
-
-For a fully interactive, pannable, zoomable view, run `gen view` from
-the command line in the same workspace.
+The rendered vignette embeds a static snapshot because its setup calls
+`options(genr.viewer = FALSE)`. At the R console, printing `p` or calling
+`view(p)` opens the interactive viewer with drag-to-pan and zoom controls.
+Annotations from the GenBank file (lacZα, bla, the MCS) appear as coloured
+tracks below the sequence.
+`sg_wt$list_annotations()` returns all named features in the database;
+passing one to `go_to()` centres the viewport on that feature with no
+coordinate look-up required.
 
 ## Design a Golden Gate conversion
 
@@ -202,7 +202,7 @@ always use a full scan regardless.
 Each entry in the `matches` list is a locus record with `start`, `end`,
 `blocks`, and `strand`. Pass a locus directly to `go_to_match` to move
 the viewport to it (or `go_to_match(locus, center = TRUE)` to center
-it instead), and to `highlight_match` to colour it on the canvas.
+it instead), and to `highlight_match` to colour it on the plot.
 
 The convenience method `go_to()` accepts both search match loci and
 annotation records returned by `list_annotations()`. Annotations from

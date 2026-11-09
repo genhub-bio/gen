@@ -92,23 +92,21 @@ Bioconductor `DNAStringSet` / `GRanges` objects.
 **Visualize**
 
 ```r
-plot(bg)                 # returns a gen_plot; displays in RStudio Viewer / Shiny
+plot(bg)  # opens the interactive viewer
 ```
 
 ## Graph viewer (GenPlot)
 
-`plot(bg)` returns a `gen_plot` object. Printing it in RStudio or Shiny
-renders an interactive canvas widget when the optional `anyhtmlwidget`
-package is installed.
-
-Navigate the view programmatically:
+`plot(bg)` returns a `gen_plot` controller and displays it interactively when
+evaluated at the console. Assign it to a variable to configure it before
+display:
 
 ```r
 p <- plot(bg)
 p$zoom_in()
 p$zoom_out()
 p$move_by(dx = 5, dy = 0)   # pan right by 5 columns
-p                            # re-render
+p                            # open the interactive viewer
 ```
 
 Track overlays and search highlights:
@@ -118,8 +116,52 @@ p$add_track_file("annotations.gff3", name = "genes", sample = "ref")
 results <- repo$search("ATCGATCG")
 p$go_to_match(results[[1]]$matches[[1]])
 p$highlight_match(results[[1]]$matches[[1]], color = "yellow")
-p
+p  # open the configured viewer
 ```
+
+Use `view()` when selecting the display destination explicitly. It accepts
+either a sequence graph directly or a configured `gen_plot`:
+
+```r
+p <- plot(bg, rows = 24, cols = 80)
+view(p)                         # RStudio pane when available, otherwise browser
+view(p, viewer = "pane")        # RStudio Viewer
+view(p, viewer = "browser")     # web browser
+
+view(bg, rows = 24, cols = 80)  # construct and display in one step
+```
+
+The viewer supports zoom controls, drag-to-pan behavior, and live updates
+from the Rust-backed graph controller. The graph is drawn in Rust and sent to
+the browser as a PNG, so the browser only forwards clicks and drags. Pass
+`scale = 1` to `plot()` or `view()` for smaller images; the default of 2 draws every
+pixel twice over, which is crisp on high-density displays at the same logical size. PNGs
+are labeled 96 dpi times the scale, so scale 2 is 192 dpi and scale 3 is 288 dpi, close to a
+300 dpi print.
+
+When knitting a document, a `gen_plot` becomes a static base64 `<img>` with no
+JavaScript. Write the same image to disk with `p$save_png("graph.png")`.
+
+The viewer is also available as a conventional Shiny module for inclusion in a
+larger application:
+
+```r
+ui <- shiny::fillPage(gen_shiny_ui("graph"))
+server <- function(input, output, session) {
+  gen_shiny_server("graph", p)
+}
+shiny::shinyApp(ui, server)
+```
+
+`gen_shiny_server()` clones `p` for each Shiny session. Viewport changes made
+by one user therefore do not affect other users when the app is deployed.
+`gen_app(p)` returns the standalone `shiny.appobj` without running it, which
+is useful when configuring the host, port, launch behavior, or deployment
+separately with `shiny::runApp()`.
+
+Set `options(genr.viewer = FALSE)` to keep `print.gen_plot()` from launching
+Shiny. This is useful in scripts and documentation builds that need the static
+widget output.
 
 ## Bioconductor integration
 
@@ -195,11 +237,7 @@ install Rust/cargo, `libclang`, and `capnp`, then use:
 remotes::install_github("genhub-bio/gen", subdir = "gen-r", ref = "v0.1.31")
 ```
 
-For interactive widget rendering, also install:
-
-```r
-remotes::install_github("keller-mark/anyhtmlwidget", upgrade = "never")
-```
+Both installation commands install the Shiny viewer and its R dependencies.
 
 ## Development
 

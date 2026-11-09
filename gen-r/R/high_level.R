@@ -5,17 +5,6 @@ NULL
   if (is.null(x)) y else x
 }
 
-# Serialize a GraphLocus's slices as "<node_id>,<seq_start>,<seq_end>,..." for the
-# "hl"/"gotoc" op protocols, which send the whole multi-block span to Rust.
-.slices_to_block_parts <- function(slices) {
-  paste(
-    sapply(slices, function(s) {
-      sprintf("%s,%d,%d", s$node$node_id, as.integer(s$node$sequence_start), as.integer(s$node$sequence_end))
-    }),
-    collapse = ","
-  )
-}
-
 # Unused: per-part mcols metadata is no longer imported, so this serializer
 # has no caller. Kept commented as a reference for a future metadata path.
 # .gen_serialize_mcols <- function(xss) {
@@ -123,60 +112,22 @@ print.gen_locus <- function(x, ...) {
   invisible(x)
 }
 
-#' Create a graph plot controller
-#'
-#' Returns a \code{gen_plot} environment that renders the sequence graph for a
-#' sequence graph.  Printing or displaying the object in RStudio / Shiny shows an
-#' interactive htmlwidget.
-#'
-#' @param db_path Character. Path to the Gen graph SQLite database.
-#' @param sequence_graph_id Character or \code{gen_hash_id}. Sequence graph to render.
-#' @param detail Character. Level of node detail: \code{"normal"} (default) or
-#'   \code{"compressed"}.
-#' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
-#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 72).
-#' @param colors Annotation colors. Three forms are accepted:
-#'   \itemize{
-#'     \item \code{NULL} (default) — use the built-in theme cycle.
-#'     \item A named character vector such as \code{c(TEF1p = "#4393c3")} — maps
-#'       annotation names to hex colors; annotations not in the vector are hidden.
-#'     \item An unnamed character vector such as \code{c("#4393c3", "#1a9850")} — a
-#'       cyclic palette assigned in encounter order.
-#'     \item A function \code{function(ann) ...} that receives each annotation
-#'       (a list with \code{id}, \code{name}, \code{group}, \code{metadata}, etc.)
-#'       and returns a hex color string or \code{NULL} to hide that annotation.
-#'   }
-#' @return A \code{gen_plot} environment with methods:
-#'   \describe{
-#'     \item{\code{zoom_in()}}{Step one zoom level in. Returns self invisibly.}
-#'     \item{\code{zoom_out()}}{Step one zoom level out. Returns self invisibly.}
-#'     \item{\code{move_by(dx, dy)}}{Pan the viewport by \code{dx} columns and \code{dy} rows. Returns self invisibly.}
-#'     \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
-#'     \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
-#'     \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
-#'     \item{\code{go_to_match(match_locus, center = FALSE)}}{Move the viewport to a search result locus, snapping it left by default or centering it when \code{center = TRUE}. Sets detail to \code{"full"}. Returns self invisibly.}
-#'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
-#'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
-#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
-#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as inline graph highlights with floating labels.}
-#'     \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
-#'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
-#'   }
-#' @export
-GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, cols = NULL, colors = NULL) {
+# Internal constructor shared by GenPlot() and clone() -- binds a `gen_plot`
+# environment's methods around an already-constructed, live `RGraphController`
+# (`controller`), so a clone gets freshly-bound closures over its own
+# environment instead of GenPlot() building (and discarding) a disposable
+# controller just to overwrite it. `controller` is mutated in place by every
+# method below; there is no ops history or DB round-trip on the R side.
+.gen_plot_from_controller <- function(repo, sequence_graph_id, controller, detail, rows, cols, colors_arg, scale = 2L) {
   ctrl <- new.env(parent = emptyenv())
-  ctrl$repo <- .RepositoryClass$new(dirname(dirname(db_path)))
-  ctrl$sequence_graph_id <- if (inherits(sequence_graph_id, "gen_hash_id")) sequence_graph_id$hash_id else as.character(sequence_graph_id)
+  ctrl$repo <- repo
+  ctrl$sequence_graph_id <- sequence_graph_id
+  ctrl$controller <- controller
   ctrl$detail <- detail
-  ctrl$ops <- character()
-  ctrl$track_specs <- tryCatch({
-    group_names <- ctrl$repo$auto_load_annotation_groups(ctrl$sequence_graph_id)
-    lapply(group_names, function(n) list(type = "group", name = n))
-  }, error = function(e) list())
-  ctrl$rows <- rows %||% 24L
-  ctrl$cols <- cols %||% 72L
-  ctrl$colors_arg <- colors
-  ctrl$color_map_json <- NULL
+  ctrl$rows <- rows
+  ctrl$cols <- cols
+  ctrl$colors_arg <- colors_arg
+  ctrl$scale <- scale
 
   ctrl$.build_color_map_json <- function() {
     if (is.null(ctrl$colors_arg)) {
@@ -203,56 +154,68 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
 
   ctrl$set_detail <- function(detail) {
     ctrl$detail <- detail
+    ctrl$controller$set_detail(detail)
     invisible(ctrl)
   }
 
-  ctrl$render_frame <- function(cols = ctrl$cols, rows = ctrl$rows) {
+  ctrl$render_png <- function(cols = ctrl$cols, rows = ctrl$rows, scale = ctrl$scale) {
     ctrl$cols <- cols
     ctrl$rows <- rows
-    if (is.null(ctrl$color_map_json)) {
-      ctrl$color_map_json <- ctrl$.build_color_map_json()
-    }
-    ctrl$repo$render_frame(ctrl$sequence_graph_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE), ctrl$color_map_json)
+    ctrl$controller$render_png(as.integer(cols), as.integer(rows), .check_png_scale(scale))
+  }
+
+  ctrl$render_png_viewport <- function(cols = ctrl$cols, rows = ctrl$rows, scale = ctrl$scale) {
+    ctrl$cols <- cols
+    ctrl$rows <- rows
+    ctrl$controller$render_png_viewport(as.integer(cols), as.integer(rows), .check_png_scale(scale))
+  }
+
+  ctrl$png_cell_size <- function(scale = ctrl$scale) {
+    ctrl$controller$png_cell_size(.check_png_scale(scale))
+  }
+
+  ctrl$background_color <- function() {
+    ctrl$controller$background_color()
+  }
+
+  ctrl$hit_regions <- function(cols = ctrl$cols, rows = ctrl$rows) {
+    jsonlite::fromJSON(
+      ctrl$controller$hit_regions(as.integer(cols), as.integer(rows)),
+      simplifyDataFrame = FALSE
+    )
+  }
+
+  ctrl$save_png <- function(path, scale = ctrl$scale) {
+    writeBin(ctrl$render_png(scale = scale), path)
+    invisible(path)
   }
 
   ctrl$add_track_group <- function(group) {
-    ctrl$track_specs <- c(ctrl$track_specs, list(list(type = "group", name = group)))
+    ctrl$controller$add_track_group(group)
     invisible(ctrl)
   }
 
   ctrl$add_track_file <- function(path, name = NULL, sample = NULL) {
-    spec <- list(type = "file", path = path, name = name, sample = sample)
-    ctrl$track_specs <- c(ctrl$track_specs, list(spec))
+    ctrl$controller$add_track_file(path, name, sample)
     invisible(ctrl)
   }
 
-
   ctrl$zoom_in <- function() {
-    ctrl$ops <- c(ctrl$ops, "zi")
+    ctrl$controller$zoom_in()
     invisible(ctrl)
   }
 
   ctrl$zoom_out <- function() {
-    ctrl$ops <- c(ctrl$ops, "zo")
+    ctrl$controller$zoom_out()
     invisible(ctrl)
   }
 
   ctrl$handle_click <- function(col, row) {
-    clicked <- ctrl$repo$handle_click(
-      ctrl$sequence_graph_id,
-      ctrl$detail,
-      paste(ctrl$ops, collapse = ";"),
-      as.integer(col),
-      as.integer(row)
-    )
-    if (isTRUE(clicked)) {
-      ctrl$ops <- c(ctrl$ops, sprintf("c,%d,%d", as.integer(col), as.integer(row)))
-    }
-    clicked
+    ctrl$controller$handle_click(as.integer(col), as.integer(row))
   }
 
   ctrl$move_by <- function(dx, dy) {
-    ctrl$ops <- c(ctrl$ops, sprintf("m,%d,%d", as.integer(dx), as.integer(dy)))
+    ctrl$controller$move_by(as.integer(dx), as.integer(dy))
     invisible(ctrl)
   }
 
@@ -266,30 +229,33 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
     node_len <- node$sequence_end - node$sequence_start
     frac_x <- if (node_len > 1L) offset / (node_len - 1L) else 0.5
     frac_x <- max(0.0, min(1.0, frac_x))
-    op <- if (isTRUE(center)) "gotoc" else "goto"
-    ctrl$ops <- c(ctrl$ops, sprintf("%s,%s,%d,%d,%.6f",
-      op, node$node_id,
+    ctrl$controller$go_to_match(
+      node$node_id,
       as.integer(node$sequence_start),
       as.integer(node$sequence_end),
-      frac_x))
+      frac_x,
+      isTRUE(center)
+    )
     invisible(ctrl)
   }
 
   ctrl$highlight_match <- function(match_locus, color = "yellow") {
     slices <- match_locus$slices
     strand_code <- switch(match_locus$strand, "+" = "f", "-" = "r", "u")
-    ctrl$ops <- c(ctrl$ops, sprintf("hl,%s,%d,%d,%s,%d,%s",
+    ctrl$controller$highlight_match(
       color,
       as.integer(match_locus$start$offset),
       as.integer(match_locus$end$offset),
       strand_code,
-      length(slices),
-      .slices_to_block_parts(slices)))
+      vapply(slices, function(s) s$node$node_id, character(1)),
+      vapply(slices, function(s) as.integer(s$node$sequence_start), integer(1)),
+      vapply(slices, function(s) as.integer(s$node$sequence_end), integer(1))
+    )
     invisible(ctrl)
   }
 
   ctrl$clear_highlights <- function() {
-    ctrl$ops <- c(ctrl$ops, "clrhl")
+    ctrl$controller$clear_highlights()
     invisible(ctrl)
   }
 
@@ -301,26 +267,146 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
     ctrl$go_to_match(if (!is.null(x$locus)) x$locus else x, center = center)
   }
 
+  ctrl$clone <- function() {
+    .gen_plot_from_controller(
+      ctrl$repo,
+      ctrl$sequence_graph_id,
+      ctrl$controller$clone_controller(),
+      ctrl$detail,
+      ctrl$rows,
+      ctrl$cols,
+      ctrl$colors_arg,
+      ctrl$scale
+    )
+  }
+
   class(ctrl) <- "gen_plot"
   ctrl
 }
 
+# A PNG scale is the number of image pixels per logical pixel; the renderer accepts 1 to 8.
+.check_png_scale <- function(scale) {
+  valid <- is.numeric(scale) && length(scale) == 1L && !is.na(scale) &&
+    scale == round(scale) && scale >= 1 && scale <= 8
+  if (!valid) {
+    stop("scale must be a whole number from 1 to 8", call. = FALSE)
+  }
+  as.integer(scale)
+}
+
+# Width and height in pixels of a PNG, read from its IHDR chunk.
+.png_dimensions <- function(png) {
+  c(
+    width = readBin(png[17:20], "integer", n = 1L, size = 4L, endian = "big"),
+    height = readBin(png[21:24], "integer", n = 1L, size = 4L, endian = "big")
+  )
+}
+
+# A PNG as a base64 data URI, the form both the knitr image and the Shiny viewer carry.
+.png_data_uri <- function(png) {
+  paste0("data:image/png;base64,", gsub("\n", "", jsonlite::base64_enc(png), fixed = TRUE))
+}
+
+#' Create a graph plot controller
+#'
+#' Returns a \code{gen_plot} environment that renders the sequence graph for a
+#' sequence graph as PNG images. Printing the object launches the interactive
+#' viewer in an interactive session and embeds a static image when knitting.
+#' Assign it to a variable to configure annotations, highlights, or navigation
+#' first; use [view()] to choose the RStudio pane or a browser explicitly.
+#'
+#' @param db_path Character. Path to the Gen graph SQLite database.
+#' @param sequence_graph_id Character or \code{gen_hash_id}. Sequence graph to render.
+#' @param detail Character. Level of node detail: \code{"normal"} (default) or
+#'   \code{"compressed"}.
+#' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
+#' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 42).
+#' @param scale Integer from 1 to 8. Image pixels per logical pixel in every PNG
+#'   the plot renders (default 2, which is crisp on high-density displays). The viewer
+#'   and knitted images show the plot at its logical size whatever the scale. PNGs are
+#'   labeled 96 dpi times the scale: 1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi (close to a
+#'   300 dpi print) and 4 is 384 dpi.
+#' @param colors Annotation colors. Three forms are accepted:
+#'   \itemize{
+#'     \item \code{NULL} (default) — use the built-in theme cycle.
+#'     \item A named character vector such as \code{c(TEF1p = "#4393c3")} — maps
+#'       annotation names to hex colors; annotations not in the vector are hidden.
+#'     \item An unnamed character vector such as \code{c("#4393c3", "#1a9850")} — a
+#'       cyclic palette assigned in encounter order.
+#'     \item A function \code{function(ann) ...} that receives each annotation
+#'       (a list with \code{id}, \code{name}, \code{group}, \code{metadata}, etc.)
+#'       and returns a hex color string or \code{NULL} to hide that annotation.
+#'   }
+#' @return A \code{gen_plot} environment with methods:
+#'   \describe{
+#'     \item{\code{zoom_in()}}{Step one zoom level in. Returns self invisibly.}
+#'     \item{\code{zoom_out()}}{Step one zoom level out. Returns self invisibly.}
+#'     \item{\code{move_by(dx, dy)}}{Pan the viewport by \code{dx} columns and \code{dy} rows. Returns self invisibly.}
+#'     \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
+#'     \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
+#'     \item{\code{render_png(cols, rows, scale)}}{Render the graph to a PNG cropped to its content. Returns a \code{raw} vector.}
+#'     \item{\code{render_png_viewport(cols, rows, scale)}}{Render the full viewport, header included, to a PNG whose pixel positions map straight to terminal cells (used by the Shiny viewer). Returns a \code{raw} vector.}
+#'     \item{\code{save_png(path, scale)}}{Write the cropped PNG to \code{path}. Returns the path invisibly.}
+#'     \item{\code{png_cell_size(scale)}}{The pixel size of one terminal cell as \code{c(width, height)}.}
+#'     \item{\code{hit_regions(cols, rows)}}{The clickable cells of the last viewport render as a list of \code{x}, \code{y} and \code{kind} records.}
+#'     \item{\code{go_to_match(match_locus, center = FALSE)}}{Move the viewport to a search result locus, snapping it left by default or centering it when \code{center = TRUE}. Sets detail to \code{"full"}. Returns self invisibly.}
+#'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
+#'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
+#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
+#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as inline graph highlights with floating labels.}
+#'     \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
+#'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
+#'     \item{\code{clone()}}{Copy the controller and its current rendering state. Changes to the copy do not affect the original.}
+#'   }
 #' @export
-print.gen_plot <- function(x, ...) {
-  json <- x$render_frame(x$cols, x$rows)
-  w <- .genplot_widget(json)
-  print(w)
+GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, cols = NULL, colors = NULL, scale = 2L) {
+  repo <- .RepositoryClass$new(dirname(dirname(db_path)))
+  sequence_graph_id <- if (inherits(sequence_graph_id, "gen_hash_id")) sequence_graph_id$hash_id else as.character(sequence_graph_id)
+  # Terminal cells are roughly twice as tall as they are wide, so 42 × 24
+  # produces a near-square canvas in the browser without scaling the graph.
+  rows <- rows %||% 24L
+  cols <- cols %||% 42L
+  scale <- .check_png_scale(scale)
+
+  controller <- repo$create_graph_controller(sequence_graph_id, detail)
+  ctrl <- .gen_plot_from_controller(repo, sequence_graph_id, controller, detail, rows, cols, colors, scale)
+  if (is.null(colors)) {
+    controller$trigger_auto_load()
+  } else {
+    controller$load_annotation_groups_with_colors_json(ctrl$.build_color_map_json())
+  }
+
+  ctrl
+}
+
+#' @export
+print.gen_plot <- function(x, viewer = "auto", ...) {
+  if (isTRUE(getOption("knitr.in.progress"))) {
+    return(knit_print.gen_plot(x, ...))
+  }
+  if (interactive() && !identical(getOption("genr.viewer"), FALSE)) {
+    view(x, viewer = viewer, ...)
+  } else {
+    cat(sprintf(
+      "<gen_plot %d x %d cells, scale %d; use $save_png(path) to write an image>\n",
+      x$cols, x$rows, x$scale
+    ))
+  }
   invisible(x)
 }
 
+# A knitted plot is one base64 PNG in an <img> tag: no JavaScript, and it survives any HTML
+# export. The image is cropped to its content and shown at its logical size, so a scaled PNG
+# stays sharp on high-density displays.
 knit_print.gen_plot <- function(x, ...) {
-  json <- x$render_frame(x$cols, x$rows)
-  w <- .genplot_widget(json)
-  knitr::knit_print(w$.get_htmlwidget(), ...)
+  png <- x$render_png(x$cols, x$rows, x$scale)
+  size <- .png_dimensions(png) / x$scale
+  alt <- sprintf("Gen sequence graph plot, %d by %d terminal cells", x$cols, x$rows)
+  knitr::asis_output(sprintf(
+    '<img src="%s" alt="%s" width="%d" height="%d" style="max-width: 100%%; height: auto;" />',
+    .png_data_uri(png), alt, as.integer(size[["width"]]), as.integer(size[["height"]])
+  ))
 }
-
-methods::setOldClass("gen_plot")
-methods::setMethod("show", "gen_plot", function(object) print(object))
 
 #' Import sequences from a Bioconductor XStringSet or named character vector
 #'
@@ -534,8 +620,8 @@ get_node_sequence <- function(obj, node) {
 }
 
 #' @export
-plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", colors = NULL, ...) {
-  GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols, colors = colors)
+plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", colors = NULL, scale = 2L, ...) {
+  GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols, colors = colors, scale = scale)
 }
 
 #' The sequence graphs produced by a single import/update/derive call
@@ -692,8 +778,7 @@ Repository <- function(path = NULL) {
   repo$build_index    <- function(ids = character(), sequence_kind = "dna", k = 16L) inner$build_index(ids, sequence_kind, as.integer(k))
   repo$search         <- function(query, ids = character(), sequence_kind = "dna") inner$search(query, ids, sequence_kind)
   repo$clear_index    <- function(ids = character()) inner$clear_index(ids)
-  repo$render_frame   <- function(sg_id, detail, cols, rows, ops, tracks_json, annotation_colors_json = "{}") inner$render_frame(sg_id, detail, cols, rows, ops, tracks_json, annotation_colors_json)
-  repo$handle_click   <- function(sg_id, detail, ops, col, row) inner$handle_click(sg_id, detail, ops, col, row)
+  repo$create_graph_controller <- function(sg_id, detail) inner$create_graph_controller(sg_id, detail)
   repo$list_annotations           <- function(sg_id) inner$list_annotations(sg_id)
   repo$auto_load_annotation_groups <- function(sg_id) inner$auto_load_annotation_groups(sg_id)
   repo$get_node_sequence          <- function(node_id, sequence_start, sequence_end) inner$get_node_sequence(node_id, as.integer(sequence_start), as.integer(sequence_end))

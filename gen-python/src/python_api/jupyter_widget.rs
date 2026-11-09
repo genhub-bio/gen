@@ -1,28 +1,15 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
 
+pub(crate) use r#gen::views::graph_session::PlotOptions;
 use r#gen::views::{
-    annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
     annotation_track::{AnnotationSpan, annotation_span_from_graph_locus},
-    annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
-    gen_graph_controller::{ClickOutcome, GenGraphController},
     graph_database::GraphDatabase,
-    graph_overlay::{
-        GraphOverlay, OverlayContent, OverlaySource, PathMembership, remove_path_overlay,
-        set_path_overlay,
-    },
-    path_scale::ScalePlacement,
-    png_export::{MAX_SCALE, write_cropped_png, write_uncropped_png},
+    graph_session::{GraphPage, GraphSession, GraphSessionError, PageRef, validated_png_scale},
 };
 use gen_annotations::projection::AnnotationSegment;
-use gen_core::{HashId, Workspace, is_terminal, range::Range};
-use gen_models::{block_group::BlockGroup, db::GraphConnection};
-use gen_tui::{
-    LayoutMode, LineStyle, highlight_style::PathStyle, layout::VisualDetail,
-    node_renderer::NodeRenderer, theme::current_theme,
-};
+use gen_core::{HashId, Workspace, range::Range};
+use gen_models::db::GraphConnection;
+use gen_tui::theme::current_theme;
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
@@ -30,45 +17,18 @@ use pyo3::{
 };
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    widgets::{Clear, Widget},
+    style::{Color, Modifier},
 };
-
-/// The theme slot (yellow in the default theme) ad hoc `show()` highlights use when no color
-/// is given. The accent cursor uses a different slot so it stays visible on top of one.
-const HIGHLIGHT_ACCENT_SLOT: usize = 0x0A;
-const FRAME_HEADER_HEIGHT: u16 = 1;
-
-fn frame_areas(cols: u16, rows: u16) -> (Rect, Rect) {
-    (
-        Rect::new(0, 0, cols, FRAME_HEADER_HEIGHT.min(rows)),
-        Rect::new(
-            0,
-            FRAME_HEADER_HEIGHT,
-            cols,
-            rows.saturating_sub(FRAME_HEADER_HEIGHT),
-        ),
-    )
-}
-
-fn workspace_for_connection(conn: &GraphConnection) -> PyResult<Workspace> {
-    let database_path = conn
-        .path()
-        .map(PathBuf::from)
-        .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let base_dir = database_path
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| PyRuntimeError::new_err("graph DB path has no workspace parent"))?;
-    Ok(Workspace::new(base_dir))
-}
 use serde::Serialize;
 
 use crate::python_api::{
     annotation::PyAnnotation, block_group::PySequenceGraph, graph_search::PyGraphLocus,
     position::PyPosition,
 };
+
+fn workspace_for_connection(conn: &GraphConnection) -> PyResult<Workspace> {
+    r#gen::views::graph_session::workspace_for_connection(conn).map_err(session_error)
+}
 
 /// Convert a ratatui `Color` to a CSS hex string.
 fn color_to_hex(color: Option<ratatui::style::Color>, default_hex: &str) -> String {
@@ -119,24 +79,6 @@ fn indexed_to_hex(i: u8) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// Parse a CSS hex colour string like `"#rrggbb"` into a ratatui `Color`.
-fn parse_hex_color(hex: &str) -> PyResult<ratatui::style::Color> {
-    use ratatui::style::Color;
-    if hex.starts_with('#') && hex.len() == 7 {
-        let r = u8::from_str_radix(&hex[1..3], 16)
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-        let g = u8::from_str_radix(&hex[3..5], 16)
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-        let b = u8::from_str_radix(&hex[5..7], 16)
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("bad color"))?;
-        Ok(Color::Rgb(r, g, b))
-    } else {
-        Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "invalid colour {hex:?}; expected a CSS hex string like \"#ff4444\""
-        )))
-    }
-}
-
 fn is_false(b: &bool) -> bool {
     !b
 }
@@ -173,13 +115,6 @@ struct RenderedFrame {
     neutral_fg: String,
     neutral_bg: String,
     cells: Vec<RenderedCell>,
-}
-
-#[derive(Serialize)]
-struct RenderedHitRegion {
-    x: u16,
-    y: u16,
-    kind: &'static str,
 }
 
 fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
@@ -245,346 +180,62 @@ fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
     }
 }
 
-/// Sort key ordering annotation spans longest-first, so shorter (inner) spans paint on top.
-fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
-    -span
-        .segments
-        .iter()
-        .map(|segment| segment.range.end - segment.range.start)
-        .sum::<i64>()
-}
-
-/// One sequence graph "page" of a `PyGraphController`. A plain `GraphWidget` has exactly one
-/// page; a `Sample`-backed widget pages through several.
-///
-/// The graph, its view, dimming, overlays and annotation groups all live in a
-/// [`GenGraphController`], the same one the terminal viewers draw, so a notebook widget loads
-/// lazily, steps through doors and reloads annotation groups per batch exactly as they do. The
-/// page adds only what is particular to notebooks: the Python-side colors, file tracks and
-/// annotation listing.
-///
-/// # Thread safety
-///
-/// ipykernel 6+ runs cell code in a thread-pool executor while anywidget comm/observe callbacks
-/// fire on the asyncio ioloop, so a page is created on one thread and used from another. The
-/// controller owns its database handle rather than borrowing a connection, which keeps it
-/// `Send + Sync`.
-#[derive(Clone)]
-struct GraphPage {
-    name: String,
-    controller: GenGraphController,
-    /// Set once Python has set up the annotation groups (with or without colors). Survives
-    /// cloning so that cell-display clones do not set them up again.
-    annotation_groups_loaded: bool,
-    annotation_files: Vec<FileTrack>,
-}
-
-#[derive(Clone)]
-struct FileTrack {
-    entry: AnnotationFileEntry,
-    shown: bool,
-    index_available: bool,
-    loaded_window: Option<(i64, i64)>,
-}
-
-/// How `plot()` loads and lays out a page.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PlotOptions {
-    /// Keep pruned/retired edit-site edges in the graph, dimmed, instead of removing them.
-    pub show_history: bool,
-    /// Place the block group's current path on one straight row.
-    pub align_path: bool,
-}
-
-impl Default for PlotOptions {
-    fn default() -> Self {
-        Self {
-            show_history: false,
-            align_path: true,
-        }
-    }
-}
-
-/// The information needed to lazily build a `GraphPage` on first visit.
-#[derive(Clone)]
-struct PageRef {
-    name: String,
-    database: GraphDatabase,
-    block_group_id: HashId,
-    /// Mirrors `plot(show_history=..., align_path=...)` - see `GraphPage::new`.
-    options: PlotOptions,
-}
-
-/// One page of a `PyGraphController`: either already loaded, or pending lazy
-/// construction the first time it becomes the active page.
-#[derive(Clone)]
-enum Page {
-    Loaded(Box<GraphPage>),
-    Pending(Box<PageRef>),
-}
-
-impl Page {
-    fn name(&self) -> &str {
-        match self {
-            Page::Loaded(page) => &page.name,
-            Page::Pending(page_ref) => &page_ref.name,
-        }
-    }
-}
-
 fn runtime_error(error: impl ToString) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
 }
 
-impl GraphPage {
-    /// Open `block_group_id` in a controller, its graph seeded and grown lazily as renders
-    /// crawl it. `show_history=False` leaves pruned/retired edit-site edges out of the crawl
-    /// entirely; `show_history=True` loads them and dims them instead. `align_path=True`
-    /// aligns the current path to y = 0, with variants placed around that axis.
-    fn new(
-        name: String,
-        database: GraphDatabase,
-        block_group_id: HashId,
-        options: PlotOptions,
-    ) -> PyResult<Self> {
-        let mut controller = GenGraphController::new(database, None)
-            .with_pruned_history(!options.show_history)
-            .with_aligned_current_path(options.align_path);
-        controller
-            .open_block_group(&block_group_id)
-            .map_err(runtime_error)?;
-        Ok(Self {
-            name,
-            controller,
-            annotation_groups_loaded: false,
-            annotation_files: Vec::new(),
-        })
-    }
-
-    fn block_group_id(&self) -> Option<HashId> {
-        self.controller
-            .block_group()
-            .map(|block_group| block_group.id)
-    }
-
-    /// Draw the graph, its annotation flags into `graph_area`.
-    fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) {
-        self.draw_graph(buf, graph_area);
-        // Annotation files are read for the nodes already loaded, so the first load has to
-        // follow a first draw; a file loaded against an empty graph would find nothing.
-        let mut redraw = false;
-        if self.annotation_files.is_empty() {
-            let mut database = self.controller.database_mut().clone();
-            if let Ok(conn) = database.connection() {
-                self.show_all_annotation_files(conn);
-            }
-            redraw = self.annotation_files.iter().any(|file| file.shown);
-        }
-        redraw |= self.refresh_annotation_files_for_viewport();
-        if redraw {
-            Clear.render(graph_area, buf);
-            self.draw_graph(buf, graph_area);
-        }
-    }
-
-    fn draw_graph(&mut self, buf: &mut Buffer, graph_area: Rect) {
-        self.controller
-            .render_settled(buf, graph_area, Style::default());
-    }
-
-    fn resolve_color(&mut self, color: Option<&str>) -> PyResult<Color> {
-        match color {
-            None => Ok(self.controller.view_state_mut().next_accent_color()),
-            Some(s) => match s {
-                "red" => Ok(Color::Red),
-                "green" => Ok(Color::Green),
-                "yellow" => Ok(Color::Yellow),
-                "blue" => Ok(Color::Blue),
-                "magenta" => Ok(Color::Magenta),
-                "cyan" => Ok(Color::Cyan),
-                "white" => Ok(Color::White),
-                hex if hex.starts_with('#') => parse_hex_color(hex),
-                other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown color {other:?}"
-                ))),
-            },
-        }
-    }
-
-    /// Add `span` as a nameless ad hoc highlight. It gets its own id so an explicit `color`
-    /// pins only this highlight. Without one it takes the theme's highlight accent, the same
-    /// on every call: ad hoc highlights mark what the reader just asked to see, so they
-    /// aren't colored apart from each other or from the annotation tracks.
-    fn push_adhoc_highlight(
-        &mut self,
-        mut span: AnnotationSpan,
-        color: Option<&str>,
-    ) -> PyResult<()> {
-        span.id = HashId::random_str();
-        let color = match color {
-            Some(color) => self.resolve_color(Some(color))?,
-            None => current_theme()[HIGHLIGHT_ACCENT_SLOT],
-        };
-        self.controller.pin_annotation_color(span.id, color);
-        self.controller.overlays_mut().push(GraphOverlay {
-            content: OverlayContent::Span(span),
-            source: OverlaySource::Adhoc,
-            style: annotation_style(color),
-        });
-        Ok(())
-    }
-
-    /// Add `spans` as the file or ad hoc track `name`; `reapply_overlays` colors them.
-    fn push_track(&mut self, name: &str, mut spans: Vec<AnnotationSpan>) {
-        spans.sort_by_key(sort_key_longest_first);
-        let overlays = self.controller.overlays_mut();
-        overlays.extend(spans.into_iter().map(|span| GraphOverlay {
-            content: OverlayContent::Span(span),
-            source: OverlaySource::Track(name.to_string()),
-            style: annotation_style(Color::Reset),
-        }));
-    }
-
-    /// The annotation group named `name`, as the entry id its overlays are keyed by.
-    fn annotation_group_id(&self, name: &str) -> Option<String> {
-        self.controller
-            .annotation_group_entries()
-            .iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| entry.id.clone())
+/// Report a session failure the way the Python API always has: a bad argument is a
+/// `ValueError`, anything else a `RuntimeError`.
+fn session_error(error: GraphSessionError) -> PyErr {
+    match error {
+        GraphSessionError::InvalidArgument(message) => PyValueError::new_err(message),
+        GraphSessionError::Operation(message) => PyRuntimeError::new_err(message),
     }
 }
 
-fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
-    let span = (window.1 - window.0).max(1);
-    (window.0.saturating_sub(span), window.1.saturating_add(span))
-}
-
-fn annotation_style(color: Color) -> PathStyle {
-    PathStyle::new(color)
-        .with_line_style(LineStyle::Bold)
-        .with_merge_glyphs(true)
-}
-
-impl GraphPage {
-    /// Whether Python has already set up this page's annotation groups.
-    ///
-    /// Returns ``true`` after either [`Self::trigger_auto_load`] or
-    /// [`Self::load_annotation_groups_with_colors`] has been called. Cloned
-    /// pages inherit this flag, preventing double set-up on cell re-display.
-    fn annotations_loaded(&self) -> bool {
-        self.annotation_groups_loaded
-    }
-
-    /// Show every annotation group in the automatic theme palette. The groups load for each
-    /// batch as renders reach it.
-    fn trigger_auto_load(&mut self) -> PyResult<()> {
-        self.annotation_groups_loaded = true;
-        Ok(())
-    }
-
-    /// Show every annotation group, coloring annotations from a Python-resolved map.
-    ///
-    /// `color_map` maps annotation ID hex strings to a CSS hex colour string
-    /// (e.g. ``"#ff4444"``) or ``None`` to hide that annotation entirely.
-    /// Annotations absent from the map fall back to the auto theme palette. No-op if
-    /// annotations have already been set up.
-    fn load_annotation_groups_with_colors(
-        &mut self,
-        color_map: &HashMap<String, Option<String>>,
-    ) -> PyResult<()> {
-        if self.annotation_groups_loaded {
-            return Ok(());
-        }
-        let overrides = color_map
-            .iter()
-            .filter_map(|(id, color)| {
-                let id = HashId::try_from(id.as_str()).ok()?;
-                match color {
-                    None => Some((id, None)),
-                    // An unreadable color falls back to the automatic palette.
-                    Some(hex) => parse_hex_color(hex).ok().map(|color| (id, Some(color))),
-                }
-            })
-            .collect();
-        self.controller.set_annotation_color_overrides(overrides);
-        self.annotation_groups_loaded = true;
-        Ok(())
-    }
-
-    /// Set the level of node detail, matching the four zoom steps of the CLI viewer.
-    ///
-    /// Parameters
-    /// detail : {"minimal", "normal", "labels", "full"}
-    ///     ``"minimal"`` shows the smallest representation; ``"normal"`` shows truncated
-    ///     nodes with annotation names hidden; ``"labels"`` shows truncated nodes with
-    ///     annotation names; ``"full"`` shows complete sequences.
-    pub fn set_detail(&mut self, detail: &str) -> PyResult<()> {
-        let (level, labels) = match detail {
-            "minimal" => (VisualDetail::Minimal, None),
-            "normal" => (VisualDetail::Truncated, Some(false)),
-            "labels" => (VisualDetail::Truncated, Some(true)),
-            "full" => (VisualDetail::Full, None),
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "detail must be \"minimal\", \"normal\", \"labels\", or \"full\"; got {other:?}"
-                )));
-            }
-        };
-        self.controller.set_detail_level(level);
-        if let Some(shown) = labels {
-            self.controller.show_annotation_names(shown);
-        }
-        Ok(())
-    }
-
-    pub fn truncate_sequences(&mut self) {
-        self.controller.set_detail_level(VisualDetail::Truncated);
-    }
-
-    pub fn full_sequences(&mut self) {
-        self.controller.set_detail_level(VisualDetail::Full);
-    }
-
-    pub fn minimize_sequences(&mut self) {
-        self.controller.set_detail_level(VisualDetail::Minimal);
-    }
-
-    fn zoom_in(&mut self) {
-        self.controller.zoom_in();
-    }
-
-    fn set_labels_shown(&mut self, shown: bool) {
-        self.controller.show_annotation_names(shown);
-    }
-
-    fn labels_shown(&self) -> bool {
-        self.controller.annotation_names_shown()
-    }
-
-    fn zoom_out(&mut self) {
-        self.controller.zoom_out();
-    }
-
-    /// Apply a click; a door takes the view into the batch behind it. Returns whether
-    /// anything changed.
-    fn handle_click(&mut self, col: u16, row: u16) -> bool {
-        self.controller.click(col, row) != ClickOutcome::Missed
-    }
-
-    fn move_by(&mut self, dx: i16, dy: i16) {
-        self.controller.pan(dx, dy);
-    }
-
+/// The page operations that take Python objects. The pages themselves live in the shared
+/// graph session, which knows nothing of Python.
+pub(crate) trait PyPageExt {
     /// Fails with a `ValueError` naming why a position cannot be shown: the block group lacks it,
     /// or edits cut it off from the start of the pruned view.
+    fn go_to_pos(&mut self, pos: &PyPosition, center: bool) -> PyResult<()>;
+
+    /// Highlight each named base and navigate to the leftmost one in the current layout.
+    fn show_positions(
+        &mut self,
+        positions: &[PyPosition],
+        color: Option<&str>,
+        center: bool,
+    ) -> PyResult<()>;
+
+    /// Highlight the path of nodes covered by `locus` in the given colour.
+    ///
+    /// `color` must be a CSS hex string like `"#ffff00"` or one of the named
+    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
+    /// theme's highlight accent is used.
+    fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()>;
+
+    /// Navigate to an `Annotation` object.
+    fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) -> PyResult<()>;
+
+    /// Highlight an `Annotation` on the graph without a label. The highlight gets its own id,
+    /// so it neither inherits the track's cached color nor repaints the track when pinned.
+    fn highlight_annotation_obj(
+        &mut self,
+        annotation: &PyAnnotation,
+        color: Option<&str>,
+    ) -> PyResult<()>;
+
+    /// Navigate to a `GraphLocus`.
+    fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) -> PyResult<()>;
+}
+
+impl PyPageExt for GraphPage {
     fn go_to_pos(&mut self, pos: &PyPosition, center: bool) -> PyResult<()> {
-        self.controller
-            .go_to_coordinate(pos.position.node_id, pos.position.coordinate, center)
+        self.go_to_coordinate(pos.position.node_id, pos.position.coordinate, center)
             .map_err(|error| PyValueError::new_err(format!("cannot go to position: {error}")))
     }
 
-    /// Highlight each named base and navigate to the leftmost one in the current layout.
     fn show_positions(
         &mut self,
         positions: &[PyPosition],
@@ -634,318 +285,38 @@ impl GraphPage {
                 .collect(),
         };
         self.push_adhoc_highlight(span, color)
+            .map_err(session_error)
     }
 
-    /// Highlight the path of nodes covered by `match_obj` in the given colour.
-    ///
-    /// `color` must be a CSS hex string like `"#ffff00"` or one of the named
-    /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
-    /// theme's highlight accent is used.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
         self.push_adhoc_highlight(
             annotation_span_from_graph_locus(&locus.graph_locus(), ""),
             color,
         )
+        .map_err(session_error)
     }
 
-    /// Remove ephemeral highlights while keeping named tracks and the selected path.
-    fn clear_highlights(&mut self) {
-        self.controller.overlays_mut().retain(|overlay| {
-            matches!(
-                overlay.source,
-                OverlaySource::Track(_) | OverlaySource::Path
-            )
-        });
-    }
-
-    /// Highlight the most recent path associated with this sequence graph.
-    ///
-    /// Parameters
-    /// color : str, optional
-    ///     Colour for the highlight.  Accepts named colours
-    ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
-    ///     (``"#ff4444"``).  When omitted the next unused theme accent
-    ///     colour is chosen automatically.
-    ///
-    /// Raises
-    /// RuntimeError
-    ///     If no sequence graph is associated with this widget, or if no path
-    ///     exists for the sequence graph.
-    /// ValueError
-    ///     If ``color`` is not a recognised colour name or CSS hex string.
-    pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
-        let block_group_id = self.block_group_id().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "show_path() requires a sequence graph; obtain the widget via SequenceGraph.plot()",
-            )
-        })?;
-        let highlight_color = self.resolve_color(color)?;
-        let conn = self
-            .controller
-            .database_mut()
-            .connection()
-            .map_err(runtime_error)?;
-        let path =
-            BlockGroup::get_current_path(conn, &block_group_id, None).map_err(runtime_error)?;
-        // Only the path's edge ids are fetched; nothing is added to the crawled graph. Each
-        // reapply highlights whichever of those edges are loaded, so batches crawled later
-        // extend the highlight without touching the database again.
-        let membership = PathMembership::load(conn, &path.id, None);
-        if membership.is_empty() {
-            return Err(PyRuntimeError::new_err("Path has no edges"));
-        }
-        set_path_overlay(
-            self.controller.overlays_mut(),
-            annotation_style(highlight_color),
-            membership,
-        );
-        Ok(())
-    }
-
-    /// Clear path highlighting previously applied by `show_path`.
-    pub fn clear_path(&mut self) {
-        remove_path_overlay(self.controller.overlays_mut());
-    }
-
-    /// Show the annotation group `group` again after `remove_track` or
-    /// `clear_all_annotations` hid it.
-    pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
-        if self.annotation_group_id(group).is_none() {
-            let mut database = self.controller.database_mut().clone();
-            let conn = database.connection().map_err(runtime_error)?;
-            if self.show_annotation_file(conn, group) {
-                return Ok(());
-            }
-        }
-        let group_id = self.annotation_group_id(group).ok_or_else(|| {
-            PyRuntimeError::new_err(format!("no annotation group named {group:?}"))
-        })?;
-        self.controller
-            .set_annotation_group_enabled(&group_id, true);
-        Ok(())
-    }
-
-    /// Navigate to an `Annotation` object.
-    pub fn go_to_annotation_obj(
-        &mut self,
-        annotation: &PyAnnotation,
-        center: bool,
-    ) -> PyResult<()> {
+    fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) -> PyResult<()> {
         // The locus carries absolute node coordinates, so the controller locates the target
         // itself and nodes outside the loaded window are reachable.
         let locus = PyGraphLocus::with_context(annotation.graph_locus(), None);
         self.go_to_locus(&locus, center)
     }
 
-    /// Highlight an `Annotation` on the graph without a label. The highlight gets its own id,
-    /// so it neither inherits the track's cached color nor repaints the track when pinned.
-    pub fn highlight_annotation_obj(
+    fn highlight_annotation_obj(
         &mut self,
         annotation: &PyAnnotation,
         color: Option<&str>,
     ) -> PyResult<()> {
         self.push_adhoc_highlight(annotation_to_span(annotation), color)
+            .map_err(session_error)
     }
 
-    /// Navigate to a `GraphLocus`.
-    pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) -> PyResult<()> {
+    fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) -> PyResult<()> {
         let Some(position) = locus.target_position(center) else {
             return Ok(());
         };
         self.go_to_pos(&position, center)
-    }
-
-    /// Remove the track `name`: an annotation group stays hidden for later batches too, until
-    /// `add_track_group` shows it again.
-    pub fn remove_track(&mut self, name: &str) {
-        for file in &mut self.annotation_files {
-            if file.entry.display_name == name {
-                file.shown = false;
-            }
-        }
-        if let Some(group_id) = self.annotation_group_id(name) {
-            self.controller
-                .set_annotation_group_enabled(&group_id, false);
-        }
-        self.controller
-            .overlays_mut()
-            .retain(|overlay| !matches!(&overlay.source, OverlaySource::Track(key) if key == name));
-    }
-
-    /// Clear all annotations from the graph, hiding every annotation group.
-    pub fn clear_all_annotations(&mut self) {
-        for file in &mut self.annotation_files {
-            file.shown = false;
-        }
-        let group_ids: Vec<String> = self
-            .controller
-            .annotation_group_entries()
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect();
-        for group_id in &group_ids {
-            self.controller
-                .set_annotation_group_enabled(group_id, false);
-        }
-        // Keep ad hoc highlights (e.g. search matches) and the path.
-        self.controller
-            .overlays_mut()
-            .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
-    }
-
-    /// Remove all overlays whose annotation name matches `name`, regardless of
-    /// which track (if any) they belong to. If the same name was added more
-    /// than once, every copy is removed.
-    pub fn remove_annotation(&mut self, name: &str) {
-        self.controller
-            .overlays_mut()
-            .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
-    }
-}
-
-impl GraphPage {
-    fn visible_coordinate_window(&self) -> Option<(i64, i64)> {
-        let world = self.controller.engine().active_world()?;
-        let mut start = i64::MAX;
-        let mut end = i64::MIN;
-        for node in world.members() {
-            if !is_terminal(node.node_id) {
-                start = start.min(node.sequence_start);
-                end = end.max(node.sequence_end);
-            }
-        }
-        (start <= end).then_some((start, end))
-    }
-
-    /// Read the repository's annotation files, keeping the display state of ones already known.
-    fn sync_annotation_files(&mut self, conn: &GraphConnection) {
-        let entries = load_annotation_file_entries(conn, None);
-        let mut previous = std::mem::take(&mut self.annotation_files);
-        self.annotation_files = entries
-            .into_iter()
-            .map(|entry| {
-                let known = previous
-                    .iter()
-                    .position(|file| file.entry.file_addition.id == entry.file_addition.id);
-                match known {
-                    Some(index) => FileTrack {
-                        entry,
-                        ..previous.swap_remove(index)
-                    },
-                    None => FileTrack {
-                        entry,
-                        shown: false,
-                        index_available: false,
-                        loaded_window: None,
-                    },
-                }
-            })
-            .collect();
-    }
-
-    /// Load one file for `window`, replacing whatever it showed before.
-    fn load_annotation_file(
-        &mut self,
-        conn: &GraphConnection,
-        index: usize,
-        window: Option<(i64, i64)>,
-    ) -> bool {
-        let Some(block_group_id) = self.block_group_id() else {
-            return false;
-        };
-        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id, None) else {
-            return false;
-        };
-        let node_filter = self.controller.loaded_node_ids();
-        let entry = self.annotation_files[index].entry.clone();
-        let Ok(workspace) = workspace_for_connection(conn) else {
-            return false;
-        };
-        let loaded = load_annotation_file_track(&AnnotationFileTrackRequest {
-            conn,
-            history_ref: None,
-            workspace: &workspace,
-            collection_name: &block_group.collection_name,
-            sample_name: &block_group.sample_name,
-            block_group_name: Some(&block_group.name),
-            query_window: window,
-            node_filter: &node_filter,
-            entry: &entry,
-        });
-        let Ok(loaded) = loaded else {
-            return false;
-        };
-        let name = entry.display_name.clone();
-        self.controller.overlays_mut().retain(
-            |overlay| !matches!(&overlay.source, OverlaySource::Track(track) if *track == name),
-        );
-        self.push_track(&loaded.track.name, loaded.track.annotations);
-        let file = &mut self.annotation_files[index];
-        file.shown = true;
-        file.index_available = loaded.index_available;
-        file.loaded_window = loaded.loaded_window;
-        true
-    }
-
-    /// The window of sequence coordinates to read an indexed file for: the viewport and as much
-    /// again on each side, so small camera moves don't reload.
-    fn annotation_query_window(&self) -> Option<(i64, i64)> {
-        self.visible_coordinate_window().map(expand_query_window)
-    }
-
-    /// Show every annotation file, as database groups are all shown when a graph is plotted.
-    /// A file that can't be read is skipped so it doesn't hide the others.
-    fn show_all_annotation_files(&mut self, conn: &GraphConnection) {
-        self.sync_annotation_files(conn);
-        let window = self.annotation_query_window();
-        for index in 0..self.annotation_files.len() {
-            self.load_annotation_file(conn, index, window);
-        }
-    }
-
-    /// Show the file recorded under `name`, returning whether there is one.
-    fn show_annotation_file(&mut self, conn: &GraphConnection, name: &str) -> bool {
-        self.sync_annotation_files(conn);
-        let Some(index) = self
-            .annotation_files
-            .iter()
-            .position(|file| file.entry.display_name == name)
-        else {
-            return false;
-        };
-        let window = self.annotation_query_window();
-        self.load_annotation_file(conn, index, window)
-    }
-
-    /// Reload shown, indexed files whose loaded window no longer covers the viewport.
-    fn refresh_annotation_files_for_viewport(&mut self) -> bool {
-        let Some(visible) = self.visible_coordinate_window() else {
-            return false;
-        };
-        let window = expand_query_window(visible);
-        let stale: Vec<usize> = self
-            .annotation_files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| file.shown && file.index_available)
-            .filter(|(_, file)| match file.loaded_window {
-                Some((start, end)) => visible.0 < start || visible.1 > end,
-                None => true,
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if stale.is_empty() {
-            return false;
-        }
-        let mut database = self.controller.database_mut().clone();
-        let Ok(conn) = database.connection() else {
-            return false;
-        };
-        let mut reloaded = false;
-        for index in stale {
-            reloaded |= self.load_annotation_file(conn, index, Some(window));
-        }
-        reloaded
     }
 }
 
@@ -973,27 +344,17 @@ fn loaded_page_for_sequence_graph(
         sg.id,
         options,
     )
+    .map_err(session_error)
 }
 
 /// Capture the information needed to lazily build a page for `sg` later.
 fn page_ref_for_sequence_graph(sg: &PySequenceGraph, options: PlotOptions) -> PyResult<PageRef> {
-    Ok(PageRef {
-        name: sg.name.clone(),
-        database: database_for_sequence_graph(sg)?,
-        block_group_id: sg.id,
+    Ok(PageRef::new(
+        sg.name.clone(),
+        database_for_sequence_graph(sg)?,
+        sg.id,
         options,
-    })
-}
-
-/// Draw a one-line header into `area`: the sequence graph name, centred. The
-/// page index/count are not drawn into the grid; they are exposed as widget
-/// metadata instead, so the frontend can render its own `<index/count>`
-/// pager indicator outside the canvas.
-fn draw_header(buf: &mut Buffer, area: Rect, name: &str) {
-    let theme = current_theme();
-    let style = Style::default().fg(theme[0x07]);
-    let name_x = area.x + area.width.saturating_sub(name.len() as u16) / 2;
-    buf.set_string(name_x, area.y, name, style);
+    ))
 }
 
 /// Controller backing a `GraphWidget`.
@@ -1010,11 +371,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, name: &str) {
 #[pyclass(name = "GraphWidget", from_py_object)]
 #[derive(Clone)]
 pub struct PyGraphController {
-    pages: Vec<Page>,
-    current_index: usize,
-    /// Set by `hide_cursor()`: keeps the cursor out of every render, including after a
-    /// later `go_to`/`show`/click would otherwise bring it back.
-    cursor_hidden: bool,
+    session: GraphSession,
 }
 
 impl PyGraphController {
@@ -1024,29 +381,25 @@ impl PyGraphController {
     fn new(conn: &GraphConnection, block_group_id: HashId) -> PyResult<Self> {
         let workspace = workspace_for_connection(conn)?;
         let database = GraphDatabase::for_connection(conn, &workspace).map_err(runtime_error)?;
+        let page = GraphPage::new(
+            String::new(),
+            database,
+            block_group_id,
+            PlotOptions {
+                show_history: true,
+                ..PlotOptions::default()
+            },
+        )
+        .map_err(session_error)?;
         Ok(Self {
-            pages: vec![Page::Loaded(Box::new(GraphPage::new(
-                String::new(),
-                database,
-                block_group_id,
-                PlotOptions {
-                    show_history: true,
-                    ..PlotOptions::default()
-                },
-            )?))],
-            current_index: 0,
-            cursor_hidden: false,
+            session: GraphSession::single(page),
         })
     }
 
     /// Build a single-page controller for `sg`, loading its graph lazily.
     pub(crate) fn for_sequence_graph(sg: &PySequenceGraph, options: PlotOptions) -> PyResult<Self> {
         Ok(Self {
-            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(
-                sg, options,
-            )?))],
-            current_index: 0,
-            cursor_hidden: false,
+            session: GraphSession::single(loaded_page_for_sequence_graph(sg, options)?),
         })
     }
 
@@ -1056,58 +409,17 @@ impl PyGraphController {
         block_groups: &[PySequenceGraph],
         options: PlotOptions,
     ) -> PyResult<Self> {
-        if block_groups.is_empty() {
-            return Err(PyRuntimeError::new_err(
-                "Sample has no sequence graphs to plot",
-            ));
-        }
-        let pages = block_groups
+        let page_refs = block_groups
             .iter()
-            .map(|sg| {
-                page_ref_for_sequence_graph(sg, options)
-                    .map(|page_ref| Page::Pending(Box::new(page_ref)))
-            })
+            .map(|sg| page_ref_for_sequence_graph(sg, options))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
-            pages,
-            current_index: 0,
-            cursor_hidden: false,
+            session: GraphSession::paged(page_refs).map_err(session_error)?,
         })
     }
 
-    /// Draw just the active page's graph into a fresh `cols` x `rows` buffer, without the header.
-    fn render_graph_buffer(&mut self, cols: u16, rows: u16) -> PyResult<Buffer> {
-        let mut buf = Buffer::empty(Rect::new(0, 0, cols, rows));
-        self.render_active(&mut buf, Rect::new(0, 0, cols, rows))?;
-        Ok(buf)
-    }
-
-    /// Draw the active page into `graph_area`, honouring `hide_cursor()`.
-    fn render_active(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
-        let cursor_hidden = self.cursor_hidden;
-        let page = self.active()?;
-        if cursor_hidden {
-            page.controller.view_state_mut().hide_cursor();
-        }
-        page.render_into(buf, graph_area);
-        Ok(())
-    }
-
     fn active(&mut self) -> PyResult<&mut GraphPage> {
-        let page = &mut self.pages[self.current_index];
-        if let Page::Pending(page_ref) = page {
-            let loaded = GraphPage::new(
-                page_ref.name.clone(),
-                page_ref.database.clone(),
-                page_ref.block_group_id,
-                page_ref.options,
-            )?;
-            *page = Page::Loaded(Box::new(loaded));
-        }
-        match page {
-            Page::Loaded(page) => Ok(page.as_mut()),
-            Page::Pending(_) => unreachable!("just loaded above"),
-        }
+        self.session.active().map_err(session_error)
     }
 }
 
@@ -1133,7 +445,7 @@ impl PyGraphController {
     /// Called by ``GraphWidget`` when no ``colors`` mapping is provided to
     /// ``plot()``. No-op if annotations have already been loaded.
     fn trigger_auto_load(&mut self) -> PyResult<()> {
-        self.active()?.trigger_auto_load()
+        self.active()?.trigger_auto_load().map_err(session_error)
     }
 
     /// Load annotation groups applying per-annotation colours from a Python-resolved map.
@@ -1152,6 +464,7 @@ impl PyGraphController {
     ) -> PyResult<()> {
         self.active()?
             .load_annotation_groups_with_colors(&color_map)
+            .map_err(session_error)
     }
 
     /// Set the level of node detail.
@@ -1162,7 +475,7 @@ impl PyGraphController {
     ///     nodes with annotation names hidden; ``"labels"`` shows truncated nodes with
     ///     annotation names; ``"full"`` shows complete sequences.
     pub fn set_detail(&mut self, detail: &str) -> PyResult<()> {
-        self.active()?.set_detail(detail)
+        self.active()?.set_detail(detail).map_err(session_error)
     }
 
     pub fn truncate_sequences(&mut self) -> PyResult<()> {
@@ -1181,11 +494,10 @@ impl PyGraphController {
     }
 
     fn render_frame(&mut self, cols: u16, rows: u16) -> PyResult<String> {
-        let total_area = Rect::new(0, 0, cols, rows);
-        let mut buf = Buffer::empty(total_area);
-        let (header_area, graph_area) = frame_areas(cols, rows);
-        draw_header(&mut buf, header_area, self.pages[self.current_index].name());
-        self.render_active(&mut buf, graph_area)?;
+        let buf = self
+            .session
+            .render_frame_buffer(cols, rows)
+            .map_err(session_error)?;
         let frame = serialize_buffer(&buf, cols, rows);
         serde_json::to_string(&frame).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
@@ -1203,7 +515,7 @@ impl PyGraphController {
         rows: u16,
         scale: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        render_png_bytes(self, py, (cols, rows), false, scale)
+        self.render_png_bytes(py, (cols, rows), false, scale)
     }
 
     /// Rasterize the full interactive viewport to PNG bytes, preserving the header and cell
@@ -1216,51 +528,33 @@ impl PyGraphController {
         rows: u16,
         scale: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        render_png_bytes(self, py, (cols, rows), true, scale)
+        self.render_png_bytes(py, (cols, rows), true, scale)
     }
 
     /// Return Rust hit-test results for clickable cells in the last rendered viewport.
     fn render_hit_regions(&mut self, cols: u16, rows: u16) -> PyResult<String> {
-        let view_state = self.active()?.controller.view_state();
-        let mut hit_regions = Vec::new();
-        for y in 0..rows {
-            for x in 0..cols {
-                let kind = if view_state.wormhole_hit(x, y).is_some() {
-                    Some("wormhole")
-                } else if view_state.node_hit(x, y).is_some() {
-                    Some("node")
-                } else {
-                    None
-                };
-                if let Some(kind) = kind {
-                    hit_regions.push(RenderedHitRegion { x, y, kind });
-                }
-            }
-        }
-        serde_json::to_string(&hit_regions)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        self.session
+            .hit_regions_json(cols, rows)
+            .map_err(session_error)
     }
 
     /// Return the logical pixel dimensions of a PNG terminal cell. A PNG rendered at ``scale``
     /// has cells ``scale`` times this size in image pixels.
     fn png_cell_size(&self) -> (usize, usize) {
-        gen_tui::RasterConfig::default().logical_cell_size()
+        GraphSession::png_cell_size()
     }
 
     /// Return the exact canvas color used by the native PNG renderer.
     fn png_background_color(&self) -> String {
-        let [red, green, blue] = gen_tui::RasterConfig::default().background;
-        format!("#{red:02x}{green:02x}{blue:02x}")
+        GraphSession::png_background_color()
     }
 
     /// Keep the cursor out of every later render (`True`), or let navigation bring it back
     /// (`False`).
     fn set_cursor_hidden(&mut self, hidden: bool) -> PyResult<()> {
-        self.cursor_hidden = hidden;
-        if !hidden {
-            self.active()?.controller.view_state_mut().show_cursor();
-        }
-        Ok(())
+        self.session
+            .set_cursor_hidden(hidden)
+            .map_err(session_error)
     }
 
     fn zoom_in(&mut self) -> PyResult<()> {
@@ -1343,7 +637,7 @@ impl PyGraphController {
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     #[pyo3(signature = (color=None))]
     pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
-        self.active()?.show_path(color)
+        self.active()?.show_path(color).map_err(session_error)
     }
 
     /// Clear path highlighting previously applied by `show_path`.
@@ -1355,7 +649,7 @@ impl PyGraphController {
     /// Load annotations from the database by group name and add them as a
     /// horizontal track panel below the graph.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
-        self.active()?.add_track_group(group)
+        self.active()?.add_track_group(group).map_err(session_error)
     }
 
     /// Navigate to an `Annotation` object.
@@ -1388,21 +682,7 @@ impl PyGraphController {
     /// `add_track_group` accepts, independent of which tracks are currently displayed.
     #[getter]
     pub fn track_names(&mut self) -> PyResult<Vec<String>> {
-        let page = self.active()?;
-        let mut database = page.controller.database_mut().clone();
-        let conn = database.connection().map_err(runtime_error)?;
-        page.sync_annotation_files(conn);
-        Ok(page
-            .controller
-            .annotation_group_entries()
-            .iter()
-            .map(|entry| entry.name.clone())
-            .chain(
-                page.annotation_files
-                    .iter()
-                    .map(|file| file.entry.display_name.clone()),
-            )
-            .collect())
+        self.session.track_names().map_err(session_error)
     }
 
     /// Remove a track-panel annotation by name.
@@ -1425,85 +705,44 @@ impl PyGraphController {
     /// Switch to the next sequence graph in the sample, wrapping around.
     /// A no-op when there is only one page.
     fn next_page(&mut self) {
-        self.current_index = (self.current_index + 1) % self.pages.len();
+        self.session.next_page();
     }
 
     /// Switch to the previous sequence graph in the sample, wrapping around.
     /// A no-op when there is only one page.
     fn prev_page(&mut self) {
-        self.current_index = (self.current_index + self.pages.len() - 1) % self.pages.len();
+        self.session.previous_page();
     }
 
     /// Number of pages available. The frontend only shows pager arrows when
     /// this is greater than 1 (plain single-graph widgets have exactly one page).
     #[getter]
     fn page_count(&self) -> usize {
-        self.pages.len()
+        self.session.page_count()
     }
 
     /// Index of the currently active page, for the frontend's `<index/count>`
     /// indicator.
     #[getter]
     fn page_index(&self) -> usize {
-        self.current_index
+        self.session.page_index()
     }
 }
 
-/// Reject a pixel scale the exporter should not be asked for.
-fn validated_png_scale(scale: usize) -> PyResult<usize> {
-    if (1..=MAX_SCALE).contains(&scale) {
-        Ok(scale)
-    } else {
-        Err(PyValueError::new_err(format!(
-            "scale must be between 1 and {}, got {scale}",
-            MAX_SCALE
-        )))
+impl PyGraphController {
+    fn render_png_bytes<'py>(
+        &mut self,
+        py: Python<'py>,
+        size: (u16, u16),
+        full_viewport: bool,
+        scale: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self
+            .session
+            .render_png(size, full_viewport, scale)
+            .map_err(session_error)?;
+        Ok(PyBytes::new(py, &bytes))
     }
-}
-
-fn render_png_bytes<'py>(
-    widget: &mut PyGraphController,
-    py: Python<'py>,
-    (cols, rows): (u16, u16),
-    full_viewport: bool,
-    scale: usize,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let scale = validated_png_scale(scale)?;
-    let controller = &mut widget.active()?.controller;
-    let previous_layout_mode = controller.view_state().layout_mode;
-    let previous_placement = controller.scale_placement();
-    controller.view_state_mut().layout_mode = LayoutMode::Curved;
-    controller.set_scale_placement(if full_viewport {
-        ScalePlacement::Bottom
-    } else {
-        ScalePlacement::BelowContent
-    });
-    let buffer_result = if full_viewport {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
-        let (header_area, graph_area) = frame_areas(cols, rows);
-        draw_header(
-            &mut buffer,
-            header_area,
-            widget.pages[widget.current_index].name(),
-        );
-        widget
-            .render_active(&mut buffer, graph_area)
-            .map(|()| buffer)
-    } else {
-        widget.render_graph_buffer(cols, rows)
-    };
-    let controller = &mut widget.active()?.controller;
-    controller.view_state_mut().layout_mode = previous_layout_mode;
-    controller.set_scale_placement(previous_placement);
-    let buffer = buffer_result?;
-    let mut bytes = Vec::new();
-    let write_result = if full_viewport {
-        write_uncropped_png(&buffer, controller.overlay_primitives(), scale, &mut bytes)
-    } else {
-        write_cropped_png(&buffer, controller.overlay_primitives(), scale, &mut bytes)
-    };
-    write_result.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    Ok(PyBytes::new(py, &bytes))
 }
 
 /// Static PNGs render on a wider canvas than the interactive viewport because the
@@ -1549,7 +788,7 @@ pub(crate) fn build_widget(
         go_to,
         scale,
     } = options;
-    let scale = validated_png_scale(scale)?;
+    let scale = validated_png_scale(scale).map_err(session_error)?;
     let gen_module = py.import("gen")?;
     let widget_class = if interactive {
         gen_module.getattr("GraphWidget")?
@@ -1594,6 +833,8 @@ mod tests {
         views::{
             annotation_track::AnnotationSpan,
             graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
+            graph_session::frame_areas,
+            png_export::MAX_SCALE,
         },
     };
     use gen_annotations::projection::AnnotationSegment;
@@ -1623,9 +864,7 @@ mod tests {
     use ratatui::{layout::Rect, style::Color};
     use serde_json::Value;
 
-    use super::{
-        MAX_SCALE, PlotOptions, PyGraphController, current_theme, frame_areas, static_viewport,
-    };
+    use super::{PlotOptions, PyGraphController, PyPageExt, current_theme, static_viewport};
     use crate::python_api::{
         annotation::PyAnnotation, block_group::PySequenceGraph, graph_search::PyGraphLocus,
     };

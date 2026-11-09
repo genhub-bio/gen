@@ -15,6 +15,7 @@ pub mod gen_graph_widget;
 pub mod graph_database;
 pub mod graph_dimming;
 pub mod graph_overlay;
+pub mod graph_session;
 pub mod helpers;
 pub mod inline_label_placement;
 pub(crate) mod junction_projection;

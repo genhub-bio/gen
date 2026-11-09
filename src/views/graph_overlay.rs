@@ -43,7 +43,12 @@ impl AnnotationColorCache {
         self.colors.get(id).copied()
     }
 
-    pub(crate) fn set(&mut self, id: HashId, color: Color) {
+    /// Pins `id` to `color`, seeding a color override before `reapply_overlays` runs.
+    /// `reapply_overlays` treats a cached color as this span's *preferred* choice
+    /// (used as-is unless another overlapping span already occupies it), so a
+    /// caller-supplied override must be seeded here to actually take effect --
+    /// `reapply_overlays` never reads a `GraphOverlay`'s own `style.color` as input.
+    pub fn set(&mut self, id: HashId, color: Color) {
         self.colors.insert(id, color);
     }
 

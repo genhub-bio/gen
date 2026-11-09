@@ -10,7 +10,8 @@ GenPlot(
   detail = "normal",
   rows = NULL,
   cols = NULL,
-  colors = NULL
+  colors = NULL,
+  scale = 2L
 )
 }
 \arguments{
@@ -23,7 +24,7 @@ GenPlot(
 
 \item{rows}{Integer or \code{NULL}. Canvas height in terminal rows (default 24).}
 
-\item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 72).}
+\item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 42).}
 
 \item{colors}{Annotation colors. Three forms are accepted:
 \itemize{
@@ -36,6 +37,12 @@ cyclic palette assigned in encounter order.
 (a list with \code{id}, \code{name}, \code{group}, \code{metadata}, etc.)
 and returns a hex color string or \code{NULL} to hide that annotation.
 }}
+
+\item{scale}{Integer from 1 to 8. Image pixels per logical pixel in every PNG
+the plot renders (default 2, which is crisp on high-density displays). The viewer
+and knitted images show the plot at its logical size whatever the scale. PNGs are
+labeled 96 dpi times the scale: 1 is 96 dpi, 2 is 192 dpi, 3 is 288 dpi (close to a
+300 dpi print) and 4 is 384 dpi.}
 }
 \value{
 A \code{gen_plot} environment with methods:
@@ -45,7 +52,11 @@ A \code{gen_plot} environment with methods:
 \item{\code{move_by(dx, dy)}}{Pan the viewport by \code{dx} columns and \code{dy} rows. Returns self invisibly.}
 \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
 \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
-\item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
+\item{\code{render_png(cols, rows, scale)}}{Render the graph to a PNG cropped to its content. Returns a \code{raw} vector.}
+\item{\code{render_png_viewport(cols, rows, scale)}}{Render the full viewport, header included, to a PNG whose pixel positions map straight to terminal cells (used by the Shiny viewer). Returns a \code{raw} vector.}
+\item{\code{save_png(path, scale)}}{Write the cropped PNG to \code{path}. Returns the path invisibly.}
+\item{\code{png_cell_size(scale)}}{The pixel size of one terminal cell as \code{c(width, height)}.}
+\item{\code{hit_regions(cols, rows)}}{The clickable cells of the last viewport render as a list of \code{x}, \code{y} and \code{kind} records.}
 \item{\code{go_to_match(match_locus, center = FALSE)}}{Move the viewport to a search result locus, snapping it left by default or centering it when \code{center = TRUE}. Sets detail to \code{"full"}. Returns self invisibly.}
 \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
 \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
@@ -53,10 +64,13 @@ A \code{gen_plot} environment with methods:
 \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as inline graph highlights with floating labels.}
 \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
 \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
+\item{\code{clone()}}{Copy the controller and its current rendering state. Changes to the copy do not affect the original.}
 }
 }
 \description{
 Returns a \code{gen_plot} environment that renders the sequence graph for a
-sequence graph.  Printing or displaying the object in RStudio / Shiny shows an
-interactive htmlwidget.
+sequence graph as PNG images. Printing the object launches the interactive
+viewer in an interactive session and embeds a static image when knitting.
+Assign it to a variable to configure annotations, highlights, or navigation
+first; use \code{\link[=view]{view()}} to choose the RStudio pane or a browser explicitly.
 }

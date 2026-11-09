@@ -67,6 +67,12 @@ Graph nodes (\code{gen_node}) are obtained directly from
 \code{subgraph(new_sample, start, end, backbone = NULL)}, and
 \code{chunks(new_sample, breakpoints = NULL, chunk_size = NULL, backbone = NULL)}.
 
+\code{plot(sequence_graph)} returns a reusable \code{gen_plot} controller and
+opens the interactive viewer when evaluated at the console. Assigning the
+controller suppresses display until it is printed. Use \code{view(plot,
+viewer = "pane")} or \code{view(plot, viewer = "browser")} to select the
+destination explicitly.
+
 \code{GenPlot()} exposes the methods \code{set_detail(detail)},
 \code{render_frame(cols = ctrl$cols, rows = ctrl$rows)}, \code{zoom_in()},
 \code{zoom_out()}, \code{handle_click(col, row)}, and \code{move_by(dx, dy)}.

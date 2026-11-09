@@ -1,4 +1,4 @@
-.PHONY: python python-wheel py-package-cli jupyter r r-test release-check-js clean build clippy-fix docker-build gif
+.PHONY: python python-wheel py-package-cli jupyter r r-native-test r-test release-check-js clean build clippy-fix docker-build gif
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
@@ -54,6 +54,10 @@ r:
 	$(if $(filter Darwin,$(shell uname -s)),MACOSX_DEPLOYMENT_TARGET=11.0) R CMD INSTALL gen-r
 	Rscript -e "for (pkg in c('knitr','rmarkdown')) if (!requireNamespace(pkg, quietly=TRUE)) install.packages(pkg, repos='https://cloud.r-project.org', quiet=TRUE)"
 	Rscript -e "tools::buildVignettes(dir='gen-r', tangle=FALSE)"
+# Runs the R test suite against the package `make r` installed, without Docker.
+r-native-test: r
+	Rscript -e "if (!requireNamespace('testthat', quietly=TRUE)) install.packages('testthat', repos='https://cloud.r-project.org')"
+	Rscript -e "library(testthat); testthat::test_dir('gen-r/tests/testthat', stop_on_failure = TRUE)"
 release-check-js:
 	cd gen-python && npm ci && npm run check && npm run build-jupyter
 	@echo "Verifying committed jupyter_widget.js/.map match build output..."

@@ -4,6 +4,12 @@
 #'All samples in the repository, each holding its sequence graphs.
 #'}
 #'
+#'\subsection{Method `create_graph_controller`}{
+#'Builds a persistent, live `RGraphController` for `sequence_graph_id`. The returned
+#'controller is mutated in place by its own methods and renders its current state to
+#'PNG bytes on request.
+#'}
+#'
 Repository <- new.env(parent = emptyenv())
 
 Repository$new <- function(path) .Call("wrap__Repository__new", path, PACKAGE = "genr")
@@ -80,9 +86,7 @@ Repository$auto_load_annotation_groups <- function(sequence_graph_id) .Call("wra
 
 Repository$list_annotations <- function(sequence_graph_id) .Call("wrap__Repository__list_annotations", self, sequence_graph_id, PACKAGE = "genr")
 
-Repository$render_frame <- function(sequence_graph_id, detail, cols, rows, ops, tracks_json, annotation_colors_json) .Call("wrap__Repository__render_frame", self, sequence_graph_id, detail, cols, rows, ops, tracks_json, annotation_colors_json, PACKAGE = "genr")
-
-Repository$handle_click <- function(sequence_graph_id, detail, ops, col, row) .Call("wrap__Repository__handle_click", self, sequence_graph_id, detail, ops, col, row, PACKAGE = "genr")
+Repository$create_graph_controller <- function(sequence_graph_id, detail) .Call("wrap__Repository__create_graph_controller", self, sequence_graph_id, detail, PACKAGE = "genr")
 
 #' @export
 `$.Repository` <- function (self, name) { func <- Repository[[name]]; environment(func) <- environment(); func }
@@ -171,5 +175,96 @@ SequenceGraph$translate_annotation <- function(region, start, output_collection,
 
 #' @export
 `[[.SequenceGraph` <- `$.SequenceGraph`
+
+#' A persistent, mutable-in-place graph controller for the R viewers. Each method mutates the
+#' shared graph session directly and rendering draws its current state to PNG bytes, so the
+#' R widget shows the same pixels as the Python widget and holds no operation history.
+#'
+#' @section Methods:
+#'\subsection{Method `go_to_match`}{
+#'Move the viewport to the base `frac_x` of the way along the block `node_id`
+#'`seq_start..seq_end`, snapping it left unless `center` is set. The zoom level stays as
+#'the user set it.
+#'}
+#'
+#'\subsection{Method `clear_highlights`}{
+#'Remove match highlights, keeping named tracks and the selected path.
+#'}
+#'
+#'\subsection{Method `trigger_auto_load`}{
+#'Show every annotation group in the automatic theme palette.
+#'}
+#'
+#'\subsection{Method `load_annotation_groups_with_colors_json`}{
+#'Show every annotation group, coloring annotations from a JSON object mapping annotation
+#'id hex strings to a `#rrggbb` color or `null` to hide that annotation.
+#'}
+#'
+#'\subsection{Method `render_png`}{
+#'Render the graph alone to PNG bytes, cropped to its content, with `scale` image pixels
+#'per logical pixel.
+#'}
+#'
+#'\subsection{Method `render_png_viewport`}{
+#'Render the full interactive viewport to PNG bytes, keeping the header and every cell at
+#'its position so pointer coordinates map straight to cells.
+#'}
+#'
+#'\subsection{Method `png_cell_size`}{
+#'The pixel size of one terminal cell in a PNG rendered at `scale`, as `c(width, height)`.
+#'}
+#'
+#'\subsection{Method `background_color`}{
+#'The canvas color of the PNG renderer, as `#rrggbb`.
+#'}
+#'
+#'\subsection{Method `hit_regions`}{
+#'The clickable cells of the last rendered viewport, as a JSON array of
+#'`{"x", "y", "kind"}` with `kind` either `"node"` or `"wormhole"`.
+#'}
+#'
+RGraphController <- new.env(parent = emptyenv())
+
+RGraphController$set_detail <- function(detail) .Call("wrap__RGraphController__set_detail", self, detail, PACKAGE = "genr")
+
+RGraphController$zoom_in <- function() .Call("wrap__RGraphController__zoom_in", self, PACKAGE = "genr")
+
+RGraphController$zoom_out <- function() .Call("wrap__RGraphController__zoom_out", self, PACKAGE = "genr")
+
+RGraphController$move_by <- function(dx, dy) .Call("wrap__RGraphController__move_by", self, dx, dy, PACKAGE = "genr")
+
+RGraphController$handle_click <- function(col, row) .Call("wrap__RGraphController__handle_click", self, col, row, PACKAGE = "genr")
+
+RGraphController$go_to_match <- function(node_id, seq_start, seq_end, frac_x, center) .Call("wrap__RGraphController__go_to_match", self, node_id, seq_start, seq_end, frac_x, center, PACKAGE = "genr")
+
+RGraphController$highlight_match <- function(color, start_offset, end_offset, strand, node_ids, seq_starts, seq_ends) .Call("wrap__RGraphController__highlight_match", self, color, start_offset, end_offset, strand, node_ids, seq_starts, seq_ends, PACKAGE = "genr")
+
+RGraphController$clear_highlights <- function() .Call("wrap__RGraphController__clear_highlights", self, PACKAGE = "genr")
+
+RGraphController$add_track_group <- function(group) .Call("wrap__RGraphController__add_track_group", self, group, PACKAGE = "genr")
+
+RGraphController$add_track_file <- function(path, name, sample) .Call("wrap__RGraphController__add_track_file", self, path, name, sample, PACKAGE = "genr")
+
+RGraphController$trigger_auto_load <- function() .Call("wrap__RGraphController__trigger_auto_load", self, PACKAGE = "genr")
+
+RGraphController$load_annotation_groups_with_colors_json <- function(color_map_json) .Call("wrap__RGraphController__load_annotation_groups_with_colors_json", self, color_map_json, PACKAGE = "genr")
+
+RGraphController$render_png <- function(cols, rows, scale) .Call("wrap__RGraphController__render_png", self, cols, rows, scale, PACKAGE = "genr")
+
+RGraphController$render_png_viewport <- function(cols, rows, scale) .Call("wrap__RGraphController__render_png_viewport", self, cols, rows, scale, PACKAGE = "genr")
+
+RGraphController$png_cell_size <- function(scale) .Call("wrap__RGraphController__png_cell_size", self, scale, PACKAGE = "genr")
+
+RGraphController$background_color <- function() .Call("wrap__RGraphController__background_color", self, PACKAGE = "genr")
+
+RGraphController$hit_regions <- function(cols, rows) .Call("wrap__RGraphController__hit_regions", self, cols, rows, PACKAGE = "genr")
+
+RGraphController$clone_controller <- function() .Call("wrap__RGraphController__clone_controller", self, PACKAGE = "genr")
+
+#' @export
+`$.RGraphController` <- function (self, name) { func <- RGraphController[[name]]; environment(func) <- environment(); func }
+
+#' @export
+`[[.RGraphController` <- `$.RGraphController`
 
 

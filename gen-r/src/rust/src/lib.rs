@@ -29,27 +29,27 @@ use r#gen::{
         },
     },
     views::{
-        annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
+        annotation_groups::annotation_group_names,
         annotation_track::{
-            AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
+            AnnotationSpan, AnnotationTrack, LoadedNodeSlices, annotation_span_from_graph_locus,
             graph_locus_from_annotation_span,
         },
         annotations::{
-            AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
-            parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
+            parse_translated_bed, parse_translated_bed_file, parse_translated_gff,
+            parse_translated_gff_file,
         },
-        gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
-            draw_annotation_labels, highlight_locus, locus_midpoint, reapply_overlays,
+        graph_database::GraphDatabase,
+        graph_session::{
+            GraphPage, GraphSession, GraphSessionError, PlotOptions, validated_png_scale,
+            workspace_for_connection,
         },
-        graph_overlay::{AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource},
     },
 };
 use gen_annotations::{
     projection::annotation_segments,
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node, region::Region};
+use gen_core::{HashId, Strand, config::Workspace, region::Region};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     annotations::Annotation,
@@ -63,19 +63,7 @@ use gen_models::{
     },
     sample::{NewSample, Sample},
 };
-use gen_tui::{
-    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    plotter::PathStyle, theme::current_theme,
-};
-use petgraph::{graph::NodeIndex, visit::NodeIndexable};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-    widgets::StatefulWidget,
-};
 use rusqlite::{Connection, types::ValueRef};
-use serde::{Deserialize, Serialize};
 use serde_json::from_str as json_from_str;
 
 fn nullable_string_to_option(value: Nullable<String>) -> Option<String> {
@@ -209,20 +197,13 @@ fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &Ge
     let span = AnnotationSpan {
         id: annotation.id,
         name: annotation.name.clone(),
-        segments: segments
-            .iter()
-            .map(|s| ViewAnnotationSegment {
-                node_id: s.node_id,
-                start: s.range.start,
-                end: s.range.end,
-                strand: s.strand,
-            })
-            .collect(),
+        segments: segments.clone(),
     };
-    let locus_robj: Robj = match graph_locus_from_annotation_span(&span, graph) {
-        Some(locus) => graph_locus_record(&locus),
-        None => r!(NULL),
-    };
+    let locus_robj: Robj =
+        match graph_locus_from_annotation_span(&span, &LoadedNodeSlices::new(graph)) {
+            Some(locus) => graph_locus_record(&locus),
+            None => r!(NULL),
+        };
     let length: i64 = segments.iter().map(|s| s.range.end - s.range.start).sum();
     let segment_records: Vec<Robj> = segments
         .iter()
@@ -448,188 +429,6 @@ fn read_genbank_reader(filename: &str) -> std::result::Result<Box<dyn Read>, Str
     }
 }
 
-fn color_to_hex(color: Option<ratatui::style::Color>, default_hex: &str) -> String {
-    use ratatui::style::Color;
-    match color {
-        None | Some(Color::Reset) => default_hex.to_string(),
-        Some(Color::Rgb(r, g, b)) => format!("#{r:02x}{g:02x}{b:02x}"),
-        Some(Color::Black) => "#000000".to_string(),
-        Some(Color::Red) => "#cc0000".to_string(),
-        Some(Color::Green) => "#00cc00".to_string(),
-        Some(Color::Yellow) => "#cccc00".to_string(),
-        Some(Color::Blue) => "#0000cc".to_string(),
-        Some(Color::Magenta) => "#cc00cc".to_string(),
-        Some(Color::Cyan) => "#00cccc".to_string(),
-        Some(Color::Gray) => "#888888".to_string(),
-        Some(Color::DarkGray) => "#444444".to_string(),
-        Some(Color::LightRed) => "#ff5555".to_string(),
-        Some(Color::LightGreen) => "#55ff55".to_string(),
-        Some(Color::LightYellow) => "#ffff55".to_string(),
-        Some(Color::LightBlue) => "#5555ff".to_string(),
-        Some(Color::LightMagenta) => "#ff55ff".to_string(),
-        Some(Color::LightCyan) => "#55ffff".to_string(),
-        Some(Color::White) => "#ffffff".to_string(),
-        Some(Color::Indexed(i)) => indexed_to_hex(i),
-    }
-}
-
-fn indexed_to_hex(i: u8) -> String {
-    const STANDARD: [&str; 16] = [
-        "#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#c0c0c0",
-        "#808080", "#ff0000", "#00ff00", "#ffff00", "#0000ff", "#ff00ff", "#00ffff", "#ffffff",
-    ];
-    if (i as usize) < STANDARD.len() {
-        return STANDARD[i as usize].to_string();
-    }
-    if i >= 232 {
-        let v = 8u8.saturating_add((i - 232) * 10);
-        return format!("#{v:02x}{v:02x}{v:02x}");
-    }
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    let n = i - 16;
-    let r = LEVELS[(n / 36) as usize];
-    let g = LEVELS[((n / 6) % 6) as usize];
-    let b = LEVELS[(n % 6) as usize];
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-#[derive(Serialize)]
-struct RenderedCell {
-    x: u16,
-    y: u16,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bg: Option<String>,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-}
-
-#[derive(Serialize)]
-struct RenderedFrame {
-    cols: u16,
-    rows: u16,
-    cells: Vec<RenderedCell>,
-}
-
-fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
-    let neutral_fg = "#cdd6f4";
-    let neutral_bg = "#1e1e2e";
-    let mut cells = Vec::new();
-    for row in 0..rows {
-        for col in 0..cols {
-            let cell = buf.cell((col, row)).expect("cell index in bounds");
-            let text = cell.symbol().to_string();
-            let style = cell.style();
-            let fg_str = color_to_hex(style.fg, neutral_fg);
-            let bg_str = color_to_hex(style.bg, neutral_bg);
-
-            if (text == " " || text.is_empty()) && fg_str == neutral_fg && bg_str == neutral_bg {
-                continue;
-            }
-
-            cells.push(RenderedCell {
-                x: col,
-                y: row,
-                text,
-                fg: if fg_str == neutral_fg {
-                    None
-                } else {
-                    Some(fg_str)
-                },
-                bg: if bg_str == neutral_bg {
-                    None
-                } else {
-                    Some(bg_str)
-                },
-                bold: style.add_modifier.contains(Modifier::BOLD),
-                italic: style.add_modifier.contains(Modifier::ITALIC),
-                underline: style.add_modifier.contains(Modifier::UNDERLINED),
-            });
-        }
-    }
-    RenderedFrame { cols, rows, cells }
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum TrackSpec {
-    Group {
-        name: String,
-    },
-    File {
-        path: String,
-        name: Option<String>,
-        sample: Option<String>,
-    },
-}
-
-fn load_tracks_from_specs(
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-    sequence_graph_id: &HashId,
-    tracks_json: &str,
-) -> Vec<AnnotationTrack> {
-    let specs: Vec<TrackSpec> = match serde_json::from_str(tracks_json) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    if specs.is_empty() {
-        return Vec::new();
-    }
-
-    let node_filter: HashSet<HashId> = controller
-        .graph()
-        .nodes()
-        .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-        .map(|n| n.node_id)
-        .collect();
-
-    let mut tracks = Vec::new();
-    for spec in specs {
-        match spec {
-            TrackSpec::Group { name } => {
-                if let Ok(bg) = BlockGroup::get_by_id(conn, sequence_graph_id, None) {
-                    let entry = AnnotationGroupEntry {
-                        id: name.clone(),
-                        name: name.clone(),
-                        sample_name: bg.sample_name.clone(),
-                        source_block_group_id: *sequence_graph_id,
-                        origin: AnnotationGroupOrigin::CurrentSample,
-                    };
-                    let request = AnnotationGroupTrackRequest {
-                        conn,
-                        workspace,
-                        history_ref: None,
-                        current_block_group: &bg,
-                        entry: &entry,
-                        node_ids: &node_filter,
-                    };
-                    if let Ok(spans) = load_annotations_for_group(&request) {
-                        tracks.push(AnnotationTrack::new(name, spans));
-                    }
-                }
-            }
-            TrackSpec::File { path, name, sample } => {
-                let display_name = name.as_deref().unwrap_or(&path);
-                tracks.push(load_annotation_file_as_track(
-                    conn,
-                    workspace,
-                    sequence_graph_id,
-                    &path,
-                    display_name,
-                    sample.as_deref(),
-                    &node_filter,
-                ));
-            }
-        }
-    }
-    tracks
-}
-
 fn load_annotation_file_as_track(
     conn: &GraphConnection,
     workspace: &Workspace,
@@ -712,201 +511,6 @@ fn load_annotation_file_as_track(
     AnnotationTrack::new(display_name.to_string(), spans)
 }
 
-fn visual_detail(detail: &str) -> std::result::Result<VisualDetail, String> {
-    match detail {
-        "normal" => Ok(VisualDetail::Truncated),
-        "full" => Ok(VisualDetail::Full),
-        "minimal" => Ok(VisualDetail::Minimal),
-        other => Err(format!(
-            "detail must be \"normal\", \"full\", or \"minimal\"; got {other:?}"
-        )),
-    }
-}
-
-fn parse_op_color(s: &str) -> std::result::Result<ratatui::style::Color, String> {
-    use ratatui::style::Color;
-    match s {
-        "red" => Ok(Color::Red),
-        "green" => Ok(Color::Green),
-        "yellow" => Ok(Color::Yellow),
-        "blue" => Ok(Color::Blue),
-        "magenta" => Ok(Color::Magenta),
-        "cyan" => Ok(Color::Cyan),
-        "white" => Ok(Color::White),
-        hex if hex.starts_with('#') && hex.len() == 7 => {
-            let r = u8::from_str_radix(&hex[1..3], 16)
-                .map_err(|_| format!("Bad red component in color '{hex}'"))?;
-            let g = u8::from_str_radix(&hex[3..5], 16)
-                .map_err(|_| format!("Bad green component in color '{hex}'"))?;
-            let b = u8::from_str_radix(&hex[5..7], 16)
-                .map_err(|_| format!("Bad blue component in color '{hex}'"))?;
-            Ok(Color::Rgb(r, g, b))
-        }
-        other => Err(format!("Unknown color '{other}'")),
-    }
-}
-
-fn parse_hl_op(op: &str) -> std::result::Result<(GraphLocus, ratatui::style::Color), String> {
-    let parts = op.split(',').collect::<Vec<_>>();
-    if parts.len() < 6 {
-        return Err(format!("Invalid hl op (too short): {op}"));
-    }
-    let color = parse_op_color(parts[1])?;
-    let start_offset = parts[2]
-        .parse::<usize>()
-        .map_err(|err| format!("Invalid hl start_offset in '{op}': {err}"))?;
-    let end_offset = parts[3]
-        .parse::<usize>()
-        .map_err(|err| format!("Invalid hl end_offset in '{op}': {err}"))?;
-    let strand = match parts[4] {
-        "f" => Strand::Forward,
-        "r" => Strand::Reverse,
-        _ => Strand::Unknown,
-    };
-    let n = parts[5]
-        .parse::<usize>()
-        .map_err(|err| format!("Invalid hl block count in '{op}': {err}"))?;
-    if parts.len() != 6 + n * 3 {
-        return Err(format!(
-            "Invalid hl op: expected {} parts for {n} blocks, got {}",
-            6 + n * 3,
-            parts.len()
-        ));
-    }
-    let mut slices = Vec::with_capacity(n);
-    for i in 0..n {
-        let base = 6 + i * 3;
-        let node_id = hash_id_from_string(parts[base])
-            .map_err(|err| format!("Invalid hl node_id[{i}] in '{op}': {err}"))?;
-        let seq_start = parts[base + 1]
-            .parse::<i64>()
-            .map_err(|err| format!("Invalid hl seq_start[{i}] in '{op}': {err}"))?;
-        let seq_end = parts[base + 2]
-            .parse::<i64>()
-            .map_err(|err| format!("Invalid hl seq_end[{i}] in '{op}': {err}"))?;
-        let block = GraphNode {
-            node_id,
-            sequence_start: seq_start,
-            sequence_end: seq_end,
-        };
-        let slice_start = if i == 0 { start_offset } else { 0 };
-        let slice_end = if i == n - 1 {
-            end_offset
-        } else {
-            block.length() as usize
-        };
-        slices.push(GraphNodeSlice {
-            block,
-            start: slice_start,
-            end: slice_end,
-            strand,
-        });
-    }
-    Ok((GraphLocus { slices }, color))
-}
-
-fn apply_graph_ops(
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
-    ops: &str,
-) -> std::result::Result<(), String> {
-    let mut deferred_hl: Vec<&str> = Vec::new();
-
-    for op in ops.split(';').filter(|segment| !segment.is_empty()) {
-        let parts = op.split(',').collect::<Vec<_>>();
-        match parts.first().copied() {
-            Some("zi") => controller.zoom_in(),
-            Some("zo") => controller.zoom_out(),
-            Some("m") => {
-                if parts.len() != 3 {
-                    return Err(format!("Invalid move op: {op}"));
-                }
-                let dx = parts[1]
-                    .parse::<i16>()
-                    .map_err(|err| format!("Invalid move dx in '{op}': {err}"))?;
-                let dy = parts[2]
-                    .parse::<i16>()
-                    .map_err(|err| format!("Invalid move dy in '{op}': {err}"))?;
-                controller.move_by_terminal(dx, dy);
-                controller.sync_cursor_to_closest_node();
-            }
-            Some("c") => {
-                if parts.len() != 3 {
-                    return Err(format!("Invalid click op: {op}"));
-                }
-                let col = parts[1]
-                    .parse::<u16>()
-                    .map_err(|err| format!("Invalid click col in '{op}': {err}"))?;
-                let row = parts[2]
-                    .parse::<u16>()
-                    .map_err(|err| format!("Invalid click row in '{op}': {err}"))?;
-                let _ = controller.handle_click(col, row);
-            }
-            Some("goto") | Some("gotoc") => {
-                if parts.len() != 5 {
-                    return Err(format!("Invalid goto op: {op}"));
-                }
-                let node_id = hash_id_from_string(parts[1])
-                    .map_err(|err| format!("Invalid goto node_id in '{op}': {err}"))?;
-                let seq_start = parts[2]
-                    .parse::<i64>()
-                    .map_err(|err| format!("Invalid goto seq_start in '{op}': {err}"))?;
-                let seq_end = parts[3]
-                    .parse::<i64>()
-                    .map_err(|err| format!("Invalid goto seq_end in '{op}': {err}"))?;
-                let frac_x = parts[4]
-                    .parse::<f64>()
-                    .map_err(|err| format!("Invalid goto frac_x in '{op}': {err}"))?;
-                let node = GraphNode {
-                    node_id,
-                    sequence_start: seq_start,
-                    sequence_end: seq_end,
-                };
-                if !controller.graph().contains_node(node) {
-                    continue;
-                }
-                controller.set_detail_level(VisualDetail::Full);
-                if let Ok((partition_idx, _)) = controller
-                    .partition_controller
-                    .partition_table
-                    .find_node(&node)
-                {
-                    let _ = controller.ensure_partition_loaded(partition_idx);
-                    let _ = controller.set_anchor_partition(partition_idx);
-                }
-                let domain_idx = NodeIndex::new(NodeIndexable::to_index(controller.graph(), node));
-                controller.go_to_node(domain_idx, (frac_x, 0.5));
-                if parts[0] == "goto" {
-                    controller.queue_snap_left();
-                }
-                controller.hide_cursor();
-                // Resolve the pending goto's camera move now rather than leaving it
-                // deferred to the final widget render, so later ops in this batch
-                // (e.g. "m" pan) apply on top of it instead of being overwritten by it.
-                controller
-                    .rebuild_viewport_graph()
-                    .map_err(|err| format!("Failed to resolve goto in '{op}': {err}"))?;
-            }
-            Some("hl") => deferred_hl.push(op),
-            Some("clrhl") => {
-                controller.clear_all_highlights();
-                deferred_hl.clear();
-            }
-            Some(other) => return Err(format!("Unknown graph op prefix '{other}'.")),
-            None => {}
-        }
-    }
-
-    for op in deferred_hl {
-        let (locus, color) = parse_hl_op(op)?;
-        let style = PathStyle::new(color)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        highlight_locus(controller, &locus, style);
-    }
-
-    Ok(())
-}
-
 fn parse_sequence_kind_r(s: &str) -> std::result::Result<SequenceKind, String> {
     match s {
         "exact" => Ok(SequenceKind::Exact),
@@ -965,7 +569,8 @@ fn graph_locus_record(locus: &GraphLocus) -> Robj {
     };
     // center = TRUE targets the span's true midpoint (computed here) rather than its start,
     // so the match sits balanced in the viewport instead of against the edge.
-    let midpoint = locus_midpoint(locus)
+    let midpoint = locus
+        .midpoint()
         .map(|(slice, offset)| {
             position_record(
                 slice.block.node_id,
@@ -2114,117 +1719,26 @@ impl Repository {
         )
     }
 
-    fn render_frame(
+    /// Builds a persistent, live `RGraphController` for `sequence_graph_id`. The returned
+    /// controller is mutated in place by its own methods and renders its current state to
+    /// PNG bytes on request.
+    fn create_graph_controller(
         &self,
         sequence_graph_id: String,
         detail: String,
-        cols: i32,
-        rows: i32,
-        ops: String,
-        tracks_json: String,
-        annotation_colors_json: String,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<RGraphController, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg_id, None)
+        let block_group = BlockGroup::get_by_id(conn, &bg_id, None)
+            .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
+        let database = GraphDatabase::for_connection(conn, self.context.workspace())
             .map_err(|e| Error::Other(e.to_string()))?;
-        let mut controller = create_gen_graph_controller(graph);
-        controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
-        controller.hide_cursor();
-
-        let area = Rect::new(0, 0, cols as u16, rows as u16);
-        let mut buf = Buffer::empty(area);
-
-        let tracks = load_tracks_from_specs(
-            conn,
-            self.context.workspace(),
-            &controller,
-            &bg_id,
-            &tracks_json,
-        );
-
-        // Parse the caller-supplied color map: id_hex → Some(color) to use that
-        // color, None to hide the annotation entirely. Empty map means use the
-        // default theme cycle for every annotation.
-        let color_overrides: HashMap<String, Option<String>> =
-            json_from_str(&annotation_colors_json).unwrap_or_default();
-
-        // Build one overlay per visible annotation span. A caller-supplied override color
-        // wins; spans with no override fall back to the theme rotation. `reapply_overlays`
-        // then repaints every overlay, greedily reassigning colors to keep overlapping
-        // spans distinguishable.
-        let mut overlays: Vec<GraphOverlay> = Vec::new();
-        let mut annotation_colors = AnnotationColorCache::new();
-        let theme = current_theme();
-        let mut theme_idx = 0usize;
-        for track in &tracks {
-            for span in &track.annotations {
-                let id_hex = span.id.to_string();
-                let color = match color_overrides.get(&id_hex) {
-                    Some(None) => continue,
-                    Some(Some(hex)) => parse_op_color(hex).unwrap_or_else(|_| {
-                        let c = theme[0x08 + (theme_idx % 8)];
-                        theme_idx += 1;
-                        c
-                    }),
-                    None => {
-                        let c = theme[0x08 + (theme_idx % 8)];
-                        theme_idx += 1;
-                        c
-                    }
-                };
-                overlays.push(GraphOverlay {
-                    content: OverlayContent::Span(span.clone()),
-                    source: OverlaySource::Track(track.name.clone()),
-                    style: PathStyle::new(color),
-                });
-            }
-        }
-        reapply_overlays(&mut controller, &mut overlays, &mut annotation_colors);
-
-        // Apply match highlights after annotations so they render on top.
-        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
-
-        // Render graph with highlights applied.
-        let renderer = GenGraphNodeRenderer::new(conn, self.context.workspace());
-        GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
-
-        // Draw floating labels after the graph, then a single hint if any were hidden.
-        let any_hidden = draw_annotation_labels(&mut buf, area, &controller, &overlays);
-        if any_hidden {
-            let detail_level = controller.get_detail_level();
-            let note = if detail_level == VisualDetail::Full {
-                " some annotations hidden due to space constraints "
-            } else {
-                " only annotations spanning a variant (edge) or filling a full node are shown "
-            };
-            let note_style = Style::default()
-                .fg(current_theme()[0x09])
-                .bg(current_theme()[0x00]);
-            buf.set_string(area.x, area.bottom().saturating_sub(1), note, note_style);
-        }
-
-        serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
-            .map_err(|err| Error::Other(err.to_string()))
-    }
-
-    fn handle_click(
-        &self,
-        sequence_graph_id: String,
-        detail: String,
-        ops: String,
-        col: i32,
-        row: i32,
-    ) -> std::result::Result<bool, Error> {
-        let conn = self.context.graph().conn();
-        let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg_id, None)
-            .map_err(|e| Error::Other(e.to_string()))?;
-        let mut controller = create_gen_graph_controller(graph);
-        controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
-        controller.hide_cursor();
-        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
-        Ok(controller.handle_click(col as u16, row as u16))
+        let mut page = GraphPage::new(block_group.name, database, bg_id, PlotOptions::default())
+            .map_err(session_error)?;
+        page.set_detail(&detail).map_err(session_error)?;
+        let mut session = GraphSession::single(page);
+        session.set_cursor_hidden(true).map_err(session_error)?;
+        Ok(RGraphController { session })
     }
 }
 
@@ -2759,8 +2273,622 @@ impl SequenceGraph {
     }
 }
 
+fn session_error(error: GraphSessionError) -> Error {
+    Error::Other(error.to_string())
+}
+
+/// A persistent, mutable-in-place graph controller for the R viewers. Each method mutates the
+/// shared graph session directly and rendering draws its current state to PNG bytes, so the
+/// R widget shows the same pixels as the Python widget and holds no operation history.
+#[extendr]
+#[derive(Clone)]
+struct RGraphController {
+    session: GraphSession,
+}
+
+#[extendr]
+impl RGraphController {
+    fn set_detail(&mut self, detail: String) -> std::result::Result<(), Error> {
+        self.session
+            .active()
+            .and_then(|page| page.set_detail(&detail))
+            .map_err(session_error)
+    }
+
+    fn zoom_in(&mut self) -> std::result::Result<(), Error> {
+        self.session.active().map_err(session_error)?.zoom_in();
+        Ok(())
+    }
+
+    fn zoom_out(&mut self) -> std::result::Result<(), Error> {
+        self.session.active().map_err(session_error)?.zoom_out();
+        Ok(())
+    }
+
+    fn move_by(&mut self, dx: i32, dy: i32) -> std::result::Result<(), Error> {
+        let dx = i16::try_from(dx).map_err(|_| Error::Other(format!("dx {dx} out of range")))?;
+        let dy = i16::try_from(dy).map_err(|_| Error::Other(format!("dy {dy} out of range")))?;
+        self.session
+            .active()
+            .map_err(session_error)?
+            .move_by(dx, dy);
+        Ok(())
+    }
+
+    fn handle_click(&mut self, col: i32, row: i32) -> std::result::Result<bool, Error> {
+        let col =
+            u16::try_from(col).map_err(|_| Error::Other(format!("col {col} out of range")))?;
+        let row =
+            u16::try_from(row).map_err(|_| Error::Other(format!("row {row} out of range")))?;
+        Ok(self
+            .session
+            .active()
+            .map_err(session_error)?
+            .handle_click(col, row))
+    }
+
+    /// Move the viewport to the base `frac_x` of the way along the block `node_id`
+    /// `seq_start..seq_end`, snapping it left unless `center` is set. The zoom level stays as
+    /// the user set it.
+    fn go_to_match(
+        &mut self,
+        node_id: String,
+        seq_start: i64,
+        seq_end: i64,
+        frac_x: f64,
+        center: bool,
+    ) -> std::result::Result<(), Error> {
+        let node_id = hash_id_from_string(&node_id).map_err(Error::Other)?;
+        let width = (seq_end - seq_start).max(1);
+        let offset = ((width as f64) * frac_x.clamp(0.0, 1.0)) as i64;
+        let coordinate = seq_start + offset.min(width - 1);
+        self.session
+            .active()
+            .map_err(session_error)?
+            .go_to_coordinate(node_id, coordinate, center)
+            .map_err(|error| Error::Other(format!("cannot go to position: {error}")))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the arguments of the R highlight_match wrapper"
+    )]
+    fn highlight_match(
+        &mut self,
+        color: String,
+        start_offset: i64,
+        end_offset: i64,
+        strand: String,
+        node_ids: Vec<String>,
+        seq_starts: Vec<i32>,
+        seq_ends: Vec<i32>,
+    ) -> std::result::Result<(), Error> {
+        if node_ids.len() != seq_starts.len() || seq_starts.len() != seq_ends.len() {
+            return Err(Error::Other(
+                "node_ids, seq_starts, and seq_ends must have the same length".to_string(),
+            ));
+        }
+        if node_ids.is_empty() {
+            return Err(Error::Other(
+                "highlight_match requires at least one block".to_string(),
+            ));
+        }
+        if start_offset < 0 || end_offset < 0 {
+            return Err(Error::Other(
+                "start_offset and end_offset must be non-negative".to_string(),
+            ));
+        }
+        let strand = match strand.as_str() {
+            "f" => Strand::Forward,
+            "r" => Strand::Reverse,
+            _ => Strand::Unknown,
+        };
+        let block_count = node_ids.len();
+        let mut slices = Vec::with_capacity(block_count);
+        for index in 0..block_count {
+            let node_id = hash_id_from_string(&node_ids[index]).map_err(Error::Other)?;
+            let block = GraphNode {
+                node_id,
+                sequence_start: i64::from(seq_starts[index]),
+                sequence_end: i64::from(seq_ends[index]),
+            };
+            let slice_start = if index == 0 { start_offset as usize } else { 0 };
+            let slice_end = if index == block_count - 1 {
+                end_offset as usize
+            } else {
+                block.length() as usize
+            };
+            slices.push(GraphNodeSlice {
+                block,
+                start: slice_start,
+                end: slice_end,
+                strand,
+            });
+        }
+        let span = annotation_span_from_graph_locus(&GraphLocus { slices }, "");
+        self.session
+            .active()
+            .and_then(|page| page.push_adhoc_highlight(span, Some(&color)))
+            .map_err(session_error)
+    }
+
+    /// Remove match highlights, keeping named tracks and the selected path.
+    fn clear_highlights(&mut self) -> std::result::Result<(), Error> {
+        self.session
+            .active()
+            .map_err(session_error)?
+            .clear_highlights();
+        Ok(())
+    }
+
+    fn add_track_group(&mut self, group: String) -> std::result::Result<(), Error> {
+        self.session
+            .active()
+            .and_then(|page| page.add_track_group(&group))
+            .map_err(session_error)
+    }
+
+    fn add_track_file(
+        &mut self,
+        path: String,
+        name: Nullable<String>,
+        sample: Nullable<String>,
+    ) -> std::result::Result<(), Error> {
+        let name = nullable_string_to_option(name);
+        let sample = nullable_string_to_option(sample);
+        let display_name = name.unwrap_or_else(|| path.clone());
+        let page = self.session.active().map_err(session_error)?;
+        let block_group_id = page
+            .block_group_id()
+            .ok_or_else(|| Error::Other("controller has no block group".to_string()))?;
+        let node_filter = page.controller.loaded_node_ids();
+        let mut database = page.controller.database_mut().clone();
+        let conn = database
+            .connection()
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let workspace = workspace_for_connection(conn).map_err(session_error)?;
+        let track = load_annotation_file_as_track(
+            conn,
+            &workspace,
+            &block_group_id,
+            &path,
+            &display_name,
+            sample.as_deref(),
+            &node_filter,
+        );
+        page.push_track(&display_name, track.annotations);
+        Ok(())
+    }
+
+    /// Show every annotation group in the automatic theme palette.
+    fn trigger_auto_load(&mut self) -> std::result::Result<(), Error> {
+        self.session
+            .active()
+            .and_then(|page| page.trigger_auto_load())
+            .map_err(session_error)
+    }
+
+    /// Show every annotation group, coloring annotations from a JSON object mapping annotation
+    /// id hex strings to a `#rrggbb` color or `null` to hide that annotation.
+    fn load_annotation_groups_with_colors_json(
+        &mut self,
+        color_map_json: String,
+    ) -> std::result::Result<(), Error> {
+        let color_overrides: HashMap<String, Option<String>> =
+            json_from_str(&color_map_json).unwrap_or_default();
+        self.session
+            .active()
+            .and_then(|page| page.load_annotation_groups_with_colors(&color_overrides))
+            .map_err(session_error)
+    }
+
+    /// Render the graph alone to PNG bytes, cropped to its content, with `scale` image pixels
+    /// per logical pixel.
+    fn render_png(&mut self, cols: i32, rows: i32, scale: i32) -> std::result::Result<Raw, Error> {
+        self.render_png_bytes(cols, rows, scale, false)
+    }
+
+    /// Render the full interactive viewport to PNG bytes, keeping the header and every cell at
+    /// its position so pointer coordinates map straight to cells.
+    fn render_png_viewport(
+        &mut self,
+        cols: i32,
+        rows: i32,
+        scale: i32,
+    ) -> std::result::Result<Raw, Error> {
+        self.render_png_bytes(cols, rows, scale, true)
+    }
+
+    /// The pixel size of one terminal cell in a PNG rendered at `scale`, as `c(width, height)`.
+    fn png_cell_size(&self, scale: i32) -> std::result::Result<Vec<i32>, Error> {
+        let scale = Self::scale(scale)?;
+        let (width, height) = GraphSession::png_cell_size();
+        Ok(vec![(width * scale) as i32, (height * scale) as i32])
+    }
+
+    /// The canvas color of the PNG renderer, as `#rrggbb`.
+    fn background_color(&self) -> String {
+        GraphSession::png_background_color()
+    }
+
+    /// The clickable cells of the last rendered viewport, as a JSON array of
+    /// `{"x", "y", "kind"}` with `kind` either `"node"` or `"wormhole"`.
+    fn hit_regions(&mut self, cols: i32, rows: i32) -> std::result::Result<String, Error> {
+        let (cols, rows) = Self::viewport(cols, rows)?;
+        self.session
+            .hit_regions_json(cols, rows)
+            .map_err(session_error)
+    }
+
+    fn clone_controller(&self) -> Self {
+        self.clone()
+    }
+}
+
+impl RGraphController {
+    fn scale(scale: i32) -> std::result::Result<usize, Error> {
+        let scale = usize::try_from(scale)
+            .map_err(|_| Error::Other(format!("scale {scale} out of range")))?;
+        validated_png_scale(scale).map_err(session_error)
+    }
+
+    fn viewport(cols: i32, rows: i32) -> std::result::Result<(u16, u16), Error> {
+        let cols =
+            u16::try_from(cols).map_err(|_| Error::Other(format!("cols {cols} out of range")))?;
+        let rows =
+            u16::try_from(rows).map_err(|_| Error::Other(format!("rows {rows} out of range")))?;
+        Ok((cols, rows))
+    }
+
+    /// The PNG bytes of the current view, kept apart from the R vector so tests need no R runtime.
+    fn png_bytes(
+        &mut self,
+        cols: i32,
+        rows: i32,
+        scale: i32,
+        full_viewport: bool,
+    ) -> std::result::Result<Vec<u8>, Error> {
+        let scale = Self::scale(scale)?;
+        let size = Self::viewport(cols, rows)?;
+        self.session
+            .render_png(size, full_viewport, scale)
+            .map_err(session_error)
+    }
+
+    fn render_png_bytes(
+        &mut self,
+        cols: i32,
+        rows: i32,
+        scale: i32,
+        full_viewport: bool,
+    ) -> std::result::Result<Raw, Error> {
+        Ok(Raw::from_bytes(&self.png_bytes(
+            cols,
+            rows,
+            scale,
+            full_viewport,
+        )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::BufReader, path::PathBuf};
+
+    use r#gen::{
+        imports::genbank::{GenBankImportOptions, import_genbank},
+        test_helpers::{TestContext, setup_block_group, setup_gen_on_disk},
+        views::{
+            annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+            annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
+        },
+    };
+    use gen_core::{is_end_node, is_start_node};
+    use gen_models::annotations::AnnotationGroup;
+
+    use super::*;
+
+    /// The fixture context owns the temporary workspace, so it must outlive the repository.
+    fn linear_repo() -> (TestContext, Repository, String) {
+        let context = setup_gen_on_disk();
+        let (bg_id, _path) = setup_block_group(context.graph().conn());
+        let repo = Repository {
+            context: (*context).clone(),
+        };
+        (context, repo, bg_id.to_string())
+    }
+
+    /// Sets up puc19 with real GenBank annotations imported, and returns the
+    /// repository, its block group id, the annotation group name, the resolved
+    /// spans for that group (for color-override tests, keyed by `span.id`), and one
+    /// real data `GraphNode` from the controller's own graph (for `highlight_match`
+    /// calls -- an `AnnotationSegment`'s node_id/start/end is not guaranteed to be an
+    /// exact `GraphNode` in the render graph's `GraphMap`, so building a match
+    /// highlight from span coordinates directly panics in `apply_cell_highlight`'s
+    /// `to_index` lookup).
+    fn puc19_repo() -> (
+        TestContext,
+        Repository,
+        String,
+        String,
+        Vec<AnnotationSpan>,
+        GraphNode,
+    ) {
+        let context = setup_gen_on_disk();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/puc19.gb");
+        {
+            let file = File::open(&path).unwrap();
+            import_genbank(
+                &context,
+                BufReader::new(file),
+                Some("fixtures"),
+                "puc19-sample",
+                OperationInfo {
+                    files: vec![
+                        OperationFile::new(path.to_str().unwrap().to_string())
+                            .set_file_type(gen_models::file_types::FileTypes::GenBank),
+                    ],
+                    description: "test".to_string(),
+                },
+                GenBankImportOptions::default().annotation_name_from_path(&path),
+            )
+            .unwrap();
+        }
+        let conn = context.graph().conn();
+        let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample", None);
+        let block_group = &block_groups[0];
+        let bg_id = block_group.id;
+        let group_name = AnnotationGroup::query_by_sample(conn, "puc19-sample", None)
+            .into_iter()
+            .find(|group| group.name != "source")
+            .expect("puc19 fixture should import at least one non-source annotation group")
+            .name;
+
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &bg_id, None).unwrap();
+        let node_ids: HashSet<HashId> = graph
+            .nodes()
+            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+            .map(|n| n.node_id)
+            .collect();
+        let entry = AnnotationGroupEntry {
+            id: group_name.clone(),
+            name: group_name.clone(),
+            sample_name: "puc19-sample".to_string(),
+            source_block_group_id: bg_id,
+            origin: AnnotationGroupOrigin::CurrentSample,
+        };
+        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            history_ref: None,
+            entry: &entry,
+            projection_graph: &graph,
+            node_ids: &node_ids,
+        })
+        .unwrap();
+        assert!(
+            !spans.is_empty(),
+            "puc19 fixture's non-source group should resolve at least one span"
+        );
+        let highlight_node = graph
+            .nodes()
+            .find(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
+            .expect("puc19 graph should contain at least one data node");
+
+        let repo = Repository {
+            context: (*context).clone(),
+        };
+        (
+            context,
+            repo,
+            bg_id.to_string(),
+            group_name,
+            spans,
+            highlight_node,
+        )
+    }
+
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    fn png_width(bytes: &[u8]) -> u32 {
+        assert_eq!(&bytes[..8], SIGNATURE, "should be a PNG");
+        u32::from_be_bytes(bytes[16..20].try_into().expect("should read the PNG width"))
+    }
+
+    fn viewport(controller: &mut RGraphController) -> Vec<u8> {
+        controller
+            .png_bytes(60, 10, 1, true)
+            .expect("should render the viewport")
+    }
+
+    // `RGraphController` characterization: pan/zoom/click/detail baselines, the
+    // ordering-sensitive scenarios where a mutating call has no render in between,
+    // and the two behavior fixes the persistent design makes over the old ops-replay
+    // path (clear_highlights keeps tracks; color overrides stick).
+
+    #[test]
+    fn test_rgraph_controller_zoom_then_move_with_no_render_between() {
+        let (_context, repo, id) = linear_repo();
+        let mut controller = repo
+            .create_graph_controller(id, "minimal".to_string())
+            .unwrap();
+        controller.zoom_in().unwrap();
+        controller.move_by(3, 0).unwrap();
+        assert!(png_width(&viewport(&mut controller)) > 0);
+    }
+
+    #[test]
+    fn test_rgraph_controller_zoom_then_click_with_no_render_between() {
+        let (_context, repo, id) = linear_repo();
+        let mut controller = repo
+            .create_graph_controller(id, "minimal".to_string())
+            .unwrap();
+        controller.zoom_in().unwrap();
+        let _ = controller.handle_click(5, 5).unwrap();
+        assert!(png_width(&viewport(&mut controller)) > 0);
+    }
+
+    #[test]
+    fn test_rgraph_controller_baseline_pan_zoom_detail() {
+        let (_context, repo, id) = linear_repo();
+
+        let mut minimal = repo
+            .create_graph_controller(id.clone(), "minimal".to_string())
+            .unwrap();
+        let minimal_baseline = viewport(&mut minimal);
+        minimal.zoom_in().unwrap();
+        assert_ne!(
+            minimal_baseline,
+            viewport(&mut minimal),
+            "zoom_in should change the rendered view"
+        );
+
+        let mut normal = repo
+            .create_graph_controller(id.clone(), "normal".to_string())
+            .unwrap();
+        let baseline = viewport(&mut normal);
+        normal.move_by(3, 0).unwrap();
+        assert_ne!(
+            baseline,
+            viewport(&mut normal),
+            "pan should change the rendered view"
+        );
+
+        let mut full = repo
+            .create_graph_controller(id, "full".to_string())
+            .unwrap();
+        assert_ne!(
+            minimal_baseline,
+            viewport(&mut full),
+            "detail change should change the rendered view"
+        );
+    }
+
+    #[test]
+    fn test_rgraph_controller_scale_doubles_the_png() {
+        let (_context, repo, id) = linear_repo();
+        let mut controller = repo
+            .create_graph_controller(id, "normal".to_string())
+            .unwrap();
+
+        let single = controller.png_bytes(60, 10, 1, true).unwrap();
+        let doubled = controller.png_bytes(60, 10, 2, true).unwrap();
+
+        assert_eq!(png_width(&doubled), 2 * png_width(&single));
+        let logical = controller.png_cell_size(1).unwrap();
+        assert_eq!(
+            controller.png_cell_size(2).unwrap(),
+            vec![2 * logical[0], 2 * logical[1]]
+        );
+        assert!(controller.png_bytes(60, 10, 0, true).is_err());
+    }
+
+    #[test]
+    fn test_rgraph_controller_hit_regions_find_nodes() {
+        let (_context, repo, id) = linear_repo();
+        let mut controller = repo
+            .create_graph_controller(id, "normal".to_string())
+            .unwrap();
+        viewport(&mut controller);
+
+        let regions = controller.hit_regions(60, 10).unwrap();
+
+        assert!(regions.contains("\"kind\":\"node\""));
+    }
+
+    #[test]
+    fn test_rgraph_controller_clear_highlights_preserves_tracks() {
+        let (_context, repo, id, group_name, _spans, highlight_node) = puc19_repo();
+        let mut controller = repo
+            .create_graph_controller(id, "full".to_string())
+            .unwrap();
+        controller.add_track_group(group_name).unwrap();
+        let render =
+            |controller: &mut RGraphController| controller.png_bytes(200, 20, 1, true).unwrap();
+        let track_only = render(&mut controller);
+
+        controller
+            .highlight_match(
+                "red".to_string(),
+                0,
+                highlight_node.length(),
+                "f".to_string(),
+                vec![highlight_node.node_id.to_string()],
+                vec![highlight_node.sequence_start as i32],
+                vec![highlight_node.sequence_end as i32],
+            )
+            .unwrap();
+        assert_ne!(
+            track_only,
+            render(&mut controller),
+            "a match highlight should change the view"
+        );
+
+        controller.clear_highlights().unwrap();
+        assert_eq!(
+            track_only,
+            render(&mut controller),
+            "clear_highlights should remove the match highlight but keep tracks intact"
+        );
+    }
+
+    #[test]
+    fn test_rgraph_controller_color_override_takes_effect() {
+        let (_context, repo, id, _group_name, spans, _highlight_node) = puc19_repo();
+        let mut default_controller = repo
+            .create_graph_controller(id.clone(), "full".to_string())
+            .unwrap();
+        default_controller.trigger_auto_load().unwrap();
+        let default_colors = default_controller.png_bytes(200, 20, 1, true).unwrap();
+
+        let mut overridden_controller = repo
+            .create_graph_controller(id, "full".to_string())
+            .unwrap();
+        let color_map_json = format!(
+            "{{{}}}",
+            spans
+                .iter()
+                .map(|span| format!("\"{}\":\"#00ff00\"", span.id))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        overridden_controller
+            .load_annotation_groups_with_colors_json(color_map_json)
+            .unwrap();
+        let overridden_colors = overridden_controller.png_bytes(200, 20, 1, true).unwrap();
+
+        assert_ne!(
+            default_colors, overridden_colors,
+            "an id -> color override should change the rendered annotation color"
+        );
+    }
+
+    #[test]
+    fn test_rgraph_controller_clone_is_independent() {
+        let (_context, repo, id) = linear_repo();
+        let mut original = repo
+            .create_graph_controller(id, "normal".to_string())
+            .unwrap();
+        let original_baseline = viewport(&mut original);
+
+        let mut clone = original.clone_controller();
+        clone.move_by(3, 0).unwrap();
+        assert_ne!(
+            original_baseline,
+            viewport(&mut clone),
+            "the clone should reflect its own move"
+        );
+
+        assert_eq!(
+            original_baseline,
+            viewport(&mut original),
+            "mutating a clone must not affect the original controller"
+        );
+    }
+}
+
 extendr_module! {
     mod genr;
     impl Repository;
     impl SequenceGraph;
+    impl RGraphController;
 }
