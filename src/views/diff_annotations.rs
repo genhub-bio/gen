@@ -12,7 +12,7 @@ use gen_diff::graph::{DiffGenGraph, DiffGenGraphRef};
 use gen_graph::{GenGraph, GraphNode, PackedGenGraph};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
-    distribute_nodes::GapSizes, graph_view::GraphViewState, layout::VisualDetail,
+    graph_view::GraphViewState, layout::VisualDetail, layout_compaction::GapPolicy,
     layout_engine::LayoutEngine, plotter::NodeRenderer,
 };
 use log::warn;
@@ -171,7 +171,7 @@ impl DiffAnnotations {
         &mut self,
         engine: &LayoutEngine<PackedGenGraph>,
         view_state: &mut GraphViewState<GraphNode>,
-        zoom_levels: &[(VisualDetail, R, GapSizes)],
+        zoom_levels: &[(VisualDetail, R, GapPolicy)],
         component: &DiffGraphComponent,
     ) where
         R: NodeRenderer<PackedGenGraph>,
