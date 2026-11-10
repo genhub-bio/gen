@@ -31,9 +31,11 @@ its string, to `get_sequence_graph()`.
 `HashId` is hashable and compares by value; it identifies graphs, annotations, assets,
 operations and branch heads. `str(hash_id)` is the hex digest.
 
-Mutating import/update/edit/copy APIs record operations automatically. The public API has no
-transaction context manager. Raw SQL (`execute`/`query`) is low-level and hidden from the
-stubs; use the operation-aware APIs instead.
+Mutating import/update/edit/copy APIs record operations automatically when the graph connection is
+in SQLite autocommit mode. Inside `repo.transaction()` or another open SQL transaction, they join
+the working set, so existing graph and sample handles see trial writes while `get_operations()`
+continues to show committed history. Raw SQL (`execute`/`query`) is low-level and hidden from the
+stubs; use the operation-aware APIs unless you specifically need SQLite transaction control.
 
 ## Branches
 
@@ -57,13 +59,54 @@ switching and accepts an `Operation`, its `HashId` or a string commit ref for `s
 ```python
 repo.get_operations(branch=None, limit=None)
 repo.get_assets(branch=None)
+repo.get_working_assets()
 ```
 
 `get_operations()` returns newest-first `Operation` objects, so `get_operations(limit=1)[0]`
 is the latest. `Operation` fields: `id` (`HashId`), `parent_id`, `committer`, `email`, `date`,
-`message`, `is_head`. Every mutating call records one operation; pass `message=` where an
-edit method accepts it so the history reads as a design log. History is the audit trail:
-there is nothing to commit.
+`message`, `is_head`. `get_assets()` returns committed assets for the current branch by default or
+for the requested branch. `get_working_assets()` returns that committed materialized view with
+pending working-set additions and latest logical-path replacements overlaid. In SQLite autocommit
+mode, each mutating call records one operation. Pass `message=` where an edit method accepts it so
+the history reads as a design log.
+
+## Repository transactions
+
+Use a transaction to test a sequence of operations, inspect the resulting graph, then keep all remaining
+changes as one history entry:
+
+```python
+graph = repo.get_sequence_graphs(sample="design")[0]
+with repo.transaction() as transaction:
+    graph.replace("vector:4-8", "GGGG", message="try a motif")
+    repo.update_with_vcf("variants.vcf", sample="design")
+    print(str(graph))  # graph handles read the trial state
+    transaction.undo()       # undo the latest successful operation
+    operation = transaction.commit("update design sequences")
+```
+
+An outer transaction opens a SQLite transaction; each nested transaction creates a SQLite
+savepoint. Nested contexts close in reverse order, following SQLite's savepoint stack. Transactions
+can nest inside an already-open SQL transaction, including one with existing working changes. Each
+successful write can be undone with `transaction.undo()`, which rolls back the newest successful
+operation savepoint on the connection and returns whether it found one. A failed write rolls back only
+that write. Successful context exit commits remaining changes; exceptions and `transaction.rollback()`
+roll back the active scope. The commit message comes from `commit(message)`, the context's optional
+message, or the remaining operation messages joined in creation order. Raw SQL-only changes use
+`Update repository`. An inner commit releases its savepoint and returns `None`; an outermost commit
+creates one Dolt history entry and returns its `Operation`, or returns `None` when empty. Annotation
+imports return `None` while a SQL transaction is open because their history id is assigned by the
+outermost commit.
+File blobs are content-addressed cache files; after rollback, newly stored bytes can remain without
+graph asset metadata.
+
+Once the outermost transaction commits or rolls back, later writes commit normally even if the
+Python `with` block has not exited. An inner commit leaves its parent transaction open. Remote
+synchronization refreshes the graph connection and should run outside an open transaction; the shared context refuses to
+replace a connection with an active SQL transaction. Remote configuration is stored in a separate
+database and remains changed if a graph transaction rolls back. Raw SQL through `execute()` and
+`query()` is available inside a transaction. `get_assets()` always reads committed assets, including when
+the current branch is requested explicitly. Use `get_working_assets()` for the current working view.
 
 ## Merge, apply and reset
 
@@ -76,9 +119,8 @@ repo.reset(operation)
 `merge()`, `apply()`, and `reset()` return the resulting HEAD `Operation`; apply/reset accept
 an `Operation`, its `HashId` or a string ref. `merge()` adopts another branch's operations
 into the current one, `apply()` applies a given operation to the current branch, and `reset()` hard-resets the current
-branch. History actions require a clean working set (`Branch.dirty` is false); do not discard
-dirty state to bypass an error. Reset discards later operations on the branch, so confirm with
-the user first. Re-query graphs and samples after history changes instead of reusing handles
+branch. Reset discards later operations on the branch, so confirm with the user first. Re-query
+graphs and samples after history changes instead of reusing handles
 from another state.
 
 ## Remotes

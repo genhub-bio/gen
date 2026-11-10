@@ -28,7 +28,6 @@ use gen_models::{
     sample::Sample,
     sample_lineage::SampleLineage,
 };
-use rusqlite::params;
 use tempfile::tempdir;
 
 #[path = "support/fake_gcs.rs"]
@@ -2135,7 +2134,7 @@ mod branch_history {
     use super::{
         AssetRef, HashSet, Path, PathBuf, Sample, Workspace, assert_success,
         commit_hash_for_summary, fs, get_connection, get_connection_for_branch, operations_stdout,
-        params, run_gen, status_rows, tempdir,
+        run_gen, status_rows, tempdir,
     };
 
     fn graph_status(repo_root: &Path) -> String {
@@ -2166,18 +2165,6 @@ mod branch_history {
         let connection = get_connection_for_branch(graph_path, Some(branch_name))
             .expect("should open the requested branch graph database");
         AssetRef::all(&connection).expect("should load branch asset references")
-    }
-
-    fn dirty_graph_with_uncommitted_log(repo_root: &Path) {
-        let graph_path = repo_root.join(".gen/default.db");
-        let connection = get_connection(graph_path).expect("should reopen graph database");
-        connection
-            .execute(
-                "INSERT INTO gen_operation_log (id, operation_kind, command, created_on)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![[1_u8], "test", "dirty working set", 1_i64],
-            )
-            .expect("should create an uncommitted graph change");
     }
 
     #[test]
@@ -2717,100 +2704,6 @@ mod branch_history {
             !sample_stdout.contains("first-sample"),
             "reset should remove the earlier branch-local sample from the working set: {sample_stdout}"
         );
-    }
-
-    #[test]
-    fn test_ref_changing_commands_fail_when_working_set_is_dirty() {
-        let repo_dir = tempdir().expect("should create temp repo directory");
-        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-        let fasta_path = fixtures_dir.join("simple.fa");
-        let update_fasta_path = repo_dir.path().join("feature-dirty-update.fa");
-
-        fs::write(&update_fasta_path, ">m123\nTTTT\n")
-            .expect("should write branch update fasta fixture");
-
-        assert_success(
-            &run_gen(repo_dir.path(), &["init"]),
-            "gen init should succeed",
-        );
-        assert_success(
-            &run_gen(
-                repo_dir.path(),
-                &[
-                    "import",
-                    "fasta",
-                    fasta_path.to_str().expect("should encode fasta path"),
-                    "--collection",
-                    "test-collection",
-                    "--sample",
-                    "test-sample",
-                ],
-            ),
-            "fasta import should succeed",
-        );
-
-        let main_history = operations_stdout(repo_dir.path());
-        let import_hash = commit_hash_for_summary(&main_history, "m123:");
-
-        assert_success(
-            &run_gen(repo_dir.path(), &["branch", "--create", "feature"]),
-            "branch create should succeed",
-        );
-        assert_success(
-            &run_gen(repo_dir.path(), &["checkout", "--branch", "feature"]),
-            "checkout feature should succeed",
-        );
-        assert_success(
-            &run_gen(
-                repo_dir.path(),
-                &[
-                    "update",
-                    "fasta",
-                    update_fasta_path
-                        .to_str()
-                        .expect("should encode update fasta path"),
-                    "--collection",
-                    "test-collection",
-                    "--sample",
-                    "test-sample",
-                    "--new-sample",
-                    "feature-sample",
-                    "--region-name",
-                    "m123:1-5",
-                ],
-            ),
-            "feature branch update should succeed",
-        );
-        let feature_history = operations_stdout(repo_dir.path());
-        let feature_update_hash = commit_hash_for_summary(&feature_history, "1 sequences inserted");
-
-        assert_success(
-            &run_gen(repo_dir.path(), &["checkout", "main"]),
-            "checkout main should succeed",
-        );
-        dirty_graph_with_uncommitted_log(repo_dir.path());
-
-        for (args, action) in [
-            (vec!["checkout", "feature"], "checkout"),
-            (vec!["reset", import_hash.as_str()], "reset"),
-            (vec!["apply", feature_update_hash.as_str()], "apply"),
-            (vec!["merge", "feature"], "merge"),
-        ] {
-            let output = run_gen(repo_dir.path(), &args);
-            assert!(
-                !output.status.success(),
-                "{action} should fail on a dirty working set: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains(&format!(
-                    "Cannot {action}: the working set has uncommitted changes."
-                )),
-                "{action} should explain that Dolt status is dirty: {stderr}"
-            );
-        }
     }
 }
 

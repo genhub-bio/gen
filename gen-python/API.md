@@ -211,6 +211,13 @@ current branch to one; each accepts an operation, `HashId`, or hash string. `Bra
 name, tracked remote, current/dirty flags, and head hash. `Operation` exposes committer, email, date,
 message, head status, id, and parent id.
 
+Use `repo.transaction(message=None)` or `graph.transaction(message=None)` to group edits for a
+repository. A successful context exit commits once. Its message comes from an explicit
+`transaction.commit(message)`, the context message, or the remaining operation messages joined in
+creation order; raw SQL-only changes use `Update repository`. `transaction.rollback()` and exceptions
+roll back the scope. Nested contexts use SQLite savepoints, and only the outermost commit creates a
+history entry.
+
 A remote is another repository that you can fetch changes from or push changes to. Configure
 remotes with `add_remote(name, url)`, `remove_remote(remote)`, `set_default_remote(remote=None)`,
 and `set_branch_remote(remote=None)`. `repo.remotes` and `repo.default_remote` inspect the setup.
@@ -222,9 +229,10 @@ authentication and asset-transfer behavior.
 ## 8. Files, assets, and exports
 
 `repo.add_file(filename, message=None)` stores a file as a repository asset without importing it
-as sequence data. `repo.get_assets(branch=None)` lists assets reachable from a branch. `Asset`
-exposes a content `id`, original `name`, and stored `path`; `asset.save_as(destination,
-overwrite=False)` writes a named readable copy.
+as sequence data. `repo.get_assets(branch=None)` lists committed assets from the current branch or
+a requested branch. `repo.get_working_assets()` overlays current pending additions and replacements
+on the committed materialized view. `Asset` exposes a content `id`, original `name`, and stored
+`path`; `asset.save_as(destination, overwrite=False)` writes a named readable copy.
 
 Export methods are called on a `SequenceGraph`, but they export the sequence graphs in that graph's
 sample and collection. `graph.export_fasta(filename, all_sequences=False)` writes current paths by

@@ -56,7 +56,7 @@ Its `sample` argument (and `import_reference_sequence()`'s `reference`) accepts 
 `Sample`; a sample object supplies its collection unless explicitly overridden. Do not
 assume file imports or updates also accept sample objects: their sample arguments are strings.
 Calling `import_sequence()` repeatedly with the same `sample` builds that sample up graph by
-graph; duplicate graph names fail. Each call records an operation, so use FASTA for large
+graph; duplicate graph names fail. Each call records an operation by default, so use FASTA for large
 file imports. The default sample name is `"reference"`.
 
 ```python
@@ -147,7 +147,8 @@ edited = repo.update_with_fasta(
 
 ```python
 asset = repo.add_file("protocol.md", message=None)   # stored, not imported as sequence
-repo.get_assets()                                    # every asset on the branch
+repo.get_assets()                                    # committed assets on the current branch
+repo.get_working_assets()                            # committed assets plus pending additions/updates
 asset.id; asset.name; asset.path
 asset.save_as("copy.md", overwrite=False)
 ```
@@ -158,7 +159,9 @@ importing it as sequence and returns its `Asset`. `Asset` has `id` (`HashId`), `
 (original file name), `path` (the stored copy under `.gen`, which has a hashed filename;
 raises `FileNotFoundError` if not downloaded yet) and `save_as(destination, overwrite=False)`,
 which copies it to a path of your choice (or into a directory under `name`). Pull transfers
-assets; see `version-control.md`.
+assets; see `version-control.md`. `get_assets(branch=None)` reads committed assets for the current or
+requested branch; `get_working_assets()` overlays pending additions and replacements for the current
+branch.
 
 ## Exports
 

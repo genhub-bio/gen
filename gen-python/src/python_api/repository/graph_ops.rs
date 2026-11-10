@@ -32,8 +32,7 @@ impl PyRepository {
     /// `refseq_accession_id` and `genbank_id` also match without their version suffix;
     /// `ensembl_id`, `custom_id` and `chromosome` also match with `chr`, `Chr`, `chrom`, `Chrom`,
     /// `chromosome` and `Chromosome` prefixes (use `chromosome` for cases like Roman numerals,
-    /// 11 for ensembl `XI`); `ucsc_id` matches as given. Give at least one identifier. Recorded as
-    /// its own operation.
+    /// 11 for ensembl `XI`); `ucsc_id` matches as given. Give at least one identifier.
     #[pyo3(signature = (
         reference_name,
         *,

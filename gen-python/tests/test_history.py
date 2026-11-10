@@ -139,28 +139,17 @@ class RepositoryHistoryTests(RepositoryTestCase):
                 [sequence] = current.all_sequences()
                 self.assertEqual(str(sequence), "AACCGG")
 
-    def test_force_reset_discards_dirty_state_only_for_a_valid_operation(self):
+    def test_reset_discards_dirty_state_only_for_a_valid_operation(self):
         self.edit_vector()
         self.repository.execute(
             "INSERT INTO collections (name) VALUES ('uncommitted collection')"
         )
         head_before = self.repository.current_branch.head
 
-        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            self.repository.checkout("main")
-        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            self.repository.checkout("orphan", create=True)
-        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            self.repository.merge("main")
-        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            self.repository.apply(self.base_operation)
-
-        self.assertEqual(
-            {branch.name for branch in self.repository.get_branches()}, {"main"}
-        )
-        self.assertEqual(self.repository.current_branch.name, "main")
-        self.assertEqual(self.repository.current_branch.head, head_before)
+        with self.assertRaisesRegex(ValueError, "operation .* not found"):
+            self.repository.reset("1" * 40)
         self.assertTrue(self.repository.current_branch.dirty)
+        self.assertEqual(self.repository.current_branch.head, head_before)
         self.assertEqual(
             self.repository.query(
                 "SELECT name FROM collections WHERE name = 'uncommitted collection'"
@@ -168,16 +157,7 @@ class RepositoryHistoryTests(RepositoryTestCase):
             [["uncommitted collection"]],
         )
 
-        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            self.repository.reset(self.base_operation)
-        self.assertTrue(self.repository.current_branch.dirty)
-
-        with self.assertRaisesRegex(ValueError, "operation .* not found"):
-            self.repository.reset("1" * 40, force=True)
-        self.assertTrue(self.repository.current_branch.dirty)
-        self.assertEqual(self.repository.current_branch.head, head_before)
-
-        reset = self.repository.reset(self.base_operation, force=True)
+        reset = self.repository.reset(self.base_operation)
 
         self.assertEqual(reset.id, self.base_operation.id)
         self.assertFalse(self.repository.current_branch.dirty)

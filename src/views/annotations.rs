@@ -1000,6 +1000,7 @@ mod tests {
         annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
         block_group::BlockGroup,
         file_types::FileTypes,
+        history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         sample::Sample,
     };
@@ -1848,7 +1849,7 @@ mod tests {
             .expect("should encode index path")
             .to_string();
 
-        add_annotation_file(
+        let operation_summary = add_annotation_file(
             &context,
             &annotation_path,
             Some("gff3"),
@@ -1857,7 +1858,10 @@ mod tests {
             Some("add genes"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should commit annotation file");
+        .expect("should record annotation file metadata");
+        DoltHistoryStore::new(context.graph().conn())
+            .commit_all(&operation_summary.summary)
+            .expect("should commit annotation file metadata");
         (context, annotation_directory, annotation_path, index_path)
     }
 

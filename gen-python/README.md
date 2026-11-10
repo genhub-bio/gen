@@ -97,11 +97,9 @@ by operation hash is not supported. After a branch change or reset, query sample
 and sequence graphs again so handles reflect the selected state.
 
 `merge(branch)` adopts the branch into the current branch. `apply(operation)`
-cherry-picks one operation onto it. Both return the new HEAD `Operation` and
-require a clean working set. `reset(operation)` hard-resets the current branch
-to an `Operation`, `HashId`, or string ref and returns the resulting HEAD. It
-also requires a clean working set unless you explicitly pass
-`reset(operation, force=True)` to discard uncommitted changes.
+cherry-picks one operation onto it. Both return the new HEAD `Operation`.
+`reset(operation)` hard-resets the current branch to an `Operation`, `HashId`,
+or string ref and returns the resulting HEAD.
 
 Push, pull, and fetch use the same remote selection, authentication, retries,
 asset transfer, and conflict behavior as the command-line client:
@@ -134,6 +132,62 @@ key can be set through the environment variable `GENHUB_API_KEY`. If this variab
 is not set, the extension falls back to the same login process the CLI uses. See 
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
+
+## Repository transactions
+
+Edits and imports commit automatically by default when the graph connection is in SQLite
+autocommit mode. Use `repo.transaction(message=None)` or
+`graph.transaction(message=None)` to group changes; the graph form applies to its owning
+repository.
+
+Calling `transaction()` opens the transaction immediately, even without a `with` block. Commit or
+roll it back explicitly when managing it manually:
+
+```python
+graph = repo.get_sequence_graphs(sample="design")[0]
+transaction = repo.transaction()
+graph.replace("vector:4-8", "GGGG", message="try a new motif")
+operation = transaction.commit("update design sequences")
+# Call transaction.rollback() instead to discard the trial edits.
+```
+
+```python
+graph = repo.get_sequence_graphs(sample="design")[0]
+with repo.transaction() as transaction:
+    graph.replace("vector:4-8", "GGGG", message="try a new motif")
+    repo.update_with_vcf("variants.vcf", reference="design")
+    # Read the trial graph, then undo the most recent successful operation if needed.
+    transaction.undo()
+    operation = transaction.commit("update design sequences")
+```
+
+Successful context exit commits the remaining changes. The commit message is the message supplied
+to `commit(message)`, otherwise the message supplied to `transaction(message)`, otherwise the
+remaining operation messages joined by newlines in creation order. `undo()` removes undone messages
+from that list. A raw SQL-only transaction uses `Update repository` when no operation messages exist.
+An exception or `transaction.rollback()` rolls back the active scope. Explicit `commit()` finalizes
+the scope immediately; context exit will not commit it again.
+
+An outer transaction opens a SQLite transaction; nested transactions create savepoints and close in
+reverse order, following SQLite's savepoint stack. Transactions can nest inside an already-open SQL
+transaction. An inner successful exit or `commit()` releases its savepoint into the parent and
+returns `None`; only a dirty outermost commit creates one Dolt history operation and returns its
+`Operation`. An empty outermost transaction returns `None`. `transaction.undo()` rolls back to the
+newest successful operation savepoint on the SQLite connection and returns whether it found one; it
+follows connection savepoint order, so nested contexts do not form separate undo stacks. A failed
+operation rolls back only its own changes.
+
+Once an outermost transaction commits or rolls back, SQLite returns to autocommit mode and later writes
+inside the still-open Python `with` block commit normally. Closing an inner transaction leaves its parent
+transaction open, so later writes remain in that parent. Remote synchronization refreshes the graph
+connection and should run outside an open transaction; the shared context refuses to replace a connection with an
+active SQL transaction. Remote configuration is stored in a separate database and remains changed if a
+graph transaction rolls back. Raw `execute()` and `query()` are available while a transaction is open.
+
+Some operations such as file imports return `None` while a SQLite transaction is open because their operation
+hash is not known until the outermost Dolt commit. `get_working_assets()` can be used to fetch working-set
+additions and replacements on the committed view. Content-addressed file blobs may remain in `.gen` as
+unreferenced cache files after a rollback; graph rows and asset metadata are rolled back.
 
 ## Sequence editing
 
@@ -222,11 +276,15 @@ for left in (a.end(), c.end()):
     sg.insert("ACGT", after=left)
 ```
 
-Each call runs one transaction and records one operation. Failures roll back
-both the edit and its operation record. Every editing method accepts an
-optional `message` used as the operation's commit message; when omitted, a
-description of the edit is generated instead. `stack=True` adds the edit as an
-alternative next to what is already there and leaves the active path unchanged.
+Each call records one operation when SQLite is in autocommit mode. Inside an
+open SQL transaction or `repo.transaction()`, edits stay in the working
+set until the outermost commit. Failed calls roll back their own changes and
+operation record. Use `repo.transaction()` to group a series of edits into one
+history entry; see [Repository transactions](#repository-transactions). Every
+editing method accepts an optional `message` used as the operation's commit
+message; when omitted, a description of the edit is generated instead.
+`stack=True` adds the edit as an alternative next to what is already there and
+leaves the active path unchanged.
 
 At a join or fork, `delete` and `replace` reconnect every route at the target's
 boundary. This also applies immediately downstream of a heterozygous call;

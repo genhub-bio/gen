@@ -7,7 +7,7 @@ use std::{
 
 use flate2::read::MultiGzDecoder;
 use gen_core::{
-    DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
+    HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
     config::Workspace,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -29,7 +29,6 @@ use crate::{
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
-    history::{HistoryStore, dolt::DoltHistoryStore},
     interval_tree::IntervalTreeSource,
     operations::{
         FileAddition, FileSource, OperationFile, OperationInfo, OperationSummary,
@@ -1007,7 +1006,7 @@ fn prepare_local_sorted_annotation(
     ))
 }
 
-/// Adds an annotation asset and its available indexes to operation history.
+/// Prepares and records an annotation file and its indexes.
 ///
 /// Callers pass checksums only when the corresponding remote streams were already consumed for
 /// annotation work. This keeps operation creation independent of remote credentials while local
@@ -1020,7 +1019,7 @@ pub fn add_annotation_file(
     name: Option<&str>,
     message: Option<&str>,
     checksum_overrides: AnnotationFileChecksumOverrides,
-) -> Result<DoltHashId, AnnotationFileError> {
+) -> Result<OperationSummary, AnnotationFileError> {
     add_annotation_file_with_progress(
         context,
         path,
@@ -1035,7 +1034,7 @@ pub fn add_annotation_file(
     )
 }
 
-/// Adds an annotation file and reports local GFF3/BED preparation stages when requested.
+/// Records annotation assets and reports local GFF3/BED preparation stages when requested.
 pub fn add_annotation_file_with_progress(
     context: &DbContext,
     path: &str,
@@ -1044,7 +1043,7 @@ pub fn add_annotation_file_with_progress(
     name: Option<&str>,
     message: Option<&str>,
     options: AnnotationFileAddOptions<'_>,
-) -> Result<DoltHashId, AnnotationFileError> {
+) -> Result<OperationSummary, AnnotationFileError> {
     let AnnotationFileAddOptions {
         checksum_overrides,
         mut progress,
@@ -1166,6 +1165,8 @@ pub fn add_annotation_file_with_progress(
         ));
     }
 
+    // We track changes to know whether or not anything has happened and to return the NoChanges condition.
+    let changes_before = graph_conn.total_changes();
     track_asset_refs(
         graph_conn,
         Some(&log_id),
@@ -1173,14 +1174,21 @@ pub fn add_annotation_file_with_progress(
         &summary,
         &asset_refs,
     )?;
-    let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
-    if history_store.status()?.is_empty() {
+    if graph_conn.total_changes() == changes_before {
         return Err(OperationError::NoChanges.into());
     }
 
-    let commit_hash = history_store.commit_all(&summary)?;
-
-    Ok(commit_hash)
+    let operation_file = OperationFile::new(path)
+        .set_file_type(file_type)
+        .set_role(AssetRole::Annotation);
+    Ok(OperationSummary::new(
+        OperationInfo {
+            files: vec![operation_file],
+            description: OperationKind::AnnotationFile.as_str().to_string(),
+        },
+        summary,
+    )
+    .with_prepared_asset_refs(asset_refs))
 }
 
 #[cfg(test)]
@@ -1199,7 +1207,9 @@ mod tests {
         assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        collection::Collection,
         errors::OperationError,
+        history::{HistoryStore, dolt::DoltHistoryStore},
         operations::{
             calculate_file_checksum, calculate_reader_checksum, commit_operation_summary,
         },
@@ -1748,10 +1758,11 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_file_creates_operation() {
+    fn test_add_annotation_file_creates_operation() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
         let history_store = DoltHistoryStore::new(graph_conn);
+        let head_before = history_store.current_head().unwrap();
 
         let repo_root = context.workspace().repo_root().unwrap();
         let annotation_path = repo_root.join("fixtures").join("annotation.gff3");
@@ -1759,7 +1770,7 @@ mod tests {
         fs::write(&annotation_path, "##gff-version 3\n").unwrap();
         let annotation_path_str = annotation_path.to_string_lossy().to_string();
 
-        let commit_hash = add_annotation_file(
+        let operation_summary = add_annotation_file(
             &context,
             &annotation_path_str,
             None,
@@ -1769,6 +1780,43 @@ mod tests {
             AnnotationFileChecksumOverrides::default(),
         )
         .unwrap();
+        assert_eq!(
+            operation_summary.summary,
+            format!("Add annotation file {annotation_path_str}")
+        );
+        assert_eq!(
+            operation_summary.operation_info.description,
+            OperationKind::AnnotationFile.as_str()
+        );
+        assert_eq!(
+            operation_summary
+                .prepared_asset_refs
+                .as_ref()
+                .expect("should return the prepared annotation assets")
+                .len(),
+            3
+        );
+        let prepared_asset_ref_ids = operation_summary
+            .prepared_asset_refs
+            .as_ref()
+            .expect("should return the prepared annotation assets")
+            .iter()
+            .map(|asset_ref| asset_ref.id)
+            .collect::<HashSet<_>>();
+        let recorded_asset_ref_ids = AssetRef::all(graph_conn)
+            .expect("should load recorded annotation assets")
+            .iter()
+            .map(|asset_ref| asset_ref.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(prepared_asset_ref_ids, recorded_asset_ref_ids);
+        assert_eq!(
+            history_store.current_head().unwrap(),
+            head_before,
+            "recording annotation metadata should not advance Dolt history"
+        );
+        let commit_hash = history_store
+            .commit_all(&operation_summary.summary)
+            .unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
 
         let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
@@ -1826,6 +1874,129 @@ mod tests {
             error,
             AnnotationFileError::OperationError(OperationError::NoChanges)
         ));
+    }
+
+    #[test]
+    fn test_add_annotation_file_records_metadata_until_caller_commits() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let history_store = DoltHistoryStore::new(graph_conn);
+        let head_before = history_store.current_head().unwrap();
+        let annotation_path = context.workspace().repo_root().unwrap().join("trial.gff3");
+        fs::write(&annotation_path, "##gff-version 3\n").unwrap();
+        let annotation_path = annotation_path.to_string_lossy().to_string();
+
+        let operation_summary = add_annotation_file(
+            &context,
+            &annotation_path,
+            None,
+            None,
+            Some("trial-annotations"),
+            Some("stage annotations"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should record annotation metadata");
+        assert_eq!(operation_summary.summary, "stage annotations");
+        assert_eq!(
+            operation_summary
+                .prepared_asset_refs
+                .as_ref()
+                .expect("should return the prepared annotation assets")
+                .len(),
+            3
+        );
+
+        let assets = AssetRef::all(graph_conn).expect("should read staged asset refs");
+        assert_eq!(
+            assets.len(),
+            3,
+            "annotation source and indexes should be staged"
+        );
+        assert!(assets.iter().any(|asset| {
+            asset.role == AssetRole::Annotation
+                && asset.name.as_deref() == Some("trial-annotations")
+        }));
+        let operation_logs = OperationLog::all(graph_conn).expect("should read staged log");
+        assert_eq!(operation_logs.len(), 1);
+        assert_eq!(
+            operation_logs[0].operation_kind,
+            OperationKind::AnnotationFile
+        );
+        assert_eq!(operation_logs[0].command, "stage annotations");
+        assert_eq!(
+            history_store.current_head().unwrap(),
+            head_before,
+            "recording annotation metadata should not advance Dolt history"
+        );
+        let commit_hash = history_store
+            .commit_all(&operation_summary.summary)
+            .unwrap();
+        assert_eq!(
+            history_store.current_head().unwrap(),
+            Some(commit_hash),
+            "the caller should advance Dolt history when it commits the returned message"
+        );
+    }
+
+    #[test]
+    fn test_add_annotation_file_rejects_duplicate_with_prior_working_changes() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let annotation_path = context.workspace().repo_root().unwrap().join("trial.gff3");
+        fs::write(&annotation_path, "##gff-version 3\n").unwrap();
+        let annotation_path = annotation_path.to_string_lossy().to_string();
+        let first_summary = add_annotation_file(
+            &context,
+            &annotation_path,
+            None,
+            None,
+            Some("trial-annotations"),
+            Some("add trial annotations"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should record the initial annotation operation");
+        let history_store = DoltHistoryStore::new(graph_conn);
+        let first_commit = history_store
+            .commit_all(&first_summary.summary)
+            .expect("should commit initial annotation operation");
+        Collection::create(graph_conn, "earlier-trial-edit")
+            .expect("should create an unrelated pending edit");
+
+        let error = add_annotation_file(
+            &context,
+            &annotation_path,
+            None,
+            None,
+            Some("trial-annotations"),
+            Some("duplicate annotation operation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect_err("should treat a duplicate annotation operation as a no-op when dirty");
+
+        assert!(
+            matches!(
+                error,
+                AnnotationFileError::OperationError(OperationError::NoChanges)
+            ),
+            "duplicate annotation should return NoChanges, got {error}"
+        );
+        assert_eq!(
+            history_store.current_head().unwrap(),
+            Some(first_commit),
+            "rejecting the duplicate should not advance history"
+        );
+        assert_eq!(
+            OperationLog::all(graph_conn).unwrap().len(),
+            1,
+            "rejecting the duplicate should not add an operation log"
+        );
+        assert!(
+            Collection::all(graph_conn)
+                .unwrap()
+                .iter()
+                .any(|collection| collection.name == "earlier-trial-edit"),
+            "rejecting the duplicate should preserve earlier pending graph changes"
+        );
     }
 
     #[test]

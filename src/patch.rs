@@ -707,13 +707,17 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
 
-        let add_file_commit_hash = add_files_operation(
+        let add_file_summary = add_files_operation(
             context,
             &[OperationFile::new(fasta_path.to_string_lossy())],
             Some("track fasta fixture"),
         )
-        .expect("should commit add-file fixture");
-        add_annotation_file(
+        .expect("should record add-file fixture");
+        let add_file_commit_hash =
+            DoltHistoryStore::new_with_config(context.graph().conn(), context.config().conn())
+                .commit_all(&add_file_summary.summary)
+                .expect("should commit add-file fixture");
+        let annotation_summary = add_annotation_file(
             context,
             gff_path
                 .to_str()
@@ -724,7 +728,10 @@ mod tests {
             Some("track annotation fixture"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should commit annotation fixture");
+        .expect("should record annotation fixture");
+        DoltHistoryStore::new_with_config(context.graph().conn(), context.config().conn())
+            .commit_all(&annotation_summary.summary)
+            .expect("should commit annotation fixture");
         let annotation_operation = current_history_operation_hash(context);
         (add_file_commit_hash, annotation_operation)
     }
@@ -980,12 +987,16 @@ mod tests {
         );
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let operation_commit = add_files_operation(
+        let operation_summary = add_files_operation(
             &context,
             &[OperationFile::new(fasta_path.to_string_lossy())],
             Some("track fasta fixture"),
         )
-        .expect("should commit FASTA asset operation");
+        .expect("should record FASTA asset operation");
+        let operation_commit =
+            DoltHistoryStore::new_with_config(context.graph().conn(), context.config().conn())
+                .commit_all(&operation_summary.summary)
+                .expect("should commit FASTA asset operation");
         let mut write_stream = Cursor::new(Vec::new());
         create_patch(
             &context,
@@ -1186,12 +1197,15 @@ mod tests {
         let history_store = DoltHistoryStore::new(context.graph().conn());
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let _op_1 = add_files_operation(
+        let add_file_summary = add_files_operation(
             &context,
             &[OperationFile::new(fasta_path.to_string_lossy())],
             Some("track fasta fixture"),
         )
-        .expect("should commit main branch fixture");
+        .expect("should record main branch fixture");
+        DoltHistoryStore::new_with_config(context.graph().conn(), context.config().conn())
+            .commit_all(&add_file_summary.summary)
+            .expect("should commit main branch fixture");
         let main_head = history_store
             .current_head()
             .unwrap()
@@ -1206,7 +1220,7 @@ mod tests {
             .checkout_branch(&gen_core::BranchName("new-branch".to_string()))
             .unwrap();
         let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
-        add_annotation_file(
+        let annotation_summary = add_annotation_file(
             &context,
             gff_path
                 .to_str()
@@ -1217,7 +1231,10 @@ mod tests {
             Some("track branch annotation"),
             AnnotationFileChecksumOverrides::default(),
         )
-        .expect("should commit branch annotation");
+        .expect("should record branch annotation");
+        history_store
+            .commit_all(&annotation_summary.summary)
+            .expect("should commit branch annotation");
         let op_2 = current_history_operation_hash(&context);
         let mut write_stream = Cursor::new(Vec::new());
         create_patch(&context, &[op_2], &mut write_stream).unwrap();
@@ -1450,11 +1467,17 @@ mod tests {
         let original_checksum =
             calculate_file_checksum(&input_path).expect("should checksum original FASTA bytes");
 
-        let operation_hash = add_files_operation(
+        let operation_summary = add_files_operation(
             &source_context,
             &[OperationFile::new(input_path.to_string_lossy())],
             Some("track reference fasta"),
         )
+        .expect("should record external fasta");
+        let operation_hash = DoltHistoryStore::new_with_config(
+            source_context.graph().conn(),
+            source_context.config().conn(),
+        )
+        .commit_all(&operation_summary.summary)
         .expect("should commit external fasta");
         assert_eq!(
             fs::read(&input_path).expect("should reread source FASTA bytes"),
@@ -1577,11 +1600,17 @@ mod tests {
         let original_bytes = fs::read(external_file.path()).expect("should read external FASTA");
         let original_checksum =
             calculate_file_checksum(external_file.path()).expect("should checksum external FASTA");
-        let operation_hash = add_files_operation(
+        let operation_summary = add_files_operation(
             &source_context,
             &[OperationFile::new(external_file.path().to_string_lossy())],
             Some("track external fasta"),
         )
+        .expect("should record external FASTA");
+        let operation_hash = DoltHistoryStore::new_with_config(
+            source_context.graph().conn(),
+            source_context.config().conn(),
+        )
+        .commit_all(&operation_summary.summary)
         .expect("should commit external FASTA");
         assert_eq!(
             fs::read(external_file.path()).expect("should reread external FASTA"),

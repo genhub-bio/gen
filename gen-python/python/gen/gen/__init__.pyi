@@ -22,6 +22,7 @@ __all__ = [
     "Sequence",
     "SequenceGraph",
     "SuperPosition",
+    "Transaction",
     "clone",
 ]
 
@@ -101,14 +102,14 @@ class Annotation:
 @typing.final
 class Asset:
     r"""
-    A file kept in the repository without being imported as sequence, such as a README, a FASTA or
-    GenBank file that was imported, or an annotation file.
+    A file kept in the repository, such as a README, a FASTA or GenBank file that was imported, or
+    an annotation file.
 
-    Add one with `Repository.add_file()` and list them with `Repository.get_assets()`. The
-    content is stored once under a hashed filename inside `.gen`, and text files such as FASTA or
-    README notes are kept compressed. `.name` is the file's original name, `.path` locates the
-    stored copy, which may be compressed, and `.save_as()` writes the original, readable file under
-    any name you choose. Treat the stored copy as read-only.
+    Add one with `Repository.add_file()` and list it with `Repository.get_assets()` or
+    `Repository.get_working_assets()`. The content is stored once under a hashed filename inside
+    `.gen`, and text files such as FASTA or README notes are kept compressed. `.name` is the file's
+    original name, `.path` locates the stored copy, which may be compressed, and `.save_as()` writes
+    the original, readable file under any name you choose. Treat the stored copy as read-only.
     """
     @property
     def id(self) -> HashId:
@@ -459,8 +460,7 @@ class Repository:
         `refseq_accession_id` and `genbank_id` also match without their version suffix;
         `ensembl_id`, `custom_id` and `chromosome` also match with `chr`, `Chr`, `chrom`, `Chrom`,
         `chromosome` and `Chromosome` prefixes (use `chromosome` for cases like Roman numerals,
-        11 for ensembl `XI`); `ucsc_id` matches as given. Give at least one identifier. Recorded as
-        its own operation.
+        11 for ensembl `XI`); `ucsc_id` matches as given. Give at least one identifier.
         """
     def stitch(
         self,
@@ -494,6 +494,10 @@ class Repository:
                 new_sample="assembly",
                 new_region="construct",
             )
+        """
+    def transaction(self, message: typing.Optional[builtins.str] = None) -> Transaction:
+        r"""
+        Starts a repository-wide transaction; successful context exit commits pending changes.
         """
     def get_branches(self) -> builtins.list[Branch]:
         r"""
@@ -537,7 +541,11 @@ class Repository:
         """
     def get_assets(self, branch: str | Branch | None = None) -> builtins.list[Asset]:
         r"""
-        Returns the assets reachable from the current branch or a named branch.
+        Returns committed assets from the current branch or a named branch.
+        """
+    def get_working_assets(self) -> builtins.list[Asset]:
+        r"""
+        Returns committed assets overlaid with additions and replacements in the current working set.
         """
     def add_file(
         self,
@@ -545,14 +553,12 @@ class Repository:
         message: typing.Optional[builtins.str] = None,
     ) -> Asset:
         r"""
-        Keep a file in the repository without importing it as sequence, for example a README or a
-        protocol, and return its `Asset`.
+        Stores a file as a repository asset and returns its `Asset`.
 
-        The content is stored once, inside `.gen`, and recorded as its own operation (with
-        `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-        stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-        the path of the file to store; a relative path is resolved against the current working
-        directory.
+        The content is stored once, inside `.gen`; `message` labels the addition. Adding the same
+        file again fails. Use `asset.path` to locate the stored copy or `asset.save_as(name)` to
+        write a copy under a name you choose. `filename` is the path of the file to store; a
+        relative path is resolved against the current working directory.
         """
     def merge(self, branch: str | Branch) -> Operation:
         r"""
@@ -562,14 +568,9 @@ class Repository:
         r"""
         Applies one operation to the current branch and returns the new HEAD operation.
         """
-    def reset(
-        self, operation: str | HashId | Operation, *, force: builtins.bool = False
-    ) -> Operation:
+    def reset(self, operation: str | HashId | Operation) -> Operation:
         r"""
         Hard-resets the current branch to an operation and returns the resulting HEAD.
-
-        By default, reset requires a clean working set. Pass `force=True` to discard uncommitted
-        changes along with later operations.
         """
     def import_annotations(
         self,
@@ -578,16 +579,15 @@ class Repository:
         index: typing.Optional[builtins.str] = None,
         name: typing.Optional[builtins.str] = None,
         message: typing.Optional[builtins.str] = None,
-    ) -> HashId:
+    ) -> typing.Optional[HashId]:
         r"""
-        Record an annotation file in the repository and return the `HashId` of the operation that
-        recorded it.
+        Imports an annotation file and makes its indexed features available on matching sequence graphs.
 
         The format is inferred from the filename unless provided. A neighboring tabix index is
         discovered unless an index path is provided. The file's features then appear in
         `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-        display and track name; `message` is the operation's commit message. `filename` and `index`
-        are path strings; a relative path is resolved against the current working directory.
+        display and track name; `message` labels the import. `filename` and `index` are path strings;
+        a relative path is resolved against the current working directory.
         """
     def import_fasta(
         self,
@@ -644,7 +644,7 @@ class Repository:
         supplies its own `name` (its id) unless one is given. `sample` is a name or a `Sample`, and
         defaults to the default sample, "reference"; call it repeatedly with the same `sample` to
         build up a sample from several sequences. With `circular=True` the sequence is stored as a
-        circular graph. Each call is its own operation, so use `import_fasta` for large files.
+        circular graph. For importing many sequences, use `import_fasta`.
 
         `collection` defaults to the default collection. A graph with this name must not already
         exist in the sample; with `exist_ok=True`, one holding exactly this sequence is returned
@@ -1029,11 +1029,9 @@ class Sample:
         r"""
         Copy this sample into a new sample with the same sequence graphs.
 
-        The destination name must not already exist. The returned sample is
-        ready for explicit in-place edits on its sequence graphs. `new_name` is the name of the
-        copy. The copy is
-        recorded as its own operation, using ``message`` as the operation's
-        commit message when given, or a generated description otherwise.
+        The destination name must not already exist. The returned sample is ready for explicit
+        in-place edits on its sequence graphs. `new_name` names the copy, and `message` optionally
+        labels it.
         """
     def add_metadata(self, metadata: dict) -> None:
         r"""
@@ -1141,6 +1139,10 @@ class SequenceGraph:
 
         Returns
         list[Annotation]
+        """
+    def transaction(self, message: typing.Optional[builtins.str] = None) -> Transaction:
+        r"""
+        Starts a repository-wide transaction; successful context exit commits pending changes.
         """
     def __repr__(self) -> builtins.str: ...
     def __hash__(self) -> builtins.int: ...
@@ -1427,10 +1429,8 @@ class SequenceGraph:
 
         The target may be a region string, a ``Locus`` from ``search()``, or an
         ``Annotation`` from ``annotations``. On a reverse-strand target the
-        sequence is read on that strand. The edit is recorded as its own operation,
-        using ``message`` as the operation's commit message when given, or a
-        generated description otherwise. Returns the ``Locus`` of the replacement
-        sequence.
+        sequence is read on that strand. ``message`` optionally labels the edit.
+        Returns the ``Locus`` of the replacement sequence.
 
         Parameters
         stack : bool, optional
@@ -1450,9 +1450,7 @@ class SequenceGraph:
         Delete the sequence covered by ``target``.
 
         The target may be a region string, a ``Locus`` from ``search()``, or an
-        ``Annotation`` from ``annotations``. The edit is recorded as its own
-        operation, using ``message`` as the operation's commit message when given,
-        or a generated description otherwise::
+        ``Annotation`` from ``annotations``. ``message`` optionally labels the edit::
 
             for annotation in sg.annotations:
                 sg.delete(annotation.locus)
@@ -1518,7 +1516,7 @@ class SequenceGraph:
             Add the insertion alongside the existing routes instead of retiring the connections
             it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
         message : str, optional
-            Commit message for the recorded operation.
+            Description associated with the insertion.
         """
 
 @typing.final
@@ -1581,6 +1579,41 @@ class SuperPosition:
     def __eq__(self, other: typing.Any) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Transaction:
+    r"""
+    An eagerly opened SQLite transaction or nested savepoint with context-manager support.
+    """
+    def __enter__(self) -> Transaction:
+        r"""
+        Returns this transaction for use as a context manager.
+        """
+    def __exit__(
+        self,
+        exception_type: typing.Optional[typing.Any],
+        _exception: typing.Optional[typing.Any],
+        _traceback: typing.Optional[typing.Any],
+    ) -> builtins.bool:
+        r"""
+        Commits a successful context or rolls it back when an exception exits the block.
+        """
+    def rollback(self) -> None:
+        r"""
+        Rolls back this transaction or nested savepoint, preserving work in its parent.
+        """
+    def undo(self) -> builtins.bool:
+        r"""
+        Undoes the newest operation savepoint on the SQLite connection, if one exists.
+        """
+    def commit(
+        self, message: typing.Optional[builtins.str] = None
+    ) -> typing.Optional[Operation]:
+        r"""
+        Releases an inner savepoint or commits an outermost transaction as one history operation.
+
+        Inner transactions return `None`; an empty outermost transaction also returns `None`.
+        """
 
 def clone(
     url: builtins.str,

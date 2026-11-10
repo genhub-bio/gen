@@ -27,7 +27,7 @@ use crate::python_api::{
     position::{PyPosition, PySuperPosition},
     repository::{
         PyRepository, clone_repository,
-        history::{PyAsset, PyBranch, PyOperation},
+        history::{PyAsset, PyBranch, PyOperation, PyTransaction},
         remote::PyRemote,
     },
     sample::{PySample, PySampleIter},
@@ -41,6 +41,7 @@ use crate::python_api::{
 pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBranch>()?;
+    m.add_class::<PyTransaction>()?;
     m.add_class::<PyOperation>()?;
     m.add_class::<PyAsset>()?;
     m.add_class::<PyRemote>()?;
