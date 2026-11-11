@@ -102,7 +102,7 @@ def _repository_identity(repository_url: str) -> tuple[str, str]:
 
 
 def _is_loopback_http_url(url: str) -> bool:
-    """Recognize only explicit localhost and IP loopback HTTP origins for local development."""
+    """Recognize IP loopback and RFC 6761 localhost names for local development."""
     try:
         parts = urlsplit(url)
         if (
@@ -117,7 +117,7 @@ def _is_loopback_http_url(url: str) -> bool:
         return False
 
     host = parts.hostname.casefold()
-    if host == "localhost":
+    if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
         return ipaddress.ip_address(host).is_loopback

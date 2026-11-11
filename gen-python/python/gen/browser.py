@@ -637,6 +637,7 @@ class NotebookSession:
             data={
                 "type": "ready",
                 "protocol": 1,
+                "capabilities": {"force_push": True},
                 "repository_url": self.repository_url,
                 "branch": current_branch.name,
                 "notebook_path": self.notebook_path,
@@ -683,6 +684,7 @@ class NotebookSession:
                 "method",
                 "target_branch",
                 "create_branch",
+                "force",
                 "notebook",
                 "notebook_path",
             }
@@ -698,6 +700,9 @@ class NotebookSession:
             create_branch = request.get("create_branch")
             if type(create_branch) is not bool:
                 raise NotebookSessionError("create_branch must be a boolean")
+            force = request.get("force", False)
+            if type(force) is not bool:
+                raise NotebookSessionError("force must be a boolean")
 
             has_notebook = "notebook" in request
             has_notebook_path = "notebook_path" in request
@@ -753,6 +758,7 @@ class NotebookSession:
             result = await self.commit(
                 target_branch,
                 create_branch=create_branch,
+                force=force,
                 **commit_options,
             )
             response = {"id": request_id, "result": result}
@@ -1447,15 +1453,21 @@ class NotebookSession:
         target_branch: str,
         create_branch: bool = False,
         *,
+        force: bool = False,
         notebook: dict[str, Any] | bytes | bytearray | None = None,
         notebook_path: str | None = None,
     ) -> dict[str, str]:
-        """Save the notebook locally, then push the current or a new branch."""
+        """Save the notebook, then push the current or a new branch.
+
+        Force pushing can replace remote-only commits when the branch has diverged.
+        """
         target_branch = _validate_branch(target_branch)
         if target_branch is None:
             raise ValueError("target_branch must be a non-empty string")
         if not isinstance(create_branch, bool):
             raise TypeError("create_branch must be a bool")
+        if type(force) is not bool:
+            raise TypeError("force must be a bool")
 
         if (notebook is None) != (notebook_path is None):
             raise ValueError("notebook and notebook_path must be provided together")
@@ -1524,7 +1536,7 @@ class NotebookSession:
             )
         commit_hash = str(current_branch.head)
         try:
-            self.repository.push(branch=target_branch, force=False)
+            self.repository.push(branch=target_branch, force=force)
         except Exception as error:
             raise NotebookSessionError(
                 f"Could not push branch '{target_branch}': {error}"

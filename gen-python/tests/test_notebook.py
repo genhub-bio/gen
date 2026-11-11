@@ -343,6 +343,32 @@ class SignedAssetUrlTests(unittest.TestCase):
                 )
                 self.assertGreater(expires_at, datetime.now(timezone.utc))
 
+    def test_localhost_subdomains_accept_local_storage_but_not_lookalikes(self):
+        storage_url = self._signed_url("http://127.0.0.1:4443")
+        local_repository_urls = (
+            "http://genhub.localhost:5173/api/repos/test/repository",
+            "http://notebook.genhub.localhost:5174/api/repos/test/repository",
+        )
+
+        for repository_url in local_repository_urls:
+            with self.subTest(repository_url=repository_url):
+                expires_at = signed_url_expiration(
+                    storage_url, repository_url, "reference.fa"
+                )
+                self.assertGreater(expires_at, datetime.now(timezone.utc))
+
+        nonlocal_repository_urls = (
+            "http://genhub.localhost.evil.test:5173/api/repos/test/repository",
+            "http://localhost.example.test:5173/api/repos/test/repository",
+            "http://example.test:5173/api/repos/test/repository",
+        )
+        for repository_url in nonlocal_repository_urls:
+            with self.subTest(repository_url=repository_url):
+                with self.assertRaisesRegex(
+                    BrowserFileError, "safe, expiring storage URL"
+                ):
+                    signed_url_expiration(storage_url, repository_url, "reference.fa")
+
     def test_production_repository_rejects_loopback_storage_urls(self):
         storage_url = self._signed_url("http://127.0.0.1:4443")
 
@@ -1385,6 +1411,7 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
             {
                 "type": "ready",
                 "protocol": 1,
+                "capabilities": {"force_push": True},
                 "repository_url": REPOSITORY_URL,
                 "branch": self.branch,
                 "notebook_path": "notebooks/active.ipynb",
@@ -1440,6 +1467,18 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other_repository.current_branch.name, self.branch)
         self.assertEqual(repository.calls[-1], ("push", None, "header-edits", False))
 
+        force_request = {
+            "id": "force-existing-branch",
+            "method": "commit",
+            "target_branch": "header-edits",
+            "create_branch": False,
+            "force": True,
+        }
+        await self._send_control_comm(session, comm, force_request)
+        self.assertEqual(comm.sent[-1]["id"], force_request["id"])
+        self.assertIn("result", comm.sent[-1])
+        self.assertEqual(repository.calls[-1], ("push", None, "header-edits", True))
+
         push_count = sum(call[0] == "push" for call in repository.calls)
         await self._send_control_comm(session, comm, branch_request)
         self.assertEqual(
@@ -1487,6 +1526,20 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
                 "method": "commit",
                 "target_branch": self.branch,
                 "create_branch": 1,
+            },
+            {
+                "id": "invalid-force-number",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": False,
+                "force": 1,
+            },
+            {
+                "id": "invalid-force-string",
+                "method": "commit",
+                "target_branch": self.branch,
+                "create_branch": False,
+                "force": "true",
             },
             {
                 "id": "missing-notebook",
@@ -1735,6 +1788,38 @@ class NotebookSessionTests(unittest.IsolatedAsyncioTestCase):
                 for asset in self.source_repository.get_assets()
             )
         )
+
+    async def test_force_push_requires_boolean_and_is_explicit(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph()
+        self.addCleanup(session.close)
+
+        with self.assertRaisesRegex(TypeError, "force must be a bool"):
+            await session.commit(self.branch, force=1)
+        self.assertEqual(session.repository.calls, [])
+
+        result = await session.commit(self.branch, force=True)
+        self.assertEqual(result["branch"], self.branch)
+        self.assertEqual(
+            session.repository.calls[-1], ("push", None, self.branch, True)
+        )
+
+    async def test_force_push_does_not_retry_after_authentication_failure(self):
+        with patch(
+            "gen.browser._browser_origin", return_value="https://genhub.example"
+        ):
+            session = await self._open_local_graph()
+        self.addCleanup(session.close)
+        session.repository.push_error = RuntimeError("login required")
+
+        with self.assertRaisesRegex(NotebookSessionError, "login required"):
+            await session.commit(self.branch, force=True)
+
+        push_calls = [call for call in session.repository.calls if call[0] == "push"]
+        self.assertEqual(push_calls, [("push", None, self.branch, True)])
+        self.assertEqual(session.repository.current_branch.name, self.branch)
 
     async def test_new_branch_starts_at_edited_head_and_pushes_without_force(self):
         with patch(
