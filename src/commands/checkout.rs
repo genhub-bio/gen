@@ -11,11 +11,8 @@ use gen_models::{
     operations::Defaults,
 };
 
-use crate::{
-    asset_materialization::{
-        DownloadAssetOutcome, materialize_versioned_asset, warn_asset_conflict,
-    },
-    history::ensure_clean_working_set,
+use crate::asset_materialization::{
+    DownloadAssetOutcome, materialize_versioned_asset, warn_asset_conflict,
 };
 
 /// Restores assets present at the requested commit from `.gen/assets` into the workspace

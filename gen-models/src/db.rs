@@ -373,7 +373,9 @@ impl DbContext {
         let graph = self.graph.conn();
         let is_outermost = graph.is_autocommit();
         if is_outermost {
-            graph.start_transaction_with_behavior(graph_write_transaction_behavior(&self.workspace))?;
+            graph.start_transaction_with_behavior(graph_write_transaction_behavior(
+                &self.workspace,
+            ))?;
         } else {
             graph.execute_batch(&format!("SAVEPOINT {TRANSACTION_SAVEPOINT}"))?;
         }
@@ -476,8 +478,10 @@ impl DbContext {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{c_char, c_int, c_void};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        ffi::{c_char, c_int, c_void},
+        sync::{Arc, Mutex},
+    };
 
     use gen_core::config::Workspace;
     use rusqlite::Connection;

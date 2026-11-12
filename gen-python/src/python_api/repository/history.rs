@@ -12,11 +12,9 @@ use gen_models::{
     errors::{AddFilesOperationError, FileAdditionError, OperationError},
     history::{
         HistoryEntry, HistoryStore,
-        dolt::{
-            DoltBranchRow, DoltHistoryStore, branch_exists, branch_rows, get_branch, hash_of,
-        },
+        dolt::{DoltBranchRow, DoltHistoryStore, branch_exists, branch_rows, get_branch, hash_of},
     },
-    operations::{OperationFile, OperationInfo, RemoteBranch, add_files_operation},
+    operations::{OperationFile, RemoteBranch, add_files_operation},
 };
 use pyo3::{
     exceptions::{PyFileExistsError, PyFileNotFoundError, PyRuntimeError, PyValueError},
@@ -777,53 +775,60 @@ impl PyRepository {
         }
         let file = OperationFile::new(path);
         let asset_name = file.filename.clone();
-        let (asset_ref, _) = run_context_savepoint_write(&self.context, || {
-            match add_files_operation(&self.context, &[file], message) {
-                Ok(operation_summary) => {
-                    let asset_ref = operation_summary
-                        .prepared_asset_refs
-                        .as_ref()
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err("the added file was not recorded as an asset")
-                        })?
-                        .iter()
-                        .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
-                        .cloned()
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err("the added file was not recorded as an asset")
-                        })?;
-                    Ok((asset_ref, Some(operation_summary)))
-                }
-                Err(AddFilesOperationError::OperationError(OperationError::NoChanges))
-                    if allow_no_changes =>
-                {
-                    let connection = self.context.graph().conn();
-                    let mut assets = Assets::get_added_working_assets(connection)
-                        .map_err(history_err_to_pyerr)?;
-                    let history_store = DoltHistoryStore::new(connection);
-                    let branch = history_store
-                        .current_branch()
-                        .map_err(history_err_to_pyerr)?
-                        .ok_or_else(|| PyRuntimeError::new_err("repository has no current branch"))?;
-                    assets.extend(
-                        Assets::get_branch_assets(connection, &branch.0)
+        let (asset_ref, _) =
+            run_context_savepoint_write(&self.context, || {
+                match add_files_operation(&self.context, &[file], message) {
+                    Ok(operation_summary) => {
+                        let asset_ref = operation_summary
+                            .prepared_asset_refs
+                            .as_ref()
+                            .ok_or_else(|| {
+                                PyRuntimeError::new_err(
+                                    "the added file was not recorded as an asset",
+                                )
+                            })?
+                            .iter()
+                            .find(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                            .cloned()
+                            .ok_or_else(|| {
+                                PyRuntimeError::new_err(
+                                    "the added file was not recorded as an asset",
+                                )
+                            })?;
+                        Ok((asset_ref, Some(operation_summary)))
+                    }
+                    Err(AddFilesOperationError::OperationError(OperationError::NoChanges))
+                        if allow_no_changes =>
+                    {
+                        let connection = self.context.graph().conn();
+                        let mut assets = Assets::get_added_working_assets(connection)
+                            .map_err(history_err_to_pyerr)?;
+                        let history_store = DoltHistoryStore::new(connection);
+                        let branch = history_store
+                            .current_branch()
                             .map_err(history_err_to_pyerr)?
-                            .into_values(),
-                    );
-                    let asset_ref = assets
-                        .into_iter()
-                        .filter(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
-                        .max_by_key(|asset| asset.created_on)
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(
-                                "the existing file was not recorded as an asset",
-                            )
-                        })?;
-                    Ok((asset_ref, None))
+                            .ok_or_else(|| {
+                                PyRuntimeError::new_err("repository has no current branch")
+                            })?;
+                        assets.extend(
+                            Assets::get_branch_assets(connection, &branch.0)
+                                .map_err(history_err_to_pyerr)?
+                                .into_values(),
+                        );
+                        let asset_ref = assets
+                            .into_iter()
+                            .filter(|asset| asset.name.as_deref() == Some(asset_name.as_str()))
+                            .max_by_key(|asset| asset.created_on)
+                            .ok_or_else(|| {
+                                PyRuntimeError::new_err(
+                                    "the existing file was not recorded as an asset",
+                                )
+                            })?;
+                        Ok((asset_ref, None))
+                    }
+                    Err(error) => Err(add_files_err_to_pyerr(path, error)),
                 }
-                Err(error) => Err(add_files_err_to_pyerr(path, error)),
-            }
-        })?;
+            })?;
         Ok(PyAsset::new(asset_ref, &self.context))
     }
 
@@ -939,7 +944,13 @@ mod tests {
             assert!(!feature.is_current, "new branch should not be current");
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             let checked_out = repository
-                .checkout(feature_object.bind(python).as_any(), false, false, None, true)
+                .checkout(
+                    feature_object.bind(python).as_any(),
+                    false,
+                    false,
+                    None,
+                    true,
+                )
                 .expect("should checkout Branch object");
             assert!(
                 checked_out.is_current,

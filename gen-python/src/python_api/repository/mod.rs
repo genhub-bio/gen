@@ -17,9 +17,7 @@ use gen_models::{
         HistoryStore,
         dolt::{DoltHistoryStore, set_commit_author_email, set_commit_author_name},
     },
-    operations::{
-        Defaults, OperationSummary, commit_operation_summary, record_operation_summary,
-    },
+    operations::{Defaults, OperationSummary, commit_operation_summary, record_operation_summary},
     sample::Sample,
 };
 use pyo3::{
@@ -170,11 +168,9 @@ where
 
     // dolt_commit seals the SQL transaction after recording the operation. Keep
     // the guard alive until then so failures also roll back the graph mutations.
-    let _transaction = Transaction::new_unchecked(
-        graph,
-        graph_write_transaction_behavior(context.workspace()),
-    )
-    .map_err(sqlite_err_to_pyerr)?;
+    let _transaction =
+        Transaction::new_unchecked(graph, graph_write_transaction_behavior(context.workspace()))
+            .map_err(sqlite_err_to_pyerr)?;
     let (value, operation_summary) = op(context)?;
     commit_operation_summary(context, &operation_summary).map_err(map_operation_error)?;
 
@@ -287,14 +283,13 @@ impl PyRepository {
     #[cfg(feature = "remote")]
     pub(crate) fn refresh_graph_connection(&mut self) -> PyResult<()> {
         let intended_branch = Defaults::get_current_branch(self.context.config().conn());
-        let graph_connection =
-            r#gen::get_workspace_graph_connection_for_branch(
-                self.context.workspace(),
-                intended_branch.as_deref(),
-            )
-            .map_err(|error| {
-                PyRuntimeError::new_err(format!("Failed to reopen graph database: {error}"))
-            })?;
+        let graph_connection = r#gen::get_workspace_graph_connection_for_branch(
+            self.context.workspace(),
+            intended_branch.as_deref(),
+        )
+        .map_err(|error| {
+            PyRuntimeError::new_err(format!("Failed to reopen graph database: {error}"))
+        })?;
         self.context
             .set_graph(graph_connection)
             .map_err(sqlite_err_to_pyerr)?;
