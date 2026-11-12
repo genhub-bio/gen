@@ -1,13 +1,15 @@
 import { makeGridMetrics } from "./grid";
 import { paintFrame, Frame } from "./renderer";
 import { attachInteraction } from "./interaction";
+import { columnsForContentWidth } from "./viewport";
 
 declare const INTERACTIVE: boolean;
 
 interface AnywidgetModel {
   get(key: "frame"): Frame;
-  get(key: "page_count"): number;
-  get(key: "page_index"): number;
+  get(key: "page_count" | "page_index" | "cols"): number;
+  set(key: "cols", value: number): void;
+  save_changes(): void;
   on(event: "change:frame", callback: () => void): void;
   on(event: "change:page_index", callback: () => void): void;
   on(event: "msg:custom", callback: (msg: { type: string; data?: string }) => void): void;
@@ -24,10 +26,19 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
   const scratchCtx = scratch.getContext("2d")!;
   const grid = makeGridMetrics(scratchCtx);
 
-  el.style.overflowX = "auto";
+  if (INTERACTIVE) {
+    el.style.display = "block";
+    el.style.boxSizing = "border-box";
+    el.style.width = "100%";
+    el.style.minWidth = "0";
+    el.style.overflowX = "auto";
+  } else {
+    el.style.overflowX = "auto";
+  }
 
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
+  if (INTERACTIVE) wrapper.style.maxWidth = "100%";
 
   const canvas = document.createElement("canvas");
   canvas.style.cssText = `display: block; cursor: ${INTERACTIVE ? "grab" : "default"}; box-shadow: inset 0 0 0 2px #45475a;`;
@@ -36,6 +47,35 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
   el.appendChild(wrapper);
 
   const ctx = canvas.getContext("2d")!;
+
+  let resizeObserver: ResizeObserver | null = null;
+  const updateColumns = (contentWidth: number): boolean => {
+    const cols = columnsForContentWidth(contentWidth, grid.cellW);
+    if (cols === null || cols === model.get("cols")) return false;
+    model.set("cols", cols);
+    model.save_changes();
+    return true;
+  };
+
+  if (INTERACTIVE) {
+    // The widget root is a block constrained by the notebook output cell, so
+    // observing its content box follows cell and side-panel resizes without
+    // measuring the wider canvas inside the scrollable output.
+    const computedStyle = window.getComputedStyle(el);
+    const initialContentWidth =
+      el.clientWidth -
+      Number.parseFloat(computedStyle.paddingLeft) -
+      Number.parseFloat(computedStyle.paddingRight);
+    updateColumns(initialContentWidth);
+
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (entry) updateColumns(entry.contentRect.width);
+      });
+      resizeObserver.observe(el);
+    }
+  }
 
   paintFrame(ctx, canvas, grid, model.get("frame"));
 
@@ -218,6 +258,8 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
 
     function doFreeze(): void {
       if (snapshotTimer) { clearTimeout(snapshotTimer); snapshotTimer = null; }
+      resizeObserver?.disconnect();
+      resizeObserver = null;
       frozen = true;
       btnContainer.style.display = "none";
       pageIndicator.style.display = "none";
@@ -226,7 +268,7 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
       const { dataUrl, width, height } = captureHiRes();
       const img = document.createElement("img");
       img.src = dataUrl;
-      img.style.cssText = `display:block;cursor:default;width:${width}px;height:${height}px`;
+      img.style.cssText = `display:block;cursor:default;width:${width}px;height:auto;max-width:100%`;
       wrapper.replaceChild(img, canvas);
       model.send({ type: "freeze", data: dataUrl, width, height });
     }
@@ -240,6 +282,7 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
     return {
       destroy() {
         if (snapshotTimer) clearTimeout(snapshotTimer);
+        resizeObserver?.disconnect();
         detachInteraction();
       },
     };

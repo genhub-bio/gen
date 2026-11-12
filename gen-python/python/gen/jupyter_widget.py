@@ -282,12 +282,13 @@ class GraphWidget(anywidget.AnyWidget):
             self._frozen = True
             if self._display_handle is not None:
                 w, h = msg.get("width"), msg.get("height")
-                size = f";width:{w}px;height:{h}px" if w and h else ""
+                size = f";width:{w}px" if w and h else ""
                 self._display_handle.update(
                     {
                         "text/html": (
                             f'<img src="{data_url}" '
-                            f'style="display:block;font-family:monospace{size}" />'
+                            f'style="display:block;font-family:monospace{size};'
+                            'max-width:100%;height:auto" />'
                         ),
                         "text/plain": _FREEZE_TEXT_HINT + ascii_repr,
                     },

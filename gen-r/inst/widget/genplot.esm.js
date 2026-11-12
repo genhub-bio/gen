@@ -128,6 +128,11 @@ function paintFrame(ctx, canvas, grid, frame) {
   return nodeCells;
 }
 
+// js/viewport.ts
+function columnsForContentWidth(contentWidth, cellWidth) {
+  return !Number.isFinite(contentWidth) || !Number.isFinite(cellWidth) || contentWidth <= 0 || cellWidth <= 0 ? null : Math.max(1, Math.floor(contentWidth / cellWidth));
+}
+
 // js/index.ts
 function render({ model, el }) {
   let scratchCtx = document.createElement("canvas").getContext("2d"), grid = makeGridMetrics(scratchCtx);
@@ -136,7 +141,10 @@ function render({ model, el }) {
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
   let canvas = document.createElement("canvas");
   canvas.style.cssText = "display: block; cursor: default; box-shadow: inset 0 0 0 2px #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);
-  let ctx = canvas.getContext("2d");
+  let ctx = canvas.getContext("2d"), resizeObserver = null, updateColumns = (contentWidth) => {
+    let cols = columnsForContentWidth(contentWidth, grid.cellW);
+    return cols === null || cols === model.get("cols") ? !1 : (model.set("cols", cols), model.save_changes(), !0);
+  };
   if (paintFrame(ctx, canvas, grid, model.get("frame")), 0)
     var makeBtn, makePageArrow, updatePageLabel, captureHiRes, sendSnapshot, scheduleSnapshot, repaint, doFreeze;
 }

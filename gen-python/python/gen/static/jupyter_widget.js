@@ -285,19 +285,56 @@ function attachInteraction(canvas, model, grid, getNodeCells, isFrozen) {
   };
 }
 
+// js/viewport.ts
+function columnsForContentWidth(contentWidth, cellWidth) {
+  if (!Number.isFinite(contentWidth) || !Number.isFinite(cellWidth) || contentWidth <= 0 || cellWidth <= 0) {
+    return null;
+  }
+  return Math.max(1, Math.floor(contentWidth / cellWidth));
+}
+
 // js/index.ts
 function render({ model, el }) {
   const scratch = document.createElement("canvas");
   const scratchCtx = scratch.getContext("2d");
   const grid = makeGridMetrics(scratchCtx);
-  el.style.overflowX = "auto";
+  if (true) {
+    el.style.display = "block";
+    el.style.boxSizing = "border-box";
+    el.style.width = "100%";
+    el.style.minWidth = "0";
+    el.style.overflowX = "auto";
+  } else {
+    el.style.overflowX = "auto";
+  }
   const wrapper = document.createElement("div");
   wrapper.style.cssText = "position: relative; display: inline-block; line-height: 0;";
+  if (true) wrapper.style.maxWidth = "100%";
   const canvas = document.createElement("canvas");
   canvas.style.cssText = `display: block; cursor: ${true ? "grab" : "default"}; box-shadow: inset 0 0 0 2px #45475a;`;
   wrapper.appendChild(canvas);
   el.appendChild(wrapper);
   const ctx = canvas.getContext("2d");
+  let resizeObserver = null;
+  const updateColumns = (contentWidth) => {
+    const cols = columnsForContentWidth(contentWidth, grid.cellW);
+    if (cols === null || cols === model.get("cols")) return false;
+    model.set("cols", cols);
+    model.save_changes();
+    return true;
+  };
+  if (true) {
+    const computedStyle = window.getComputedStyle(el);
+    const initialContentWidth = el.clientWidth - Number.parseFloat(computedStyle.paddingLeft) - Number.parseFloat(computedStyle.paddingRight);
+    updateColumns(initialContentWidth);
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (entry) updateColumns(entry.contentRect.width);
+      });
+      resizeObserver.observe(el);
+    }
+  }
   paintFrame(ctx, canvas, grid, model.get("frame"));
   if (true) {
     let makeBtn2 = function(svg, title, onClick) {
@@ -340,6 +377,8 @@ function render({ model, el }) {
         clearTimeout(snapshotTimer);
         snapshotTimer = null;
       }
+      resizeObserver?.disconnect();
+      resizeObserver = null;
       frozen = true;
       btnContainer.style.display = "none";
       pageIndicator.style.display = "none";
@@ -348,7 +387,7 @@ function render({ model, el }) {
       const { dataUrl, width, height } = captureHiRes2();
       const img = document.createElement("img");
       img.src = dataUrl;
-      img.style.cssText = `display:block;cursor:default;width:${width}px;height:${height}px`;
+      img.style.cssText = `display:block;cursor:default;width:${width}px;height:auto;max-width:100%`;
       wrapper.replaceChild(img, canvas);
       model.send({ type: "freeze", data: dataUrl, width, height });
     };
@@ -471,6 +510,7 @@ function render({ model, el }) {
     return {
       destroy() {
         if (snapshotTimer) clearTimeout(snapshotTimer);
+        resizeObserver?.disconnect();
         detachInteraction();
       }
     };
