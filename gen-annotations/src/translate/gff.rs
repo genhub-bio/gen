@@ -110,10 +110,7 @@ mod tests {
     };
 
     use gen_core::Strand;
-    use gen_models::{
-        block_group::BlockGroup, history::dolt::commit_all, reference_alias::ReferenceAlias,
-        sample::Sample,
-    };
+    use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
 
     use super::translate_gff;
     use crate::test_helpers::{

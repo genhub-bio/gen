@@ -140,8 +140,8 @@ pub fn update_with_library(
     new_sample_name: &str,
     region_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
-    library_file_path: Option<&str>,
     parts_file_path: Option<&str>,
+    library_file_path: Option<&str>,
 ) -> Result<OperationSummary, UpdateWithLibraryError> {
     let conn = context.graph().conn();
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
@@ -513,6 +513,51 @@ mod tests {
         graphs::combinatorial_library::parse_library, imports::fasta::import_fasta,
         test_helpers::setup_gen,
     };
+
+    #[test]
+    fn test_update_with_library_records_input_file_types() -> Result<()> {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let reference_path = fixtures.join("simple.fa");
+        let parts_path = fixtures.join("parts.fa");
+        let library_path = fixtures.join("single_column_design.csv");
+        let parts_path = parts_path.to_str().expect("should have a UTF-8 parts path");
+        let library_path = library_path
+            .to_str()
+            .expect("should have a UTF-8 library path");
+
+        import_fasta(
+            &context,
+            &reference_path
+                .to_str()
+                .expect("should have a UTF-8 reference path")
+                .to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )?;
+        let parts_list = parse_library(parts_path, library_path)?;
+        let operation_summary = update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "library sample",
+            "m123:7-20",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        assert_eq!(
+            operation_summary.operation_info.files,
+            vec![
+                OperationFile::new(library_path).set_file_type(FileTypes::CSV),
+                OperationFile::new(parts_path).set_file_type(FileTypes::Fasta),
+            ],
+        );
+        Ok(())
+    }
 
     #[test]
     fn makes_a_pool() -> Result<()> {
