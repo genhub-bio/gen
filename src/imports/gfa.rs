@@ -259,7 +259,7 @@ pub fn import_gfa(
             .collect::<Vec<BlockGroupEdgeData>>(),
     );
 
-    for input_path in &gfa.paths {
+    for (path_index, input_path) in gfa.paths.iter().enumerate() {
         let path_name = &input_path.name;
         let mut source_node_id = PATH_START_NODE_ID;
         let mut source_coordinate = 0;
@@ -295,10 +295,16 @@ pub fn import_gfa(
         path_edge_ids.push(edge_id);
         path_edge_data.push(key);
         Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
-        Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
+        Path::create_with_validated_edges(
+            conn,
+            path_name,
+            &block_group.id,
+            &path_edge_ids,
+            path_index == 0,
+        )?;
     }
 
-    for input_walk in &gfa.walk {
+    for (walk_index, input_walk) in gfa.walk.iter().enumerate() {
         let path_name = &input_walk.sample_id;
         let mut source_node_id = PATH_START_NODE_ID;
         let mut source_coordinate = 0;
@@ -334,7 +340,13 @@ pub fn import_gfa(
         path_edge_ids.push(edge_id);
         path_edge_data.push(key);
         Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
-        Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
+        Path::create_with_validated_edges(
+            conn,
+            path_name,
+            &block_group.id,
+            &path_edge_ids,
+            gfa.paths.is_empty() && walk_index == 0,
+        )?;
     }
 
     // check the graph for cycles and make start/end nodes if so

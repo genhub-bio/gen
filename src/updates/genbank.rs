@@ -14,6 +14,7 @@ use gen_models::{
     operations::{OperationInfo, OperationSummary},
     path::Path,
     region::ResolvedGenRegion,
+    sample::{NewSample, Sample},
     sequence::Sequence,
 };
 use itertools::Itertools;
@@ -38,6 +39,13 @@ where
         Err(CollectionError::Duplicate(c)) => c,
         Err(e) => return Err(GenBankError::CollectionError(e)),
     };
+    Sample::get_or_create(
+        conn,
+        NewSample {
+            name: sample_name,
+            ..Default::default()
+        },
+    )?;
     for result in reader {
         match result {
             Ok(seq) => {
@@ -144,6 +152,7 @@ where
                         &locus.name,
                         &block_group.id,
                         &[edge_into.id, edge_out_of.id],
+                        block_group.parent_block_group_id.is_none(),
                     )?
                 };
                 let changes = locus.changes_to_wt();
@@ -277,6 +286,36 @@ mod tests {
                     .to_string()
             ))
         )
+    }
+
+    #[test]
+    fn test_create_missing_creates_sample_and_graph() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let sample_name = "new GenBank sample";
+        let data = include_bytes!("../../fixtures/geneious_genbank/insertion.gb");
+        assert!(Sample::get_by_name(conn, sample_name).is_err());
+
+        update_with_genbank(
+            &context,
+            data.as_slice(),
+            Some("test"),
+            sample_name,
+            true,
+            &OperationInfo {
+                files: vec![],
+                description: "test".to_string(),
+            },
+        )
+        .expect("should update GenBank into a missing sample");
+
+        let sample = Sample::get_by_name(conn, sample_name).expect("should create sample");
+        assert!(!sample.is_reference);
+        let block_groups = Sample::get_block_groups(conn, "test", sample_name, None);
+        assert_eq!(block_groups.len(), 1);
+        let path = BlockGroup::get_current_path(conn, &block_groups[0].id, None)
+            .expect("should create path in the sample's block group");
+        assert!(path.length(conn, None).expect("should read path length") > 0);
     }
 
     #[test]

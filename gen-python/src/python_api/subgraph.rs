@@ -134,7 +134,7 @@ fn create_subgraph_between(
                 .chain(internal.iter().map(|edge| edge.id))
                 .chain(core::iter::once(end_edge.edge.id))
                 .collect::<Vec<_>>();
-            Path::create(conn, &current_path.name, &child.id, &edge_ids)?;
+            Path::create(conn, &current_path.name, &child.id, &edge_ids, false)?;
         }
     }
     Ok(child)

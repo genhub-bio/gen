@@ -1494,7 +1494,7 @@ mod tests {
                     break;
                 }
             }
-            let path = Path::create(conn, name, &block_group_id, &ordered).unwrap();
+            let path = Path::create(conn, name, &block_group_id, &ordered, false).unwrap();
             let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession
@@ -1508,7 +1508,7 @@ mod tests {
             start: i64,
             end: i64,
         ) -> Accession {
-            let path = Path::create(conn, name, &block_group_id, edge_ids).unwrap();
+            let path = Path::create(conn, name, &block_group_id, edge_ids, false).unwrap();
             let accession = BlockGroup::add_accession(conn, &path, name, start, end).unwrap();
             Path::delete(conn, name, &block_group_id);
             accession

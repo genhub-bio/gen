@@ -1217,7 +1217,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{TestContext, get_sample_bg, setup_block_group, setup_gen},
+        test_helpers::{TestContext, get_sample_bg, setup_gen},
     };
     #[test]
     fn test_update_vcf_stores_sample_metadata_scores() {

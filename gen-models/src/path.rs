@@ -41,6 +41,8 @@ pub struct Path {
     pub block_group_id: HashId,
     pub name: String,
     pub created_on: i64,
+    /// Whether this path defines the coordinate reference for its block-group lineage.
+    pub is_reference: bool,
     /// History ref this runtime model was selected from.
     #[serde(skip)]
     #[model_select(history_ref)]
@@ -61,6 +63,7 @@ impl PartialEq for Path {
             && self.block_group_id == other.block_group_id
             && self.name == other.name
             && self.created_on == other.created_on
+            && self.is_reference == other.is_reference
     }
 }
 
@@ -72,6 +75,7 @@ impl Hash for Path {
         self.block_group_id.hash(state);
         self.name.hash(state);
         self.created_on.hash(state);
+        self.is_reference.hash(state);
     }
 }
 
@@ -102,6 +106,7 @@ impl<'a> Capnp<'a> for Path {
         builder.set_block_group_id(&self.block_group_id.0).unwrap();
         builder.set_name(&self.name);
         builder.set_created_on(self.created_on);
+        builder.set_is_reference(self.is_reference);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -127,6 +132,7 @@ impl<'a> Capnp<'a> for Path {
             block_group_id,
             name,
             created_on,
+            is_reference: reader.get_is_reference(),
             history_ref: None,
             cached_block_group: ForeignKeyCache::default(),
             cached_interval_tree: None,
@@ -433,17 +439,19 @@ impl Path {
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, name, block_group_id, edge_ids))
     )]
+    /// Creates a path with an explicit, immutable reference status.
     pub fn create(
         conn: &GraphConnection,
         name: &str,
         block_group_id: &HashId,
         edge_ids: &[HashId],
+        is_reference: bool,
     ) -> Result<Path, PathError> {
         Path::validate_edges(conn, edge_ids, block_group_id)?;
-        Self::create_from_edge_ids(conn, name, block_group_id, edge_ids)
+        Self::create_from_edge_ids(conn, name, block_group_id, edge_ids, is_reference)
     }
 
-    /// Creates a path from edge identifiers previously validated in memory.
+    /// Creates a path from edges validated in memory with an explicit reference status.
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, name, block_group_id, edge_ids))
@@ -453,8 +461,9 @@ impl Path {
         name: &str,
         block_group_id: &HashId,
         edge_ids: &[HashId],
+        is_reference: bool,
     ) -> Result<Path, PathError> {
-        Self::create_from_edge_ids(conn, name, block_group_id, edge_ids)
+        Self::create_from_edge_ids(conn, name, block_group_id, edge_ids, is_reference)
     }
 
     fn create_from_edge_ids(
@@ -462,51 +471,42 @@ impl Path {
         name: &str,
         block_group_id: &HashId,
         edge_ids: &[HashId],
+        is_reference: bool,
     ) -> Result<Path, PathError> {
         let hash = HashId(calculate_hash(&format!("{block_group_id}:{name}")));
-        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-        // TODO: Should we do something if edge_ids don't match here? Suppose we have a path
-        // for a block group with edges 1,2,3. And then the same path is added again with edges
-        // 5,6,7, should this be an error? Should we just keep adding edges?
-        let encoded_edge_ids = Self::encode_edge_ids(edge_ids);
-        let query = "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids) VALUES (?1, ?2, ?3, ?4, ?5);";
-        let mut stmt = conn.prepare(query).unwrap();
-
-        let path = match stmt.execute(params![
-            hash,
-            name,
-            block_group_id,
-            timestamp,
-            encoded_edge_ids
-        ]) {
-            Ok(_) => Path {
-                id: hash,
-                name: name.to_string(),
-                block_group_id: *block_group_id,
-                created_on: timestamp,
-                history_ref: None,
-                cached_block_group: ForeignKeyCache::default(),
-                cached_interval_tree: None,
-            },
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Path {
-                    id: hash,
-                    name: name.to_string(),
-                    block_group_id: *block_group_id,
-                    created_on: timestamp,
-                    history_ref: None,
-                    cached_block_group: ForeignKeyCache::default(),
-                    cached_interval_tree: None,
-                }
+        if let Some(existing) = Self::select(conn).get_by_id(hash)? {
+            if is_reference && !existing.is_reference {
+                return Err(PathError::Invalid(
+                    "an existing path cannot be promoted to reference".to_string(),
+                ));
             }
-            Err(e) => {
-                return Err(PathError::DatabaseError(e));
-            }
-        };
-
-        Ok(path)
+            return Ok(existing);
+        }
+        let timestamp = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .expect("should fit timestamp");
+        conn.execute(
+            "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids, is_reference)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                hash,
+                name,
+                block_group_id,
+                timestamp,
+                Self::encode_edge_ids(edge_ids),
+                is_reference
+            ],
+        )?;
+        Ok(Path {
+            id: hash,
+            name: name.to_string(),
+            block_group_id: *block_group_id,
+            created_on: timestamp,
+            is_reference,
+            history_ref: None,
+            cached_block_group: ForeignKeyCache::default(),
+            cached_interval_tree: None,
+        })
     }
 
     /// Replaces a path's ordered edges after validation, preserving its identity and metadata.
@@ -1012,7 +1012,7 @@ impl Path {
         }
 
         let new_name = Self::generate_path_name(&self.name, &new_edge_ids);
-        Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
+        Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids, false)
     }
 
     pub fn new_path_with_deletion(
@@ -1090,7 +1090,7 @@ impl Path {
 
         let new_name = Self::generate_path_name(&self.name, &new_edge_ids);
 
-        Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
+        Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids, false)
     }
 
     fn node_blocks_for_range(
@@ -1361,7 +1361,7 @@ mod tests {
                     phased: 0,
                 }],
             );
-            let path = Path::create(conn, "chr1", &block_group.id, &[edge.id]).unwrap();
+            let path = Path::create(conn, "chr1", &block_group.id, &[edge.id], false).unwrap();
 
             let region = Region::parse("CHR1").unwrap();
             let resolved = Path::resolve(&region, conn, "test collection", "test-sample").unwrap();
@@ -1406,7 +1406,7 @@ mod tests {
                     phased: 0,
                 }],
             );
-            let _ = Path::create(conn, "chr1", &block_group.id, &[edge.id]).unwrap();
+            let _ = Path::create(conn, "chr1", &block_group.id, &[edge.id], false).unwrap();
 
             let other_block_group =
                 create_bg(conn, "test collection", "test-sample", "other block group");
@@ -1429,7 +1429,8 @@ mod tests {
                     phased: 0,
                 }],
             );
-            let _ = Path::create(conn, "CHR1", &other_block_group.id, &[other_edge.id]).unwrap();
+            let _ =
+                Path::create(conn, "CHR1", &other_block_group.id, &[other_edge.id], false).unwrap();
 
             let region = Region::parse("chr1").unwrap();
             let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
@@ -1485,6 +1486,7 @@ mod tests {
                 "chr1",
                 &non_default_block_group.id,
                 &[non_default_edge.id],
+                false,
             )
             .unwrap();
 
@@ -1507,8 +1509,14 @@ mod tests {
                     phased: 0,
                 }],
             );
-            let default_path =
-                Path::create(conn, "chr1", &default_block_group.id, &[default_edge.id]).unwrap();
+            let default_path = Path::create(
+                conn,
+                "chr1",
+                &default_block_group.id,
+                &[default_edge.id],
+                false,
+            )
+            .unwrap();
 
             let region = Region::parse("chr1").unwrap();
             let resolved = Path::resolve(&region, conn, "test collection", "test-sample").unwrap();
@@ -1562,7 +1570,8 @@ mod tests {
                     phased: 0,
                 }],
             );
-            let _ = Path::create(conn, "chr1", &default_block_group_a.id, &[edge_a.id]).unwrap();
+            let _ =
+                Path::create(conn, "chr1", &default_block_group_a.id, &[edge_a.id], false).unwrap();
 
             let edge_b = Edge::create(
                 conn,
@@ -1583,7 +1592,8 @@ mod tests {
                     phased: 0,
                 }],
             );
-            let _ = Path::create(conn, "chr1", &default_block_group_b.id, &[edge_b.id]).unwrap();
+            let _ =
+                Path::create(conn, "chr1", &default_block_group_b.id, &[edge_b.id], false).unwrap();
 
             let region = Region::parse("chr1").unwrap();
             let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
@@ -1615,6 +1625,7 @@ mod tests {
             id: HashId::pad_str(100),
             block_group_id: HashId::pad_str(50),
             name: "test_path".to_string(),
+            is_reference: true,
             created_on: Utc::now().timestamp_nanos_opt().unwrap(),
             history_ref: Some("saved-ref".to_string()),
             cached_block_group: ForeignKeyCache::default(),
@@ -1698,7 +1709,7 @@ mod tests {
             existing_edge_ids[3],
             existing_edge_ids[4],
         ];
-        let path = Path::create(conn, "cycle", &block_group_id, &edge_ids)
+        let path = Path::create(conn, "cycle", &block_group_id, &edge_ids, false)
             .expect("should create path with repeated edge");
 
         let resolved_edge_ids = Path::edges_for_path(conn, &path.id, None)
@@ -1808,9 +1819,14 @@ mod tests {
 
         Path::validate_edges_in_memory(&edge_ids, &edge_data)
             .expect("should validate path edge data");
-        let copied_path =
-            Path::create_with_validated_edges(conn, "validated-copy", &block_group_id, &edge_ids)
-                .expect("should create path from validated edge IDs");
+        let copied_path = Path::create_with_validated_edges(
+            conn,
+            "validated-copy",
+            &block_group_id,
+            &edge_ids,
+            false,
+        )
+        .expect("should create path from validated edge IDs");
 
         assert_eq!(
             Path::edge_ids_for_path(conn, &copied_path.id, None),
@@ -1838,9 +1854,9 @@ mod tests {
         let (block_group_id, seed_path) = setup_block_group(conn);
         let edge_ids = Path::edge_ids_for_path(conn, &seed_path.id, None);
 
-        let alpha = Path::create(conn, "alpha", &block_group_id, &edge_ids).unwrap();
-        let beta = Path::create(conn, "beta", &block_group_id, &edge_ids).unwrap();
-        let gamma = Path::create(conn, "gamma", &block_group_id, &edge_ids).unwrap();
+        let alpha = Path::create(conn, "alpha", &block_group_id, &edge_ids, false).unwrap();
+        let beta = Path::create(conn, "beta", &block_group_id, &edge_ids, false).unwrap();
+        let gamma = Path::create(conn, "gamma", &block_group_id, &edge_ids, false).unwrap();
 
         let matches = Path::select(conn)
             .collection_name("test")
@@ -1861,7 +1877,7 @@ mod tests {
         let edge_ids = Path::edge_ids_for_path(conn, &historical_path.id, None);
         let historical_commit =
             commit_all(conn, "historical path selector").expect("should commit path");
-        let current_path = Path::create(conn, "current", &block_group_id, &edge_ids)
+        let current_path = Path::create(conn, "current", &block_group_id, &edge_ids, false)
             .expect("should create current path");
 
         let historical_matches = Path::select(conn)
@@ -1921,7 +1937,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges1);
 
-        let _ = Path::create(conn, "chr1", &block_group.id, &edge_ids1).unwrap();
+        let _ = Path::create(conn, "chr1", &block_group.id, &edge_ids1, false).unwrap();
 
         // Create second path
         let sequence2 = Sequence::new()
@@ -1963,7 +1979,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges2);
 
-        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids2).unwrap();
+        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids2, false).unwrap();
 
         let paths_before = Path::query_for_collection(conn, "test collection");
         assert_eq!(paths_before.len(), 2);
@@ -2067,7 +2083,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
         assert_eq!(
             path.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAACCCCCCCGGGGGGG"
@@ -2166,7 +2182,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
         assert_eq!(
             path.sequence(conn, test_workspace(), None).unwrap(),
             "CCCCCCCGGGGGGGTTTTTTTCGATCGAT"
@@ -2272,7 +2288,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
         let tree = path.intervaltree(conn).unwrap();
         let blocks1: Vec<NodeIntervalBlock> = tree.query_point(2).map(|x| x.value).collect();
         assert_eq!(blocks1.len(), 1);
@@ -2400,7 +2416,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
         let tree = path.intervaltree(conn).unwrap();
         let blocks1: Vec<NodeIntervalBlock> = tree.query_point(2).map(|x| x.value).collect();
         assert_eq!(blocks1.len(), 1);
@@ -2489,7 +2505,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let mappings = path.find_block_mappings(conn, &path).unwrap();
         assert_eq!(mappings.len(), 1);
@@ -2553,7 +2569,7 @@ mod tests {
             })
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -2594,7 +2610,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
+        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids, false).unwrap();
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 0);
@@ -2657,7 +2673,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -2708,7 +2724,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
+        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids, false).unwrap();
 
         assert_eq!(
             path2.sequence(conn, test_workspace(), None).unwrap(),
@@ -2782,7 +2798,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -2828,6 +2844,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge2.id],
+            false,
         )
         .unwrap();
 
@@ -2909,7 +2926,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -2955,6 +2972,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge2.id],
+            false,
         )
         .unwrap();
 
@@ -3035,7 +3053,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -3065,6 +3083,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge2.id],
+            false,
         )
         .unwrap();
 
@@ -3163,7 +3182,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -3209,6 +3228,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge3.id],
+            false,
         )
         .unwrap();
 
@@ -3307,7 +3327,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -3353,6 +3373,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge3.id],
+            false,
         )
         .unwrap();
 
@@ -3450,7 +3471,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -3480,6 +3501,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge3.id],
+            false,
         )
         .unwrap();
 
@@ -3555,7 +3577,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3625,7 +3647,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -3666,7 +3688,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
+        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids, false).unwrap();
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3736,7 +3758,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -3787,7 +3809,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
+        let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids, false).unwrap();
 
         assert_eq!(
             path2.sequence(conn, test_workspace(), None).unwrap(),
@@ -3866,7 +3888,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -3912,6 +3934,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge2.id],
+            false,
         )
         .unwrap();
 
@@ -3996,7 +4019,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence2 = Sequence::new()
             .sequence_type("DNA")
@@ -4042,6 +4065,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge2.id],
+            false,
         )
         .unwrap();
 
@@ -4142,7 +4166,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -4188,6 +4212,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge5.id, edge3.id],
+            false,
         )
         .unwrap();
 
@@ -4288,7 +4313,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let edge4 = Edge::create(
             conn,
@@ -4318,6 +4343,7 @@ mod tests {
             "chr2",
             &block_group.id,
             &[edge1.id, edge4.id, edge3.id],
+            false,
         )
         .unwrap();
 
@@ -4404,7 +4430,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
         assert_eq!(
             path1.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAAA"
@@ -4596,7 +4622,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
         assert_eq!(
             path1.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAAA"
@@ -4738,7 +4764,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
     }
 
     #[test]
@@ -4774,7 +4800,7 @@ mod tests {
         .unwrap();
 
         let edge_ids = [edge1.id, edge2.id];
-        let error = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap_err();
+        let error = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap_err();
         assert!(
             matches!(error, PathError::Invalid(message) if message.contains("not all edges are in the block group"))
         );
@@ -4838,7 +4864,7 @@ mod tests {
 
         let edge_ids = vec![edge1.id, edge2.id];
 
-        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
     }
 
     #[test]
@@ -4894,7 +4920,7 @@ mod tests {
 
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
     }
 
     #[test]
@@ -4950,7 +4976,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
     }
 
     #[test]
@@ -5013,7 +5039,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids, false).unwrap();
 
         let intervaltree = path.intervaltree(conn).unwrap();
 
@@ -5164,8 +5190,15 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let path1 = Path::create(conn, "chr1.1", &block_group.id, &[edge1.id, edge4.id]).unwrap();
-        let path2 = Path::create(conn, "chr1.2", &block_group.id, edge_ids).unwrap();
+        let path1 = Path::create(
+            conn,
+            "chr1.1",
+            &block_group.id,
+            &[edge1.id, edge4.id],
+            false,
+        )
+        .unwrap();
+        let path2 = Path::create(conn, "chr1.2", &block_group.id, edge_ids, false).unwrap();
 
         let intervaltree1 = path1.intervaltree(conn).unwrap();
 

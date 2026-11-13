@@ -237,6 +237,7 @@ mod tests {
             "m123",
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
+            false,
         )
         .unwrap();
     }

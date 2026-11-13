@@ -1443,7 +1443,7 @@ mod tests {
                 },
             ],
         );
-        Path::create(conn, "chr2", &block_group.id, &[edge0.id, edge1.id])
+        Path::create(conn, "chr2", &block_group.id, &[edge0.id, edge1.id], false)
             .expect("should create current path");
         block_group.id
     }

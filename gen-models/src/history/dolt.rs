@@ -491,7 +491,8 @@ fn resolve_created_on_conflicts(
                    AND our_id IS their_id \
                    AND our_block_group_id IS their_block_group_id \
                    AND our_name IS their_name \
-                   AND our_edge_ids IS their_edge_ids",
+                   AND our_edge_ids IS their_edge_ids \
+                   AND our_is_reference IS their_is_reference",
             ),
             "block_group_edges" => Some(
                 "DELETE FROM dolt_conflicts_block_group_edges \
@@ -1817,7 +1818,7 @@ mod tests {
                 target_block_group_edge,
             ],
         );
-        let path = Path::create(&conn, "chr1", &block_group.id, &[base_edge.id])
+        let path = Path::create(&conn, "chr1", &block_group.id, &[base_edge.id], false)
             .expect("should create base path");
         conn.execute(
             "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",

@@ -1880,6 +1880,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             "test-gene",
             &block_group.id,
             &[e_s_suf, e_suf_wt, e_wt_pre, e_pre_end],
+            false,
         )
         .unwrap();
 
@@ -1926,6 +1927,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             "columns",
             &block_group.id,
             &[e_s1a, e_1a2a, e_2a_end],
+            false,
         )
         .unwrap();
         (conn, block_group.id)
@@ -1969,6 +1971,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             "bubble",
             &block_group.id,
             &[e_s_pre, e_pre_ref, e_ref_post, e_post_e],
+            false,
         )
         .unwrap();
 
@@ -2849,7 +2852,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
                 build_block_group_edge(block_group.id, e_g_end, 3),
             ],
         );
-        Path::create(&conn, "fanout", &block_group.id, &[e_start, e_a, e_a_end]).unwrap();
+        Path::create(
+            &conn,
+            "fanout",
+            &block_group.id,
+            &[e_start, e_a, e_a_end],
+            false,
+        )
+        .unwrap();
         (conn, block_group.id)
     }
 
@@ -2904,7 +2914,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
                 build_block_group_edge(block_group.id, e_end, 0),
             ],
         );
-        Path::create(&conn, "converge", &block_group.id, &[e_start_f, e_f, e_end]).unwrap();
+        Path::create(
+            &conn,
+            "converge",
+            &block_group.id,
+            &[e_start_f, e_f, e_end],
+            false,
+        )
+        .unwrap();
         (conn, block_group.id)
     }
 
@@ -3328,7 +3345,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
                 build_block_group_edge(block_group.id, e_z_end, 2),
             ],
         );
-        Path::create(&conn, "probe", &block_group.id, &[e_start_a, e_a_end]).unwrap();
+        Path::create(
+            &conn,
+            "probe",
+            &block_group.id,
+            &[e_start_a, e_a_end],
+            false,
+        )
+        .unwrap();
 
         let from_path = translate_from_path(
             &conn,

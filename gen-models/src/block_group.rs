@@ -19,7 +19,7 @@ use gen_graph::{
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
 use petgraph::visit::NodeIndexable as _;
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, ToSql, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -39,6 +39,7 @@ use crate::{
     path::{Path, PathSelect},
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::{Sample, SampleSelect},
+    select::sql_table_name_with_history_ref,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq, ModelSelect)]
@@ -353,7 +354,7 @@ impl BlockGroup {
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
-            Path::create(conn, &path.name, target_block_group_id, &edge_ids)?;
+            Path::create(conn, &path.name, target_block_group_id, &edge_ids, false)?;
         }
 
         Ok(())
@@ -1151,6 +1152,54 @@ impl BlockGroup {
         Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
 
+    /// Returns the reference on this block group or its nearest ancestor at the selected revision.
+    ///
+    /// Descendants inherit coordinates without copying reference status onto their paths.
+    /// A local reference overrides all older ancestors, independently of the current path.
+    pub fn get_reference_path(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Result<Path, BlockGroupError> {
+        let block_groups =
+            sql_table_name_with_history_ref("block_groups", Some("block_groups"), history_ref);
+        let paths = sql_table_name_with_history_ref("paths", Some("paths"), history_ref);
+        let query = format!(
+            "WITH RECURSIVE ancestors(id, parent_block_group_id, depth, visited) AS (
+                 SELECT id, parent_block_group_id, 0, '|' || hex(id) || '|'
+                 FROM {block_groups} WHERE id = :block_group_id
+                 UNION ALL
+                 SELECT parent.id, parent.parent_block_group_id, ancestors.depth + 1,
+                        ancestors.visited || hex(parent.id) || '|'
+                 FROM {block_groups} parent
+                 JOIN ancestors ON parent.id = ancestors.parent_block_group_id
+                 WHERE instr(ancestors.visited, '|' || hex(parent.id) || '|') = 0
+             )
+             SELECT paths.id FROM {paths} paths
+             JOIN ancestors ON paths.block_group_id = ancestors.id
+             WHERE paths.is_reference = 1
+             ORDER BY ancestors.depth LIMIT 1"
+        );
+        let mut query_params: Vec<(&str, &dyn ToSql)> = vec![(":block_group_id", block_group_id)];
+        if let Some(reference) = history_ref.as_ref() {
+            query_params.push((":history_ref", reference));
+        }
+        let path_id: Option<HashId> = conn
+            .prepare(&query)?
+            .query_row(query_params.as_slice(), |row| row.get(0))
+            .optional()?;
+        let missing = || {
+            QueryError::ResultsNotFound(format!(
+                "No reference path found for block group {block_group_id} or its ancestors"
+            ))
+        };
+        let path_id = path_id.ok_or_else(missing)?;
+        Path::select(conn)
+            .with_ref(history_ref)
+            .get_by_id(path_id)?
+            .ok_or_else(|| missing().into())
+    }
+
     /// Loads the most recently created path from the selected graph view.
     pub fn get_current_path(
         conn: &GraphConnection,
@@ -1339,6 +1388,7 @@ mod tests {
     use crate::{
         annotations::Annotation as ModelAnnotation,
         collection::Collection,
+        history::dolt::commit_all,
         node::Node,
         region::{ResolvedGenRegion, ResolvedRegionKind},
         sample::{NewSample, Sample},
@@ -1347,6 +1397,118 @@ mod tests {
             create_bg, get_connection, interval_tree_verify, setup_block_group, test_workspace,
         },
     };
+
+    #[test]
+    fn test_path_reference_status_is_explicit() {
+        let conn = &get_connection(None).expect("should open test database");
+        let (root_id, original) = setup_block_group(conn);
+        let edges = Path::edge_ids_for_path(conn, &original.id, None);
+        Path::delete(conn, &original.name, &root_id);
+
+        let ordinary = Path::create(conn, "ordinary", &root_id, &edges, false).unwrap();
+        assert!(!ordinary.is_reference);
+        assert!(BlockGroup::get_reference_path(conn, &root_id, None).is_err());
+        let reference = Path::create(conn, "reference", &root_id, &edges, true).unwrap();
+        assert!(reference.is_reference);
+        assert_eq!(
+            BlockGroup::get_reference_path(conn, &root_id, None)
+                .unwrap()
+                .id,
+            reference.id
+        );
+        assert!(Path::create(conn, "ordinary", &root_id, &edges, true).is_err());
+    }
+
+    #[test]
+    fn test_reference_path_uses_nearest_ancestor_and_preserves_history() {
+        let conn = &get_connection(None).expect("should open test database");
+        let (root_id, reference) = setup_block_group(conn);
+        assert!(reference.is_reference);
+        let edges = Path::edge_ids_for_path(conn, &reference.id, None);
+        let newer = Path::create(conn, "newer route", &root_id, &edges, false)
+            .expect("should create a later non-reference path");
+        assert!(!newer.is_reference);
+        assert_eq!(
+            BlockGroup::get_current_path(conn, &root_id, None)
+                .unwrap()
+                .id,
+            newer.id
+        );
+        assert_eq!(
+            BlockGroup::get_reference_path(conn, &root_id, None)
+                .unwrap()
+                .id,
+            reference.id
+        );
+
+        Sample::get_or_create_child(conn, "test", "child", vec!["test".to_string()])
+            .expect("should create child sample");
+        let child = Sample::get_block_groups(conn, "test", "child", None).remove(0);
+        assert!(
+            Path::select(conn)
+                .block_group_id(child.id)
+                .is_reference(true)
+                .load()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            BlockGroup::get_reference_path(conn, &child.id, None)
+                .unwrap()
+                .id,
+            reference.id
+        );
+        let inherited_revision = commit_all(conn, "inherited reference")
+            .expect("should commit inherited reference")
+            .to_string();
+
+        let local_reference = Path::create(conn, "child reference", &child.id, &edges, true)
+            .expect("should define a descendant reference");
+        Sample::get_or_create_child(conn, "test", "grandchild", vec!["child".to_string()])
+            .expect("should create grandchild sample");
+        let grandchild = Sample::get_block_groups(conn, "test", "grandchild", None).remove(0);
+        assert_eq!(
+            BlockGroup::get_reference_path(conn, &grandchild.id, None)
+                .unwrap()
+                .id,
+            local_reference.id
+        );
+        let local_revision = commit_all(conn, "local reference")
+            .expect("should commit local reference")
+            .to_string();
+        let historical_reference =
+            BlockGroup::get_reference_path(conn, &child.id, Some(&inherited_revision)).unwrap();
+        assert_eq!(historical_reference.id, reference.id);
+        assert_eq!(
+            historical_reference.history_ref.as_deref(),
+            Some(inherited_revision.as_str())
+        );
+        assert_eq!(
+            BlockGroup::get_reference_path(conn, &child.id, Some(&local_revision))
+                .unwrap()
+                .id,
+            local_reference.id
+        );
+        assert!(Path::create(conn, "second reference", &child.id, &edges, true).is_err());
+    }
+
+    #[test]
+    fn test_reference_path_errors_when_lineage_has_no_reference() {
+        let conn = &get_connection(None).expect("should open test database");
+        Collection::get_or_create(conn, "test").unwrap();
+        let empty = create_bg(conn, "test", "empty", "chr1");
+        assert!(matches!(
+            BlockGroup::get_reference_path(conn, &empty.id, None),
+            Err(BlockGroupError::QueryError(QueryError::ResultsNotFound(_)))
+        ));
+        Sample::get_or_create_child(conn, "test", "empty child", vec!["empty".to_string()])
+            .unwrap();
+        let child = Sample::get_block_groups(conn, "test", "empty child", None).remove(0);
+        assert!(BlockGroup::get_reference_path(conn, &child.id, None).is_err());
+        assert!(
+            BlockGroup::get_reference_path(conn, &HashId::convert_str("missing"), None).is_err()
+        );
+    }
 
     #[test]
     fn test_touching_deletions_add_each_deletion_and_their_combination() {
@@ -2158,6 +2320,7 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>(),
+            false,
         )
         .unwrap();
         let parent_b_path = Path::create(
@@ -2168,6 +2331,7 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>(),
+            false,
         )
         .unwrap();
         let parent_b_alt_path = Path::create(
@@ -2178,6 +2342,7 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>(),
+            false,
         )
         .unwrap();
         let parent_a_path_len = parent_a_path.length(conn, None).unwrap();
@@ -2269,10 +2434,22 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (source_block_group_id, original_path) = setup_block_group(conn);
         let edge_ids = Path::edge_ids_for_path(conn, &original_path.id, None);
-        Path::create(conn, "z-added-first", &source_block_group_id, &edge_ids)
-            .expect("should create the first additional source path");
-        Path::create(conn, "a-added-last", &source_block_group_id, &edge_ids)
-            .expect("should create the last additional source path");
+        Path::create(
+            conn,
+            "z-added-first",
+            &source_block_group_id,
+            &edge_ids,
+            false,
+        )
+        .expect("should create the first additional source path");
+        Path::create(
+            conn,
+            "a-added-last",
+            &source_block_group_id,
+            &edge_ids,
+            false,
+        )
+        .expect("should create the last additional source path");
         let source_path_names = Path::select(conn)
             .block_group_id(source_block_group_id)
             .order_by(crate::path::PathSelect::CreatedOn, Direction::Asc)

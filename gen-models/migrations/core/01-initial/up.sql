@@ -61,11 +61,13 @@ CREATE TABLE paths (
   block_group_id BLOB NOT NULL,
   name TEXT NOT NULL,
   created_on INTEGER NOT NULL,
+  is_reference INTEGER NOT NULL DEFAULT 0 CHECK (is_reference IN (0, 1)),
   -- Ordered concatenation of fixed-width HashId values.
   edge_ids BLOB NOT NULL,
   FOREIGN KEY(block_group_id) REFERENCES block_groups(id)
 ) STRICT;
 CREATE UNIQUE INDEX path_uidx ON paths(block_group_id, name);
+CREATE UNIQUE INDEX path_reference_uidx ON paths(block_group_id) WHERE is_reference = 1;
 
 CREATE TABLE accessions (
   id BLOB PRIMARY KEY NOT NULL,

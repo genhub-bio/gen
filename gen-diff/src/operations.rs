@@ -852,6 +852,7 @@ mod tests {
             block_group_name,
             &block_group.id,
             &[start_edge.id, end_edge.id],
+            false,
         )
         .expect("should create path");
         block_group
@@ -931,6 +932,7 @@ mod tests {
             &block_group.name,
             &block_group.id,
             &[start_edge.id, end_edge.id],
+            false,
         )
         .expect("should recreate path");
     }
