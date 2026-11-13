@@ -769,7 +769,7 @@ mod tests {
             });
         }
         BlockGroupEdge::bulk_create(conn, &rows);
-        Path::create(conn, "chr1", &block_group.id, &path_edge_ids)
+        Path::create(conn, "chr1", &block_group.id, &path_edge_ids, false)
             .expect("should create current path");
         let sequence_graph = PySequenceGraph {
             id: block_group.id,

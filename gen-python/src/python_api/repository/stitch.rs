@@ -155,8 +155,14 @@ fn create_stitched_from_sources(
         }
     }
 
-    make_stitch_from_block_groups(context, &chunks, child_block_group.id, new_region_name)
-        .map_err(stitch_error)?;
+    make_stitch_from_block_groups(
+        context,
+        &chunks,
+        child_block_group.id,
+        new_region_name,
+        true,
+    )
+    .map_err(stitch_error)?;
     validate_stitched_block_group_is_acyclic(context, &child_block_group.id)?;
     Ok(child_block_group)
 }

@@ -1454,7 +1454,7 @@ fn new_allele_edges(left: &Port, right: &Port, allele: Option<(HashId, i64)>) ->
 /// Writes `edge_ids` as an immutable path derived from its parent.
 fn create_path(conn: &GraphConnection, path: &Path, edge_ids: Vec<HashId>) -> PyResult<()> {
     let name = Path::generate_path_name(&path.name, &edge_ids);
-    Path::create(conn, &name, &path.block_group_id, &edge_ids)
+    Path::create(conn, &name, &path.block_group_id, &edge_ids, false)
         .map_err(|error| block_group_err_to_pyerr(error.into()))?;
     Ok(())
 }
@@ -1720,7 +1720,7 @@ mod tests {
             .windows(2)
             .map(|pair| edge_ids[&(pair[0], pair[1])])
             .collect::<Vec<_>>();
-        Path::create_with_validated_edges(conn, name, &block_group.id, &path_edges)
+        Path::create_with_validated_edges(conn, name, &block_group.id, &path_edges, false)
             .expect("should create current path");
         Fixture {
             graph: PySequenceGraph {

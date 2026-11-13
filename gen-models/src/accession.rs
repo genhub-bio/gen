@@ -865,7 +865,7 @@ mod tests {
                 .collect::<Vec<_>>();
             crate::block_group_edge::BlockGroupEdge::bulk_create(conn, &block_group_edges);
             let other_path =
-                Path::create(conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
+                Path::create(conn, "other-path", &other_block_group.id, &edge_ids, false).unwrap();
             let _ = BlockGroup::add_accession(conn, &other_path, "MREB", 5, 15).unwrap();
 
             let region = Region::parse("mreB").unwrap();

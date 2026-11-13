@@ -94,6 +94,7 @@ struct Path {
   blockGroupId @1 :List(UInt8);
   name @2 :Text;
   createdOn @3 :Int64;
+  isReference @4 :Bool;
 }
 
 struct PathEdge {

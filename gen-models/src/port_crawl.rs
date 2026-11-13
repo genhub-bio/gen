@@ -842,7 +842,7 @@ mod tests {
                 .edge
                 .id
         });
-        Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        Path::create(&conn, "chain", &block_group_id, &edge_ids, false).unwrap();
         let region = resolve(&Region::parse("chain:5").unwrap(), &conn, "test", "test").unwrap();
         let graph = crawl_graph(&conn, block_group_id, CrawlStart::Region(&region), 1, None)
             .unwrap()
@@ -958,7 +958,7 @@ mod tests {
                 .edge
                 .id
         });
-        Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        Path::create(&conn, "chain", &block_group_id, &edge_ids, false).unwrap();
         let region = resolve(&Region::parse("chain:5-11").unwrap(), &conn, "test", "test").unwrap();
         let graph = crawl_graph(
             &conn,
@@ -1008,7 +1008,7 @@ mod tests {
                 .edge
                 .id
         });
-        let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        let path = Path::create(&conn, "chain", &block_group_id, &edge_ids, false).unwrap();
         (conn, block_group_id, path)
     }
 

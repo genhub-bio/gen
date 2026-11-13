@@ -1280,7 +1280,7 @@ mod tests {
                 .collect::<Vec<_>>();
             crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
             let other_path =
-                Path::create(&conn, "other-path", &other_block_group.id, &edge_ids).unwrap();
+                Path::create(&conn, "other-path", &other_block_group.id, &edge_ids, false).unwrap();
             let other_accession =
                 BlockGroup::add_accession(&conn, &other_path, "ann-accession-2", 0, 5).unwrap();
             let _ = Annotation::get_or_create(&conn, "MREB", "genes", &other_accession.id, None)
@@ -1320,7 +1320,7 @@ mod tests {
                 .collect::<Vec<_>>();
             crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
             let child_path =
-                Path::create(&conn, "child-path", &child_block_group.id, &edge_ids).unwrap();
+                Path::create(&conn, "child-path", &child_block_group.id, &edge_ids, false).unwrap();
             let child_accession =
                 BlockGroup::add_accession(&conn, &child_path, "child-accession", 0, 5).unwrap();
             let child_annotation =
@@ -1361,7 +1361,7 @@ mod tests {
                 .collect::<Vec<_>>();
             crate::block_group_edge::BlockGroupEdge::bulk_create(&conn, &block_group_edges);
             let _child_path =
-                Path::create(&conn, "child-path", &child_block_group.id, &edge_ids).unwrap();
+                Path::create(&conn, "child-path", &child_block_group.id, &edge_ids, false).unwrap();
             SampleLineage::create(&conn, "test", "child").unwrap();
 
             let region = Region::parse("mreB").unwrap();
@@ -1400,7 +1400,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             BlockGroupEdge::bulk_create(conn, &block_group_edges);
-            let path = Path::create(conn, accession_name, &block_group.id, &edge_ids).unwrap();
+            let path =
+                Path::create(conn, accession_name, &block_group.id, &edge_ids, false).unwrap();
             let accession = BlockGroup::add_accession(conn, &path, accession_name, 0, 5).unwrap();
             Annotation::get_or_create(conn, annotation_name, "genes", &accession.id, None).unwrap()
         }

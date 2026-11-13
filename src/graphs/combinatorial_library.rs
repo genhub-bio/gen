@@ -309,6 +309,7 @@ pub fn create_library(
             format!("{library_name} default path").as_str(),
             &block_group_id,
             &path_edge_ids,
+            true,
         )?;
     }
 

@@ -996,8 +996,14 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
     let duplicate_path = BlockGroup::get_current_path(conn, &duplicate_block_group.id, None)
         .expect("should find duplicate annotation path");
     let path_edge_ids = gen_models::path::Path::edge_ids_for_path(conn, &duplicate_path.id, None);
-    gen_models::path::Path::create(conn, "chr1", &duplicate_block_group.id, &path_edge_ids)
-        .expect("should create a distinct path search fixture");
+    gen_models::path::Path::create(
+        conn,
+        "chr1",
+        &duplicate_block_group.id,
+        &path_edge_ids,
+        false,
+    )
+    .expect("should create a distinct path search fixture");
     for (accession_name, start, end) in [
         ("duplicate-accession-a", 0, 5),
         ("duplicate-accession-b", 20, 25),

@@ -329,7 +329,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         );
-        Path::create(conn, "sequence", &block_group.id, &edge_ids).unwrap();
+        Path::create(conn, "sequence", &block_group.id, &edge_ids, false).unwrap();
         Sample::get_or_create_child(
             conn,
             collection_name,
@@ -503,7 +503,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids, false);
 
         // Set up child
         let _child_sample = Sample::get_or_create_child(
@@ -803,7 +803,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "test path", &block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "test path", &block_group.id, &edge_ids, false);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("diff-against-nothing.gfa");
@@ -916,7 +916,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "test path", &block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "test path", &block_group.id, &edge_ids, false);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("self-diff.gfa");
@@ -1029,7 +1029,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids, false);
 
         let _sample2 = Sample::get_or_create(
             conn,
@@ -1095,7 +1095,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path2 = Path::create(conn, "parent", &block_group2.id, &edge_ids);
+        let _path2 = Path::create(conn, "parent", &block_group2.id, &edge_ids, false);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
@@ -1209,7 +1209,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids);
+        let _path1 = Path::create(conn, "parent", &block_group.id, &edge_ids, false);
 
         let _sample2 = Sample::get_or_create(
             conn,
@@ -1275,7 +1275,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path2 = Path::create(conn, "parent", &block_group2.id, &edge_ids);
+        let _path2 = Path::create(conn, "parent", &block_group2.id, &edge_ids, false);
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
@@ -1372,7 +1372,13 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        let _path1 = Path::create(conn, "parent", &block_group.id, &[edge1.id, edge2.id]);
+        let _path1 = Path::create(
+            conn,
+            "parent",
+            &block_group.id,
+            &[edge1.id, edge2.id],
+            false,
+        );
 
         // Set up child
         let _child_sample = Sample::get_or_create_child(

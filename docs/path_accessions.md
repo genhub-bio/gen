@@ -23,6 +23,24 @@ flowchart LR
 and thus provide a reference frame for modifications. On fasta import, each header automatically becomes a defined path,
 so `Chr1` and so on will be automatically assigned.
 
+## Reference paths
+
+Paths have an `is_reference` flag that identifies the coordinate reference for a block-group
+lineage. `Path::create` and `Path::create_with_validated_edges` require an explicit
+`is_reference` argument. Imports mark their reference paths `true`; copying and ordinary
+editing use `false`, leaving the inherited reference unchanged. GFA imports choose the first
+path, or the first walk when no paths exist, as the reference for their single block group.
+
+`BlockGroup::get_reference_path` checks the block group itself, then walks its parent chain to
+find the nearest ancestor with a reference path. It returns that ancestor's path, which may
+belong to a different block group. Historical lookups use the requested revision for both
+ancestry and paths. A lineage without a reference returns an error.
+
+Creating a path with `is_reference = true` in a descendant overrides its inherited reference.
+Each block group can have at most one reference path, and existing paths cannot be promoted
+through the creation methods. The current path remains the most recently created path,
+independently of reference status.
+
 ## Accessions
 
 When inserting changes to a genome, we may want to refer to the modifications. For example, in the above change, we have
