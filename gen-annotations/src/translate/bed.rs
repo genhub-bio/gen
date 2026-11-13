@@ -79,7 +79,7 @@ where
         let mut region = match regions_by_reference.get(resolved_reference) {
             Some(region) => region.clone(),
             None => {
-                let path = BlockGroup::get_current_path(conn, block_group_id, history_ref)?;
+                let path = BlockGroup::get_reference_path(conn, block_group_id, history_ref)?;
                 let region = ResolvedGenRegion::from_path(conn, &path, 0, 0)?;
                 regions_by_reference.insert(resolved_reference.to_string(), region.clone());
                 region
