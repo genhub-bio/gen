@@ -834,6 +834,10 @@ pub(crate) fn build_unified_diff_graph(
                 change: merge_input_edge_changes(
                     source_graph.edge_metadata(edge_key),
                     target_graph.edge_metadata(edge_key),
+                    EdgeEndpointChanges {
+                        source: source_node.change,
+                        target: target_node.change,
+                    },
                     default_operation,
                 ),
             })
@@ -947,14 +951,25 @@ fn merge_input_changes(
     }
 }
 
+/// The unified changes of the nodes an edge connects.
+#[derive(Clone, Copy)]
+struct EdgeEndpointChanges {
+    source: DiffChange,
+    target: DiffChange,
+}
+
 /// Applies edge-specific reconciliation on top of the general input rules.
 ///
 /// Continuation edges reconnect slices split during normalization, so they
-/// stay unchanged. Explicit edges present in only one input are added or
-/// removed.
+/// stay unchanged unless an endpoint slice exists on one side only. The
+/// continuation cannot exist without both slices, so it takes that endpoint's
+/// added or removed change; otherwise the edges flanking an added or removed
+/// slice would render as unchanged. Explicit edges present in only one input
+/// are added or removed.
 fn merge_input_edge_changes(
     source_metadata: Option<DiffInputEdgeMetadata>,
     target_metadata: Option<DiffInputEdgeMetadata>,
+    endpoint_changes: EdgeEndpointChanges,
     default_operation: Option<DoltHashId>,
 ) -> DiffChange {
     if source_metadata
@@ -962,7 +977,12 @@ fn merge_input_edge_changes(
         .chain(target_metadata)
         .any(|metadata| metadata.origin == EdgeOrigin::Continuation)
     {
-        return DiffChange::unchanged();
+        return [endpoint_changes.source, endpoint_changes.target]
+            .into_iter()
+            .find(|change| matches!(change.kind, DiffChangeKind::Added | DiffChangeKind::Removed))
+            .map_or_else(DiffChange::unchanged, |change| {
+                changed(change.kind, change.operation, default_operation)
+            });
     }
     let source_change = source_metadata.map(|metadata| metadata.change);
     let target_change = target_metadata.map(|metadata| metadata.change);
@@ -1530,6 +1550,56 @@ mod tests {
                     .iter()
                     .all(|edge| edge.change.operation.is_none())
             );
+        }
+    }
+
+    #[test]
+    fn test_continuation_flanking_one_sided_slice_takes_its_change() {
+        // One input:   source -> a[0..10] -> end
+        // Other input: source -> a[0..3] -> a[6..10] -> end, skipping a[3..6].
+        // The skipped slice is removed or added depending on direction, and the
+        // continuations on either side of it cannot exist without it.
+        let node = HashId::convert_str("flanked-node");
+        let continuous_edges = vec![
+            topology_test_edge(PATH_START_NODE_ID, node, 0),
+            topology_test_edge(node, PATH_END_NODE_ID, 10),
+        ];
+        let mut skip_edge = topology_test_edge(node, node, 3);
+        skip_edge.edge.target_coordinate = 6;
+        let skipping_edges = vec![
+            topology_test_edge(PATH_START_NODE_ID, node, 0),
+            skip_edge,
+            topology_test_edge(node, PATH_END_NODE_ID, 10),
+        ];
+        let slice = |sequence_start, sequence_end| GraphNode {
+            node_id: node,
+            sequence_start,
+            sequence_end,
+        };
+
+        for (base, query, expected) in [
+            (&continuous_edges, &skipping_edges, DiffChangeKind::Removed),
+            (&skipping_edges, &continuous_edges, DiffChangeKind::Added),
+        ] {
+            let graph = build_diff_graph_from_edges(
+                EdgeDiffInput::unattributed(base),
+                EdgeDiffInput::unattributed(query),
+                None,
+            );
+            let skipped = graph
+                .nodes()
+                .find(|diff_node| diff_node.node == slice(3, 6))
+                .expect("should keep the skipped slice");
+            assert_eq!(skipped.change.kind, expected);
+            for (source, target) in [(slice(0, 3), slice(3, 6)), (slice(3, 6), slice(6, 10))] {
+                let edges = graph
+                    .all_edges()
+                    .find_map(|(edge_source, edge_target, edges)| {
+                        (edge_source.node == source && edge_target.node == target).then_some(edges)
+                    })
+                    .expect("should keep the continuation around the skipped slice");
+                assert!(edges.iter().all(|edge| edge.change.kind == expected));
+            }
         }
     }
 
