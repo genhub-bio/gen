@@ -566,7 +566,6 @@ where
                     &locus.name,
                     &block_group.id,
                     &[edge_into.id, edge_out_of.id],
-                    true,
                 )?;
 
                 let wt_changes = locus.changes_to_wt();

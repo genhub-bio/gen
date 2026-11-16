@@ -265,7 +265,6 @@ pub fn derive_chunks(
                 &current_path.name,
                 &child_block_group_id,
                 &new_path_edge_ids,
-                false,
             )?;
         }
 
@@ -466,7 +465,6 @@ fn create_stitched_block_group(
         block_group_chunks,
         child_block_group.id,
         new_region_name,
-        true,
     )?;
 
     validate_stitched_block_group_is_acyclic(conn, context.workspace(), &child_block_group.id)?;
@@ -494,7 +492,6 @@ pub fn make_stitch_from_block_groups(
     block_group_chunks: &[BlockGroupChunk],
     child_block_group_id: HashId,
     new_region_name: &str,
-    is_reference: bool,
 ) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
 
@@ -548,7 +545,6 @@ pub fn make_stitch_from_block_groups(
             new_region_name,
             &child_block_group_id,
             &new_path_edge_ids,
-            is_reference,
         )?;
     }
 
@@ -1199,7 +1195,6 @@ mod tests {
             name,
             &block_group.id,
             &[start_edge.id, internal_edge.id, end_edge.id],
-            false,
         )
         .unwrap();
     }

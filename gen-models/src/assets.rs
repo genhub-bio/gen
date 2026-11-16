@@ -20,11 +20,13 @@ use url::{Position, Url};
 
 use crate::{
     Direction, ModelSelect,
+    annotation_file_source::AnnotationFileSource,
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, ModelSelectError, QueryError},
     file_types::FileTypes,
     history::dolt::hash_of,
     operations::FileAddition,
+    select::sql_table_name_with_history_ref,
 };
 
 mod compression;
@@ -221,6 +223,7 @@ pub enum AssetView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationFileAssets {
+    pub source: Option<AnnotationFileSource>,
     pub log_id: HashId,
     pub annotation: AssetRef,
     pub index: Option<AssetRef>,
@@ -689,8 +692,15 @@ impl Assets {
         let operation_logs_table = OperationLog::table_name_with_history_ref(history_ref);
         let operation_assets_table = OperationAsset::table_name_with_history_ref(history_ref);
         let asset_refs_table = AssetRef::table_name_with_history_ref(history_ref);
+        let sources_table = sql_table_name_with_history_ref(
+            "annotation_file_sources",
+            Some("annotation_file_sources"),
+            history_ref,
+        );
         let query = format!(
             "SELECT operation_logs.id AS log_id, \
+                    annotation_sources.collection_name AS source_collection, \
+                    annotation_sources.sample_name AS source_sample, \
                     annotation_assets.id AS annotation_id, \
                     annotation_assets.uri AS annotation_uri, \
                     annotation_assets.file_type AS annotation_file_type, \
@@ -730,6 +740,9 @@ impl Assets {
               AND annotation_operation_assets.role = :annotation_role \
              JOIN {asset_refs_table} annotation_assets \
                ON annotation_assets.id = annotation_operation_assets.asset_ref_id \
+             LEFT JOIN {sources_table} annotation_sources \
+               ON annotation_sources.log_id = operation_logs.id \
+              AND annotation_sources.asset_ref_id = annotation_assets.id \
              LEFT JOIN {operation_assets_table} index_operation_assets \
                ON index_operation_assets.log_id = operation_logs.id \
               AND index_operation_assets.role = :index_role \
@@ -743,6 +756,8 @@ impl Assets {
                ON attribute_index_assets.id = attribute_index_operation_assets.asset_ref_id \
               AND attribute_index_assets.upstream_asset_ref_id = annotation_assets.id \
              WHERE operation_logs.operation_kind = :operation_kind \
+               AND (annotation_sources.log_id IS NOT NULL OR NOT EXISTS ( \
+                    SELECT 1 FROM {sources_table} binding WHERE binding.asset_ref_id = annotation_assets.id)) \
              ORDER BY operation_logs.created_on, annotation_assets.created_on, \
                       annotation_assets.name"
         );
@@ -794,6 +809,15 @@ impl Assets {
                 None => None,
             };
             Ok(AnnotationFileAssets {
+                source: row
+                    .get::<_, Option<String>>("source_collection")?
+                    .map(|collection_name| {
+                        Ok::<_, rusqlite::Error>(AnnotationFileSource {
+                            collection_name,
+                            sample_name: row.get("source_sample")?,
+                        })
+                    })
+                    .transpose()?,
                 log_id: row.get("log_id")?,
                 annotation: AssetRef {
                     id: row.get("annotation_id")?,
@@ -2223,6 +2247,7 @@ mod tests {
         let commit = commit_all(conn, "add annotation assets").expect("should commit assets");
 
         let expected = vec![AnnotationFileAssets {
+            source: None,
             log_id: log.id,
             annotation,
             index: Some(index),

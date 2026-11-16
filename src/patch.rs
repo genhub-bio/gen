@@ -31,11 +31,12 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, result::ZipError, write::Sim
 
 const MANIFEST_ENTRY: &str = "manifest.json";
 const PATCH_FORMAT_VERSION: u32 = 2;
-const BOOTSTRAP_TABLES: [&str; 18] = [
+const BOOTSTRAP_TABLES: [&str; 19] = [
     "accession_nodes",
     "accessions",
     "annotation_group_samples",
     "annotation_groups",
+    "annotation_file_sources",
     "annotations",
     "block_group_edges",
     "block_groups",
@@ -247,6 +248,7 @@ fn is_schema_bootstrap_working_set(
             (SELECT COUNT(*) FROM annotation_group_samples) + \
             (SELECT COUNT(*) FROM annotation_groups) + \
             (SELECT COUNT(*) FROM annotations) + \
+            (SELECT COUNT(*) FROM annotation_file_sources) + \
             (SELECT COUNT(*) FROM block_group_edges) + \
             (SELECT COUNT(*) FROM block_groups) + \
             (SELECT COUNT(*) FROM collections) + \

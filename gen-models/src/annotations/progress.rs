@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use super::AnnotationFileChecksumOverrides;
+use crate::annotation_file_source::AnnotationFileSource;
 
 /// A stage reported while preparing a local GFF3 or BED annotation file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,10 +18,22 @@ pub enum AnnotationFileProgressStage {
 
 /// Options shared by annotation-file addition and its optional progress callback.
 pub struct AnnotationFileAddOptions<'a> {
+    /// Coordinate source; omitted values use the default collection and reference sample.
+    pub source: Option<AnnotationFileSource>,
     /// Checksums collected while reading annotation assets.
     pub checksum_overrides: AnnotationFileChecksumOverrides,
     /// Called immediately before each local GFF3 or BED preparation stage.
     pub progress: Option<&'a mut dyn FnMut(AnnotationFileProgressStage)>,
+}
+
+impl<'a> From<AnnotationFileChecksumOverrides> for AnnotationFileAddOptions<'a> {
+    fn from(checksum_overrides: AnnotationFileChecksumOverrides) -> Self {
+        Self {
+            source: None,
+            checksum_overrides,
+            progress: None,
+        }
+    }
 }
 
 pub(super) fn report_annotation_file_progress(

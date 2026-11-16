@@ -13,7 +13,8 @@ use r#gen::{
 };
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
-    annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
+    annotation_file_source::AnnotationFileSource,
+    annotations::{AnnotationFileAddOptions, AnnotationFileChecksumOverrides, add_annotation_file},
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
@@ -222,7 +223,8 @@ impl PyRepository {
     /// `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
     /// display and track name; `message` labels the import. `filename` and `index` are path strings;
     /// a relative path is resolved against the current working directory.
-    #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
+    /// `sample` selects the coordinate source by name or as a `Sample` (including its collection).
+    #[pyo3(signature = (filename, format=None, index=None, name=None, message=None, *, sample=None))]
     fn import_annotations(
         &self,
         filename: &str,
@@ -230,7 +232,19 @@ impl PyRepository {
         index: Option<&str>,
         name: Option<&str>,
         message: Option<&str>,
+        #[gen_stub(override_type(type_repr = "str | Sample | None", imports = ()))] sample: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<Option<PyHashId>> {
+        let selected_sample = sample.map(sample_reference).transpose()?;
+        let source = AnnotationFileSource::for_addition(
+            &self.context,
+            selected_sample
+                .as_ref()
+                .and_then(|(_, collection)| collection.as_deref()),
+            selected_sample.as_ref().map(|(sample, _)| sample.as_str()),
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let filename = absolute_path_string(filename)?;
         let index = index.map(absolute_path_string).transpose()?;
         let (_, operation_hash) = run_context_savepoint_write(&self.context, || {
@@ -241,7 +255,11 @@ impl PyRepository {
                 index.as_deref(),
                 name,
                 message,
-                AnnotationFileChecksumOverrides::default(),
+                AnnotationFileAddOptions {
+                    source: Some(source),
+                    checksum_overrides: AnnotationFileChecksumOverrides::default(),
+                    progress: None,
+                },
             )
             .map_err(|error| {
                 PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}"))

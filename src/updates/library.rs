@@ -369,7 +369,6 @@ fn update_path_library(
         &reference_block_group_chunks,
         target_block_group.id,
         new_sample_name,
-        false,
     )?;
 
     // Stitch the library in between the first and last reference chunks
@@ -378,7 +377,6 @@ fn update_path_library(
         &block_group_chunks,
         target_block_group.id,
         new_sample_name,
-        false,
     )?;
 
     Ok(())

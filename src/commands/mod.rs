@@ -337,6 +337,12 @@ pub enum Commands {
     /// Add an annotation file without importing its intervals
     #[command(name = "add-annotation-file", arg_required_else_help(true))]
     AddAnnotationFile {
+        /// Collection whose paths define the annotation coordinates (defaults to the configured collection)
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
+        /// Coordinate source sample (defaults to the collection's reference sample)
+        #[arg(short = 's', long)]
+        sample: Option<String>,
         /// The annotation file path
         #[clap(index = 1)]
         path: String,
@@ -535,6 +541,37 @@ mod tests {
     use gen_diff::operations::DiffRange;
 
     use super::{Cli, Commands, parse_diff_revisions};
+
+    #[test]
+    fn test_annotation_file_accepts_coordinate_source() {
+        let cli = Cli::try_parse_from([
+            "gen",
+            "add-annotation-file",
+            "genes.gff3",
+            "--sample",
+            "edited",
+            "--collection",
+            "genome",
+        ])
+        .expect("should parse annotation coordinate source");
+        let Some(Commands::AddAnnotationFile {
+            sample, collection, ..
+        }) = cli.command
+        else {
+            panic!("should parse annotation file command");
+        };
+        assert_eq!(sample.as_deref(), Some("edited"));
+        assert_eq!(collection.as_deref(), Some("genome"));
+        let cli = Cli::try_parse_from(["gen", "add-annotation-file", "genes.bed"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::AddAnnotationFile {
+                sample: None,
+                collection: None,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn test_import_and_update_variants_accept_commit_messages() {

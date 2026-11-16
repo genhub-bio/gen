@@ -2,7 +2,9 @@ use std::path::Path as FsPath;
 
 use gen_core::{HashId, Sha256Hash};
 use gen_models::{
+    annotation_file_source::{AnnotationFileSource, AnnotationFileSourceError},
     assets::{AssetRef, AssetUri, Assets},
+    collection::Collection,
     db::GraphConnection,
     file_types::FileTypes,
 };
@@ -35,11 +37,37 @@ impl AnnotationAssetEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationFileEntry {
+    /// Identity of the attachment, distinct from its reusable file assets.
+    pub id: HashId,
+    /// Coordinate provenance; old files without an association use the inferred reference sample.
+    pub source: Option<AnnotationFileSource>,
     pub file_addition: AnnotationAssetEntry,
     pub index_file_addition: Option<AnnotationAssetEntry>,
     pub attribute_index_file_addition: Option<AnnotationAssetEntry>,
     pub name: Option<String>,
     pub display_name: String,
+}
+
+impl AnnotationFileEntry {
+    pub fn coordinate_source(
+        &self,
+        conn: &GraphConnection,
+        collection: &str,
+        history_ref: Option<&str>,
+    ) -> Result<AnnotationFileSource, AnnotationFileSourceError> {
+        match &self.source {
+            Some(source) => Ok(source.clone()),
+            None => {
+                let collections = Collection::select(conn).with_ref(history_ref).load()?;
+                let collection = match collections.as_slice() {
+                    [] => collection,
+                    [source] => source.name.as_str(),
+                    _ => return Err(AnnotationFileSourceError::AmbiguousCollection),
+                };
+                AnnotationFileSource::resolve(conn, collection, None, history_ref)
+            }
+        }
+    }
 }
 
 // Preserve optional checksums while translating persistence records so checksumless remote
@@ -81,6 +109,8 @@ pub fn load_annotation_file_entries(
             .unwrap_or_else(|| file_addition.file_path().to_string())
         });
         entries.push(AnnotationFileEntry {
+            id: annotation_file.log_id,
+            source: annotation_file.source,
             file_addition,
             index_file_addition,
             attribute_index_file_addition,
@@ -96,13 +126,49 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_models::{
+        annotation_file_source::AnnotationFileSourceError,
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::Assets,
+        collection::Collection,
         file_types::FileTypes,
     };
 
     use super::load_annotation_file_entries;
     use crate::test_helpers::setup_gen_on_disk;
+
+    #[test]
+    fn test_legacy_annotation_sources_require_unambiguous_collection() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        Collection::create(conn, "genome").unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        add_annotation_file(
+            &context,
+            fixture.to_str().unwrap(),
+            None,
+            None,
+            Some("legacy"),
+            None,
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .unwrap();
+        conn.execute("DELETE FROM annotation_file_sources", [])
+            .unwrap();
+        let entry = load_annotation_file_entries(conn, None).remove(0);
+        assert!(entry.source.is_none());
+        assert_eq!(
+            entry
+                .coordinate_source(conn, "genome", None)
+                .unwrap()
+                .collection_name,
+            "genome"
+        );
+        Collection::create(conn, "other-genome").unwrap();
+        assert!(matches!(
+            entry.coordinate_source(conn, "genome", None),
+            Err(AnnotationFileSourceError::AmbiguousCollection)
+        ));
+    }
 
     #[test]
     fn test_loads_annotation_file_entries_from_graph_asset_refs() {

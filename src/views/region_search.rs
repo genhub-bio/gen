@@ -496,10 +496,15 @@ fn query_active_annotation_files(
 ) -> Vec<FileAnnotationRecords> {
     let mut candidates = Vec::new();
     for entry in request.annotation_files {
-        if !request
-            .active_annotation_files
-            .contains(&entry.file_addition.id)
-        {
+        match entry.coordinate_source(request.conn, request.collection_name, request.history_ref) {
+            Ok(source) if source.collection_name != request.collection_name => continue,
+            Err(error) => {
+                errors.push(error.to_string());
+                continue;
+            }
+            _ => {}
+        }
+        if !request.active_annotation_files.contains(&entry.id) {
             continue;
         }
         if entry.index_file_addition.is_none() || entry.attribute_index_file_addition.is_none() {
@@ -703,11 +708,15 @@ fn resolve_file_annotation_match(
     region: &Region,
     file_records: FileAnnotationRecords,
 ) -> Result<RegionSearchMatch, String> {
+    let source = file_records
+        .entry
+        .coordinate_source(request.conn, request.collection_name, request.history_ref)
+        .map_err(|error| error.to_string())?;
     let mut translation_context = AnnotationTranslationContext::new(
         request.conn,
         request.workspace,
-        request.collection_name,
-        request.sample_name,
+        &source.collection_name,
+        &source.sample_name,
         request.history_ref,
     )
     .map_err(|error| error.to_string())?;
@@ -996,14 +1005,8 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
     let duplicate_path = BlockGroup::get_current_path(conn, &duplicate_block_group.id, None)
         .expect("should find duplicate annotation path");
     let path_edge_ids = gen_models::path::Path::edge_ids_for_path(conn, &duplicate_path.id, None);
-    gen_models::path::Path::create(
-        conn,
-        "chr1",
-        &duplicate_block_group.id,
-        &path_edge_ids,
-        false,
-    )
-    .expect("should create a distinct path search fixture");
+    gen_models::path::Path::create(conn, "chr1", &duplicate_block_group.id, &path_edge_ids)
+        .expect("should create a distinct path search fixture");
     for (accession_name, start, end) in [
         ("duplicate-accession-a", 0, 5),
         ("duplicate-accession-b", 20, 25),
@@ -1041,7 +1044,8 @@ mod tests {
     use gen_core::{HashId, Strand, region::Region};
     use gen_graph::GenGraph;
     use gen_models::{
-        annotations::AnnotationFileChecksumOverrides,
+        annotation_file_source::AnnotationFileSource,
+        annotations::{AnnotationFileAddOptions, AnnotationFileChecksumOverrides},
         locus::{GraphLocus, GraphNodeSlice},
     };
     use gen_tui::{geometry::WorldPos, layout::VisualDetail, plotter::PathStyle};
@@ -1112,7 +1116,14 @@ mod tests {
             None,
             Some(filename),
             Some("add TUI annotation search fixture"),
-            AnnotationFileChecksumOverrides::default(),
+            AnnotationFileAddOptions {
+                source: Some(AnnotationFileSource {
+                    collection_name: fixture.block_group.collection_name.clone(),
+                    sample_name: fixture.block_group.sample_name.clone(),
+                }),
+                checksum_overrides: AnnotationFileChecksumOverrides::default(),
+                progress: None,
+            },
         )
         .expect("should add and index TUI annotation search fixture");
         fixture.annotation_files = crate::views::annotation_files::load_annotation_file_entries(
@@ -1124,7 +1135,7 @@ mod tests {
             .iter()
             .find(|entry| entry.display_name == filename)
             .expect("should load added annotation file entry");
-        let id = entry.file_addition.id;
+        let id = entry.id;
         if activate {
             fixture.active_annotation_files.insert(id);
         }
@@ -1519,7 +1530,11 @@ mod tests {
             resolve_selected_search_match(&fixture.request(), name_matches[0].clone())
                 .expect("should resolve a selected indexed GFF annotation");
         let full_span = span_for_match(&fixture, &selected_name_match);
-        assert!(full_span.segments.len() > 1);
+        assert_eq!(full_span.segments.len(), 1);
+        assert_eq!(
+            (full_span.segments[0].start, full_span.segments[0].end),
+            (4, 20)
+        );
         assert_eq!(
             full_span
                 .segments
@@ -1543,7 +1558,7 @@ mod tests {
         assert!(matches!(
             &overlays[0].content,
             OverlayContent::Span(span)
-                if span.segments.len() > 1
+                if span.segments.len() == 1
                     && span
                         .segments
                         .iter()
@@ -1626,7 +1641,7 @@ mod tests {
             .expect("should resolve coordinates relative to a file annotation");
         assert_eq!(sliced_matches.len(), 1);
         let sliced_span = span_for_match(&fixture, &sliced_matches[0]);
-        assert!(sliced_span.segments.len() > 1);
+        assert_eq!(sliced_span.segments.len(), 1);
         assert_eq!(
             sliced_span
                 .segments
@@ -1641,7 +1656,7 @@ mod tests {
                 .iter()
                 .map(|segment| (segment.start, segment.end))
                 .collect::<Vec<_>>(),
-            vec![(6, 8), (0, 1)]
+            vec![(6, 9)]
         );
 
         let ambiguous_colon_matches = resolve_region_search_matches(&fixture.request(), "chr1:5")
@@ -1754,7 +1769,14 @@ mod tests {
             None,
             Some("simple.gff"),
             Some("add simple GFF viewer search fixture"),
-            AnnotationFileChecksumOverrides::default(),
+            AnnotationFileAddOptions {
+                source: Some(AnnotationFileSource {
+                    collection_name: fixture.block_group.collection_name.clone(),
+                    sample_name: fixture.block_group.sample_name.clone(),
+                }),
+                checksum_overrides: AnnotationFileChecksumOverrides::default(),
+                progress: None,
+            },
         )
         .expect("should add and index the simple GFF fixture");
         fixture.annotation_files = crate::views::annotation_files::load_annotation_file_entries(
@@ -1766,9 +1788,7 @@ mod tests {
             .iter()
             .find(|entry| entry.display_name == "simple.gff")
             .expect("should load simple GFF annotation file entry");
-        fixture
-            .active_annotation_files
-            .insert(annotation_file.file_addition.id);
+        fixture.active_annotation_files.insert(annotation_file.id);
 
         let matches = resolve_region_search_matches(&fixture.request(), "FoObAr")
             .expect("should find a lowercase GFF name attribute case-insensitively");
@@ -1831,7 +1851,7 @@ mod tests {
         let active_entry = fixture
             .annotation_files
             .iter()
-            .find(|entry| entry.file_addition.id == active_id)
+            .find(|entry| entry.id == active_id)
             .expect("should find active annotation file");
         let active_identity = super::indexed_source_identity(active_entry)
             .expect("active file should have recorded indexes");
@@ -1858,7 +1878,7 @@ mod tests {
         let active_entry = fixture
             .annotation_files
             .iter_mut()
-            .find(|entry| entry.file_addition.id == active_id)
+            .find(|entry| entry.id == active_id)
             .expect("should find active annotation file");
         let attribute_index = active_entry
             .attribute_index_file_addition
@@ -1885,7 +1905,7 @@ mod tests {
         let active_entry = fixture
             .annotation_files
             .iter_mut()
-            .find(|entry| entry.file_addition.id == active_id)
+            .find(|entry| entry.id == active_id)
             .expect("should find active annotation file");
         active_entry.attribute_index_file_addition = None;
         fixture.index_cache.borrow_mut().clear();

@@ -68,7 +68,7 @@ where
         let mut region = match regions_by_reference.get(resolved_reference) {
             Some(region) => region.clone(),
             None => {
-                let path = BlockGroup::get_reference_path(conn, block_group_id, history_ref)?;
+                let path = BlockGroup::get_current_path(conn, block_group_id, history_ref)?;
                 let region = ResolvedGenRegion::from_path(conn, &path, 0, 0)?;
                 regions_by_reference.insert(resolved_reference.to_string(), region.clone());
                 region
@@ -134,9 +134,9 @@ mod tests {
     }
 
     #[test]
-    fn test_translates_gff_using_inherited_reference_after_current_path_changes() {
+    fn test_translates_gff_using_selected_source_sample() {
         let conn = get_connection();
-        let (child, reference) = create_shifted_reference_descendant(&conn);
+        let (_child, reference) = create_shifted_reference_descendant(&conn);
         let node_id =
             gen_models::path::Path::edges_for_path(&conn, &reference.id, None)[0].target_node_id;
         let mut translated = Vec::new();
@@ -144,7 +144,7 @@ mod tests {
             &conn,
             test_workspace(),
             "test",
-            &child.sample_name,
+            Sample::DEFAULT_NAME,
             None,
             Cursor::new(b"m123\t.\tgene\t6\t8\t.\t+\t.\tID=feature\n"),
             &mut translated,
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(translated).unwrap(),
             format!("{node_id}\t.\tgene\t6\t8\t.\t+\t.\tID=feature\n"),
-            "annotation coordinates must use the inherited reference, not the shifted current path"
+            "annotation coordinates must use the selected source sample"
         );
     }
 

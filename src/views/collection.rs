@@ -371,8 +371,7 @@ impl CollectionExplorerState {
         &mut self,
         entries: &[crate::views::annotation_files::AnnotationFileEntry],
     ) {
-        let valid_ids: HashSet<HashId> =
-            entries.iter().map(|entry| entry.file_addition.id).collect();
+        let valid_ids: HashSet<HashId> = entries.iter().map(|entry| entry.id).collect();
         self.active_annotation_files
             .retain(|id| valid_ids.contains(id));
     }
@@ -469,7 +468,7 @@ impl CollectionExplorer {
         self.data
             .annotation_files
             .iter()
-            .find(|entry| entry.file_addition.id == *id)
+            .find(|entry| entry.id == *id)
     }
 
     pub fn annotation_group_entry(&self, id: &str) -> Option<&AnnotationGroupEntry> {
@@ -782,10 +781,10 @@ impl CollectionExplorer {
         // Annotation files
         for entry in &self.data.annotation_files {
             items.push(ExplorerItem::AnnotationFile {
-                id: entry.file_addition.id,
+                id: entry.id,
                 display_name: entry.display_name.clone(),
                 file_type: entry.file_addition.file_type,
-                active: state.is_annotation_file_active(&entry.file_addition.id),
+                active: state.is_annotation_file_active(&entry.id),
             });
         }
 

@@ -152,7 +152,6 @@ where
                         &locus.name,
                         &block_group.id,
                         &[edge_into.id, edge_out_of.id],
-                        block_group.parent_block_group_id.is_none(),
                     )?
                 };
                 let changes = locus.changes_to_wt();

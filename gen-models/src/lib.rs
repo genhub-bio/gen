@@ -5,6 +5,7 @@ pub use gen_models_macros::ModelSelect;
 pub use select::Direction;
 
 pub mod accession;
+pub mod annotation_file_source;
 pub mod annotations;
 pub mod assets;
 pub mod block_group;

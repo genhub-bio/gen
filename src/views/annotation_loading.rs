@@ -162,7 +162,7 @@ impl AnnotationLoadCoordinator {
     }
 
     pub(super) fn queue_activation(&mut self, spec: AnnotationLoadSpec) {
-        let file_id = spec.entry.file_addition.id;
+        let file_id = spec.entry.id;
         let activation = self
             .activations
             .get(&file_id)
@@ -174,7 +174,7 @@ impl AnnotationLoadCoordinator {
     }
 
     pub(super) fn queue_reload(&mut self, spec: AnnotationLoadSpec) {
-        let file_id = spec.entry.file_addition.id;
+        let file_id = spec.entry.id;
         if let Some(activation) = self.activations.get(&file_id).copied() {
             self.queue(spec, activation);
         }
@@ -182,7 +182,7 @@ impl AnnotationLoadCoordinator {
 
     fn queue(&mut self, spec: AnnotationLoadSpec, activation: u64) {
         self.next_request_id = self.next_request_id.wrapping_add(1);
-        let file_id = spec.entry.file_addition.id;
+        let file_id = spec.entry.id;
         let identity = AnnotationLoadIdentity {
             generation: self.generation,
             activation,
@@ -200,7 +200,7 @@ impl AnnotationLoadCoordinator {
             node_filter: spec.node_filter,
         };
         self.pending
-            .retain(|pending| pending.identity.entry.file_addition.id != file_id);
+            .retain(|pending| pending.identity.entry.id != file_id);
         self.pending.push_back(job);
     }
 
@@ -213,12 +213,12 @@ impl AnnotationLoadCoordinator {
             .wrapping_add(1);
         self.activations.insert(file_id, activation);
         self.pending
-            .retain(|pending| pending.identity.entry.file_addition.id != file_id);
+            .retain(|pending| pending.identity.entry.id != file_id);
     }
 
     pub(super) fn is_current(&self, identity: &AnnotationLoadIdentity) -> bool {
         self.generation == identity.generation
-            && self.activations.get(&identity.entry.file_addition.id) == Some(&identity.activation)
+            && self.activations.get(&identity.entry.id) == Some(&identity.activation)
     }
 
     pub(super) fn try_receive(&mut self) -> Option<AnnotationLoadResult> {
@@ -312,10 +312,9 @@ impl AnnotationLoadCoordinator {
 
     pub(super) fn has_current_work_for_file(&self, file_id: HashId) -> bool {
         self.pending.iter().any(|pending| {
-            pending.identity.entry.file_addition.id == file_id && self.is_current(&pending.identity)
+            pending.identity.entry.id == file_id && self.is_current(&pending.identity)
         }) || self.in_flight.as_ref().is_some_and(|in_flight| {
-            in_flight.identity.entry.file_addition.id == file_id
-                && self.is_current(&in_flight.identity)
+            in_flight.identity.entry.id == file_id && self.is_current(&in_flight.identity)
         })
     }
 
@@ -325,7 +324,7 @@ impl AnnotationLoadCoordinator {
         visible_window: (i64, i64),
     ) -> bool {
         let covers = |identity: &AnnotationLoadIdentity| {
-            identity.entry.file_addition.id == file_id
+            identity.entry.id == file_id
                 && self.is_current(identity)
                 && identity.query_window.is_some_and(|(start, end)| {
                     start <= visible_window.0 && end >= visible_window.1
@@ -340,7 +339,7 @@ impl AnnotationLoadCoordinator {
 
     pub(super) fn cancel_pending_reloads(&mut self, file_id: HashId) {
         self.pending
-            .retain(|pending| pending.identity.entry.file_addition.id != file_id);
+            .retain(|pending| pending.identity.entry.id != file_id);
     }
 }
 
@@ -638,7 +637,7 @@ mod tests {
             None,
         )
         .expect("should start annotation loading worker");
-        let file_id = entry.file_addition.id;
+        let file_id = entry.id;
         coordinator.queue_activation(annotation_spec(
             &block_group,
             entry.clone(),
@@ -709,7 +708,7 @@ mod tests {
             None,
         )
         .expect("should start annotation loading worker");
-        let file_id = entry.file_addition.id;
+        let file_id = entry.id;
         coordinator.queue_activation(annotation_spec(
             &block_group,
             entry.clone(),
@@ -774,7 +773,7 @@ mod tests {
             None,
         )
         .expect("should start annotation loading worker");
-        let file_id = entry.file_addition.id;
+        let file_id = entry.id;
         coordinator.queue_activation(annotation_spec(
             &block_group,
             entry,
@@ -787,7 +786,7 @@ mod tests {
         let result = coordinator
             .try_receive()
             .expect("should surface the disconnected worker as a result");
-        assert_eq!(result.identity.entry.file_addition.id, file_id);
+        assert_eq!(result.identity.entry.id, file_id);
         assert!(result.result.is_err());
         assert!(
             !coordinator.is_busy(),

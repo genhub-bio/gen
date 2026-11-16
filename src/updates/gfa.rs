@@ -480,13 +480,7 @@ fn create_new_path_from_existing(
         })
         .collect::<Vec<BlockGroupEdgeData>>();
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
-    Path::create(
-        conn,
-        unmatched_path_name,
-        &block_group_id,
-        &new_edge_ids,
-        false,
-    )?;
+    Path::create(conn, unmatched_path_name, &block_group_id, &new_edge_ids)?;
 
     Ok(())
 }

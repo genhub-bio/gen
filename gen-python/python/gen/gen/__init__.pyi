@@ -579,6 +579,8 @@ class Repository:
         index: typing.Optional[builtins.str] = None,
         name: typing.Optional[builtins.str] = None,
         message: typing.Optional[builtins.str] = None,
+        *,
+        sample: str | Sample | None = None,
     ) -> typing.Optional[HashId]:
         r"""
         Imports an annotation file and makes its indexed features available on matching sequence graphs.
@@ -588,6 +590,7 @@ class Repository:
         `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
         display and track name; `message` labels the import. `filename` and `index` are path strings;
         a relative path is resolved against the current working directory.
+        `sample` selects the coordinate source by name or as a `Sample` (including its collection).
         """
     def import_fasta(
         self,

@@ -103,13 +103,7 @@ pub fn import_sequences(
         ];
 
         BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
-        let path = Path::create(
-            conn,
-            name,
-            &block_group.id,
-            &[edge_into.id, edge_out_of.id],
-            true,
-        )?;
+        let path = Path::create(conn, name, &block_group.id, &[edge_into.id, edge_out_of.id])?;
         summary.entry(path.name).or_insert(sequence_length);
     }
 
@@ -238,7 +232,6 @@ pub fn import_genomic_regions(
             region_name,
             &block_group.id,
             &[edge_into.id, edge_out_of.id],
-            true,
         )?;
         summary.entry(path.name).or_insert(region_len);
     }

@@ -23,23 +23,28 @@ flowchart LR
 and thus provide a reference frame for modifications. On fasta import, each header automatically becomes a defined path,
 so `Chr1` and so on will be automatically assigned.
 
-## Reference paths
+## Annotation coordinate sources
 
-Paths have an `is_reference` flag that identifies the coordinate reference for a block-group
-lineage. `Path::create` and `Path::create_with_validated_edges` require an explicit
-`is_reference` argument. Imports mark their reference paths `true`; copying and ordinary
-editing use `false`, leaving the inherited reference unchanged. GFA imports choose the first
-path, or the first walk when no paths exist, as the reference for their single block group.
+An annotation file is associated with a source sample and collection when it is added.
+Each record's contig name (or reference alias) identifies a block group in that sample;
+that block group's current path defines the record's coordinates. Paths do not carry
+reference flags, and annotation translation does not search the destination's ancestors.
 
-`BlockGroup::get_reference_path` checks the block group itself, then walks its parent chain to
-find the nearest ancestor with a reference path. It returns that ancestor's path, which may
-belong to a different block group. Historical lookups use the requested revision for both
-ancestry and paths. A lineage without a reference returns an error.
+`gen add-annotation-file genes.gff3 --collection genome` uses the collection's reference
+sample. Use `--sample SAMPLE` when the file describes a different sample. If several
+reference samples exist, select one explicitly. The configured collection is used by
+default; with no configured collection, a single existing collection is inferred.
 
-Creating a path with `is_reference = true` in a descendant overrides its inherited reference.
-Each block group can have at most one reference path, and existing paths cannot be promoted
-through the creation methods. The current path remains the most recently created path,
-independently of reference status.
+Views and annotation searches first translate coordinates using the file's source sample,
+then project the resulting node segments onto the graph being viewed. Descendant updates
+therefore do not reinterpret an ancestor's annotation file using descendant coordinates.
+The same file can be attached to multiple samples with separate coordinate associations.
+Stored annotations continue to use node coordinates through accessions.
+
+Source associations are versioned with the annotation operation. Historical views use the
+source sample's paths at the selected revision. Older unassociated files fall back to the
+reference sample of the sole collection. Ambiguous legacy sources must be reattached with
+an explicit sample and collection. The source sample's current paths are assumed stable after association.
 
 ## Accessions
 

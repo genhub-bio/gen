@@ -965,9 +965,7 @@ impl GraphPage {
         self.annotation_files = entries
             .into_iter()
             .map(|entry| {
-                let known = previous
-                    .iter()
-                    .position(|file| file.entry.file_addition.id == entry.file_addition.id);
+                let known = previous.iter().position(|file| file.entry.id == entry.id);
                 match known {
                     Some(index) => FileTrack {
                         entry,
