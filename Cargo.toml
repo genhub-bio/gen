@@ -23,7 +23,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-models-macros", "gen-models-macros/tests/fixture", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas", "gen-http"]
+members = [".", "gen-core", "gen-models", "gen-models-macros", "gen-models-macros/tests/fixture", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas", "gen-http", "gen-wasm"]
 default-members = [".", "gen-core", "gen-models", "gen-models-macros", "gen-models-macros/tests/fixture", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations", "gen-http"]
 exclude = ["gen-python", "gen-r/src/rust"]
 
@@ -124,4 +124,4 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite.git", rev = "8674d13400e7064d4dd213e5f7db9998e6a2a4ff" }
+rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite.git", rev = "651c2fc064809cf42673c733a86ded33edc2febd" }

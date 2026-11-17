@@ -2356,6 +2356,30 @@ pub fn execute_push(
     explicit_branch: Option<&str>,
     force: bool,
 ) -> Result<(), RemotePushError> {
+    execute_push_with_asset_policy(workspace, explicit_remote, explicit_branch, force, false)
+}
+
+/// Pushes a browser-created branch whose referenced assets already exist on GenHub.
+///
+/// GenHub verifies every asset referenced by the published branch before it completes the push.
+/// This is used for branch creation and merging existing remote history, where the browser does
+/// not have local copies of source-branch assets to upload.
+#[cfg(feature = "browser-cloud")]
+pub fn execute_push_with_published_assets(
+    workspace: &Workspace,
+    explicit_remote: Option<&str>,
+    explicit_branch: Option<&str>,
+) -> Result<(), RemotePushError> {
+    execute_push_with_asset_policy(workspace, explicit_remote, explicit_branch, false, true)
+}
+
+fn execute_push_with_asset_policy(
+    workspace: &Workspace,
+    explicit_remote: Option<&str>,
+    explicit_branch: Option<&str>,
+    force: bool,
+    use_published_assets: bool,
+) -> Result<(), RemotePushError> {
     let progress = TransferProgress::stderr();
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let intended_branch = Defaults::get_current_branch(&config);
@@ -2370,6 +2394,11 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
+    if use_published_assets && remote.url.starts_with("file://") {
+        return Err(RemotePushError::AssetTransfer(Box::new(io::Error::other(
+            "published asset reuse requires a GenHub remote",
+        ))));
+    }
     #[cfg(not(any(
         all(feature = "remote-native", not(target_os = "emscripten")),
         feature = "browser-cloud"
@@ -2591,26 +2620,31 @@ pub fn execute_push(
             }
             Ok(())
         };
-        transfer_assets(
-            &graph,
-            workspace,
-            &remote,
-            RemoteOperation::Push,
-            AssetTransferRun {
-                target: AssetTransferTarget {
-                    branch: &branch,
-                    history_ref: &branch,
-                    range: AssetTransferRange {
-                        from_commit: assets_transfer_checkpoint.as_ref(),
-                        previous_hash: previous_hash.as_ref(),
-                        materialize: true,
+        if use_published_assets {
+            progress.println("Using assets already published to GenHub.");
+            Ok(Vec::new())
+        } else {
+            transfer_assets(
+                &graph,
+                workspace,
+                &remote,
+                RemoteOperation::Push,
+                AssetTransferRun {
+                    target: AssetTransferTarget {
+                        branch: &branch,
+                        history_ref: &branch,
+                        range: AssetTransferRange {
+                            from_commit: assets_transfer_checkpoint.as_ref(),
+                            previous_hash: previous_hash.as_ref(),
+                            materialize: true,
+                        },
                     },
+                    progress: &progress,
                 },
-                progress: &progress,
-            },
-            |_| Ok(()),
-            &mut refresh_push_lease,
-        )
+                |_| Ok(()),
+                &mut refresh_push_lease,
+            )
+        }
     };
     let upload_receipts = match upload_receipts_result {
         Ok(upload_receipts) => upload_receipts,

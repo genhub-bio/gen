@@ -62,4 +62,4 @@ pyo3-build-config = "0.29"
 members = ["."]
 
 [patch.crates-io]
-rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite.git", rev = "8674d13400e7064d4dd213e5f7db9998e6a2a4ff" }
+rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite.git", rev = "651c2fc064809cf42673c733a86ded33edc2febd" }
