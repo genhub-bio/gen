@@ -226,6 +226,18 @@ and `set_branch_remote(remote=None)`. `repo.remotes` and `repo.default_remote` i
 remote-tracking reference without switching the checkout. Push, pull, and fetch use the CLI's
 authentication and asset-transfer behavior.
 
+### GenHub notebook commands
+
+A GenHub notebook can run repository operations through the browser build using GenHub-issued storage
+capabilities. `await gen.browser.execute_repository_command(command)` accepts only `initialize`,
+`create_branch`, or `merge`. Each command includes the same-origin
+`/api/repos/{namespace}/{slug}` URL and the signed-in committer name and email. Initialization
+accepts `branch` (the configured default branch, `main` when omitted); branch creation accepts
+`source_branch` and `branch`; merge accepts `source_branch` and `target_branch`.
+
+The call returns `{"branch": ..., "commit_hash": ...}` after Gen publishes that branch through its
+normal remote workflow. A merge conflict raises `NotebookSessionError` and does not push the target.
+
 ## 8. Files, assets, and exports
 
 `repo.add_file(filename, message=None, *, allow_no_changes=False)` stores a file as a repository

@@ -2070,5 +2070,180 @@ class NotebookCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(widget._observer)
 
 
+class RepositoryCommandStub:
+    def __init__(self, branch="main"):
+        self.branch = branch
+        self.head = "a" * 40
+        self.branches = {branch}
+        self.calls = []
+        self.workspace = None
+        self.merge_error = None
+
+    @property
+    def current_branch(self):
+        return SimpleNamespace(name=self.branch, head=self.head)
+
+    def query(self, query):
+        self.calls.append(("query", query))
+        if query.startswith("SELECT dolt_branch('-m', 'main', "):
+            branch = query.rsplit("'", 2)[1]
+            self.branches.remove("main")
+            self.branches.add(branch)
+            self.branch = branch
+            return [[0]]
+        return [[0]]
+
+    def checkout(self, branch, *, create=False, materialize_assets=True):
+        self.calls.append(("checkout", branch, create, materialize_assets))
+        if create:
+            self.branches.add(branch)
+        self.branch = branch
+
+    def get_branches(self):
+        return [SimpleNamespace(name=branch) for branch in sorted(self.branches)]
+
+    def add_remote(self, name, url):
+        self.calls.append(("add_remote", name, url))
+
+    def set_default_remote(self, remote):
+        self.calls.append(("set_default_remote", remote))
+
+    def set_branch_remote(self, remote):
+        self.calls.append(("set_branch_remote", remote))
+
+    def merge(self, source_branch):
+        self.calls.append(("merge", source_branch))
+        if self.merge_error is not None:
+            raise self.merge_error
+        self.head = "b" * 40
+
+    def push(self, *, branch):
+        self.calls.append(("push", branch))
+
+
+class RepositoryCommandTests(unittest.IsolatedAsyncioTestCase):
+    def test_command_is_exported_from_browser_and_package(self):
+        self.assertIs(gen.execute_repository_command, gen.browser.execute_repository_command)
+        self.assertIn("execute_repository_command", gen.__all__)
+
+    def _repository_type(self, repository):
+        repository_type = Mock(return_value=repository)
+        repository_type.open_remote_graph = Mock(return_value=repository)
+        return repository_type
+
+    def _command(self, action, **fields):
+        return {
+            "action": action,
+            "repository_url": REPOSITORY_URL,
+            "committer": "Ada Example",
+            "email": "ada@example.invalid",
+            **fields,
+        }
+
+    async def test_initialize_renames_default_branch_and_publishes_it(self):
+        repository = RepositoryCommandStub()
+        repository_type = self._repository_type(repository)
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch("gen.Repository", repository_type),
+        ):
+            result = await gen.browser.execute_repository_command(
+                self._command("initialize", branch="trunk")
+            )
+
+        self.assertEqual(result, {"branch": "trunk", "commit_hash": "a" * 40})
+        self.assertEqual(repository.branches, {"trunk"})
+        self.assertEqual(repository.calls[0][0], "query")
+        self.assertIn(("checkout", "trunk", False, False), repository.calls)
+        self.assertIn(("add_remote", "origin", REPOSITORY_URL), repository.calls)
+        self.assertEqual(repository.calls[-1], ("push", "trunk"))
+        self.assertFalse(Path(repository_type.call_args.args[0]).exists())
+        repository_type.assert_called_once()
+
+    async def test_create_branch_opens_source_and_pushes_new_branch(self):
+        repository = RepositoryCommandStub("feature")
+        repository.branches.add("main")
+        repository_type = self._repository_type(repository)
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch("gen.Repository", repository_type),
+        ):
+            result = await gen.browser.execute_repository_command(
+                self._command("create_branch", source_branch="feature", branch="review")
+            )
+
+        self.assertEqual(result, {"branch": "review", "commit_hash": "a" * 40})
+        repository_type.open_remote_graph.assert_called_once()
+        self.assertEqual(repository_type.open_remote_graph.call_args.kwargs["branch"], "feature")
+        self.assertIn(("checkout", "review", True, False), repository.calls)
+        self.assertIn(("set_branch_remote", "origin"), repository.calls)
+        self.assertEqual(repository.calls[-1], ("push", "review"))
+
+    async def test_merge_publishes_target_after_gen_merge(self):
+        repository = RepositoryCommandStub("main")
+        repository.branches.add("feature")
+        repository_type = self._repository_type(repository)
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch("gen.Repository", repository_type),
+        ):
+            result = await gen.browser.execute_repository_command(
+                self._command("merge", source_branch="feature", target_branch="main")
+            )
+
+        self.assertEqual(result, {"branch": "main", "commit_hash": "b" * 40})
+        self.assertEqual(repository.calls[-2:], [("merge", "feature"), ("push", "main")])
+        self.assertEqual(repository_type.open_remote_graph.call_args.kwargs["branch"], "main")
+
+    async def test_merge_conflict_does_not_publish(self):
+        repository = RepositoryCommandStub("main")
+        repository.branches.add("feature")
+        repository.merge_error = RuntimeError("merge conflict")
+        repository_type = self._repository_type(repository)
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch("gen.Repository", repository_type),
+            self.assertRaisesRegex(NotebookSessionError, "merge conflict"),
+        ):
+            await gen.browser.execute_repository_command(
+                self._command("merge", source_branch="feature", target_branch="main")
+            )
+
+        self.assertNotIn("push", [call[0] for call in repository.calls])
+
+    async def test_invalid_command_fields_and_missing_identity_fail_before_open(self):
+        repository_type = self._repository_type(RepositoryCommandStub())
+        with (
+            patch("gen.browser._browser_origin", return_value="https://genhub.example"),
+            patch("gen.Repository", repository_type),
+        ):
+            with self.assertRaisesRegex(NotebookSessionError, "Unsupported.*field"):
+                await gen.browser.execute_repository_command(
+                    self._command("merge", source_branch="feature", target_branch="main", sql="DROP TABLE")
+                )
+            missing_email = self._command("initialize")
+            del missing_email["email"]
+            with self.assertRaisesRegex(NotebookSessionError, "email"):
+                await gen.browser.execute_repository_command(missing_email)
+
+        repository_type.assert_not_called()
+        repository_type.open_remote_graph.assert_not_called()
+
+
+class NativeRepositoryInitializationTests(unittest.TestCase):
+    def test_renaming_initial_default_branch_updates_default_ref(self):
+        with tempfile.TemporaryDirectory(prefix="gen-notebook-init-branch-") as directory:
+            repository = gen.Repository(str(Path(directory) / "repository"))
+            self.assertEqual(repository.query("SELECT dolt_default_branch()"), [["main"]])
+
+            result = repository.query("SELECT dolt_branch('-m', 'main', 'trunk')")
+            repository.checkout("trunk", materialize_assets=False)
+
+            self.assertEqual(result, [[0]])
+            self.assertEqual(repository.query("SELECT dolt_default_branch()"), [["trunk"]])
+            self.assertEqual([branch.name for branch in repository.get_branches()], ["trunk"])
+            self.assertEqual(repository.current_branch.name, "trunk")
+
+
 if __name__ == "__main__":
     unittest.main()

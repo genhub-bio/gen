@@ -1737,4 +1737,118 @@ async def _capture_active_notebook(widget: Any) -> dict[str, Any]:
         widget.capture_error = ""
 
 
-__all__ = ["NotebookSession", "NotebookSessionError"]
+__all__ = ["NotebookSession", "NotebookSessionError", "execute_repository_command"]
+
+
+def _validate_repository_command(
+    command: Any,
+) -> tuple[str, str, str, str, dict[str, str]]:
+    if not isinstance(command, dict):
+        raise NotebookSessionError("A GenHub repository command must be an object")
+    action = command.get("action")
+    if not isinstance(action, str) or action not in {"initialize", "create_branch", "merge"}:
+        raise NotebookSessionError("The GenHub repository command is not supported")
+    allowed_fields = {
+        "action", "repository_url", "committer", "email", "branch",
+        "source_branch", "target_branch",
+    }
+    unknown_fields = set(command) - allowed_fields
+    if unknown_fields:
+        field = sorted(unknown_fields)[0]
+        raise NotebookSessionError(f"Unsupported GenHub repository command field: {field}")
+    repository_url = _absolute_repository_url(command.get("repository_url"))
+    committer = command.get("committer")
+    email = command.get("email")
+    if not isinstance(committer, str) or not committer.strip():
+        raise NotebookSessionError("committer must be a non-empty string")
+    if not isinstance(email, str) or not email.strip():
+        raise NotebookSessionError("email must be a non-empty string")
+    fields: dict[str, str] = {}
+    if action == "initialize":
+        branch = _validate_branch(command.get("branch", "main"))
+        if branch is None:
+            raise NotebookSessionError("The default branch name is required")
+        fields["branch"] = branch
+    elif action == "create_branch":
+        source = _validate_branch(command.get("source_branch"))
+        branch = _validate_branch(command.get("branch"))
+        if source is None or branch is None:
+            raise NotebookSessionError("Source and new branch names are required")
+        if source == branch:
+            raise NotebookSessionError("The new branch must differ from its source")
+        fields.update(source_branch=source, branch=branch)
+    else:
+        source = _validate_branch(command.get("source_branch"))
+        target = _validate_branch(command.get("target_branch"))
+        if source is None or target is None:
+            raise NotebookSessionError("Source and target branch names are required")
+        if source == target:
+            raise NotebookSessionError("The source and target branches must differ")
+        fields.update(source_branch=source, target_branch=target)
+    return action, repository_url, committer.strip(), email.strip(), fields
+
+
+async def execute_repository_command(command: dict[str, Any]) -> dict[str, str]:
+    """Execute one allow-listed GenHub command, then publish its branch through Gen."""
+    action, repository_url, committer, email, fields = _validate_repository_command(command)
+    temporary_directory = tempfile.TemporaryDirectory(prefix="gen-repository-command-")
+    repository = None
+    try:
+        from . import Repository
+
+        workspace = Path(temporary_directory.name) / "repository"
+        if action == "initialize":
+            repository = Repository(str(workspace), committer=committer, email=email)
+            branch = fields["branch"]
+            current_branch = repository.current_branch
+            if current_branch is None:
+                raise NotebookSessionError("The new Gen repository has no default branch")
+            if branch != current_branch.name:
+                escaped_branch = branch.replace("'", "''")
+                renamed = repository.query(
+                    "SELECT dolt_branch('-m', 'main', " f"'{escaped_branch}')"
+                )
+                if renamed != [[0]]:
+                    raise NotebookSessionError(f"Gen could not set default branch '{branch}'")
+                repository.checkout(branch, materialize_assets=False)
+            repository.add_remote("origin", repository_url)
+            repository.set_default_remote("origin")
+            repository.set_branch_remote("origin")
+            target_branch = branch
+        else:
+            target_branch = fields["branch"] if action == "create_branch" else fields["target_branch"]
+            open_branch = fields["source_branch"] if action == "create_branch" else target_branch
+            repository = Repository.open_remote_graph(
+                repository_url, path=workspace, branch=open_branch,
+                committer=committer, email=email,
+            )
+            current_branch = repository.current_branch
+            if current_branch is None or current_branch.name != open_branch:
+                raise NotebookSessionError(f"Gen could not select branch '{open_branch}'")
+            branches = {item.name for item in repository.get_branches()}
+            if action == "create_branch":
+                if target_branch in branches:
+                    raise NotebookSessionError(f"Branch '{target_branch}' already exists")
+                repository.checkout(target_branch, create=True, materialize_assets=False)
+                repository.set_branch_remote("origin")
+            else:
+                source_branch = fields["source_branch"]
+                if source_branch not in branches:
+                    raise NotebookSessionError(
+                        f"Source branch '{source_branch}' is not available in this repository"
+                    )
+                repository.merge(source_branch)
+
+        current_branch = repository.current_branch
+        if current_branch is None or current_branch.name != target_branch:
+            raise NotebookSessionError(f"Gen did not select target branch '{target_branch}'")
+        commit_hash = str(current_branch.head)
+        repository.push(branch=target_branch)
+        return {"branch": target_branch, "commit_hash": commit_hash}
+    except NotebookSessionError:
+        raise
+    except Exception as error:
+        raise NotebookSessionError(f"GenHub {action} command failed: {error}") from error
+    finally:
+        repository = None
+        temporary_directory.cleanup()

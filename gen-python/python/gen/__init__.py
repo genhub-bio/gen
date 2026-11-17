@@ -37,7 +37,7 @@ except ImportError:
 else:
     _has_clone = True
 
-from .browser import NotebookSession, NotebookSessionError
+from .browser import NotebookSession, NotebookSessionError, execute_repository_command
 
 # Only a live Jupyter kernel can display the browser canvas. Route terminals,
 # scripts, and AI REPLs to the text widget even when the optional dependencies
@@ -73,6 +73,7 @@ __all__ = [
     "Sequence",
     "SequenceGraph",
     "SuperPosition",
+    "execute_repository_command",
     "freeze_all_widgets",
 ]
 
