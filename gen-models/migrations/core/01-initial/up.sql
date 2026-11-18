@@ -193,18 +193,12 @@ CREATE TABLE gen_operation_assets (
   log_id BLOB NOT NULL,
   asset_ref_id BLOB NOT NULL,
   role TEXT NOT NULL,
+  collection_name TEXT,
+  sample_name TEXT,
+  CHECK ((collection_name IS NULL) = (sample_name IS NULL)),
   PRIMARY KEY (log_id, asset_ref_id, role),
   FOREIGN KEY(log_id) REFERENCES gen_operation_log(id),
   FOREIGN KEY(asset_ref_id) REFERENCES gen_asset_refs(id)
-) STRICT;
-
--- The operation identifies an attachment: identical file bytes can annotate different samples.
-CREATE TABLE annotation_file_sources (
-  log_id BLOB NOT NULL REFERENCES gen_operation_log(id),
-  asset_ref_id BLOB NOT NULL REFERENCES gen_asset_refs(id),
-  collection_name TEXT NOT NULL,
-  sample_name TEXT NOT NULL,
-  PRIMARY KEY (log_id, asset_ref_id)
 ) STRICT;
 
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('E. coli K-12 MG1655', 'NC_000913.3', 'U00096.3', 'U00096.3', '');

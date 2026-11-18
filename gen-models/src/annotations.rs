@@ -1174,13 +1174,15 @@ pub fn add_annotation_file_with_progress(
         &asset_refs,
     )?;
     graph_conn.execute(
-        "INSERT INTO annotation_file_sources (log_id, asset_ref_id, collection_name, sample_name)
-         VALUES (?1, ?2, ?3, ?4) ON CONFLICT(log_id, asset_ref_id) DO NOTHING",
+        "UPDATE gen_operation_assets SET collection_name = ?3, sample_name = ?4
+         WHERE log_id = ?1 AND asset_ref_id = ?2 AND role = ?5
+           AND collection_name IS NULL AND sample_name IS NULL",
         params![
             log_id,
             annotation_asset_ref_id,
             source.collection_name,
-            source.sample_name
+            source.sample_name,
+            AssetRole::Annotation
         ],
     )?;
     if graph_conn.total_changes() == changes_before {

@@ -26,7 +26,6 @@ use crate::{
     file_types::FileTypes,
     history::dolt::hash_of,
     operations::FileAddition,
-    select::sql_table_name_with_history_ref,
 };
 
 mod compression;
@@ -251,6 +250,10 @@ pub struct OperationAsset {
     pub asset_ref_id: HashId,
     #[model_select(primary_key)]
     pub role: AssetRole,
+    /// Collection containing the annotation coordinate source, when specified.
+    pub collection_name: Option<String>,
+    /// Sample whose current paths define annotation coordinates, when specified.
+    pub sample_name: Option<String>,
 }
 
 impl AssetRef {
@@ -692,15 +695,10 @@ impl Assets {
         let operation_logs_table = OperationLog::table_name_with_history_ref(history_ref);
         let operation_assets_table = OperationAsset::table_name_with_history_ref(history_ref);
         let asset_refs_table = AssetRef::table_name_with_history_ref(history_ref);
-        let sources_table = sql_table_name_with_history_ref(
-            "annotation_file_sources",
-            Some("annotation_file_sources"),
-            history_ref,
-        );
         let query = format!(
             "SELECT operation_logs.id AS log_id, \
-                    annotation_sources.collection_name AS source_collection, \
-                    annotation_sources.sample_name AS source_sample, \
+                    annotation_operation_assets.collection_name AS source_collection, \
+                    annotation_operation_assets.sample_name AS source_sample, \
                     annotation_assets.id AS annotation_id, \
                     annotation_assets.uri AS annotation_uri, \
                     annotation_assets.file_type AS annotation_file_type, \
@@ -740,9 +738,6 @@ impl Assets {
               AND annotation_operation_assets.role = :annotation_role \
              JOIN {asset_refs_table} annotation_assets \
                ON annotation_assets.id = annotation_operation_assets.asset_ref_id \
-             LEFT JOIN {sources_table} annotation_sources \
-               ON annotation_sources.log_id = operation_logs.id \
-              AND annotation_sources.asset_ref_id = annotation_assets.id \
              LEFT JOIN {operation_assets_table} index_operation_assets \
                ON index_operation_assets.log_id = operation_logs.id \
               AND index_operation_assets.role = :index_role \
@@ -756,8 +751,10 @@ impl Assets {
                ON attribute_index_assets.id = attribute_index_operation_assets.asset_ref_id \
               AND attribute_index_assets.upstream_asset_ref_id = annotation_assets.id \
              WHERE operation_logs.operation_kind = :operation_kind \
-               AND (annotation_sources.log_id IS NOT NULL OR NOT EXISTS ( \
-                    SELECT 1 FROM {sources_table} binding WHERE binding.asset_ref_id = annotation_assets.id)) \
+               AND (annotation_operation_assets.collection_name IS NOT NULL OR NOT EXISTS ( \
+                    SELECT 1 FROM {operation_assets_table} binding \
+                    WHERE binding.asset_ref_id = annotation_assets.id \
+                      AND binding.role = :annotation_role AND binding.collection_name IS NOT NULL)) \
              ORDER BY operation_logs.created_on, annotation_assets.created_on, \
                       annotation_assets.name"
         );
@@ -880,12 +877,14 @@ impl OperationAsset {
         operation_asset: &OperationAsset,
     ) -> rusqlite::Result<()> {
         conn.execute(
-            "INSERT OR IGNORE INTO gen_operation_assets (log_id, asset_ref_id, role) \
-             VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO gen_operation_assets (log_id, asset_ref_id, role, collection_name, sample_name) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 operation_asset.log_id,
                 operation_asset.asset_ref_id,
-                &operation_asset.role
+                &operation_asset.role,
+                &operation_asset.collection_name,
+                &operation_asset.sample_name
             ],
         )?;
         Ok(())
@@ -2091,6 +2090,8 @@ mod tests {
             log_id: operation_log.id,
             asset_ref_id: asset_ref.id,
             role: AssetRole::Input,
+            collection_name: None,
+            sample_name: None,
         };
 
         OperationLog::create(conn, &operation_log).expect("should insert operation log");
@@ -2104,6 +2105,32 @@ mod tests {
         assert_eq!(asset_refs, vec![asset_ref]);
         assert_eq!(operation_logs, vec![operation_log]);
         assert_eq!(operation_assets, vec![operation_asset]);
+
+        for statement in [
+            "UPDATE gen_operation_assets SET collection_name = 'genome'",
+            "UPDATE gen_operation_assets SET sample_name = 'reference'",
+        ] {
+            let error = conn
+                .execute(statement, [])
+                .expect_err("should reject a partial coordinate source");
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(error, _) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK)
+            );
+        }
+        conn.execute(
+            "UPDATE gen_operation_assets SET collection_name = 'genome', sample_name = 'reference'",
+            [],
+        )
+        .expect("should set a complete coordinate source");
+        let operation_assets = OperationAsset::all(conn).expect("should reload operation assets");
+        assert_eq!(
+            operation_assets[0].collection_name.as_deref(),
+            Some("genome")
+        );
+        assert_eq!(
+            operation_assets[0].sample_name.as_deref(),
+            Some("reference")
+        );
     }
 
     #[test]
@@ -2223,6 +2250,8 @@ mod tests {
                 log_id: log.id,
                 asset_ref_id: annotation.id,
                 role: AssetRole::Annotation,
+                collection_name: None,
+                sample_name: None,
             },
         )
         .expect("should associate annotation asset");
@@ -2232,6 +2261,8 @@ mod tests {
                 log_id: log.id,
                 asset_ref_id: index.id,
                 role: AssetRole::AnnotationIndex,
+                collection_name: None,
+                sample_name: None,
             },
         )
         .expect("should associate annotation index asset");
@@ -2241,6 +2272,8 @@ mod tests {
                 log_id: log.id,
                 asset_ref_id: attribute_index.id,
                 role: AssetRole::Other(ANNOTATION_ATTRIBUTE_INDEX_ROLE.to_string()),
+                collection_name: None,
+                sample_name: None,
             },
         )
         .expect("should associate annotation attribute index asset");

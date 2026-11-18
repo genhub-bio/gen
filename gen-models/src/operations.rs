@@ -322,6 +322,8 @@ pub(crate) fn track_asset_refs(
                 log_id,
                 asset_ref_id: asset_ref.id,
                 role: asset_ref.role.clone(),
+                collection_name: None,
+                sample_name: None,
             },
         )?;
     }

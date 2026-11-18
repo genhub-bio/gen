@@ -152,8 +152,11 @@ mod tests {
             AnnotationFileChecksumOverrides::default(),
         )
         .unwrap();
-        conn.execute("DELETE FROM annotation_file_sources", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE gen_operation_assets SET collection_name = NULL, sample_name = NULL",
+            [],
+        )
+        .unwrap();
         let entry = load_annotation_file_entries(conn, None).remove(0);
         assert!(entry.source.is_none());
         assert_eq!(
