@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use crate::{
     Direction, ModelSelect, ModelSelectError,
+    annotation_file_source::AnnotationFileSource,
     assets::{
         AssetRef, AssetRole, AssetUri, CompressionType, LocalAssetUri, OperationAsset,
         OperationKind, OperationLog, stage_bgzf_asset_copy,
@@ -281,7 +282,7 @@ pub fn record_operation_summary(
         None,
         &operation_kind,
         &operation_summary.summary,
-        &prepared_assets,
+        prepared_assets.iter().map(|asset| (asset, None)),
     )?;
 
     Ok(())
@@ -291,12 +292,12 @@ pub fn record_operation_summary(
     feature = "profiling",
     tracing::instrument(skip(graph_conn, log_id, assets))
 )]
-pub(crate) fn track_asset_refs(
+pub(crate) fn track_asset_refs<'a>(
     graph_conn: &crate::db::GraphConnection,
     log_id: Option<&HashId>,
     operation_kind: &OperationKind,
     command: &str,
-    assets: &[AssetRef],
+    assets: impl IntoIterator<Item = (&'a AssetRef, Option<&'a AnnotationFileSource>)>,
 ) -> Result<(), rusqlite::Error> {
     let created_on = chrono::Utc::now()
         .timestamp_nanos_opt()
@@ -314,7 +315,7 @@ pub(crate) fn track_asset_refs(
         },
     )?;
 
-    for asset_ref in assets {
+    for (asset_ref, source) in assets {
         AssetRef::create(graph_conn, asset_ref)?;
         OperationAsset::create(
             graph_conn,
@@ -322,8 +323,8 @@ pub(crate) fn track_asset_refs(
                 log_id,
                 asset_ref_id: asset_ref.id,
                 role: asset_ref.role.clone(),
-                collection_name: None,
-                sample_name: None,
+                collection_name: source.map(|source| source.collection_name.clone()),
+                sample_name: source.map(|source| source.sample_name.clone()),
             },
         )?;
     }
@@ -415,7 +416,7 @@ pub fn add_files_operation(
         Some(&log_id),
         &OperationKind::AddFile,
         &summary,
-        &asset_refs,
+        asset_refs.iter().map(|asset| (asset, None)),
     )?;
     if graph_conn.total_changes() == changes_before {
         return Err(AddFilesOperationError::OperationError(

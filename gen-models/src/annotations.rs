@@ -1171,19 +1171,10 @@ pub fn add_annotation_file_with_progress(
         Some(&log_id),
         &OperationKind::AnnotationFile,
         &summary,
-        &asset_refs,
-    )?;
-    graph_conn.execute(
-        "UPDATE gen_operation_assets SET collection_name = ?3, sample_name = ?4
-         WHERE log_id = ?1 AND asset_ref_id = ?2 AND role = ?5
-           AND collection_name IS NULL AND sample_name IS NULL",
-        params![
-            log_id,
-            annotation_asset_ref_id,
-            source.collection_name,
-            source.sample_name,
-            AssetRole::Annotation
-        ],
+        asset_refs.iter().map(|asset| {
+            let coordinate_source = (asset.role == AssetRole::Annotation).then_some(&source);
+            (asset, coordinate_source)
+        }),
     )?;
     if graph_conn.total_changes() == changes_before {
         return Err(OperationError::NoChanges.into());
