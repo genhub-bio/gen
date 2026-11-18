@@ -261,9 +261,9 @@ fn initialize_repository(
     let graph = gen_models::db::GraphConnection(migrations_connection);
     select_initial_branch(&graph, &branch)?;
     configure_remote(&config, &remote_url, &branch)?;
-    let commit_hash = gen_models::history::dolt::hash_of(&graph, &branch)
-        .map_err(|_| "Could not read the initialized branch head".to_string())?;
-    drop(graph);
+    let context = gen_models::db::DbContext::new_raw(workspace.clone(), graph, config);
+    let commit_hash = commit_repository_readme(&context, &remote_url, &branch)?;
+    drop(context);
     push_branch(&workspace, &branch)?;
     Ok(ActionResult {
         branch,
@@ -466,6 +466,45 @@ fn configure_author(
         .map_err(|_| "Could not configure the repository author".to_string())
 }
 
+#[cfg(any(target_os = "emscripten", test))]
+fn commit_repository_readme(
+    context: &gen_models::db::DbContext,
+    remote_url: &str,
+    branch: &str,
+) -> Result<String, String> {
+    let readme_path = context.workspace().base_dir().join("README.md");
+    std::fs::write(&readme_path, repository_readme_contents(remote_url))
+        .map_err(|_| "Could not create the repository README".to_string())?;
+    let readme_file =
+        gen_models::operations::OperationFile::new(readme_path.to_string_lossy().into_owned());
+    let operation = match gen_models::operations::add_files_operation(
+        context,
+        &[readme_file],
+        Some("Add repository README"),
+    ) {
+        Ok(operation) => operation,
+        Err(gen_models::errors::AddFilesOperationError::OperationError(
+            gen_models::errors::OperationError::NoChanges,
+        )) => {
+            return gen_models::history::dolt::hash_of(context.graph().conn(), branch)
+                .map(|hash| hash.to_string())
+                .map_err(|_| "Could not read the initialized branch head".to_string());
+        }
+        Err(_) => return Err("Could not track the repository README".to_string()),
+    };
+    DoltHistoryStore::new_with_config(context.graph().conn(), context.config().conn())
+        .commit_all(&operation.summary)
+        .map(|hash| hash.to_string())
+        .map_err(|_| "Could not commit the repository README".to_string())
+}
+
+#[cfg(any(target_os = "emscripten", test))]
+fn repository_readme_contents(remote_url: &str) -> String {
+    format!(
+        "# GenHub repository\n\nRun this command to clone the repository with Gen.\n\n```sh\ngen clone {remote_url}\n```\n\nIf prompted, sign in to GenHub to authorize the clone.\n"
+    )
+}
+
 #[cfg(target_os = "emscripten")]
 fn configure_remote(
     config: &ConfigConnection,
@@ -590,15 +629,16 @@ mod tests {
 
     use gen_core::config::Workspace;
     use gen_models::{
-        db::{get_config_connection, get_connection},
+        assets::AssetRef,
+        db::{DbContext, get_config_connection, get_connection},
         history::dolt::{
             active_branch, branch_rows, commit_all, connect_branch, hash_of, status_rows,
         },
     };
 
     use super::{
-        RepositoryAction, checked_branch, checked_path_segment, create_branch_from,
-        merge_branch_into, select_initial_branch,
+        RepositoryAction, checked_branch, checked_path_segment, commit_repository_readme,
+        create_branch_from, merge_branch_into, select_initial_branch,
     };
 
     #[test]
@@ -664,6 +704,64 @@ mod tests {
         assert_eq!(
             active_branch(&graph).expect("should read active branch"),
             "release"
+        );
+    }
+
+    #[test]
+    fn test_initial_repository_readme_is_tracked_and_committed_on_selected_branch() {
+        let directory = tempfile::tempdir().expect("should create a temporary workspace");
+        let workspace = Workspace::new(directory.path());
+        workspace.ensure_gen_dir();
+        let config = get_config_connection(
+            workspace
+                .gen_db_path()
+                .expect("should locate config database"),
+        )
+        .expect("should initialize a Gen config database");
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should locate graph database"),
+        )
+        .expect("should initialize a Gen graph database");
+        super::configure_author(&graph, "Alice", "alice@users.noreply.genhub.bio")
+            .expect("should configure the repository author");
+        select_initial_branch(&graph, "release")
+            .expect("should select the configured repository default branch");
+        let context = DbContext::new_raw(workspace.clone(), graph, config);
+        let remote_url = "https://genhub.example/api/repos/alice/sample";
+
+        let commit_hash = commit_repository_readme(&context, remote_url, "release")
+            .expect("should commit the README to the configured branch");
+        let retry_hash = commit_repository_readme(&context, remote_url, "release")
+            .expect("should preserve a committed README on retry");
+        let head = hash_of(context.graph().conn(), "release")
+            .expect("should read the initialized branch head");
+        let readme =
+            AssetRef::get_materialized_assets_at(context.graph().conn(), None, Some(&head))
+                .expect("should read files committed on the initial branch")
+                .into_iter()
+                .find(|asset| asset.name.as_deref() == Some("README.md"))
+                .expect("should find the README in the initial branch history");
+        let readme_contents = std::fs::read_to_string(workspace.base_dir().join("README.md"))
+            .expect("should read the generated README");
+
+        assert_eq!(commit_hash, head.to_string());
+        assert_eq!(retry_hash, commit_hash);
+        assert_eq!(
+            active_branch(context.graph().conn()).expect("should read the active branch"),
+            "release"
+        );
+        assert_eq!(readme.logical_path.as_deref(), Some("README.md"));
+        assert_eq!(readme.file_type, "none");
+        let clone_command = format!("```sh\ngen clone {remote_url}\n```");
+        assert!(readme_contents.contains(&clone_command));
+        assert!(readme_contents.contains("sign in to GenHub"));
+        assert!(
+            status_rows(context.graph().conn())
+                .expect("should read repository status")
+                .is_empty(),
+            "the README commit should leave the selected branch clean"
         );
     }
 

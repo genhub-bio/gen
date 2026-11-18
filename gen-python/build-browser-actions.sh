@@ -55,11 +55,13 @@ fi
 CARGO_ENCODED_RUSTFLAGS="$(IFS=$'\x1f'; printf '%s' "${rustflags[*]}")"
 export CARGO_ENCODED_RUSTFLAGS
 
-cargo build \
+# Gen's 64 KiB asset-transfer checksum buffer needs headroom beyond Emscripten's 64 KiB default.
+cargo rustc \
     --manifest-path "${repo_root}/gen-wasm/Cargo.toml" \
     --target wasm32-unknown-emscripten \
     --bin gen_browser_actions \
-    --release
+    --release -- \
+    -C 'link-arg=-sSTACK_SIZE=1048576'
 
 wasm_target_dir="${target_dir}/wasm32-unknown-emscripten/release"
 mkdir -p "${output_dir}"
