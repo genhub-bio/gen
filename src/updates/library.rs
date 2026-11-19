@@ -25,7 +25,7 @@ use crate::{
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
-    updates::resolve_update_region,
+    updates::resolve_sequence_update_region,
 };
 
 /// Creates a top-level accession anchored at a single resolved graph
@@ -146,7 +146,7 @@ pub fn update_with_library(
     let conn = context.graph().conn();
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
+        resolve_sequence_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
 
     update_graph_with_library(
         context,
@@ -297,7 +297,7 @@ fn update_path_library(
         parent_sample_name,
         new_sample_name,
         &resolved_region.block_group.name,
-        None,
+        Some(&parent_path.name),
         chunk_ranges,
         Some(target_block_group.id),
         false,
@@ -510,9 +510,76 @@ mod tests {
 
     use super::*;
     use crate::{
-        graphs::combinatorial_library::parse_library, imports::fasta::import_fasta,
-        test_helpers::setup_gen,
+        graphs::combinatorial_library::parse_library,
+        imports::fasta::import_fasta,
+        test_helpers::{get_sample_bg, setup_gen},
+        updates::sequence::update_with_sequence,
     };
+
+    #[test]
+    fn test_library_updates_use_selected_path_coordinates() {
+        for (region, reference, edited) in [
+            ("chr1:4-6", "ATTAACCCC", "ATTAGGCCC"),
+            ("historical:4-6", "AAAACCCC", "AAAAGGCC"),
+        ] {
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let original = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+            std::fs::write(original.path(), ">chr1\nAAAACCCC\n").unwrap();
+            import_fasta(
+                &context,
+                &original.path().to_string_lossy().into_owned(),
+                "test",
+                "original",
+                None,
+                None,
+            )
+            .unwrap();
+            let block_group = get_sample_bg(conn, "test", "original");
+            let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+            let edge_ids = Path::edges_for_path(conn, &path.id, None)
+                .iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            Path::create(conn, "historical", &block_group.id, &edge_ids).unwrap();
+            update_with_sequence(
+                &context, "test", "original", "extended", "chr1:1-2", "TT", false,
+            )
+            .unwrap();
+
+            // The same in-bounds range selects AC on the current path and CC on
+            // the historical path. Resolution and chunk extraction must agree.
+            update_with_library(
+                &context,
+                "test",
+                "extended",
+                "library",
+                region,
+                vec![vec![SequencePart {
+                    name: "patch".to_string(),
+                    sequence: "GG".to_string(),
+                    sequence_length: 2,
+                }]],
+                None,
+                None,
+            )
+            .unwrap();
+            let block_group = get_sample_bg(conn, "test", "library");
+            let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+            assert_eq!(
+                path.sequence(conn, context.workspace(), None).unwrap(),
+                reference,
+                "{region} should preserve the selected reference route",
+            );
+            let sequences =
+                BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                    .unwrap();
+            assert!(
+                sequences.contains(edited),
+                "{region} should create {edited}; found {sequences:?}",
+            );
+        }
+    }
 
     #[test]
     fn makes_a_pool() -> Result<()> {

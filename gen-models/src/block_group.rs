@@ -796,6 +796,15 @@ impl BlockGroup {
         workspace: &Workspace,
         change: &BlockGroupChange,
     ) -> Result<(), BlockGroupError> {
+        Self::insert_change_with_edges(conn, workspace, change).map(|_| ())
+    }
+
+    /// Persists a change and returns its planned edges so callers can rebuild the edited path.
+    pub fn insert_change_with_edges(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        change: &BlockGroupChange,
+    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         let new_augmented_edges = change.region.plan_edges(conn, workspace, change, None)?;
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
@@ -804,14 +813,15 @@ impl BlockGroup {
         if let Some(accession) = &change.path_accession {
             new_accession_edges.insert(
                 (change.region.block_group.id, accession.clone()),
-                new_augmented_edges,
+                new_augmented_edges.clone(),
             );
         }
         Self::persist_insert_changes(
             conn,
             new_augmented_edges_by_block_group,
             new_accession_edges,
-        )
+        )?;
+        Ok(new_augmented_edges)
     }
 
     #[cfg_attr(
@@ -950,8 +960,11 @@ impl BlockGroup {
 
         if change.block.sequence_start == change.block.sequence_end {
             // Deletion
-            let source_coordinate =
-                change.region.start - start_block.start + start_block.sequence_start;
+            let source_coordinate = if is_terminal(start_block.node_id) {
+                0
+            } else {
+                change.region.start - start_block.start + start_block.sequence_start
+            };
             let target_coordinate = change.region.end - end_block.start + end_block.sequence_start;
             let mut aug_edges = vec![];
             let new_edge = EdgeData {
@@ -967,6 +980,28 @@ impl BlockGroup {
                 chromosome_index: change.chromosome_index,
                 phased: change.phased,
             });
+
+            // A suffix deletion at a junction must also let the selected
+            // upstream route reach END directly. An edge from the following
+            // block's start otherwise only connects routes traversing that node.
+            if is_end_node(end_block.node_id)
+                && start_block.start == change.region.start
+                && !is_terminal(previous_start_blocks[0].node_id)
+            {
+                let previous_block = previous_start_blocks[0];
+                aug_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: previous_block.node_id,
+                        source_coordinate: previous_block.sequence_end,
+                        source_strand: previous_block.strand,
+                        target_node_id: PATH_END_NODE_ID,
+                        target_coordinate: 0,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: change.chromosome_index,
+                    phased: change.phased,
+                });
+            }
 
             // NOTE: If the deletion is happening at the very beginning of a path, we need to add
             // an edge from the dedicated start node to the end of the deletion, to indicate it's
@@ -1049,8 +1084,11 @@ impl BlockGroup {
             // doesn't affect sequence readouts, so it may not be worth it.
         } else {
             // Insertion/replacement
-            let insertion_start_coordinate =
-                change.region.start - start_block.start + start_block.sequence_start;
+            let insertion_start_coordinate = if is_terminal(start_block.node_id) {
+                0
+            } else {
+                change.region.start - start_block.start + start_block.sequence_start
+            };
             let new_start_edge = EdgeData {
                 source_node_id: start_block.node_id,
                 source_coordinate: insertion_start_coordinate,

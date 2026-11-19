@@ -224,8 +224,18 @@ pub fn derive_chunks(
             new_path_edge_ids.push(new_start_edge.edge.id);
         }
 
-        for edge in &current_path_edges {
+        // A library update derives chunks into an already populated child. Edge
+        // membership alone therefore cannot identify which edges belong to a chunk.
+        let mut path_coordinate = 0;
+        for (previous_edge, edge) in current_path_edges
+            .iter()
+            .zip(current_path_edges.iter().skip(1))
+        {
+            path_coordinate += (edge.source_coordinate - previous_edge.target_coordinate).abs();
             if is_start_node(edge.source_node_id) || is_end_node(edge.target_node_id) {
+                continue;
+            }
+            if path_coordinate <= start_coordinate || path_coordinate >= end_coordinate {
                 continue;
             }
 

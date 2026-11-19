@@ -956,7 +956,15 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between path_start and
         // path_end with the input edges that are to and from a new node
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(path_start).next().unwrap().value;
+        let mut block_with_start = tree.query_point(path_start).next().unwrap().value;
+        // Insertions at a junction leave from the preceding block and arrive
+        // at the following one, matching the splice edges planned for the edit.
+        if path_start == path_end {
+            let previous_block = tree.query_point(path_start - 1).next().unwrap().value;
+            if previous_block.end == path_start {
+                block_with_start = previous_block;
+            }
+        }
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
         let edges = Path::edges_for_path(conn, &self.id, None);
@@ -1024,14 +1032,26 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between deletion_start and
         // deletion_end with a single edge spanning the deletion.
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
+        let block_with_start = tree
+            .query_point(if deletion_start == 0 {
+                -1
+            } else {
+                deletion_start
+            })
+            .next()
+            .unwrap()
+            .value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
-        let node_deletion_start = if block_with_start.strand == Strand::Forward {
+        let node_deletion_start = if is_terminal(block_with_start.node_id) {
+            0
+        } else if block_with_start.strand == Strand::Forward {
             block_with_start.sequence_start + deletion_start - block_with_start.start
         } else {
             block_with_start.sequence_end - deletion_start + block_with_start.start
         };
-        let node_deletion_end = if block_with_end.strand == Strand::Forward {
+        let node_deletion_end = if is_terminal(block_with_end.node_id) {
+            0
+        } else if block_with_end.strand == Strand::Forward {
             block_with_end.sequence_start + deletion_end - block_with_end.start
         } else {
             block_with_end.sequence_end - deletion_end + block_with_end.start
@@ -1063,28 +1083,44 @@ impl Path {
             .iter()
             .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
             .collect::<HashMap<(_, i64), &Edge>>();
-        let edge_before_deletion = edges_by_target
-            .get(&(block_with_start.node_id, block_with_start.sequence_start))
-            .unwrap();
-        let edge_after_deletion = edges_by_source
-            .get(&(block_with_end.node_id, block_with_end.sequence_end))
-            .unwrap();
+        let edge_before_deletion = if is_start_node(block_with_start.node_id) {
+            None
+        } else {
+            Some(
+                edges_by_target
+                    .get(&(block_with_start.node_id, block_with_start.sequence_start))
+                    .unwrap(),
+            )
+        };
+        let edge_after_deletion = if is_end_node(block_with_end.node_id) {
+            None
+        } else {
+            Some(
+                edges_by_source
+                    .get(&(block_with_end.node_id, block_with_end.sequence_end))
+                    .unwrap(),
+            )
+        };
 
         let mut new_edge_ids = vec![];
-        let mut before_deletion = true;
-        let mut after_deletion = false;
-        for edge in &edges {
-            if before_deletion {
+        if let Some(edge_before_deletion) = edge_before_deletion {
+            for edge in &edges {
                 new_edge_ids.push(edge.id);
                 if edge.id == edge_before_deletion.id {
-                    before_deletion = false;
-                    new_edge_ids.push(deletion_edge.id);
+                    break;
                 }
-            } else if after_deletion {
-                new_edge_ids.push(edge.id);
-            } else if edge.id == edge_after_deletion.id {
-                after_deletion = true;
-                new_edge_ids.push(edge.id);
+            }
+        }
+        new_edge_ids.push(deletion_edge.id);
+        if let Some(edge_after_deletion) = edge_after_deletion {
+            let mut after_deletion = false;
+            for edge in &edges {
+                if edge.id == edge_after_deletion.id {
+                    after_deletion = true;
+                }
+                if after_deletion {
+                    new_edge_ids.push(edge.id);
+                }
             }
         }
 
