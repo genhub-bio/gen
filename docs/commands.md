@@ -133,6 +133,14 @@ with FAI and GZI indexes are the most efficient for both local files and remote
 URLs. Pass the index locations explicitly with `--fai <path-or-uri>` and
 `--gzi <path-or-uri>`.
 
+# Sequence, FASTA, and library updates
+
+For `gen update sequence`, `gen update fasta`, and `gen update library`, `--region-name chr1:2-5`
+uses zero-based, half-open coordinates on the selected sample's current path
+for block group `chr1`. A block-group name takes precedence over a matching
+path name. A distinct path name selects that specific route. Annotation and
+accession names are also supported.
+
 # VCF update
 
 `gen update vcf` applies the variants in a VCF file to sample graphs and records the update as an operation. It uses
