@@ -541,7 +541,7 @@ class TransactionTests(RepositoryTestCase):
         with self.repository.transaction() as transaction:
             asset = self.repository.add_file(notes)
             annotation_result = self.repository.import_annotations(
-                str(FIXTURES / "simple.gff"), name="trial-genes"
+                str(FIXTURES / "simple.gff"), name="trial-genes", sample=sample
             )
 
             self.assertIsNone(annotation_result)
