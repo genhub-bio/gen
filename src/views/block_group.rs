@@ -507,7 +507,7 @@ fn auto_activate_annotation_files_for_viewport(
     annotation_loads: &mut AnnotationLoadCoordinator,
 ) {
     for entry in entries {
-        let id = entry.file_addition.id;
+        let id = entry.id;
         let active = explorer_state.is_annotation_file_active(&id);
         if !active {
             explorer_state.active_annotation_files.insert(id);
@@ -576,7 +576,7 @@ fn apply_annotation_load_result(
     view: AnnotationLoadView<'_>,
     state: AnnotationLoadUiState<'_>,
 ) {
-    let file_id = result.identity.entry.file_addition.id;
+    let file_id = result.identity.entry.id;
     if !annotation_loads.is_current(&result.identity)
         || !state.explorer_state.is_annotation_file_active(&file_id)
         || !annotation_file_result_matches_view(
@@ -1404,7 +1404,7 @@ pub fn view_block_group(
             }
             let query_window = expand_query_window(visible_window);
             for entry in &explorer.data.annotation_files {
-                let id = entry.file_addition.id;
+                let id = entry.id;
                 if !explorer_state.is_annotation_file_active(&id) {
                     continue;
                 }

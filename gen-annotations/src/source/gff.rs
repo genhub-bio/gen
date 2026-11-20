@@ -172,7 +172,7 @@ fn annotation_from_record(
 mod tests {
     use std::{fs::File, io::Cursor, sync::Arc};
 
-    use gen_core::{HashId, Strand};
+    use gen_core::HashId;
     use gen_models::{
         accession::Accession, annotations::Annotation, interval_tree::IntervalTreeSource as _,
         region::ResolvedGenRegion, sample::Sample,

@@ -158,8 +158,7 @@ mod tests {
 
     use super::AnnotationTranslationContext;
     use crate::test_helpers::{
-        create_reverse_test_block_group, create_sliced_test_block_group, get_connection,
-        setup_test_data, test_workspace,
+        create_sliced_test_block_group, get_connection, setup_test_data, test_workspace,
     };
 
     #[test]

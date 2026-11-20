@@ -464,49 +464,32 @@ impl Path {
         edge_ids: &[HashId],
     ) -> Result<Path, PathError> {
         let hash = HashId(calculate_hash(&format!("{block_group_id}:{name}")));
-        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-        // TODO: Should we do something if edge_ids don't match here? Suppose we have a path
-        // for a block group with edges 1,2,3. And then the same path is added again with edges
-        // 5,6,7, should this be an error? Should we just keep adding edges?
-        let encoded_edge_ids = Self::encode_edge_ids(edge_ids);
-        let query = "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids) VALUES (?1, ?2, ?3, ?4, ?5);";
-        let mut stmt = conn.prepare(query).unwrap();
-
-        let path = match stmt.execute(params![
-            hash,
-            name,
-            block_group_id,
-            timestamp,
-            encoded_edge_ids
-        ]) {
-            Ok(_) => Path {
-                id: hash,
-                name: name.to_string(),
-                block_group_id: *block_group_id,
-                created_on: timestamp,
-                history_ref: None,
-                cached_block_group: ForeignKeyCache::default(),
-                cached_interval_tree: None,
-            },
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Path {
-                    id: hash,
-                    name: name.to_string(),
-                    block_group_id: *block_group_id,
-                    created_on: timestamp,
-                    history_ref: None,
-                    cached_block_group: ForeignKeyCache::default(),
-                    cached_interval_tree: None,
-                }
-            }
-            Err(e) => {
-                return Err(PathError::DatabaseError(e));
-            }
-        };
-
-        Ok(path)
+        if let Some(existing) = Self::select(conn).get_by_id(hash)? {
+            return Ok(existing);
+        }
+        let timestamp = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .expect("should fit timestamp");
+        conn.execute(
+            "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                hash,
+                name,
+                block_group_id,
+                timestamp,
+                Self::encode_edge_ids(edge_ids),
+            ],
+        )?;
+        Ok(Path {
+            id: hash,
+            name: name.to_string(),
+            block_group_id: *block_group_id,
+            created_on: timestamp,
+            history_ref: None,
+            cached_block_group: ForeignKeyCache::default(),
+            cached_interval_tree: None,
+        })
     }
 
     /// Replaces a path's ordered edges after validation, preserving its identity and metadata.

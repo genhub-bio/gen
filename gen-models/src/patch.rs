@@ -270,6 +270,8 @@ mod tests {
                 log_id: log.id,
                 asset_ref_id: asset.id,
                 role: AssetRole::Input,
+                collection_name: None,
+                sample_name: None,
             },
         )
         .expect("should link checksumless asset");

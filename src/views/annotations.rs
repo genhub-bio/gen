@@ -825,17 +825,7 @@ pub struct AnnotationFileTrackRequest<'a> {
     pub workspace: &'a Workspace,
     pub collection_name: &'a str,
     pub sample_name: &'a str,
-    // Used as the tabix reference/contig name. translate_gff/translate_bed re-project the file's
-    // reference-relative coordinates onto each sample's own current path
-    // (BlockGroup::get_current_path), so edits/indels within a lineage don't break the mapping.
-    // Matching purely by name is only ambiguous for unrelated samples that happen to share a
-    // contig name with no common ancestry (e.g. two independently-imported genomes both naming a
-    // contig "chr1"). File-based annotations are linear-space by nature, so the robust fix is to
-    // anchor a file to the node_id of its original reference sequence rather than to a name:
-    // node identity already survives the whole derivation lineage for free (copy_contents_from
-    // rebinds existing edges/nodes rather than duplicating them), so "is this node present in the
-    // current block group" answers applicability correctly without needing a sample_lineage walk
-    // or relying on lineage having been explicitly registered.
+    // Destination contig used for indexed queries; coordinate translation uses the file's source sample.
     pub block_group_name: Option<&'a str>,
     pub query_window: Option<(i64, i64)>,
     pub node_filter: &'a HashSet<HashId>,
@@ -852,6 +842,18 @@ pub struct AnnotationFileTrackRequest<'a> {
 pub fn load_annotation_file_track(
     request: &AnnotationFileTrackRequest<'_>,
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
+    let source = request.entry.coordinate_source(
+        request.conn,
+        request.collection_name,
+        request.history_ref,
+    )?;
+    if source.collection_name != request.collection_name {
+        return Ok(AnnotationFileTrackLoadResult {
+            track: AnnotationTrack::new(request.entry.display_name.clone(), Vec::new()),
+            index_available: false,
+            loaded_window: None,
+        });
+    }
     let mut file_path =
         resolve_local_annotation_file_path(request.workspace, &request.entry.file_addition);
     let index = load_annotation_index(request.workspace, request.entry, file_path.as_deref())?;
@@ -908,8 +910,8 @@ pub fn load_annotation_file_track(
         FileTypes::Gff3 => translate_gff(
             request.conn,
             request.workspace,
-            request.collection_name,
-            request.sample_name,
+            &source.collection_name,
+            &source.sample_name,
             request.history_ref,
             reader,
             &mut buffer,
@@ -917,8 +919,8 @@ pub fn load_annotation_file_track(
         FileTypes::Bed => translate_bed(
             request.conn,
             request.workspace,
-            request.collection_name,
-            request.sample_name,
+            &source.collection_name,
+            &source.sample_name,
             request.history_ref,
             reader,
             &mut buffer,
@@ -994,14 +996,21 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_core::{HashId, Sha256Hash, Strand};
+    use gen_core::{HashId, PATH_START_NODE_ID, Sha256Hash, Strand};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
-        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+        annotation_file_source::AnnotationFileSource,
+        annotations::{
+            AnnotationFileAddOptions, AnnotationFileChecksumOverrides, add_annotation,
+            add_annotation_file,
+        },
         block_group::BlockGroup,
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
         file_types::FileTypes,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
+        path::Path,
         sample::Sample,
     };
     use noodles::{bgzf, core::Position, csi, tabix};
@@ -1026,6 +1035,152 @@ mod tests {
             annotation_groups::load_annotation_group_entries,
         },
     };
+
+    #[test]
+    fn test_file_annotations_use_source_sample_paths_after_descendant_update() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fasta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta.to_str().unwrap().to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
+        let parent = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .unwrap();
+        let original = BlockGroup::get_current_path(conn, &parent.id, None).unwrap();
+        Sample::get_or_create_child(
+            conn,
+            "test",
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        )
+        .unwrap();
+        let child = Sample::get_block_groups(conn, "test", "child", None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .unwrap();
+        // Skip three bases within the first node, preserving every other path edge.
+        let mut edges = Path::edges_for_path(conn, &original.id, None);
+        let entry = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            edges[0].target_node_id,
+            edges[0].target_coordinate + 3,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id: child.id,
+                edge_id: entry.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+        edges[0] = entry;
+        Path::create(
+            conn,
+            "shifted",
+            &child.id,
+            &edges.iter().map(|edge| edge.id).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &child.id, None).unwrap();
+        let node_filter = graph
+            .nodes()
+            .map(|node| node.node_id)
+            .collect::<HashSet<_>>();
+        for (format, record) in [
+            ("gff3", "m123\t.\tgene\t6\t8\t.\t+\t.\tID=feature\n"),
+            ("bed", "m123\t5\t8\tfeature\t0\t+\n"),
+        ] {
+            let mut file = tempfile::Builder::new()
+                .suffix(&format!(".{format}"))
+                .tempfile()
+                .unwrap();
+            file.write_all(record.as_bytes()).unwrap();
+            // Attach identical bytes to both samples; each file has a different coordinate meaning.
+            for source in [Sample::DEFAULT_NAME, "child"] {
+                add_annotation_file(
+                    &context,
+                    file.path().to_str().unwrap(),
+                    Some(format),
+                    None,
+                    Some(source),
+                    None,
+                    AnnotationFileAddOptions {
+                        source: (source != Sample::DEFAULT_NAME).then(|| AnnotationFileSource {
+                            collection_name: "test".to_string(),
+                            sample_name: source.to_string(),
+                        }),
+                        checksum_overrides: AnnotationFileChecksumOverrides::default(),
+                        progress: None,
+                    },
+                )
+                .unwrap();
+            }
+            let entries = load_annotation_file_entries(conn, None);
+            for source in [Sample::DEFAULT_NAME, "child"] {
+                let entry = entries
+                    .iter()
+                    .find(|entry| {
+                        entry.name.as_deref() == Some(source)
+                            && entry.file_addition.file_type
+                                == if format == "bed" {
+                                    FileTypes::Bed
+                                } else {
+                                    FileTypes::Gff3
+                                }
+                    })
+                    .unwrap();
+                let loaded = load_annotation_file_track(&AnnotationFileTrackRequest {
+                    conn,
+                    history_ref: None,
+                    workspace: context.workspace(),
+                    collection_name: "test",
+                    sample_name: "child",
+                    block_group_name: Some("m123"),
+                    query_window: Some((0, 30)),
+                    node_filter: &node_filter,
+                    entry,
+                })
+                .unwrap();
+                let expected = if source == "child" { (8, 11) } else { (5, 8) };
+                assert!(
+                    loaded
+                        .track
+                        .annotations
+                        .iter()
+                        .flat_map(|annotation| &annotation.segments)
+                        .any(|segment| (segment.start, segment.end) == expected),
+                    "{format} should use the {source} sample's path"
+                );
+                let unrelated = load_annotation_file_track(&AnnotationFileTrackRequest {
+                    conn,
+                    history_ref: None,
+                    workspace: context.workspace(),
+                    collection_name: "another-collection",
+                    sample_name: "child",
+                    block_group_name: Some("m123"),
+                    query_window: Some((0, 30)),
+                    node_filter: &node_filter,
+                    entry,
+                })
+                .unwrap();
+                assert!(unrelated.track.annotations.is_empty());
+            }
+        }
+    }
 
     fn serve_http_content(
         contents: &[u8],
@@ -1443,6 +1598,8 @@ mod tests {
     #[test]
     fn test_annotation_index_is_coordinate_index_for_csi_and_tbi_sidecars() {
         let annotation_entry = AnnotationFileEntry {
+            id: HashId::convert_str("test-annotation-track"),
+            source: None,
             file_addition: AnnotationAssetEntry {
                 id: HashId::convert_str("annotation"),
                 asset_uri: "file:///tmp/annotation.gff3".to_string(),
@@ -1510,6 +1667,8 @@ mod tests {
             .expect("should write BGZF and CSI outputs");
 
         let entry = AnnotationFileEntry {
+            id: HashId::convert_str("test-annotation-track"),
+            source: None,
             file_addition: AnnotationAssetEntry {
                 id: HashId::convert_str("annotation"),
                 asset_uri: format!("file://{}", output_path.display()),
@@ -1570,6 +1729,8 @@ mod tests {
             checksum: None,
         };
         let entry = AnnotationFileEntry {
+            id: HashId::convert_str("test-annotation-track"),
+            source: None,
             file_addition: AnnotationAssetEntry {
                 id: HashId::convert_str("remote-annotation"),
                 asset_uri: "http://127.0.0.1:1/annotation.gff3.gz".to_string(),
@@ -1622,6 +1783,8 @@ mod tests {
         let contents = b"##gff-version 3\n";
         let (asset_uri, server) = serve_http_content(contents, 1);
         let entry = AnnotationFileEntry {
+            id: HashId::convert_str("test-annotation-track"),
+            source: None,
             file_addition: AnnotationAssetEntry {
                 id: HashId::convert_str("unindexed-remote-annotation"),
                 asset_uri,
@@ -1689,6 +1852,8 @@ mod tests {
             checksum: None,
         };
         let entry = AnnotationFileEntry {
+            id: HashId::convert_str("test-annotation-track"),
+            source: None,
             file_addition: file_addition.clone(),
             index_file_addition: None,
             attribute_index_file_addition: None,

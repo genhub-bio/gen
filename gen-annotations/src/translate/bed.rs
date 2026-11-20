@@ -121,14 +121,12 @@ mod tests {
     use std::{fs::File, io::Cursor, path::PathBuf};
 
     use gen_core::Strand;
-    use gen_models::{
-        block_group::BlockGroup, history::dolt::commit_all, reference_alias::ReferenceAlias,
-        sample::Sample,
-    };
+    use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
 
     use super::translate_bed;
     use crate::test_helpers::{
-        create_sliced_test_block_group, get_connection, setup_test_data, test_workspace,
+        create_shifted_reference_descendant, create_sliced_test_block_group, get_connection,
+        setup_test_data, test_workspace,
     };
 
     fn translate_bed_input(conn: &gen_models::db::GraphConnection, input: &str) -> String {
@@ -144,6 +142,30 @@ mod tests {
         )
         .expect("should translate BED input");
         String::from_utf8(translated).expect("should write UTF-8 BED output")
+    }
+
+    #[test]
+    fn test_translates_bed_using_selected_source_sample() {
+        let conn = get_connection();
+        let (_child, reference) = create_shifted_reference_descendant(&conn);
+        let node_id =
+            gen_models::path::Path::edges_for_path(&conn, &reference.id, None)[0].target_node_id;
+        let mut translated = Vec::new();
+        translate_bed(
+            &conn,
+            test_workspace(),
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            Cursor::new(b"m123\t5\t8\tfeature\t0\t+\n"),
+            &mut translated,
+        )
+        .expect("should translate reference annotation for descendant");
+        assert_eq!(
+            String::from_utf8(translated).unwrap(),
+            format!("{node_id}\t5\t8\tfeature\t0\t+\n"),
+            "annotation coordinates must use the selected source sample"
+        );
     }
 
     #[test]

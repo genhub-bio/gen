@@ -21,6 +21,7 @@ use thiserror::Error;
 use crate::{
     Direction, ForeignKeyCache, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
+    annotation_file_source::{AnnotationFileSource, AnnotationFileSourceError},
     assets::{
         ANNOTATION_ATTRIBUTE_INDEX_ROLE, AssetRef, AssetRole, AssetUri, ChecksummedWriter,
         CompressionType, LocalAssetUri, OperationKind,
@@ -729,6 +730,8 @@ pub enum AnnotationGroupError {
 
 #[derive(Debug, Error)]
 pub enum AnnotationFileError {
+    #[error(transparent)]
+    Source(#[from] AnnotationFileSourceError),
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
     #[error("File addition error: {0}")]
@@ -1011,27 +1014,16 @@ fn prepare_local_sorted_annotation(
 /// Callers pass checksums only when the corresponding remote streams were already consumed for
 /// annotation work. This keeps operation creation independent of remote credentials while local
 /// annotation files are sorted, retained, and hashed during preparation.
-pub fn add_annotation_file(
+pub fn add_annotation_file<'a>(
     context: &DbContext,
     path: &str,
     format: Option<&str>,
     index: Option<&str>,
     name: Option<&str>,
     message: Option<&str>,
-    checksum_overrides: AnnotationFileChecksumOverrides,
+    options: impl Into<AnnotationFileAddOptions<'a>>,
 ) -> Result<OperationSummary, AnnotationFileError> {
-    add_annotation_file_with_progress(
-        context,
-        path,
-        format,
-        index,
-        name,
-        message,
-        AnnotationFileAddOptions {
-            checksum_overrides,
-            progress: None,
-        },
-    )
+    add_annotation_file_with_progress(context, path, format, index, name, message, options.into())
 }
 
 /// Records annotation assets and reports local GFF3/BED preparation stages when requested.
@@ -1045,11 +1037,16 @@ pub fn add_annotation_file_with_progress(
     options: AnnotationFileAddOptions<'_>,
 ) -> Result<OperationSummary, AnnotationFileError> {
     let AnnotationFileAddOptions {
+        source,
         checksum_overrides,
         mut progress,
     } = options;
     let workspace = context.workspace();
     let graph_conn = context.graph().conn();
+    let source = match source {
+        Some(source) => source,
+        None => AnnotationFileSource::for_addition(context, None, None)?,
+    };
 
     let file_type = match format {
         Some(format) => parse_annotation_file_type(format)?,
@@ -1146,8 +1143,10 @@ pub fn add_annotation_file_with_progress(
         .map(|(file_addition, _, _, _)| file_addition.id.to_string())
         .collect::<Vec<_>>()
         .join(":");
+    let source_key = serde_json::to_string(&(&source.collection_name, &source.sample_name))
+        .expect("should serialize annotation source names");
     let log_id = HashId(calculate_hash(&format!(
-        "{file_addition_id}:{name_value}:{index_file_addition_ids}",
+        "{file_addition_id}:{name_value}:{index_file_addition_ids}:{source_key}",
         file_addition_id = file_addition.id
     )));
     let summary = message
@@ -1172,7 +1171,10 @@ pub fn add_annotation_file_with_progress(
         Some(&log_id),
         &OperationKind::AnnotationFile,
         &summary,
-        &asset_refs,
+        asset_refs.iter().map(|asset| {
+            let coordinate_source = (asset.role == AssetRole::Annotation).then_some(&source);
+            (asset, coordinate_source)
+        }),
     )?;
     if graph_conn.total_changes() == changes_before {
         return Err(OperationError::NoChanges.into());
@@ -1204,7 +1206,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
+        assets::{AssetRef, AssetRole, Assets, OperationAsset, OperationLog},
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
@@ -1218,6 +1220,53 @@ mod tests {
         sample_lineage::SampleLineage,
         test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
     };
+
+    #[test]
+    fn test_annotation_file_sources_survive_history_and_shared_assets() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let path = context.workspace().repo_root().unwrap().join("source.gff3");
+        fs::write(&path, "##gff-version 3\n").expect("should write annotation file");
+        let mut revisions = Vec::new();
+        for sample in ["original", "descendant"] {
+            let summary = add_annotation_file(
+                &context,
+                path.to_str().unwrap(),
+                Some("gff3"),
+                None,
+                Some("genes"),
+                None,
+                AnnotationFileAddOptions {
+                    source: Some(AnnotationFileSource {
+                        collection_name: "test".to_string(),
+                        sample_name: sample.to_string(),
+                    }),
+                    checksum_overrides: AnnotationFileChecksumOverrides::default(),
+                    progress: None,
+                },
+            )
+            .expect("should associate annotation source");
+            revisions.push(
+                commit_operation_summary(&context, &summary)
+                    .expect("should commit annotation source")
+                    .to_string(),
+            );
+        }
+        let files = Assets::get_annotation_files(conn, None).expect("should load annotation files");
+        assert_eq!(
+            files.len(),
+            2,
+            "commit metadata should not create additional unbound tracks"
+        );
+        assert_eq!(files[0].annotation.id, files[1].annotation.id);
+        assert_ne!(files[0].log_id, files[1].log_id);
+        assert_eq!(files[0].source.as_ref().unwrap().sample_name, "original");
+        assert_eq!(files[1].source.as_ref().unwrap().sample_name, "descendant");
+        let historical = Assets::get_annotation_files(conn, Some(&revisions[0]))
+            .expect("should load historical coordinate source");
+        assert_eq!(historical.len(), 1);
+        assert_eq!(historical[0].source, files[0].source);
+    }
 
     mod region_resolver {
         use super::*;
@@ -1942,6 +1991,14 @@ mod tests {
     fn test_add_annotation_file_rejects_duplicate_with_prior_working_changes() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
+        let options = || AnnotationFileAddOptions {
+            source: Some(AnnotationFileSource {
+                collection_name: "default".to_string(),
+                sample_name: Sample::DEFAULT_NAME.to_string(),
+            }),
+            checksum_overrides: AnnotationFileChecksumOverrides::default(),
+            progress: None,
+        };
         let annotation_path = context.workspace().repo_root().unwrap().join("trial.gff3");
         fs::write(&annotation_path, "##gff-version 3\n").unwrap();
         let annotation_path = annotation_path.to_string_lossy().to_string();
@@ -1952,7 +2009,7 @@ mod tests {
             None,
             Some("trial-annotations"),
             Some("add trial annotations"),
-            AnnotationFileChecksumOverrides::default(),
+            options(),
         )
         .expect("should record the initial annotation operation");
         let history_store = DoltHistoryStore::new(graph_conn);
@@ -1969,7 +2026,7 @@ mod tests {
             None,
             Some("trial-annotations"),
             Some("duplicate annotation operation"),
-            AnnotationFileChecksumOverrides::default(),
+            options(),
         )
         .expect_err("should treat a duplicate annotation operation as a no-op when dirty");
 
@@ -2279,6 +2336,7 @@ mod tests {
                 Some("invalid-gff"),
                 None,
                 AnnotationFileAddOptions {
+                    source: None,
                     checksum_overrides: AnnotationFileChecksumOverrides::default(),
                     progress: Some(&mut on_progress),
                 },
@@ -2313,6 +2371,7 @@ mod tests {
                 Some("search-bed"),
                 None,
                 AnnotationFileAddOptions {
+                    source: None,
                     checksum_overrides: AnnotationFileChecksumOverrides::default(),
                     progress: Some(&mut on_progress),
                 },
@@ -2501,6 +2560,7 @@ mod tests {
                 Some("remote-annotation"),
                 None,
                 AnnotationFileAddOptions {
+                    source: None,
                     checksum_overrides: AnnotationFileChecksumOverrides::default(),
                     progress: Some(&mut on_progress),
                 },
@@ -2553,6 +2613,7 @@ mod tests {
                 Some("genbank-annotation"),
                 None,
                 AnnotationFileAddOptions {
+                    source: None,
                     checksum_overrides: AnnotationFileChecksumOverrides::default(),
                     progress: Some(&mut on_progress),
                 },

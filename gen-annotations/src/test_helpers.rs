@@ -410,3 +410,57 @@ pub(crate) fn create_sliced_test_block_group(
 
     (block_group, node_id)
 }
+
+/// Builds a descendant whose current path omits three leading reference bases.
+/// The entry edge starts three bases farther into the same first node; no node is removed,
+/// and all remaining edges stay unchanged. Downstream current-path coordinates are therefore
+/// three bases smaller than the source-sample coordinates.
+/// Reference-file annotations must still anchor to the unshifted ancestor coordinates.
+pub(crate) fn create_shifted_reference_descendant(conn: &GraphConnection) -> (BlockGroup, Path) {
+    setup_test_data(conn);
+    let root = BlockGroup::get_by_name(conn, "test", Sample::DEFAULT_NAME, "m123", None)
+        .expect("should find reference block group");
+    let reference =
+        BlockGroup::get_current_path(conn, &root.id, None).expect("should find reference path");
+    Sample::get_or_create_child(
+        conn,
+        "test",
+        "shifted",
+        vec![Sample::DEFAULT_NAME.to_string()],
+    )
+    .expect("should create shifted sample");
+    let child = BlockGroup::get_by_name(conn, "test", "shifted", "m123", None)
+        .expect("should find child block group");
+    let mut edges = Path::edges_for_path(conn, &reference.id, None);
+    let original_entry = &edges[0];
+    let shifted_entry = Edge::create(
+        conn,
+        PATH_START_NODE_ID,
+        0,
+        Strand::Forward,
+        original_entry.target_node_id,
+        original_entry.target_coordinate + 3,
+        Strand::Forward,
+    )
+    .expect("should create entry after the deleted bases");
+    BlockGroupEdge::bulk_create(
+        conn,
+        &[BlockGroupEdgeData {
+            block_group_id: child.id,
+            edge_id: shifted_entry.id,
+            chromosome_index: 0,
+            phased: 0,
+        }],
+    );
+    edges[0] = shifted_entry;
+    let edge_ids = edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
+    let edited = Path::create(conn, "shifted path", &child.id, &edge_ids)
+        .expect("should create shifted current path");
+    assert_eq!(
+        BlockGroup::get_current_path(conn, &child.id, None)
+            .unwrap()
+            .id,
+        edited.id
+    );
+    (child, reference)
+}

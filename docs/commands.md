@@ -109,6 +109,17 @@ remove the cache. Local repository files and `.gen/assets` are not affected.
 
 # Annotation file import
 
+```sh
+gen add-annotation-file genes.gff3 --collection genome
+gen add-annotation-file genes.bed --collection genome --sample edited-sample
+```
+
+The file's source sample and collection define its coordinates. `--sample` defaults to the
+collection's reference sample; multiple reference samples require an explicit choice.
+`--collection` defaults to the configured collection, or the sole existing collection.
+Viewing a descendant keeps using the source sample's current paths. The source association
+is recorded in repository history along with the annotation assets.
+
 Adding a local GFF3 or BED file with `gen add-annotation-file` sorts it, builds its CSI coordinate
 index as the source is compressed, and records the attribute index used by viewer search. CSI
 supports large contigs beyond the TBI coordinate limit. The command reports sorting, compression,

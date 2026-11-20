@@ -1708,6 +1708,8 @@ mod tests {
                 log_id: operation_log.id,
                 asset_ref_id: local_asset.id,
                 role: AssetRole::Input,
+                collection_name: None,
+                sample_name: None,
             },
         )
         .expect("should link local asset");
@@ -1757,6 +1759,8 @@ mod tests {
                 log_id: operation_log.id,
                 asset_ref_id: remote_asset.id,
                 role: AssetRole::Input,
+                collection_name: None,
+                sample_name: None,
             },
         )
         .expect("should link remote asset");

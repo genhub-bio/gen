@@ -40,6 +40,7 @@ use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
 use gen_diff::{operations::collect_operation_diff, sample::build_sample_diff};
 use gen_models::{
+    annotation_file_source::AnnotationFileSource,
     annotations::{
         AnnotationFileAddOptions, AnnotationFileChecksumOverrides, AnnotationFileProgressStage,
         add_annotation, add_annotation_file_with_progress,
@@ -717,12 +718,19 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::AddAnnotationFile {
+            collection,
+            sample,
             path,
             format,
             index,
             name,
             message,
         }) => {
+            let source = AnnotationFileSource::for_addition(
+                &db_context,
+                collection.as_deref(),
+                sample.as_deref(),
+            )?;
             let stderr_is_terminal = io::stderr().is_terminal();
             let mut progress_bar = None;
             let add_result = {
@@ -751,6 +759,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     name.as_deref(),
                     message.as_deref(),
                     AnnotationFileAddOptions {
+                        source: Some(source),
                         checksum_overrides: AnnotationFileChecksumOverrides::default(),
                         progress: Some(&mut on_progress),
                     },

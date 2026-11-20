@@ -193,6 +193,9 @@ CREATE TABLE gen_operation_assets (
   log_id BLOB NOT NULL,
   asset_ref_id BLOB NOT NULL,
   role TEXT NOT NULL,
+  collection_name TEXT,
+  sample_name TEXT,
+  CHECK ((collection_name IS NULL) = (sample_name IS NULL)),
   PRIMARY KEY (log_id, asset_ref_id, role),
   FOREIGN KEY(log_id) REFERENCES gen_operation_log(id),
   FOREIGN KEY(asset_ref_id) REFERENCES gen_asset_refs(id)
