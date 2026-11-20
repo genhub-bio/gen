@@ -1308,6 +1308,7 @@ fn translate_from(
     // collapses synonymous variants that share both.
     let mut protein_node_ids: HashMap<(HashId, u8), HashId> = HashMap::new();
     let mut protein_identity_hashes: HashMap<(HashId, u8), String> = HashMap::new();
+    let mut routing_predecessor_hashes: HashMap<(HashId, u8), Vec<String>> = HashMap::new();
     let mut protein_amino_acid_len: HashMap<(HashId, u8), i64> = HashMap::new();
 
     for &node_id in &topo_order {
@@ -1316,31 +1317,46 @@ fn translate_from(
             None => continue,
         };
         for frame in frames {
-            let codons = match node_codons.get(&(node_id, frame)) {
-                Some(c) if !c.amino_acids.is_empty() => c,
-                _ => continue,
-            };
-            let amino_acid_str = String::from_utf8_lossy(&codons.amino_acids).into_owned();
-
             // Collect identity hashes of all DNA predecessors whose exit frame
-            // equals this node's entry frame, then sort for determinism.
+            // equals this node's entry frame, then sort for determinism. A
+            // zero-length routing node has no anchor of its own, so it passes
+            // its predecessors' hashes through; otherwise nodes on either side
+            // of it would hash as if they had no predecessor.
             let mut pred_hashes: Vec<String> = Vec::new();
             for source in subgraph.neighbors_directed(node_id, Direction::Incoming) {
                 let source_len = dna_by_node.get(&source).map(|s| s.len()).unwrap_or(0);
                 if let Some(source_frames) = entry_frames.get(&source) {
                     for &source_frame in source_frames {
-                        if (source_frame as usize + source_len) % 3 == frame as usize
-                            && let Some(h) = protein_identity_hashes.get(&(source, source_frame))
-                        {
+                        if (source_frame as usize + source_len) % 3 != frame as usize {
+                            continue;
+                        }
+                        if let Some(h) = protein_identity_hashes.get(&(source, source_frame)) {
                             pred_hashes.push(h.clone());
+                        } else if source_len == 0
+                            && let Some(hashes) =
+                                routing_predecessor_hashes.get(&(source, source_frame))
+                        {
+                            pred_hashes.extend(hashes.iter().cloned());
                         }
                     }
                 }
             }
             pred_hashes.sort();
+            pred_hashes.dedup();
             if pred_hashes.is_empty() {
                 pred_hashes.push(label_hash.to_string());
             }
+
+            let codons = match node_codons.get(&(node_id, frame)) {
+                Some(c) if !c.amino_acids.is_empty() => c,
+                _ => {
+                    if dna_by_node.get(&node_id).is_some_and(String::is_empty) {
+                        routing_predecessor_hashes.insert((node_id, frame), pred_hashes);
+                    }
+                    continue;
+                }
+            };
+            let amino_acid_str = String::from_utf8_lossy(&codons.amino_acids).into_owned();
 
             let (node_id_protein, identity_hash) =
                 create_protein_node(conn, &pred_hashes, &amino_acid_str)?;
@@ -1564,7 +1580,7 @@ mod tests {
         sample_lineage::SampleLineage,
         sequence::Sequence,
     };
-    use petgraph::algo::{connected_components, has_path_connecting};
+    use petgraph::algo::{connected_components, has_path_connecting, is_cyclic_directed};
 
     use super::{
         CodonTable, TranslationError, TranslationParams, translate_annotation,
@@ -2006,6 +2022,103 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
                     && seq.get_sequence(None, None).unwrap_or_default() == amino_acid
             })
             .count()
+    }
+
+    #[test]
+    fn test_translation_adjacent_pairs_node_collision() {
+        let (conn, block_group) = new_block_group("separated-ala-pairs");
+        let (prefix, prefix_len) = build_node(&conn, &"ATG".repeat(46), "prefix");
+        let (spacer, spacer_len) = build_node(&conn, &"ATG".repeat(57), "spacer");
+        let (stop, stop_len) = build_node(&conn, "TAG", "stop");
+        let (first_route, first_route_len) = build_node(&conn, "", "first-route");
+        let (second_route, second_route_len) = build_node(&conn, "", "second-route");
+        let first_pair = [
+            [
+                build_node(&conn, "GCA", "ala47-a"),
+                build_node(&conn, "GCC", "ala47-b"),
+            ],
+            [
+                build_node(&conn, "GCA", "ala48-a"),
+                build_node(&conn, "GCC", "ala48-b"),
+            ],
+        ];
+        let second_pair = [
+            [
+                build_node(&conn, "GCA", "ala106-a"),
+                build_node(&conn, "GCC", "ala106-b"),
+            ],
+            [
+                build_node(&conn, "GCA", "ala107-a"),
+                build_node(&conn, "GCC", "ala107-b"),
+            ],
+        ];
+
+        let mut edges = Vec::new();
+        let mut add_edge = |source, source_coord, target, target_coord| {
+            let edge_id = build_edge(&conn, source, source_coord, target, target_coord);
+            edges.push(build_block_group_edge(block_group.id, edge_id, 0));
+            edge_id
+        };
+        let start_edge = add_edge(PATH_START_NODE_ID, 0, prefix, 0);
+        for (node, _) in first_pair[0] {
+            add_edge(prefix, prefix_len, node, 0);
+        }
+        for (node, length) in first_pair[0] {
+            add_edge(node, length, first_route, 0);
+        }
+        for (node, _) in first_pair[1] {
+            add_edge(first_route, first_route_len, node, 0);
+        }
+        for (node, length) in first_pair[1] {
+            add_edge(node, length, spacer, 0);
+        }
+        for (node, _) in second_pair[0] {
+            add_edge(spacer, spacer_len, node, 0);
+        }
+        for (node, length) in second_pair[0] {
+            add_edge(node, length, second_route, 0);
+        }
+        for (node, _) in second_pair[1] {
+            add_edge(second_route, second_route_len, node, 0);
+        }
+        for (node, length) in second_pair[1] {
+            add_edge(node, length, stop, 0);
+        }
+        add_edge(stop, stop_len, PATH_END_NODE_ID, 0);
+        BlockGroupEdge::bulk_create(&conn, &edges);
+        let reference_edges = [
+            start_edge,
+            build_edge(&conn, prefix, prefix_len, first_pair[0][0].0, 0),
+            build_edge(&conn, first_pair[0][0].0, 3, first_route, 0),
+            build_edge(&conn, first_route, 0, first_pair[1][0].0, 0),
+            build_edge(&conn, first_pair[1][0].0, 3, spacer, 0),
+            build_edge(&conn, spacer, spacer_len, second_pair[0][0].0, 0),
+            build_edge(&conn, second_pair[0][0].0, 3, second_route, 0),
+            build_edge(&conn, second_route, 0, second_pair[1][0].0, 0),
+            build_edge(&conn, second_pair[1][0].0, 3, stop, 0),
+            build_edge(&conn, stop, stop_len, PATH_END_NODE_ID, 0),
+        ];
+        Path::create(
+            &conn,
+            "separated-ala-pairs",
+            &block_group.id,
+            &reference_edges,
+        )
+        .unwrap();
+
+        let protein = translate_block_group(
+            &conn,
+            test_workspace(),
+            &block_group.id,
+            TranslationParams::new("test"),
+        )
+        .unwrap();
+        let graph = BlockGroup::get_graph(&conn, test_workspace(), &protein.id, None).unwrap();
+        assert!(!is_cyclic_directed(&graph));
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, test_workspace(), &protein.id, true).unwrap(),
+            HashSet::from([format!("{}AA{}AA*", "M".repeat(46), "M".repeat(57))])
+        );
     }
 
     /// Whether PATH_END is reachable from PATH_START in the protein graph.
