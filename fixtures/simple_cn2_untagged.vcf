@@ -1,0 +1,7 @@
+##fileformat=VCFv4.2
+##contig=<ID=m123,length=34>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##ALT=<ID=CN2,Description="Copy number allele: 2 copies">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	dup
+m123	13	.	ATC	<CN2>	.	PASS	SVTYPE=DUP	GT	1/1
