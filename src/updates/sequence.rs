@@ -385,10 +385,14 @@ mod tests {
         }
     }
 
-    // Editing 4..6 on the named historical path replaces its first two Cs.
-    // Historical [AAAA] ----------> [CCCC]
-    // Current    [A] --> [TT] ----> [AA] --> [CCCC]
-    // Updated    [AAAA] --> [GG] --> [CC]
+    // Save a copy of the original path as "historical", then replace one A
+    // with two Ts to make a longer current path. The extra base shifts the
+    // point where the Cs begin, so the same zero-based, half-open range
+    // selects different bases on the two paths.
+    // Historical [AAAA] ------> [CCCC]   4..6 selects CC
+    // Current    [A] --> [TT] --> [AA] --> [CCCC]   4..6 selects AC
+    // Both update methods target historical:4-6 and replace CC with GG.
+    // Result     [AAAA] --> [GG] --> [CC]
     #[test]
     fn test_updates_use_explicit_historical_path() {
         let context = setup_gen();
@@ -434,8 +438,6 @@ mod tests {
             "AAAACCCC",
         );
 
-        // Both paths contain 4..6, but it selects CC on the historical path and AC
-        // on the current path. The child must splice the explicitly named route.
         let patch = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
         std::fs::write(patch.path(), ">patch\nGG\n").unwrap();
         update_with_sequence(
