@@ -4572,6 +4572,148 @@ mod tests {
         );
     }
 
+    fn attach_test_edit_edges(conn: &GraphConnection, block_group_id: HashId, edge_ids: &[HashId]) {
+        let edges = edge_ids
+            .iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id,
+                edge_id: *edge_id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &edges);
+    }
+
+    // Insert at the A -> T junction or at the final G -> END junction.
+    // [START] --> [A x10] --> [CG] --> [T x10] --> [C x10] --> [G x10] --> [END]
+    // [START] --> [A x10] --> [T x10] --> [C x10] --> [G x10] --> [CG] --> [END]
+    #[test]
+    fn test_new_path_with_insertion_at_junction() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let edges = Path::edges_for_path(conn, &path.id, None);
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CG")
+            .save(conn)
+            .unwrap();
+        let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str("insert")).unwrap();
+
+        for (position, junction, expected) in [
+            (10, &edges[1], "AAAAAAAAAACGTTTTTTTTTTCCCCCCCCCCGGGGGGGGGG"),
+            (40, &edges[4], "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGGCG"),
+        ] {
+            let incoming = Edge::create(
+                conn,
+                junction.source_node_id,
+                junction.source_coordinate,
+                junction.source_strand,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let outgoing = Edge::create(
+                conn,
+                node_id,
+                sequence.length,
+                Strand::Forward,
+                junction.target_node_id,
+                junction.target_coordinate,
+                junction.target_strand,
+            )
+            .unwrap();
+            attach_test_edit_edges(conn, block_group_id, &[incoming.id, outgoing.id]);
+            let edited = path
+                .new_path_with(conn, position, position, &incoming, &outgoing)
+                .unwrap();
+            assert_eq!(
+                edited.sequence(conn, test_workspace(), None).unwrap(),
+                expected
+            );
+        }
+    }
+
+    // The new first edge skips the first two bases.
+    // [START:0] --> [A x8] --> [T x10] --> [C x10] --> [G x10] --> [END]
+    #[test]
+    fn test_new_path_with_prefix_deletion() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let edges = Path::edges_for_path(conn, &path.id, None);
+        let deletion = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            edges[0].target_node_id,
+            2,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        attach_test_edit_edges(conn, block_group_id, &[deletion.id]);
+        let edited = path.new_path_with_deletion(conn, 0, 2).unwrap();
+        let edited_edges = Path::edges_for_path(conn, &edited.id, None);
+        assert_eq!(edited_edges.first().unwrap().id, deletion.id);
+        assert_eq!(
+            edited.sequence(conn, test_workspace(), None).unwrap(),
+            "AAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG"
+        );
+    }
+
+    // The new last edge skips the final two bases.
+    // [START] --> [A x10] --> [T x10] --> [C x10] --> [G x8] --> [END:0]
+    #[test]
+    fn test_new_path_with_suffix_deletion() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let edges = Path::edges_for_path(conn, &path.id, None);
+        let deletion = Edge::create(
+            conn,
+            edges[4].source_node_id,
+            8,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        attach_test_edit_edges(conn, block_group_id, &[deletion.id]);
+        let edited = path.new_path_with_deletion(conn, 38, 40).unwrap();
+        let edited_edges = Path::edges_for_path(conn, &edited.id, None);
+        assert_eq!(edited_edges.last().unwrap().id, deletion.id);
+        assert_eq!(
+            edited.sequence(conn, test_workspace(), None).unwrap(),
+            "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGG"
+        );
+    }
+
+    // Deleting every block leaves only the edge between the markers.
+    // [START:0] --> [END:0]
+    #[test]
+    fn test_new_path_with_full_deletion() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let deletion = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        attach_test_edit_edges(conn, block_group_id, &[deletion.id]);
+        let edited = path.new_path_with_deletion(conn, 0, 40).unwrap();
+        assert_eq!(Path::edges_for_path(conn, &edited.id, None), vec![deletion]);
+        assert_eq!(edited.sequence(conn, test_workspace(), None).unwrap(), "");
+    }
+
     #[test]
     fn test_new_path_with_deletion() {
         let conn = &get_connection(None).unwrap();
