@@ -578,6 +578,47 @@ mod tests {
         updates::fasta::update_with_fasta,
     };
 
+    // The child already contains all three junctions from the full path.
+    // [A x10] --> [T x10] --> [C x10] --> [G x10]
+    //          10          20          30
+    // Chunk 10..30 includes only the T -> C junction at 20.
+    #[test]
+    fn test_derive_chunk_in_populated_child_keeps_only_interior_path_edges() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (_, parent_path) = setup_block_group(conn);
+        let parent_edges = Path::edges_for_path(conn, &parent_path.id, None);
+        derive_chunks(
+            &context,
+            "test",
+            "test",
+            "child",
+            "chr1",
+            Some(&parent_path.name),
+            vec![Range { start: 0, end: 40 }],
+            None,
+            true,
+        )
+        .unwrap();
+        let child_id = get_block_group_id(conn, "test", "child", "chr1").unwrap();
+
+        let chunks = derive_chunks(
+            &context,
+            "test",
+            "test",
+            "child",
+            "chr1",
+            Some(&parent_path.name),
+            vec![Range { start: 10, end: 30 }],
+            Some(child_id),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].path_edges, vec![parent_edges[2].clone()]);
+    }
+
     #[test]
     fn test_derive_chunks_one_insertion() {
         /*
