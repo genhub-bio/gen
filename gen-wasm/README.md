@@ -30,4 +30,6 @@ Browser builds must resolve `rusqdoltlite` from a `browser-cloud` source that in
 
 The client exposes `initializeRepository({ namespace, slug, branch? })`, `createRepositoryBranch({ namespace, slug, sourceBranch, branch })`, and `mergeRepositoryBranches({ namespace, slug, sourceBranch, targetBranch })`. Results contain `branch` and `commitHash`. Initialization reads GenHub's configured default branch and checks that the repository is uninitialized and has no listed branches.
 
+The factory and action methods reject with `GenRepositoryActionError`. Gen sanitizes diagnostic messages before rejecting and uses a generic message for unexpected startup or runtime failures. Each error includes the safe `message` and a JavaScript stack from the façade.
+
 The JavaScript layer reads the signed-in user and repository state using same-origin session-cookie requests. Gen's existing browser remote acquires scoped CABs for graph reads and pushes, keeping signed capabilities inside Gen's remote operations.
