@@ -25,7 +25,7 @@ use crate::{
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
-    updates::resolve_sequence_update_region,
+    updates::resolve_update_region,
 };
 
 /// Creates a top-level accession anchored at a single resolved graph
@@ -146,7 +146,7 @@ pub fn update_with_library(
     let conn = context.graph().conn();
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        resolve_sequence_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
+        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
 
     update_graph_with_library(
         context,
@@ -518,9 +518,9 @@ mod tests {
 
     #[test]
     fn test_library_updates_use_selected_path_coordinates() {
-        for (region, reference, edited) in [
-            ("chr1:4-6", "ATTAACCCC", "ATTAGGCCC"),
-            ("historical:4-6", "AAAACCCC", "AAAAGGCC"),
+        for (path_name, reference, edited) in [
+            (None, "ATTAACCCC", "ATTAGGCCC"),
+            (Some("historical"), "AAAACCCC", "AAAAGGCC"),
         ] {
             let context = setup_gen();
             let conn = context.graph().conn();
@@ -547,6 +547,10 @@ mod tests {
             )
             .unwrap();
 
+            let extended = get_sample_bg(conn, "test", "extended");
+            let current = BlockGroup::get_current_path(conn, &extended.id, None).unwrap();
+            let region = format!("{}:4-6", path_name.unwrap_or(&current.name));
+
             // The same in-bounds range selects AC on the current path and CC on
             // the historical path. Resolution and chunk extraction must agree.
             update_with_library(
@@ -554,7 +558,7 @@ mod tests {
                 "test",
                 "extended",
                 "library",
-                region,
+                &region,
                 vec![vec![SequencePart {
                     name: "patch".to_string(),
                     sequence: "GG".to_string(),

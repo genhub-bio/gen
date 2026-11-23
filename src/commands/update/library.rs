@@ -23,7 +23,7 @@ pub struct Command {
     /// A new sample name to associate with the update
     #[arg(long)]
     new_sample: String,
-    /// The region to replace with the library (block group, path, accession, or annotation)
+    /// The region to replace with the library (path, accession, or annotation)
     #[arg(short, long = "region-name", alias = "path-name")]
     region_name: String,
     /// A CSV with combinatorial library information

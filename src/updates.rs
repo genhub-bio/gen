@@ -7,7 +7,7 @@ use gen_models::{
     path::Path,
     region::{
         GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve_accession,
-        resolve_annotation, resolve_block_group, resolve_path,
+        resolve_annotation, resolve_path,
     },
 };
 
@@ -18,25 +18,6 @@ pub mod gfa;
 pub mod library;
 pub mod sequence;
 pub mod vcf;
-
-pub(crate) fn resolve_sequence_update_region(
-    region: &Region,
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-) -> Result<ResolvedGenRegion, GenRegionError> {
-    match resolve_block_group(region, conn, collection_name, sample_name) {
-        Ok(mut resolved) => {
-            // Sequence edits use the current path's coordinates for a block-group target.
-            resolved.kind = ResolvedRegionKind::Path;
-            Ok(resolved)
-        }
-        Err(GenRegionError::NotFound(_)) => {
-            resolve_update_region(region, conn, collection_name, sample_name)
-        }
-        Err(error) => Err(error),
-    }
-}
 
 pub(crate) fn child_update_path(
     conn: &GraphConnection,
