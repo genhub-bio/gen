@@ -360,19 +360,6 @@ where
     assert_eq!(v2, expected);
 }
 
-pub fn current_path_region(
-    context: &DbContext,
-    collection: &str,
-    sample: &str,
-    range: &str,
-) -> String {
-    let conn = context.graph().conn();
-    let block_group = get_sample_bg(conn, collection, sample);
-    let path = BlockGroup::get_current_path(conn, &block_group.id, None)
-        .expect("should find the sample's current path");
-    format!("{}:{range}", path.name)
-}
-
 pub fn get_sample_bg(
     conn: &GraphConnection,
     collection_name: &str,

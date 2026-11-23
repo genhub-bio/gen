@@ -17,7 +17,7 @@ use crate::{
     fasta::FastaError,
     updates::{
         InsertChangeData, InsertedPathEdges, child_update_path, insert_update_change,
-        resolve_update_region, target_update_region,
+        resolve_sequence_update_region, target_update_region,
     },
 };
 #[allow(clippy::too_many_arguments)]
@@ -33,7 +33,7 @@ pub fn update_with_fasta(
     let conn = context.graph().conn();
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
+        resolve_sequence_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
     let (start_coordinate, end_coordinate) =
         if parsed_region.start.is_some() || parsed_region.end.is_some() {
             (resolved_region.start, resolved_region.end)
@@ -232,7 +232,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{current_path_region, get_sample_bg, setup_gen},
+        test_helpers::{get_sample_bg, setup_gen},
     };
 
     fn block_groups_for_sample(
@@ -508,7 +508,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "4-6"),
+            "m123:4-6",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -570,7 +570,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "1-6"),
+            "m123:1-6",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -638,7 +638,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "1-12"),
+            "m123:1-12",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -700,7 +700,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "6-12"),
+            "m123:6-12",
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -760,7 +760,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "4-6"),
+            "m123:4-6",
             fasta_update_path.to_str().unwrap(),
             false,
         );

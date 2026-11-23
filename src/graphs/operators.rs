@@ -574,7 +574,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{current_path_region, setup_block_group, setup_gen},
+        test_helpers::{setup_block_group, setup_gen},
         updates::fasta::update_with_fasta,
     };
 
@@ -805,7 +805,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            &current_path_region(&context, collection, "test1", "15-20"),
+            "m123:15-20",
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -937,7 +937,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            &current_path_region(&context, collection, "test1", "15-20"),
+            "m123:15-20",
             fasta_update_path.to_str().unwrap(),
             false,
         )

@@ -15,7 +15,7 @@ use crate::{
     errors::SequenceUpdateError,
     updates::{
         InsertChangeData, InsertedPathEdges, child_update_path, insert_update_change,
-        resolve_update_region, target_update_region,
+        resolve_sequence_update_region, target_update_region,
     },
 };
 #[allow(clippy::too_many_arguments)]
@@ -31,7 +31,7 @@ pub fn update_with_sequence(
     let conn = context.graph().conn();
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
-        resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
+        resolve_sequence_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
     if parsed_region.start.is_none() && parsed_region.end.is_none() {
         return Err(SequenceUpdateError::MissingCoordinates(
             region_name.to_string(),
@@ -190,7 +190,7 @@ mod tests {
     use crate::{
         graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
-        test_helpers::{current_path_region, get_sample_bg, setup_block_group, setup_gen},
+        test_helpers::{get_sample_bg, setup_block_group, setup_gen},
         updates::{fasta::update_with_fasta, library::update_with_library},
     };
 
@@ -219,9 +219,6 @@ mod tests {
             &context, "test", "original", "extended", "chr1:2-4", "GGG", false,
         )
         .unwrap();
-        let parent = get_sample_bg(conn, "test", "extended");
-        let parent_path = BlockGroup::get_current_path(conn, &parent.id, None).unwrap();
-        let region = format!("{}:{region}", parent_path.name);
         if use_fasta {
             let patch = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
             std::fs::write(patch.path(), format!(">patch\n{sequence}\n")).unwrap();
@@ -230,14 +227,14 @@ mod tests {
                 "test",
                 "extended",
                 "edited",
-                &region,
+                region,
                 &patch.path().to_string_lossy(),
                 false,
             )
             .unwrap();
         } else {
             update_with_sequence(
-                &context, "test", "extended", "edited", &region, sequence, false,
+                &context, "test", "extended", "edited", region, sequence, false,
             )
             .unwrap();
         }
@@ -256,6 +253,8 @@ mod tests {
             sequences.contains(expected),
             "{region} with use_fasta={use_fasta} should preserve the edited graph route; found {sequences:?}",
         );
+        let parent = get_sample_bg(conn, "test", "extended");
+        let parent_path = BlockGroup::get_current_path(conn, &parent.id, None).unwrap();
         assert_eq!(
             parent_path
                 .sequence(conn, context.workspace(), None)
@@ -266,70 +265,70 @@ mod tests {
 
     #[test]
     fn test_sequence_updates_insert_at_start_after_length_change() {
-        assert_update_after_length_change("0-0", "TT", "TTAAGGGCCCC", false);
+        assert_update_after_length_change("chr1:0-0", "TT", "TTAAGGGCCCC", false);
     }
 
     #[test]
     fn test_sequence_updates_insert_at_end_after_length_change() {
-        assert_update_after_length_change("9-9", "TT", "AAGGGCCCCTT", false);
+        assert_update_after_length_change("chr1:9-9", "TT", "AAGGGCCCCTT", false);
     }
 
     #[test]
     fn test_sequence_updates_delete_at_start_after_length_change() {
-        assert_update_after_length_change("0-1", "", "AGGGCCCC", false);
-        assert_update_after_length_change("0-2", "", "GGGCCCC", false);
+        assert_update_after_length_change("chr1:0-1", "", "AGGGCCCC", false);
+        assert_update_after_length_change("chr1:0-2", "", "GGGCCCC", false);
     }
 
     #[test]
     fn test_sequence_updates_delete_at_end_after_length_change() {
-        assert_update_after_length_change("8-9", "", "AAGGGCCC", false);
-        assert_update_after_length_change("5-9", "", "AAGGG", false);
+        assert_update_after_length_change("chr1:8-9", "", "AAGGGCCC", false);
+        assert_update_after_length_change("chr1:5-9", "", "AAGGG", false);
     }
 
     #[test]
     fn test_sequence_updates_insert_at_junctions_after_length_change() {
-        assert_update_after_length_change("2-2", "TT", "AATTGGGCCCC", false);
-        assert_update_after_length_change("5-5", "TT", "AAGGGTTCCCC", false);
+        assert_update_after_length_change("chr1:2-2", "TT", "AATTGGGCCCC", false);
+        assert_update_after_length_change("chr1:5-5", "TT", "AAGGGTTCCCC", false);
     }
 
     #[test]
     fn test_sequence_updates_delete_across_junctions_after_length_change() {
-        assert_update_after_length_change("1-3", "", "AGGCCCC", false);
-        assert_update_after_length_change("4-6", "", "AAGGCCC", false);
+        assert_update_after_length_change("chr1:1-3", "", "AGGCCCC", false);
+        assert_update_after_length_change("chr1:4-6", "", "AAGGCCC", false);
     }
 
     #[test]
     fn test_fasta_updates_insert_at_start_after_length_change() {
-        assert_update_after_length_change("0-0", "TT", "TTAAGGGCCCC", true);
+        assert_update_after_length_change("chr1:0-0", "TT", "TTAAGGGCCCC", true);
     }
 
     #[test]
     fn test_fasta_updates_insert_at_end_after_length_change() {
-        assert_update_after_length_change("9-9", "TT", "AAGGGCCCCTT", true);
+        assert_update_after_length_change("chr1:9-9", "TT", "AAGGGCCCCTT", true);
     }
 
     #[test]
     fn test_fasta_updates_delete_at_start_after_length_change() {
-        assert_update_after_length_change("0-1", "", "AGGGCCCC", true);
-        assert_update_after_length_change("0-2", "", "GGGCCCC", true);
+        assert_update_after_length_change("chr1:0-1", "", "AGGGCCCC", true);
+        assert_update_after_length_change("chr1:0-2", "", "GGGCCCC", true);
     }
 
     #[test]
     fn test_fasta_updates_delete_at_end_after_length_change() {
-        assert_update_after_length_change("8-9", "", "AAGGGCCC", true);
-        assert_update_after_length_change("5-9", "", "AAGGG", true);
+        assert_update_after_length_change("chr1:8-9", "", "AAGGGCCC", true);
+        assert_update_after_length_change("chr1:5-9", "", "AAGGG", true);
     }
 
     #[test]
     fn test_fasta_updates_insert_at_junctions_after_length_change() {
-        assert_update_after_length_change("2-2", "TT", "AATTGGGCCCC", true);
-        assert_update_after_length_change("5-5", "TT", "AAGGGTTCCCC", true);
+        assert_update_after_length_change("chr1:2-2", "TT", "AATTGGGCCCC", true);
+        assert_update_after_length_change("chr1:5-5", "TT", "AAGGGTTCCCC", true);
     }
 
     #[test]
     fn test_fasta_updates_delete_across_junctions_after_length_change() {
-        assert_update_after_length_change("1-3", "", "AGGCCCC", true);
-        assert_update_after_length_change("4-6", "", "AAGGCCC", true);
+        assert_update_after_length_change("chr1:1-3", "", "AGGCCCC", true);
+        assert_update_after_length_change("chr1:4-6", "", "AAGGCCC", true);
     }
 
     // Both updates splice the same [GG] node into different positions.
@@ -382,6 +381,70 @@ mod tests {
                     "{region} with use_fasta={use_fasta} should use this edit's edges",
                 );
             }
+        }
+    }
+
+    // The block-group name selects the current 42-base path for the next update.
+    // Original  [first 33 bases] --> [A]         --> [END]
+    // Current   [first 33 bases] --> [ACCCCCCCC] --> [END]
+    // Updated   [first 33 bases] --> [ACC] --> [AA] --> [CCCC] --> [END]
+    #[test]
+    fn test_updates_use_current_path_for_block_group_name() {
+        let context = setup_gen();
+        let original = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &original.to_string_lossy().into_owned(),
+            "test",
+            "original",
+            None,
+            None,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            "test",
+            "original",
+            "extended",
+            "m123:33-34",
+            "ACCCCCCCC",
+            false,
+        )
+        .unwrap();
+
+        // Replacing the last base extends the path from 34 to 42 bases. Editing 36..38
+        // below must use that current path; those coordinates are outside the original path.
+        let patch = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+        std::fs::write(patch.path(), ">patch\nAA\n").unwrap();
+        update_with_sequence(
+            &context,
+            "test",
+            "extended",
+            "inline",
+            "m123:36-38",
+            "AA",
+            false,
+        )
+        .unwrap();
+        update_with_fasta(
+            &context,
+            "test",
+            "extended",
+            "fasta",
+            "m123:36-38",
+            &patch.path().to_string_lossy(),
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        for sample in ["inline", "fasta"] {
+            let block_group = get_sample_bg(conn, "test", sample);
+            let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+            assert_eq!(
+                path.sequence(conn, context.workspace(), None).unwrap(),
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGACCAACCCC",
+            );
         }
     }
 
@@ -899,7 +962,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "4-6"),
+            "m123:4-6",
             "TTTTTTTT",
             false,
         );
@@ -955,7 +1018,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "1-6"),
+            "m123:1-6",
             "TTTTTTTT",
             false,
         );
@@ -1017,7 +1080,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "1-12"),
+            "m123:1-12",
             "TTTTTTTT",
             false,
         );
@@ -1073,7 +1136,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "6-12"),
+            "m123:6-12",
             "TTTTTTTT",
             false,
         );
@@ -1129,7 +1192,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "4-6"),
+            "m123:4-6",
             "AAAAAAAA",
             false,
         );
@@ -1371,7 +1434,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "2-5"),
+            "m123:2-5",
             "",
             false,
         );
@@ -1432,7 +1495,7 @@ mod tests {
             &collection,
             "inserted",
             "deleted-node-end",
-            &current_path_region(&context, &collection, "inserted", "1-2"),
+            "m123:1-2",
             "",
             false,
         )
@@ -1442,7 +1505,7 @@ mod tests {
             &collection,
             "deleted-node-end",
             "deleted-next-node-start",
-            &current_path_region(&context, &collection, "deleted-node-end", "1-2"),
+            "m123:1-2",
             "",
             false,
         )
@@ -1489,7 +1552,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            &current_path_region(&context, &collection, "child sample", "2-3"),
+            "m123:2-3",
             "",
             false,
         )
