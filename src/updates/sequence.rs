@@ -331,6 +331,9 @@ mod tests {
         assert_update_after_length_change("chr1:4-6", "", "AAGGCCC", true);
     }
 
+    // Both updates splice the same [GG] node into different positions.
+    // First  [A] ------> [GG] --> [AACCCC]
+    // Second [AAAAC] --> [GG] --> [CC]
     #[test]
     fn test_updates_reuse_node_with_edges_for_selected_edit() {
         for use_fasta in [false, true] {
@@ -381,6 +384,10 @@ mod tests {
         }
     }
 
+    // The block-group name selects the current 42-base path for the next update.
+    // Original  [first 33 bases] --> [A]         --> [END]
+    // Current   [first 33 bases] --> [ACCCCCCCC] --> [END]
+    // Updated   [first 33 bases] --> [ACC] --> [AA] --> [CCCC] --> [END]
     #[test]
     fn test_updates_use_current_path_for_block_group_name() {
         let context = setup_gen();
@@ -441,6 +448,10 @@ mod tests {
         }
     }
 
+    // Editing 4..6 on the named historical path replaces its first two Cs.
+    // Historical [AAAA] ----------> [CCCC]
+    // Current    [A] --> [TT] ----> [AA] --> [CCCC]
+    // Updated    [AAAA] --> [GG] --> [CC]
     #[test]
     fn test_updates_use_explicit_historical_path() {
         let context = setup_gen();
