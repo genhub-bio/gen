@@ -160,3 +160,71 @@ pub(crate) fn insert_update_change(
         outgoing: load_edge(false)?,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use gen_core::{HashId, PATH_START_NODE_ID, PathBlock, Strand};
+    use gen_models::{node::Node, path::Path, region::ResolvedGenRegion, sequence::Sequence};
+
+    use super::{InsertChangeData, insert_update_change};
+    use crate::test_helpers::{setup_block_group, setup_gen};
+
+    // Both edits use the GG slice at 1..3 of the same node.
+    // Earlier  ... --> [TT] --> [GG] --> [T x6] --> ...
+    // Prefix   [START:0] -----> [GG] --> [A x8] --> ...
+    #[test]
+    fn test_insert_update_change_returns_splice_edges_for_reused_node() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (_, path) = setup_block_group(conn);
+        let path_edges = Path::edges_for_path(conn, &path.id, None);
+        let first_node = path_edges[0].target_node_id;
+        let second_node = path_edges[1].target_node_id;
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CGGA")
+            .save(conn)
+            .unwrap();
+        let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str("reused")).unwrap();
+
+        for (start, end, source_node, source_offset, target_node, target_offset) in [
+            (12, 14, second_node, 2, second_node, 4),
+            (0, 2, PATH_START_NODE_ID, 0, first_node, 2),
+        ] {
+            let region = ResolvedGenRegion::from_path(conn, &path, start, end).unwrap();
+            let data = InsertChangeData::new(PathBlock {
+                node_id,
+                block_sequence: "GG".to_string(),
+                sequence_start: 1,
+                sequence_end: 3,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            });
+            let edges = insert_update_change(conn, context.workspace(), region, data)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                (
+                    edges.incoming.source_node_id,
+                    edges.incoming.source_coordinate,
+                    edges.incoming.target_node_id,
+                    edges.incoming.target_coordinate,
+                ),
+                (source_node, source_offset, node_id, 1),
+                "incoming edge for {start}..{end}"
+            );
+            assert_eq!(
+                (
+                    edges.outgoing.source_node_id,
+                    edges.outgoing.source_coordinate,
+                    edges.outgoing.target_node_id,
+                    edges.outgoing.target_coordinate,
+                ),
+                (node_id, 3, target_node, target_offset),
+                "outgoing edge for {start}..{end}"
+            );
+        }
+    }
+}
