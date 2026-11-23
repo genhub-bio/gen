@@ -416,6 +416,55 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_first_record_in_multi_record_fasta_keeps_reference_path() {
+        // The empty record bypasses [AA], and the second record adds [GG].
+        // [AA] --+--> [AA] --+--> [CCCC]  (reference)
+        //        +----------+
+        //        +--> [GG] --+
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let mut original = NamedTempFile::new().unwrap();
+        writeln!(original, ">chr1\nAAAACCCC").unwrap();
+        import_fasta(
+            &context,
+            &original.path().to_string_lossy().into_owned(),
+            "test",
+            "parent",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut patch = NamedTempFile::new().unwrap();
+        writeln!(patch, ">deletion\n>replacement\nGG").unwrap();
+        update_with_fasta(
+            &context,
+            "test",
+            "parent",
+            "child",
+            "chr1:2-4",
+            patch.path().to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+
+        let child = get_sample_bg(conn, "test", "child");
+        let path = BlockGroup::get_current_path(conn, &child.id, None).unwrap();
+        assert_eq!(
+            path.sequence(conn, context.workspace(), None).unwrap(),
+            "AAAACCCC"
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, context.workspace(), &child.id, false).unwrap(),
+            HashSet::from([
+                "AAAACCCC".to_string(),
+                "AACCCC".to_string(),
+                "AAGGCCCC".to_string()
+            ])
+        );
+    }
+
+    #[test]
     fn test_update_within_update() {
         /*
         Graph after fasta updates:
