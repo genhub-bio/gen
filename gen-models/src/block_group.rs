@@ -796,6 +796,15 @@ impl BlockGroup {
         workspace: &Workspace,
         change: &BlockGroupChange,
     ) -> Result<(), BlockGroupError> {
+        Self::insert_change_with_edges(conn, workspace, change).map(|_| ())
+    }
+
+    /// Persists a change and returns its planned edges so callers can rebuild the edited path.
+    pub fn insert_change_with_edges(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        change: &BlockGroupChange,
+    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         let new_augmented_edges = change.region.plan_edges(conn, workspace, change, None)?;
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
@@ -804,14 +813,15 @@ impl BlockGroup {
         if let Some(accession) = &change.path_accession {
             new_accession_edges.insert(
                 (change.region.block_group.id, accession.clone()),
-                new_augmented_edges,
+                new_augmented_edges.clone(),
             );
         }
         Self::persist_insert_changes(
             conn,
             new_augmented_edges_by_block_group,
             new_accession_edges,
-        )
+        )?;
+        Ok(new_augmented_edges)
     }
 
     #[cfg_attr(
@@ -950,8 +960,11 @@ impl BlockGroup {
 
         if change.block.sequence_start == change.block.sequence_end {
             // Deletion
-            let source_coordinate =
-                change.region.start - start_block.start + start_block.sequence_start;
+            let source_coordinate = if is_terminal(start_block.node_id) {
+                0
+            } else {
+                change.region.start - start_block.start + start_block.sequence_start
+            };
             let target_coordinate = change.region.end - end_block.start + end_block.sequence_start;
             let mut aug_edges = vec![];
             let new_edge = EdgeData {
@@ -967,6 +980,28 @@ impl BlockGroup {
                 chromosome_index: change.chromosome_index,
                 phased: change.phased,
             });
+
+            // A suffix deletion at a junction must also let the selected
+            // upstream route reach END directly. An edge from the following
+            // block's start otherwise only connects routes traversing that node.
+            if is_end_node(end_block.node_id)
+                && start_block.start == change.region.start
+                && !is_terminal(previous_start_blocks[0].node_id)
+            {
+                let previous_block = previous_start_blocks[0];
+                aug_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: previous_block.node_id,
+                        source_coordinate: previous_block.sequence_end,
+                        source_strand: previous_block.strand,
+                        target_node_id: PATH_END_NODE_ID,
+                        target_coordinate: 0,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: change.chromosome_index,
+                    phased: change.phased,
+                });
+            }
 
             // NOTE: If the deletion is happening at the very beginning of a path, we need to add
             // an edge from the dedicated start node to the end of the deletion, to indicate it's
@@ -1049,8 +1084,11 @@ impl BlockGroup {
             // doesn't affect sequence readouts, so it may not be worth it.
         } else {
             // Insertion/replacement
-            let insertion_start_coordinate =
-                change.region.start - start_block.start + start_block.sequence_start;
+            let insertion_start_coordinate = if is_terminal(start_block.node_id) {
+                0
+            } else {
+                change.region.start - start_block.start + start_block.sequence_start
+            };
             let new_start_edge = EdgeData {
                 source_node_id: start_block.node_id,
                 source_coordinate: insertion_start_coordinate,
@@ -4675,14 +4713,14 @@ mod tests {
         }
     }
 
-    fn insert_test_edit(
+    fn build_test_edit(
         conn: &GraphConnection,
         path: &Path,
         start: i64,
         end: i64,
         bases: &str,
         preserve_edge: bool,
-    ) {
+    ) -> BlockGroupChange {
         let (node_id, length) = if bases.is_empty() {
             (HashId::convert_str(""), 0)
         } else {
@@ -4709,14 +4747,25 @@ mod tests {
             strand: Strand::Forward,
         };
         let region = ResolvedGenRegion::from_path(conn, path, start, end).unwrap();
-        let change = BlockGroupChange {
+        BlockGroupChange {
             region,
             path_accession: None,
             block,
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
             preserve_edge,
-        };
+        }
+    }
+
+    fn insert_test_edit(
+        conn: &GraphConnection,
+        path: &Path,
+        start: i64,
+        end: i64,
+        bases: &str,
+        preserve_edge: bool,
+    ) {
+        let change = build_test_edit(conn, path, start, end, bases, preserve_edge);
         BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
     }
 
@@ -4993,6 +5042,97 @@ mod tests {
                 "{position}"
             );
         }
+    }
+
+    // Deleting the first two bases adds a route from START at coordinate 0.
+    // [START] --+--> [AA] --+--> [AAAAAAAA] --> ...
+    //           +----------+
+    #[test]
+    fn test_prefix_deletion_uses_zero_coordinate_for_start_marker() {
+        let conn = &get_connection(None).unwrap();
+        let (_, path) = setup_block_group(conn);
+        let change = build_test_edit(conn, &path, 0, 2, "", true);
+        let edges = BlockGroup::insert_change_with_edges(conn, test_workspace(), &change).unwrap();
+        let marker_edges: Vec<_> = edges
+            .iter()
+            .map(|edge| &edge.edge_data)
+            .filter(|edge| edge.source_node_id == PATH_START_NODE_ID)
+            .collect();
+
+        assert!(!marker_edges.is_empty());
+        assert!(marker_edges.iter().all(|edge| edge.source_coordinate == 0));
+    }
+
+    // Both edits use the same [GGG] node. The returned edges should be for the prefix splice.
+    // Earlier edit  ... --> [TT] --> [GGG] --> [TTTTTT] --> ...
+    // Prefix splice [START:0] -----> [GGG] --> [AAAAAAAA] --> ...
+    #[test]
+    fn test_prefix_replacement_returns_only_valid_persisted_splice_edges() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let earlier_change = build_test_edit(conn, &path, 12, 14, "GGG", true);
+        BlockGroup::insert_change(conn, test_workspace(), &earlier_change).unwrap();
+        let mut change = build_test_edit(conn, &path, 0, 2, "GGG", false);
+        change.block.node_id = earlier_change.block.node_id;
+        let edges = BlockGroup::insert_change_with_edges(conn, test_workspace(), &change).unwrap();
+        let path_edges = Path::edges_for_path(conn, &path.id, None);
+        let incoming = EdgeData {
+            source_node_id: PATH_START_NODE_ID,
+            source_coordinate: 0,
+            source_strand: Strand::Forward,
+            target_node_id: change.block.node_id,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        let outgoing = EdgeData {
+            source_node_id: change.block.node_id,
+            source_coordinate: 3,
+            source_strand: Strand::Forward,
+            target_node_id: path_edges[0].target_node_id,
+            target_coordinate: 2,
+            target_strand: Strand::Forward,
+        };
+        let splice_edges: HashSet<_> = edges
+            .iter()
+            .map(|edge| edge.edge_data)
+            .filter(|edge| {
+                edge.target_node_id == change.block.node_id
+                    || edge.source_node_id == change.block.node_id
+            })
+            .collect();
+        assert_eq!(splice_edges, HashSet::from([incoming, outgoing]));
+
+        let persisted = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
+        assert!(splice_edges.iter().all(|splice| {
+            persisted
+                .iter()
+                .any(|edge| edge.edge.id == splice.id_hash())
+        }));
+    }
+
+    // Deleting 20..40 adds a direct edge from the last retained block to END.
+    // ... --> [TTTTTTTTTT] --+--> [CCCCCCCCCC] --> [GGGGGGGGGG] --+--> [END]
+    //                       +-----------------------------------+
+    #[test]
+    fn test_suffix_deletion_at_junction_connects_upstream_block_to_end() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let change = build_test_edit(conn, &path, 20, 40, "", true);
+        let edges = BlockGroup::insert_change_with_edges(conn, test_workspace(), &change).unwrap();
+        let path_edges = Path::edges_for_path(conn, &path.id, None);
+        let junction = &path_edges[2];
+        let upstream_to_end = EdgeData {
+            source_node_id: junction.source_node_id,
+            source_coordinate: junction.source_coordinate,
+            source_strand: junction.source_strand,
+            target_node_id: PATH_END_NODE_ID,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        assert!(edges.iter().any(|edge| edge.edge_data == upstream_to_end));
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert!(sequences.contains("AAAAAAAAAATTTTTTTTTT"));
     }
 
     #[test]

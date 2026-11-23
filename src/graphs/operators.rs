@@ -224,8 +224,18 @@ pub fn derive_chunks(
             new_path_edge_ids.push(new_start_edge.edge.id);
         }
 
-        for edge in &current_path_edges {
+        // A library update derives chunks into an already populated child. Edge
+        // membership alone therefore cannot identify which edges belong to a chunk.
+        let mut path_coordinate = 0;
+        for (previous_edge, edge) in current_path_edges
+            .iter()
+            .zip(current_path_edges.iter().skip(1))
+        {
+            path_coordinate += (edge.source_coordinate - previous_edge.target_coordinate).abs();
             if is_start_node(edge.source_node_id) || is_end_node(edge.target_node_id) {
+                continue;
+            }
+            if path_coordinate <= start_coordinate || path_coordinate >= end_coordinate {
                 continue;
             }
 
@@ -564,9 +574,50 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{setup_block_group, setup_gen},
+        test_helpers::{current_path_region, setup_block_group, setup_gen},
         updates::fasta::update_with_fasta,
     };
+
+    // The child already contains all three junctions from the full path.
+    // [A x10] --> [T x10] --> [C x10] --> [G x10]
+    //          10          20          30
+    // Chunk 10..30 includes only the T -> C junction at 20.
+    #[test]
+    fn test_derive_chunk_in_populated_child_keeps_only_interior_path_edges() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (_, parent_path) = setup_block_group(conn);
+        let parent_edges = Path::edges_for_path(conn, &parent_path.id, None);
+        derive_chunks(
+            &context,
+            "test",
+            "test",
+            "child",
+            "chr1",
+            Some(&parent_path.name),
+            vec![Range { start: 0, end: 40 }],
+            None,
+            true,
+        )
+        .unwrap();
+        let child_id = get_block_group_id(conn, "test", "child", "chr1").unwrap();
+
+        let chunks = derive_chunks(
+            &context,
+            "test",
+            "test",
+            "child",
+            "chr1",
+            Some(&parent_path.name),
+            vec![Range { start: 10, end: 30 }],
+            Some(child_id),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].path_edges, vec![parent_edges[2].clone()]);
+    }
 
     #[test]
     fn test_derive_chunks_one_insertion() {
@@ -754,7 +805,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            "m123:15-20",
+            &current_path_region(&context, collection, "test1", "15-20"),
             fasta_update_path.to_str().unwrap(),
             false,
         )
@@ -886,7 +937,7 @@ mod tests {
             collection,
             "test1",
             "test2",
-            "m123:15-20",
+            &current_path_region(&context, collection, "test1", "15-20"),
             fasta_update_path.to_str().unwrap(),
             false,
         )

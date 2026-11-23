@@ -4,10 +4,9 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
-    edge::Edge,
     node::Node,
     operations::{OperationInfo, OperationSummary},
-    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
+    region::{GenRegionError, Region, ResolvedGenRegion},
     sample::Sample,
     sequence::Sequence,
 };
@@ -15,7 +14,8 @@ use gen_models::{
 use crate::{
     errors::SequenceUpdateError,
     updates::{
-        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
+        InsertChangeData, InsertedPathEdges, child_update_path, insert_update_change,
+        resolve_update_region, target_update_region,
     },
 };
 #[allow(clippy::too_many_arguments)]
@@ -65,9 +65,9 @@ pub fn update_with_sequence(
     }
 
     for target_block_group in &target_block_groups {
-        let path = BlockGroup::get_current_path(conn, &target_block_group.id, None)?;
+        let path = child_update_path(conn, &resolved_region, target_block_group.id)?;
         let (start_coordinate, end_coordinate) = (resolved_region.start, resolved_region.end);
-        let node_id = if sequence.is_empty() {
+        let edges = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
             let path_block = PathBlock {
                 node_id,
@@ -84,10 +84,9 @@ pub fn update_with_sequence(
                 context.workspace(),
                 &resolved_region,
                 target_block_group,
-                &path,
+                path.as_ref(),
                 path_block,
-            )?;
-            node_id
+            )?
         } else {
             let seq = Sequence::new()
                 .sequence_type("DNA")
@@ -120,33 +119,22 @@ pub fn update_with_sequence(
                 context.workspace(),
                 &resolved_region,
                 target_block_group,
-                &path,
+                path.as_ref(),
                 path_block,
-            )?;
-            node_id
+            )?
         };
 
-        if !disable_reference_path_update && resolved_region.kind == ResolvedRegionKind::Path {
-            if node_id == HashId::convert_str("") {
-                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
-            } else {
-                let edge_to_new_node = Edge::select(conn)
-                    .target_node_id(node_id)
-                    .load()
-                    .expect("should load edge to inserted node")[0]
-                    .clone();
-                let edge_from_new_node = Edge::select(conn)
-                    .source_node_id(node_id)
-                    .load()
-                    .expect("should load edge from inserted node")[0]
-                    .clone();
+        if !disable_reference_path_update && let Some(path) = path {
+            if let Some(edges) = edges {
                 path.new_path_with(
                     conn,
                     start_coordinate,
                     end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
+                    &edges.incoming,
+                    &edges.outgoing,
                 )?;
+            } else {
+                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
             }
         }
     }
@@ -171,13 +159,12 @@ fn insert_sequence_change(
     workspace: &gen_core::Workspace,
     region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
-    path: &gen_models::path::Path,
+    path: Option<&gen_models::path::Path>,
     block: PathBlock,
-) -> Result<(), SequenceUpdateError> {
-    let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
+) -> Result<Option<InsertedPathEdges>, SequenceUpdateError> {
+    let source = target_update_region(conn, region, target_block_group.id, path)?;
     let data = InsertChangeData::new(block);
-    insert_update_change(conn, workspace, source, data)?;
-    Ok(())
+    Ok(insert_update_change(conn, workspace, source, data)?)
 }
 
 #[cfg(test)]
@@ -203,9 +190,287 @@ mod tests {
     use crate::{
         graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
-        test_helpers::{get_sample_bg, setup_block_group, setup_gen},
-        updates::library::update_with_library,
+        test_helpers::{current_path_region, get_sample_bg, setup_block_group, setup_gen},
+        updates::{fasta::update_with_fasta, library::update_with_library},
     };
+
+    fn assert_update_after_length_change(
+        region: &str,
+        sequence: &str,
+        expected: &str,
+        use_fasta: bool,
+    ) {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let original = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+        std::fs::write(original.path(), ">chr1\nAAAACCCC\n").unwrap();
+        import_fasta(
+            &context,
+            &original.path().to_string_lossy().into_owned(),
+            "test",
+            "original",
+            None,
+            None,
+        )
+        .unwrap();
+        // The current path is AA -> GGG -> CCCC (length 9), with junctions
+        // at 2 and 5. The original path is still present and has length 8.
+        update_with_sequence(
+            &context, "test", "original", "extended", "chr1:2-4", "GGG", false,
+        )
+        .unwrap();
+        let parent = get_sample_bg(conn, "test", "extended");
+        let parent_path = BlockGroup::get_current_path(conn, &parent.id, None).unwrap();
+        let region = format!("{}:{region}", parent_path.name);
+        if use_fasta {
+            let patch = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+            std::fs::write(patch.path(), format!(">patch\n{sequence}\n")).unwrap();
+            update_with_fasta(
+                &context,
+                "test",
+                "extended",
+                "edited",
+                &region,
+                &patch.path().to_string_lossy(),
+                false,
+            )
+            .unwrap();
+        } else {
+            update_with_sequence(
+                &context, "test", "extended", "edited", &region, sequence, false,
+            )
+            .unwrap();
+        }
+
+        let block_group = get_sample_bg(conn, "test", "edited");
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        assert_eq!(
+            path.sequence(conn, context.workspace(), None).unwrap(),
+            expected,
+            "{region} with use_fasta={use_fasta} should edit the current path boundary",
+        );
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert!(
+            sequences.contains(expected),
+            "{region} with use_fasta={use_fasta} should preserve the edited graph route; found {sequences:?}",
+        );
+        assert_eq!(
+            parent_path
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
+            "AAGGGCCCC",
+        );
+    }
+
+    #[test]
+    fn test_sequence_updates_insert_at_start_after_length_change() {
+        assert_update_after_length_change("0-0", "TT", "TTAAGGGCCCC", false);
+    }
+
+    #[test]
+    fn test_sequence_updates_insert_at_end_after_length_change() {
+        assert_update_after_length_change("9-9", "TT", "AAGGGCCCCTT", false);
+    }
+
+    #[test]
+    fn test_sequence_updates_delete_at_start_after_length_change() {
+        assert_update_after_length_change("0-1", "", "AGGGCCCC", false);
+        assert_update_after_length_change("0-2", "", "GGGCCCC", false);
+    }
+
+    #[test]
+    fn test_sequence_updates_delete_at_end_after_length_change() {
+        assert_update_after_length_change("8-9", "", "AAGGGCCC", false);
+        assert_update_after_length_change("5-9", "", "AAGGG", false);
+    }
+
+    #[test]
+    fn test_sequence_updates_insert_at_junctions_after_length_change() {
+        assert_update_after_length_change("2-2", "TT", "AATTGGGCCCC", false);
+        assert_update_after_length_change("5-5", "TT", "AAGGGTTCCCC", false);
+    }
+
+    #[test]
+    fn test_sequence_updates_delete_across_junctions_after_length_change() {
+        assert_update_after_length_change("1-3", "", "AGGCCCC", false);
+        assert_update_after_length_change("4-6", "", "AAGGCCC", false);
+    }
+
+    #[test]
+    fn test_fasta_updates_insert_at_start_after_length_change() {
+        assert_update_after_length_change("0-0", "TT", "TTAAGGGCCCC", true);
+    }
+
+    #[test]
+    fn test_fasta_updates_insert_at_end_after_length_change() {
+        assert_update_after_length_change("9-9", "TT", "AAGGGCCCCTT", true);
+    }
+
+    #[test]
+    fn test_fasta_updates_delete_at_start_after_length_change() {
+        assert_update_after_length_change("0-1", "", "AGGGCCCC", true);
+        assert_update_after_length_change("0-2", "", "GGGCCCC", true);
+    }
+
+    #[test]
+    fn test_fasta_updates_delete_at_end_after_length_change() {
+        assert_update_after_length_change("8-9", "", "AAGGGCCC", true);
+        assert_update_after_length_change("5-9", "", "AAGGG", true);
+    }
+
+    #[test]
+    fn test_fasta_updates_insert_at_junctions_after_length_change() {
+        assert_update_after_length_change("2-2", "TT", "AATTGGGCCCC", true);
+        assert_update_after_length_change("5-5", "TT", "AAGGGTTCCCC", true);
+    }
+
+    #[test]
+    fn test_fasta_updates_delete_across_junctions_after_length_change() {
+        assert_update_after_length_change("1-3", "", "AGGCCCC", true);
+        assert_update_after_length_change("4-6", "", "AAGGCCC", true);
+    }
+
+    // Both updates splice the same [GG] node into different positions.
+    // First  [A] ------> [GG] --> [AACCCC]
+    // Second [AAAAC] --> [GG] --> [CC]
+    #[test]
+    fn test_updates_reuse_node_with_edges_for_selected_edit() {
+        for use_fasta in [false, true] {
+            let context = setup_gen();
+            let original = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+            std::fs::write(original.path(), ">chr1\nAAAACCCC\n").unwrap();
+            import_fasta(
+                &context,
+                &original.path().to_string_lossy().into_owned(),
+                "test",
+                "original",
+                None,
+                None,
+            )
+            .unwrap();
+            let patch = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+            std::fs::write(patch.path(), ">patch\nGG\n").unwrap();
+
+            // Both edits target the same child and reuse its GG node, but splice
+            // it at different locations on the original path.
+            for (region, expected) in [("chr1:1-2", "AGGAACCCC"), ("chr1:5-6", "AAAACGGCC")] {
+                if use_fasta {
+                    update_with_fasta(
+                        &context,
+                        "test",
+                        "original",
+                        "edited",
+                        region,
+                        &patch.path().to_string_lossy(),
+                        false,
+                    )
+                    .unwrap();
+                } else {
+                    update_with_sequence(
+                        &context, "test", "original", "edited", region, "GG", false,
+                    )
+                    .unwrap();
+                }
+                let conn = context.graph().conn();
+                let block_group = get_sample_bg(conn, "test", "edited");
+                let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+                assert_eq!(
+                    path.sequence(conn, context.workspace(), None).unwrap(),
+                    expected,
+                    "{region} with use_fasta={use_fasta} should use this edit's edges",
+                );
+            }
+        }
+    }
+
+    // Save a copy of the original path as "historical", then replace one A
+    // with two Ts to make a longer current path. The extra base shifts the
+    // point where the Cs begin, so the same zero-based, half-open range
+    // selects different bases on the two paths.
+    // Historical [AAAA] ------> [CCCC]   4..6 selects CC
+    // Current    [A] --> [TT] --> [AA] --> [CCCC]   4..6 selects AC
+    // Both update methods target historical:4-6 and replace CC with GG.
+    // Result     [AAAA] --> [GG] --> [CC]
+    #[test]
+    fn test_updates_use_explicit_historical_path() {
+        let context = setup_gen();
+        let original = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+        std::fs::write(original.path(), ">chr1\nAAAACCCC\n").unwrap();
+        import_fasta(
+            &context,
+            &original.path().to_string_lossy().into_owned(),
+            "test",
+            "original",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, "test", "original");
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        let edge_ids = Path::edges_for_path(conn, &path.id, None)
+            .iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+        Path::create(conn, "historical", &block_group.id, &edge_ids).unwrap();
+        update_with_sequence(
+            &context, "test", "original", "extended", "chr1:1-2", "TT", false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, "test", "extended");
+        let current = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        let historical = BlockGroup::get_path_by_name(conn, &block_group.id, "historical")
+            .unwrap()
+            .unwrap();
+        assert_ne!(current.id, historical.id);
+        assert_eq!(
+            current.sequence(conn, context.workspace(), None).unwrap(),
+            "ATTAACCCC",
+        );
+        assert_eq!(
+            historical
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
+            "AAAACCCC",
+        );
+
+        let patch = tempfile::Builder::new().suffix(".fa").tempfile().unwrap();
+        std::fs::write(patch.path(), ">patch\nGG\n").unwrap();
+        update_with_sequence(
+            &context,
+            "test",
+            "extended",
+            "inline",
+            "historical:4-6",
+            "GG",
+            false,
+        )
+        .unwrap();
+        update_with_fasta(
+            &context,
+            "test",
+            "extended",
+            "fasta",
+            "historical:4-6",
+            &patch.path().to_string_lossy(),
+            false,
+        )
+        .unwrap();
+
+        for sample in ["inline", "fasta"] {
+            let block_group = get_sample_bg(conn, "test", sample);
+            let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+            assert_eq!(
+                path.sequence(conn, context.workspace(), None).unwrap(),
+                "AAAAGGCC",
+                "{sample} should edit the historical route rather than the current route",
+            );
+        }
+    }
 
     fn block_groups_for_sample(
         conn: &gen_models::db::GraphConnection,
@@ -636,7 +901,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:4-6",
+            &current_path_region(&context, &collection, "child sample", "4-6"),
             "TTTTTTTT",
             false,
         );
@@ -692,7 +957,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:1-6",
+            &current_path_region(&context, &collection, "child sample", "1-6"),
             "TTTTTTTT",
             false,
         );
@@ -754,7 +1019,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:1-12",
+            &current_path_region(&context, &collection, "child sample", "1-12"),
             "TTTTTTTT",
             false,
         );
@@ -810,7 +1075,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:6-12",
+            &current_path_region(&context, &collection, "child sample", "6-12"),
             "TTTTTTTT",
             false,
         );
@@ -866,7 +1131,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:4-6",
+            &current_path_region(&context, &collection, "child sample", "4-6"),
             "AAAAAAAA",
             false,
         );
@@ -1108,7 +1373,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:2-5",
+            &current_path_region(&context, &collection, "child sample", "2-5"),
             "",
             false,
         );
@@ -1169,7 +1434,7 @@ mod tests {
             &collection,
             "inserted",
             "deleted-node-end",
-            "m123:1-2",
+            &current_path_region(&context, &collection, "inserted", "1-2"),
             "",
             false,
         )
@@ -1179,7 +1444,7 @@ mod tests {
             &collection,
             "deleted-node-end",
             "deleted-next-node-start",
-            "m123:1-2",
+            &current_path_region(&context, &collection, "deleted-node-end", "1-2"),
             "",
             false,
         )
@@ -1226,7 +1491,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:2-3",
+            &current_path_region(&context, &collection, "child sample", "2-3"),
             "",
             false,
         )

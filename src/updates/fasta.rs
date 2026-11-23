@@ -4,7 +4,6 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
-    edge::Edge,
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo, OperationSummary},
@@ -17,7 +16,8 @@ use noodles::fasta;
 use crate::{
     fasta::FastaError,
     updates::{
-        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
+        InsertChangeData, InsertedPathEdges, child_update_path, insert_update_change,
+        resolve_update_region, target_update_region,
     },
 };
 #[allow(clippy::too_many_arguments)]
@@ -73,25 +73,18 @@ pub fn update_with_fasta(
     struct TargetBlockGroupState {
         block_group_id: HashId,
         path: Option<gen_models::path::Path>,
-        first_node: Option<HashId>,
+        // Only a single record updates the reference path; its edges are absent for a deletion.
+        first_change: Option<Option<InsertedPathEdges>>,
     }
 
     let mut target_states = target_block_groups
         .iter()
         .map(|target_block_group| -> Result<_, FastaError> {
-            let path = if resolved_region.kind == ResolvedRegionKind::Path {
-                Some(BlockGroup::get_current_path(
-                    conn,
-                    &target_block_group.id,
-                    None,
-                )?)
-            } else {
-                None
-            };
+            let path = child_update_path(conn, &resolved_region, target_block_group.id)?;
             Ok(TargetBlockGroupState {
                 block_group_id: target_block_group.id,
                 path,
-                first_node: None,
+                first_change: None,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -115,7 +108,7 @@ pub fn update_with_fasta(
                     strand: Strand::Forward,
                 };
 
-                insert_fasta_change(
+                let edges = insert_fasta_change(
                     conn,
                     context.workspace(),
                     &resolved_region,
@@ -124,9 +117,9 @@ pub fn update_with_fasta(
                     path_block,
                 )?;
                 if index == 0 {
-                    state.first_node = Some(node_id);
-                } else if state.first_node.is_some() {
-                    state.first_node = None;
+                    state.first_change = Some(edges);
+                } else {
+                    state.first_change = None;
                 }
             } else {
                 let seq = Sequence::new()
@@ -155,7 +148,7 @@ pub fn update_with_fasta(
                     strand: Strand::Forward,
                 };
 
-                insert_fasta_change(
+                let edges = insert_fasta_change(
                     conn,
                     context.workspace(),
                     &resolved_region,
@@ -164,9 +157,9 @@ pub fn update_with_fasta(
                     path_block,
                 )?;
                 if index == 0 {
-                    state.first_node = Some(node_id);
-                } else if state.first_node.is_some() {
-                    state.first_node = None;
+                    state.first_change = Some(edges);
+                } else {
+                    state.first_change = None;
                 }
             }
             change_count += 1;
@@ -176,29 +169,19 @@ pub fn update_with_fasta(
     for state in target_states {
         if !disable_reference_path_update
             && resolved_region.kind == ResolvedRegionKind::Path
-            && let Some(node_id) = state.first_node
+            && let Some(edges) = state.first_change
             && let Some(path) = state.path
         {
-            if node_id == HashId::convert_str("") {
-                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
-            } else {
-                let edge_to_new_node = Edge::select(conn)
-                    .target_node_id(node_id)
-                    .load()
-                    .expect("should load edge to inserted node")[0]
-                    .clone();
-                let edge_from_new_node = Edge::select(conn)
-                    .source_node_id(node_id)
-                    .load()
-                    .expect("should load edge from inserted node")[0]
-                    .clone();
+            if let Some(edges) = edges {
                 path.new_path_with(
                     conn,
                     start_coordinate,
                     end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
+                    &edges.incoming,
+                    &edges.outgoing,
                 )?;
+            } else {
+                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
             }
         }
     }
@@ -226,11 +209,10 @@ fn insert_fasta_change(
     target_block_group_id: HashId,
     path: Option<&gen_models::path::Path>,
     block: PathBlock,
-) -> Result<(), FastaError> {
+) -> Result<Option<InsertedPathEdges>, FastaError> {
     let source = target_update_region(conn, region, target_block_group_id, path)?;
     let data = InsertChangeData::new(block);
-    insert_update_change(conn, workspace, source, data)?;
-    Ok(())
+    Ok(insert_update_change(conn, workspace, source, data)?)
 }
 
 #[cfg(test)]
@@ -250,7 +232,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
-        test_helpers::{get_sample_bg, setup_gen},
+        test_helpers::{current_path_region, get_sample_bg, setup_gen},
     };
 
     fn block_groups_for_sample(
@@ -434,6 +416,55 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_first_record_in_multi_record_fasta_keeps_reference_path() {
+        // The empty record bypasses [AA], and the second record adds [GG].
+        // [AA] --+--> [AA] --+--> [CCCC]  (reference)
+        //        +----------+
+        //        +--> [GG] --+
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let mut original = NamedTempFile::new().unwrap();
+        writeln!(original, ">chr1\nAAAACCCC").unwrap();
+        import_fasta(
+            &context,
+            &original.path().to_string_lossy().into_owned(),
+            "test",
+            "parent",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut patch = NamedTempFile::new().unwrap();
+        writeln!(patch, ">deletion\n>replacement\nGG").unwrap();
+        update_with_fasta(
+            &context,
+            "test",
+            "parent",
+            "child",
+            "chr1:2-4",
+            patch.path().to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+
+        let child = get_sample_bg(conn, "test", "child");
+        let path = BlockGroup::get_current_path(conn, &child.id, None).unwrap();
+        assert_eq!(
+            path.sequence(conn, context.workspace(), None).unwrap(),
+            "AAAACCCC"
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, context.workspace(), &child.id, false).unwrap(),
+            HashSet::from([
+                "AAAACCCC".to_string(),
+                "AACCCC".to_string(),
+                "AAGGCCCC".to_string()
+            ])
+        );
+    }
+
+    #[test]
     fn test_update_within_update() {
         /*
         Graph after fasta updates:
@@ -477,7 +508,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:4-6",
+            &current_path_region(&context, &collection, "child sample", "4-6"),
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -539,7 +570,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:1-6",
+            &current_path_region(&context, &collection, "child sample", "1-6"),
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -607,7 +638,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:1-12",
+            &current_path_region(&context, &collection, "child sample", "1-12"),
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -669,7 +700,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:6-12",
+            &current_path_region(&context, &collection, "child sample", "6-12"),
             fasta_update2_path.to_str().unwrap(),
             false,
         );
@@ -729,7 +760,7 @@ mod tests {
             &collection,
             "child sample",
             "grandchild sample",
-            "m123:4-6",
+            &current_path_region(&context, &collection, "child sample", "4-6"),
             fasta_update_path.to_str().unwrap(),
             false,
         );

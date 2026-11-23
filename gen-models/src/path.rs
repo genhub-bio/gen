@@ -956,7 +956,15 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between path_start and
         // path_end with the input edges that are to and from a new node
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(path_start).next().unwrap().value;
+        let mut block_with_start = tree.query_point(path_start).next().unwrap().value;
+        // Insertions at a junction leave from the preceding block and arrive
+        // at the following one, matching the splice edges planned for the edit.
+        if path_start == path_end {
+            let previous_block = tree.query_point(path_start - 1).next().unwrap().value;
+            if previous_block.end == path_start {
+                block_with_start = previous_block;
+            }
+        }
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
         let edges = Path::edges_for_path(conn, &self.id, None);
@@ -1024,14 +1032,26 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between deletion_start and
         // deletion_end with a single edge spanning the deletion.
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
+        let block_with_start = tree
+            .query_point(if deletion_start == 0 {
+                -1
+            } else {
+                deletion_start
+            })
+            .next()
+            .unwrap()
+            .value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
-        let node_deletion_start = if block_with_start.strand == Strand::Forward {
+        let node_deletion_start = if is_terminal(block_with_start.node_id) {
+            0
+        } else if block_with_start.strand == Strand::Forward {
             block_with_start.sequence_start + deletion_start - block_with_start.start
         } else {
             block_with_start.sequence_end - deletion_start + block_with_start.start
         };
-        let node_deletion_end = if block_with_end.strand == Strand::Forward {
+        let node_deletion_end = if is_terminal(block_with_end.node_id) {
+            0
+        } else if block_with_end.strand == Strand::Forward {
             block_with_end.sequence_start + deletion_end - block_with_end.start
         } else {
             block_with_end.sequence_end - deletion_end + block_with_end.start
@@ -1063,28 +1083,44 @@ impl Path {
             .iter()
             .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
             .collect::<HashMap<(_, i64), &Edge>>();
-        let edge_before_deletion = edges_by_target
-            .get(&(block_with_start.node_id, block_with_start.sequence_start))
-            .unwrap();
-        let edge_after_deletion = edges_by_source
-            .get(&(block_with_end.node_id, block_with_end.sequence_end))
-            .unwrap();
+        let edge_before_deletion = if is_start_node(block_with_start.node_id) {
+            None
+        } else {
+            Some(
+                edges_by_target
+                    .get(&(block_with_start.node_id, block_with_start.sequence_start))
+                    .unwrap(),
+            )
+        };
+        let edge_after_deletion = if is_end_node(block_with_end.node_id) {
+            None
+        } else {
+            Some(
+                edges_by_source
+                    .get(&(block_with_end.node_id, block_with_end.sequence_end))
+                    .unwrap(),
+            )
+        };
 
         let mut new_edge_ids = vec![];
-        let mut before_deletion = true;
-        let mut after_deletion = false;
-        for edge in &edges {
-            if before_deletion {
+        if let Some(edge_before_deletion) = edge_before_deletion {
+            for edge in &edges {
                 new_edge_ids.push(edge.id);
                 if edge.id == edge_before_deletion.id {
-                    before_deletion = false;
-                    new_edge_ids.push(deletion_edge.id);
+                    break;
                 }
-            } else if after_deletion {
-                new_edge_ids.push(edge.id);
-            } else if edge.id == edge_after_deletion.id {
-                after_deletion = true;
-                new_edge_ids.push(edge.id);
+            }
+        }
+        new_edge_ids.push(deletion_edge.id);
+        if let Some(edge_after_deletion) = edge_after_deletion {
+            let mut after_deletion = false;
+            for edge in &edges {
+                if edge.id == edge_after_deletion.id {
+                    after_deletion = true;
+                }
+                if after_deletion {
+                    new_edge_ids.push(edge.id);
+                }
             }
         }
 
@@ -4534,6 +4570,148 @@ mod tests {
                 .unwrap(),
             "ATCGCCCCCCCCAAAAA"
         );
+    }
+
+    fn attach_test_edit_edges(conn: &GraphConnection, block_group_id: HashId, edge_ids: &[HashId]) {
+        let edges = edge_ids
+            .iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id,
+                edge_id: *edge_id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &edges);
+    }
+
+    // Insert at the A -> T junction or at the final G -> END junction.
+    // [START] --> [A x10] --> [CG] --> [T x10] --> [C x10] --> [G x10] --> [END]
+    // [START] --> [A x10] --> [T x10] --> [C x10] --> [G x10] --> [CG] --> [END]
+    #[test]
+    fn test_new_path_with_insertion_at_junction() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let edges = Path::edges_for_path(conn, &path.id, None);
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CG")
+            .save(conn)
+            .unwrap();
+        let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str("insert")).unwrap();
+
+        for (position, junction, expected) in [
+            (10, &edges[1], "AAAAAAAAAACGTTTTTTTTTTCCCCCCCCCCGGGGGGGGGG"),
+            (40, &edges[4], "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGGCG"),
+        ] {
+            let incoming = Edge::create(
+                conn,
+                junction.source_node_id,
+                junction.source_coordinate,
+                junction.source_strand,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let outgoing = Edge::create(
+                conn,
+                node_id,
+                sequence.length,
+                Strand::Forward,
+                junction.target_node_id,
+                junction.target_coordinate,
+                junction.target_strand,
+            )
+            .unwrap();
+            attach_test_edit_edges(conn, block_group_id, &[incoming.id, outgoing.id]);
+            let edited = path
+                .new_path_with(conn, position, position, &incoming, &outgoing)
+                .unwrap();
+            assert_eq!(
+                edited.sequence(conn, test_workspace(), None).unwrap(),
+                expected
+            );
+        }
+    }
+
+    // The new first edge skips the first two bases.
+    // [START:0] --> [A x8] --> [T x10] --> [C x10] --> [G x10] --> [END]
+    #[test]
+    fn test_new_path_with_prefix_deletion() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let edges = Path::edges_for_path(conn, &path.id, None);
+        let deletion = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            edges[0].target_node_id,
+            2,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        attach_test_edit_edges(conn, block_group_id, &[deletion.id]);
+        let edited = path.new_path_with_deletion(conn, 0, 2).unwrap();
+        let edited_edges = Path::edges_for_path(conn, &edited.id, None);
+        assert_eq!(edited_edges.first().unwrap().id, deletion.id);
+        assert_eq!(
+            edited.sequence(conn, test_workspace(), None).unwrap(),
+            "AAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG"
+        );
+    }
+
+    // The new last edge skips the final two bases.
+    // [START] --> [A x10] --> [T x10] --> [C x10] --> [G x8] --> [END:0]
+    #[test]
+    fn test_new_path_with_suffix_deletion() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let edges = Path::edges_for_path(conn, &path.id, None);
+        let deletion = Edge::create(
+            conn,
+            edges[4].source_node_id,
+            8,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        attach_test_edit_edges(conn, block_group_id, &[deletion.id]);
+        let edited = path.new_path_with_deletion(conn, 38, 40).unwrap();
+        let edited_edges = Path::edges_for_path(conn, &edited.id, None);
+        assert_eq!(edited_edges.last().unwrap().id, deletion.id);
+        assert_eq!(
+            edited.sequence(conn, test_workspace(), None).unwrap(),
+            "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGG"
+        );
+    }
+
+    // Deleting every block leaves only the edge between the markers.
+    // [START:0] --> [END:0]
+    #[test]
+    fn test_new_path_with_full_deletion() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let deletion = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        attach_test_edit_edges(conn, block_group_id, &[deletion.id]);
+        let edited = path.new_path_with_deletion(conn, 0, 40).unwrap();
+        assert_eq!(Path::edges_for_path(conn, &edited.id, None), vec![deletion]);
+        assert_eq!(edited.sequence(conn, test_workspace(), None).unwrap(), "");
     }
 
     #[test]
