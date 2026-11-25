@@ -135,10 +135,23 @@ URLs. Pass the index locations explicitly with `--fai <path-or-uri>` and
 
 # VCF update
 
-`gen update vcf` applies the variants in a VCF file to sample graphs and records the update as an operation. It uses
-genotypes from the VCF, or a genotype provided with `--genotype`; use `--sample` when assigning calls from a VCF without
-sample columns. Use `--reference` or `--parent-samples` to choose the sample or samples that provide the reference
-coordinates for new samples.
+`gen update vcf` applies the variants in a VCF file to sample graphs and
+records the update as an operation. Use `--sample` to select a sample from the
+VCF header. Omit it to use all VCF samples.
+
+```sh
+gen import fasta --reference reference fixtures/simple.fa
+gen update vcf --sample foo fixtures/simple.vcf
+```
+
+This creates `foo` from the collection's sole reference sample and applies only
+`foo`'s genotypes. Existing samples use their existing graph and parent lineage.
+Use `--parent-samples` (also available as `--reference`) to choose parent samples
+explicitly. A new sample requires explicit parents when the collection has no
+reference or multiple references.
+
+To apply a fixed genotype to every record, pass `--genotype` and use `--sample`
+to name the output sample. The supplied genotype overrides VCF sample genotypes.
 
 By default, variant positions are interpreted in the parent sample's reference
 coordinates. Use `--inplace` to interpret them against the sample's existing
@@ -156,25 +169,6 @@ name with `gen export fasta --sample`.
 `gen export fasta <path> --sample <sample>` exports the sample's current path
 sequence for each block group. Exports with a revision selection use the current
 path at that revision.
-
-# VCF update
-
-Select a sample's genotypes from a VCF with `--sample`. For example:
-
-```sh
-gen import fasta --reference reference fixtures/simple.fa
-gen update vcf --sample foo fixtures/simple.vcf
-```
-
-This creates `foo` from the collection's sole reference sample and applies only
-`foo`'s genotypes. Existing samples use their existing graph and parent lineage.
-Use `--parent-samples reference` to specify the parent explicitly; this is
-required for a new sample when the collection has no reference or multiple
-references. To import all VCF samples, omit `--sample`.
-
-With `--genotype`, `--sample` instead names the output sample and the supplied
-genotype is applied to every record, overriding VCF sample genotypes. Without
-`--genotype`, the selected sample must exist in the VCF header.
 
 # View diff
 
