@@ -22,10 +22,11 @@ pub struct Command {
     /// If no genotype is provided, enter the genotype to assign variants
     #[arg(short, long)]
     genotype: Option<String>,
-    /// Optional sample override. If omitted, use samples defined in the VCF.
+    /// Select a VCF sample, or name the output sample when --genotype is supplied.
     #[arg(short, long)]
     sample: Option<String>,
-    /// Use the given samples as the parent samples for changes. Repeat the flag or use commas.
+    /// Parent samples for changes; defaults to existing lineage or the collection's sole reference.
+    /// Repeat the flag or use commas.
     #[arg(
         long = "parent-samples",
         aliases = ["parent-sample", "ps", "reference"],

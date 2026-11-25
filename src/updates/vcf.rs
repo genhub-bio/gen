@@ -589,9 +589,9 @@ fn parse_sample_metadata(
 /// Options controlling how a VCF update selects samples and records inferred paths.
 #[derive(Debug, Default)]
 pub struct VcfUpdateOptions {
-    /// Genotype to use when the VCF has no sample genotype.
+    /// Genotype to apply to the named output sample for every record.
     pub fixed_genotype: String,
-    /// Sample name to assign when the VCF has no sample columns.
+    /// VCF sample to select, or output sample when a fixed genotype is supplied.
     pub fixed_sample: Option<String>,
     /// Parent sample names used as the coordinate reference.
     pub parent_samples: Vec<String>,
@@ -605,20 +605,41 @@ pub struct VcfUpdateOptions {
 
 fn resolve_parent_samples(
     conn: &GraphConnection,
+    collection_name: &str,
     sample_name: &str,
     explicit_parent_samples: &[String],
     resolved_parent_samples: &mut HashMap<String, Vec<String>>,
-) -> Vec<String> {
-    resolved_parent_samples
-        .entry(sample_name.to_string())
-        .or_insert_with(|| {
-            if explicit_parent_samples.is_empty() {
-                Sample::get_parent_names(conn, sample_name, None)
-            } else {
-                explicit_parent_samples.to_vec()
-            }
-        })
-        .clone()
+) -> Result<Vec<String>, VcfError> {
+    if let Some(parents) = resolved_parent_samples.get(sample_name) {
+        return Ok(parents.clone());
+    }
+    let mut parents = if explicit_parent_samples.is_empty() {
+        Sample::get_parent_names(conn, sample_name, None)
+    } else {
+        explicit_parent_samples.to_vec()
+    };
+    // New VCF samples need a sequence source. Existing samples keep their own
+    // graphs or lineage; only an unambiguous reference can seed a new graph.
+    if parents.is_empty()
+        && Sample::get_block_groups(conn, collection_name, sample_name, None).is_empty()
+    {
+        let references = Sample::get_reference_samples(conn, None)
+            .into_iter()
+            .filter(|sample| {
+                !Sample::get_block_groups(conn, collection_name, &sample.name, None).is_empty()
+            })
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+        if references.len() != 1 {
+            return Err(VcfError::InvalidRecord(format!(
+                "Cannot choose a reference for sample '{sample_name}' in collection '{collection_name}': found {} reference samples. Specify --parent-samples explicitly.",
+                references.len()
+            )));
+        }
+        parents = references;
+    }
+    resolved_parent_samples.insert(sample_name.to_string(), parents.clone());
+    Ok(parents)
 }
 
 /// Update sequences from VCF without reading sample metadata.
@@ -685,6 +706,15 @@ pub fn update_with_vcf_options(
     let mut genotype = vec![];
     if !fixed_genotype.is_empty() {
         genotype = parse_genotype(&fixed_genotype);
+    }
+
+    if genotype.is_empty()
+        && let Some(sample_name) = fixed_sample
+        && !sample_names.contains(sample_name)
+    {
+        return Err(VcfError::InvalidRecord(format!(
+            "Sample '{sample_name}' is not present in the VCF header. Choose a VCF sample or provide --genotype to apply a fixed genotype."
+        )));
     }
 
     // Cache a bunch of data ahead of making changes
@@ -762,10 +792,11 @@ pub fn update_with_vcf_options(
         if let Some(fixed_sample) = fixed_sample.filter(|_| !genotype.is_empty()) {
             let sample_parent_samples = resolve_parent_samples(
                 conn,
+                collection_name,
                 fixed_sample,
                 &parent_samples,
                 &mut resolved_parent_samples,
-            );
+            )?;
             if !created_samples.contains(fixed_sample) {
                 Sample::get_or_create_child(
                     conn,
@@ -781,8 +812,7 @@ pub fn update_with_vcf_options(
                 fixed_sample,
                 seq_name.clone(),
                 &sample_parent_samples,
-            )
-            .expect("can't find sample bg....check this out more");
+            )?;
             if create_homozygous_paths {
                 let alleles = genotype
                     .iter()
@@ -898,12 +928,16 @@ pub fn update_with_vcf_options(
         } else {
             for (sample_index, sample) in record.samples().iter().enumerate() {
                 let sample_name: &str = sample_names[sample_index].as_ref();
+                if fixed_sample.is_some_and(|selected| selected != sample_name) {
+                    continue;
+                }
                 let sample_parent_samples = resolve_parent_samples(
                     conn,
+                    collection_name,
                     sample_name,
                     &parent_samples,
                     &mut resolved_parent_samples,
-                );
+                )?;
                 if !created_samples.contains(sample_name) {
                     Sample::get_or_create_child(
                         conn,
@@ -919,8 +953,7 @@ pub fn update_with_vcf_options(
                     sample_name,
                     seq_name.clone(),
                     &sample_parent_samples,
-                )
-                .expect("can't find sample bg....check this out more");
+                )?;
                 let genotype = sample.get(&header, "GT");
                 if create_homozygous_paths {
                     let alleles = match &genotype {

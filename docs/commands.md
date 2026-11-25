@@ -157,6 +157,25 @@ name with `gen export fasta --sample`.
 sequence for each block group. Exports with a revision selection use the current
 path at that revision.
 
+# VCF update
+
+Select a sample's genotypes from a VCF with `--sample`. For example:
+
+```sh
+gen import fasta --reference reference fixtures/simple.fa
+gen update vcf --sample foo fixtures/simple.vcf
+```
+
+This creates `foo` from the collection's sole reference sample and applies only
+`foo`'s genotypes. Existing samples use their existing graph and parent lineage.
+Use `--parent-samples reference` to specify the parent explicitly; this is
+required for a new sample when the collection has no reference or multiple
+references. To import all VCF samples, omit `--sample`.
+
+With `--genotype`, `--sample` instead names the output sample and the supplied
+genotype is applied to every record, overriding VCF sample genotypes. Without
+`--genotype`, the selected sample must exist in the VCF header.
+
 # View diff
 
 Compare one sequence graph between two samples with:
