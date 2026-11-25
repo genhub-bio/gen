@@ -22,10 +22,11 @@ pub struct Command {
     /// If no genotype is provided, enter the genotype to assign variants
     #[arg(short, long)]
     genotype: Option<String>,
-    /// Optional sample override. If omitted, use samples defined in the VCF.
+    /// Select a VCF sample, or name the output sample when --genotype is supplied.
     #[arg(short, long)]
     sample: Option<String>,
-    /// Use the given samples as the parent samples for changes. Repeat the flag or use commas.
+    /// Parent samples for changes; defaults to existing lineage or the collection's sole reference.
+    /// Repeat the flag or use commas.
     #[arg(
         long = "parent-samples",
         aliases = ["parent-sample", "ps", "reference"],
@@ -57,7 +58,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         ));
     }
 
-    conn.execute("BEGIN TRANSACTION", [])?;
+    {
+        #[cfg(feature = "profiling")]
+        let _span = tracing::info_span!("begin_transaction").entered();
+        conn.execute("BEGIN TRANSACTION", [])?;
+    }
 
     let collection_name = &cmd
         .collection
@@ -78,7 +83,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         },
     ) {
         Ok((operation_summary, _output_samples)) => {
-            conn.execute("END TRANSACTION", [])?;
+            {
+                #[cfg(feature = "profiling")]
+                let _span = tracing::info_span!("end_transaction").entered();
+                conn.execute("END TRANSACTION", [])?;
+            }
             let mut operation_summary = operation_summary;
             if let Some(message) = cmd.message {
                 operation_summary.summary = message;

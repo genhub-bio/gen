@@ -95,6 +95,7 @@ fn clamp_inline_view_height(requested_height: u16) -> u16 {
     }
 }
 
+#[cfg_attr(feature = "profiling", tracing::instrument)]
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let workspace = Workspace::from_current_dir();

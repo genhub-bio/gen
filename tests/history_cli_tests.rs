@@ -3976,3 +3976,179 @@ fn test_vcf_update_requires_inferable_sample_path() {
         "ambiguous graph update without path inference should succeed",
     );
 }
+
+#[test]
+fn test_vcf_sample_uses_imported_reference() {
+    let repo_dir = tempdir().expect("should create temp repo directory");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    assert_success(
+        &run_gen(repo_dir.path(), &["init"]),
+        "should initialize repo",
+    );
+    assert_success(
+        &run_gen(
+            repo_dir.path(),
+            &[
+                "import",
+                "fasta",
+                "--reference",
+                "reference",
+                fixtures
+                    .join("simple.fa")
+                    .to_str()
+                    .expect("should encode FASTA path"),
+            ],
+        ),
+        "should import reference",
+    );
+    assert_success(
+        &run_gen(
+            repo_dir.path(),
+            &[
+                "update",
+                "vcf",
+                "--sample",
+                "foo",
+                fixtures
+                    .join("simple.vcf")
+                    .to_str()
+                    .expect("should encode VCF path"),
+            ],
+        ),
+        "should update selected VCF sample using imported reference",
+    );
+    let connection = get_connection(repo_dir.path().join(".gen/default.db"))
+        .expect("should open graph database");
+    let workspace = Workspace::new(repo_dir.path());
+    assert_eq!(
+        Sample::get_parent_names(&connection, "foo", None),
+        vec!["reference"]
+    );
+    for (sample, expected) in [
+        ("reference", "ATCGATCGATCGATCGATCGGGAACACACAGAGA"),
+        ("foo", "ATCATCGATCGATCGATCGGGAACACACAGAGA"),
+    ] {
+        let block_groups = Sample::get_block_groups(&connection, "default", sample, None);
+        assert_eq!(block_groups.len(), 1);
+        assert_eq!(block_groups[0].name, "m123");
+        assert_eq!(
+            BlockGroup::get_all_sequences(&connection, &workspace, &block_groups[0].id, false)
+                .expect("should read sample sequence"),
+            HashSet::from([expected.to_string()]),
+        );
+    }
+    assert!(Sample::get_by_name(&connection, "unknown").is_err());
+    assert!(Sample::get_by_name(&connection, "G1").is_err());
+}
+
+#[test]
+fn test_vcf_sample_requires_unambiguous_reference() {
+    let repo_dir = tempdir().expect("should create temp repo directory");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let fasta = fixtures.join("simple.fa");
+    let vcf = fixtures.join("simple.vcf");
+    let fasta = fasta.to_str().expect("should encode FASTA path");
+    let vcf = vcf.to_str().expect("should encode VCF path");
+    assert_success(
+        &run_gen(repo_dir.path(), &["init"]),
+        "should initialize repo",
+    );
+    // An ordinary sample must not be silently treated as a reference.
+    assert_success(
+        &run_gen(
+            repo_dir.path(),
+            &["import", "fasta", "--sample", "ordinary", fasta],
+        ),
+        "should import ordinary sample",
+    );
+    let update = ["update", "vcf", "--sample", "foo", vcf];
+    let output = run_gen(repo_dir.path(), &update);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("found 0 reference samples"));
+    for reference in ["first", "second"] {
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &["import", "fasta", "--reference", reference, fasta],
+            ),
+            "should import reference",
+        );
+    }
+    let output = run_gen(repo_dir.path(), &update);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("found 2 reference samples"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--parent-samples"));
+    let connection = get_connection(repo_dir.path().join(".gen/default.db"))
+        .expect("should open graph database");
+    assert!(Sample::get_by_name(&connection, "foo").is_err());
+    drop(connection);
+    assert_success(
+        &run_gen(
+            repo_dir.path(),
+            &[
+                "update",
+                "vcf",
+                "--sample",
+                "foo",
+                "--parent-samples",
+                "second",
+                vcf,
+            ],
+        ),
+        "should accept explicit parent with multiple references",
+    );
+    let connection = get_connection(repo_dir.path().join(".gen/default.db"))
+        .expect("should open graph database");
+    assert_eq!(
+        Sample::get_parent_names(&connection, "foo", None),
+        vec!["second"]
+    );
+}
+
+#[test]
+fn test_vcf_sample_missing_from_header_reports_error() {
+    let repo_dir = tempdir().expect("should create temp repo directory");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    assert_success(
+        &run_gen(repo_dir.path(), &["init"]),
+        "should initialize repo",
+    );
+    assert_success(
+        &run_gen(
+            repo_dir.path(),
+            &[
+                "import",
+                "fasta",
+                "--reference",
+                "reference",
+                fixtures
+                    .join("simple.fa")
+                    .to_str()
+                    .expect("should encode FASTA path"),
+            ],
+        ),
+        "should import reference",
+    );
+    let output = run_gen(
+        repo_dir.path(),
+        &[
+            "update",
+            "vcf",
+            "--sample",
+            "absent",
+            fixtures
+                .join("simple.vcf")
+                .to_str()
+                .expect("should encode VCF path"),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Sample 'absent' is not present in the VCF header")
+    );
+    let connection = get_connection(repo_dir.path().join(".gen/default.db"))
+        .expect("should open graph database");
+    assert!(Sample::get_by_name(&connection, "absent").is_err());
+    assert!(Sample::get_by_name(&connection, "foo").is_err());
+}
