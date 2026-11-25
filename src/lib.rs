@@ -54,6 +54,7 @@ pub fn get_connection(
     get_connection_for_branch(db_path, None)
 }
 
+#[cfg_attr(feature = "profiling", tracing::instrument(skip(db_path, branch)))]
 pub fn get_connection_for_branch(
     db_path: impl Into<PathBuf>,
     branch: Option<&str>,
@@ -73,6 +74,7 @@ pub fn get_connection_for_branch(
 /// This exists as a way to get a connection without running migrations. We need
 /// this for places like clone where migrations create an initial state incompatible
 /// with a fast-forward merge/clone.
+#[cfg_attr(feature = "profiling", tracing::instrument(skip(db_path)))]
 pub fn get_raw_connection(
     db_path: impl Into<PathBuf>,
 ) -> Result<GraphConnection, core::errors::ConnectionError> {
@@ -81,6 +83,7 @@ pub fn get_raw_connection(
     Ok(GraphConnection(conn))
 }
 
+#[cfg_attr(feature = "profiling", tracing::instrument(skip(db_path)))]
 pub fn get_config_connection(
     db_path: impl Into<Option<PathBuf>>,
 ) -> Result<ConfigConnection, core::errors::ConnectionError> {

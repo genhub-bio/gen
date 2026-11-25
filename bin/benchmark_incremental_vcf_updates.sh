@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Generate one multi-sample VCF and benchmark a single update.
 # Example usage, to write results to a file:
 # SAMPLE_LIMIT=100 bin/benchmark_incremental_vcf_updates.sh | tee benchmark-results.txt
 
@@ -11,19 +12,19 @@ REFERENCE_PATH="${1:-${SCRIPT_DIR}/incremental_vcf_update_fixtures/reference.gb}
 ALIGNED_FASTA_PATH="${2:-${SCRIPT_DIR}/incremental_vcf_update_fixtures/aligned-1000.fa}"
 SAMPLE_LIMIT="${SAMPLE_LIMIT:-100}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
-PROFILE_SAMPLES="${PROFILE_SAMPLES:-}"
+PROFILE="${PROFILE:-0}"
 PROFILE_MODE="${PROFILE_MODE:-sample}"
 PROFILE_DIR="${PROFILE_DIR:-${PWD}/incremental-vcf-profiles}"
 BENCHMARK_WORKSPACE=""
-CUMULATIVE_MS=0
+SAMPLE_COUNT=0
 
 usage() {
   printf 'Usage: %s [reference.gb] [aligned.fa[.zst]]\n' "$0"
   printf '\nEnvironment:\n'
   printf '  GEN_BIN         gen executable (default: target/release/gen)\n'
-  printf '  SAMPLE_LIMIT    records to process (default: 100; 0 means all)\n'
+  printf '  SAMPLE_LIMIT    samples in the VCF (default: 100; 0 means all)\n'
   printf '  KEEP_WORKDIR    set to 1 to retain the benchmark repository\n'
-  printf '  PROFILE_SAMPLES comma-separated sample numbers to profile\n'
+  printf '  PROFILE         set to 1 to profile the single multi-sample update\n'
   printf '  PROFILE_MODE    sample or exact (default: sample)\n'
   printf '  PROFILE_DIR     profile output directory\n'
 }
@@ -77,6 +78,10 @@ check_inputs() {
   command -v minimap2 > /dev/null
   command -v paftools.js > /dev/null
   command -v perl > /dev/null
+  command -v bcftools > /dev/null
+  if [[ "${ALIGNED_FASTA_PATH}" == *.zst ]]; then
+    command -v zstd > /dev/null
+  fi
   if [[ ! "${SAMPLE_LIMIT}" =~ ^[0-9]+$ ]]; then
     printf 'SAMPLE_LIMIT must be a non-negative integer: %s\n' "${SAMPLE_LIMIT}" >&2
     exit 1
@@ -85,11 +90,6 @@ check_inputs() {
     printf 'PROFILE_MODE must be sample or exact: %s\n' "${PROFILE_MODE}" >&2
     exit 1
   fi
-}
-
-should_profile() {
-  local sample_number=$1
-  [[ ",${PROFILE_SAMPLES}," == *",${sample_number},"* ]]
 }
 
 stream_aligned_fasta() {
@@ -104,47 +104,39 @@ process_record() {
   local record_path=$1
   local sample_name=$2
   local sample_number=$3
-  local alignment_start
-  local alignment_ms
+  local variant_path="${BENCHMARK_WORKSPACE}/sample-${sample_number}.vcf.gz"
+
+  minimap2 -cx asm5 --cs=long reference.fa "${record_path}" > alignment.paf 2> /dev/null
+  paftools.js call -f reference.fa -L0 -l0 -s "${sample_name}" alignment.paf > sample.vcf
+  bcftools sort -Oz -o "${variant_path}" sample.vcf
+  bcftools index "${variant_path}"
+  printf '%s\n' "${variant_path}" >> vcf-files.txt
+  SAMPLE_COUNT=${sample_number}
+}
+
+run_update() {
+  local preparation_ms=$1
   local update_start
   local update_ms
 
-  alignment_start="$(now_ms)"
-  minimap2 -cx asm5 --cs=long reference.fa "${record_path}" > alignment.paf 2> /dev/null
-  paftools.js call -f reference.fa -L0 -l0 -s "${sample_name}" alignment.paf > variants.vcf
-  alignment_ms="$(elapsed_ms "${alignment_start}")"
-
   update_start="$(now_ms)"
-  if should_profile "${sample_number}"; then
-    local profile_path="${PROFILE_DIR}/sample-${sample_number}.txt"
+  if [[ "${PROFILE}" == "1" ]]; then
+    local profile_path="${PROFILE_DIR}/multi-sample-update.txt"
     if [[ "${PROFILE_MODE}" == "sample" ]]; then
       GEN_PROFILE=1 GEN_PROFILE_SAMPLE=1 \
         "${GEN_BIN}" update vcf --reference reference variants.vcf > "${profile_path}"
     else
-      GEN_PROFILE=1 \
+      env -u GEN_PROFILE_SAMPLE GEN_PROFILE=1 \
         "${GEN_BIN}" update vcf --reference reference variants.vcf > "${profile_path}"
     fi
   else
     "${GEN_BIN}" update vcf --reference reference variants.vcf > /dev/null
   fi
   update_ms="$(elapsed_ms "${update_start}")"
-  CUMULATIVE_MS=$((CUMULATIVE_MS + alignment_ms + update_ms))
 
-  local labels=(sample_number sample_name alignment_and_vcf_ms update_ms total_ms cumulative_ms gen_db_bytes)
-  local values=("${sample_number}" "${sample_name}" "${alignment_ms}" "${update_ms}"
-    "$((alignment_ms + update_ms))" "${CUMULATIVE_MS}" "$(database_size_bytes)")
-  local row_format=""
-  local column_index
-  local column_width
-  for column_index in "${!labels[@]}"; do
-    column_width=${#labels[column_index]}
-    if ((${#values[column_index]} > column_width)); then
-      column_width=${#values[column_index]}
-    fi
-    row_format+="%-${column_width}s  "
-  done
-  row_format="${row_format%  }"
-  printf "${row_format}\n" "${labels[@]}" "${values[@]}"
+  printf 'sample_count\talignment_and_vcf_ms\tupdate_ms\ttotal_ms\tgen_db_bytes\n'
+  printf '%s\t%s\t%s\t%s\t%s\n' "${SAMPLE_COUNT}" "${preparation_ms}" \
+    "${update_ms}" "$((preparation_ms + update_ms))" "$(database_size_bytes)"
 }
 
 run_records() {
@@ -186,8 +178,13 @@ main() {
     return
   fi
   check_inputs
-  if [[ -n "${PROFILE_SAMPLES}" ]]; then
+  # Inputs must remain valid after entering the temporary repository.
+  GEN_BIN="$(cd "$(dirname "${GEN_BIN}")" && pwd)/$(basename "${GEN_BIN}")"
+  REFERENCE_PATH="$(cd "$(dirname "${REFERENCE_PATH}")" && pwd)/$(basename "${REFERENCE_PATH}")"
+  ALIGNED_FASTA_PATH="$(cd "$(dirname "${ALIGNED_FASTA_PATH}")" && pwd)/$(basename "${ALIGNED_FASTA_PATH}")"
+  if [[ "${PROFILE}" == "1" ]]; then
     mkdir -p "${PROFILE_DIR}"
+    PROFILE_DIR="$(cd "${PROFILE_DIR}" && pwd)"
   fi
   BENCHMARK_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/gen-incremental-vcf-benchmark.XXXXXXXX")"
   trap cleanup EXIT HUP INT TERM
@@ -197,7 +194,23 @@ main() {
   "${GEN_BIN}" import genbank --reference reference "${REFERENCE_PATH}" > /dev/null
   "${GEN_BIN}" export fasta --sample reference reference.fa > /dev/null
 
-  run_records < <(stream_aligned_fasta)
+  local preparation_start
+  preparation_start="$(now_ms)"
+  # Materialize the input so decompression failures propagate before any update.
+  stream_aligned_fasta > aligned.fa
+  run_records < aligned.fa
+  if ((SAMPLE_COUNT == 0)); then
+    printf 'Aligned FASTA contains no samples\n' >&2
+    return 1
+  fi
+  if ((SAMPLE_COUNT == 1)); then
+    bcftools view -Ov -o variants.vcf "${BENCHMARK_WORKSPACE}/sample-1.vcf.gz"
+  else
+    # Variant-only calls omit reference sites. Fill those genotypes as reference
+    # to preserve the behavior of applying each sample's calls independently.
+    bcftools merge --missing-to-ref --file-list vcf-files.txt -Ov -o variants.vcf
+  fi
+  run_update "$(elapsed_ms "${preparation_start}")"
 }
 
 main "$@"

@@ -58,7 +58,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         ));
     }
 
-    conn.execute("BEGIN TRANSACTION", [])?;
+    {
+        #[cfg(feature = "profiling")]
+        let _span = tracing::info_span!("begin_transaction").entered();
+        conn.execute("BEGIN TRANSACTION", [])?;
+    }
 
     let collection_name = &cmd
         .collection
@@ -79,7 +83,11 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         },
     ) {
         Ok((operation_summary, _output_samples)) => {
-            conn.execute("END TRANSACTION", [])?;
+            {
+                #[cfg(feature = "profiling")]
+                let _span = tracing::info_span!("end_transaction").entered();
+                conn.execute("END TRANSACTION", [])?;
+            }
             let mut operation_summary = operation_summary;
             if let Some(message) = cmd.message {
                 operation_summary.summary = message;

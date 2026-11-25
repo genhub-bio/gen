@@ -20,6 +20,7 @@ enum MigrationError {
     DirtyWorkingSet,
 }
 
+#[cfg_attr(feature = "profiling", tracing::instrument(skip(conn)))]
 pub fn run_migrations(conn: &mut Connection) {
     apply_graph_migrations(conn).unwrap();
 }
@@ -58,6 +59,7 @@ fn apply_graph_migrations(conn: &mut Connection) -> Result<bool, MigrationError>
     Ok(pending_migrations > 0)
 }
 
+#[cfg_attr(feature = "profiling", tracing::instrument(skip(conn)))]
 pub fn run_config_migrations(conn: &mut Connection) {
     let migrations = Migrations::from_directory(&CONFIG_MIGRATION_DIR).unwrap();
 
