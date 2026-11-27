@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
-use indexmap::IndexSet;
 use rusqlite::{self, types::Value};
 use serde::{Deserialize, Serialize};
 
@@ -124,21 +123,12 @@ impl BlockGroupEdge {
         tracing::instrument(skip(conn, block_group_edges))
     )]
     pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
-        let unique_block_group_edges = block_group_edges
-            .iter()
-            .collect::<IndexSet<_>>()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        if unique_block_group_edges.is_empty() {
-            return;
-        }
         let batch_size = max_rows_per_batch(conn, 6);
 
-        for chunk in unique_block_group_edges.chunks(batch_size) {
+        for chunk in block_group_edges.chunks(batch_size) {
             let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             let mut sql = String::from(
-                "INSERT OR IGNORE INTO block_group_edges
+                "INSERT INTO block_group_edges
                  (id, block_group_id, edge_id, chromosome_index, phased, created_on) VALUES ",
             );
             for row_index in 0..chunk.len() {
@@ -147,7 +137,9 @@ impl BlockGroupEdge {
                 }
                 sql.push_str("(?, ?, ?, ?, ?, ?)");
             }
-            sql.push(';');
+            sql.push_str(
+                " ON CONFLICT(block_group_id, edge_id, chromosome_index, phased) DO NOTHING;",
+            );
             let mut params = Vec::with_capacity(chunk.len() * 6);
             for block_group_edge in chunk {
                 params.push(Value::from(block_group_edge.id_hash()));
@@ -254,9 +246,12 @@ impl BlockGroupEdge {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use capnp::message::TypedBuilder;
     use chrono::Utc;
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use rusqlite::params;
 
     use super::*;
     use crate::{
@@ -302,6 +297,95 @@ mod tests {
         assert_ne!(
             block_group_edge.id_hash(),
             changed_block_group_edge.id_hash()
+        );
+    }
+
+    #[test]
+    fn test_bulk_create_deduplicates_input_and_existing_rows() {
+        let conn = &get_connection(None).expect("should create graph connection");
+        Collection::get_or_create(conn, "bulk-create").expect("should create benchmark collection");
+        let block_group = create_bg(conn, "bulk-create", "sample", "block-group");
+        let edge = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create edge");
+        let block_group_edge = BlockGroupEdgeData {
+            block_group_id: block_group.id,
+            edge_id: edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        };
+
+        BlockGroupEdge::bulk_create(conn, &[block_group_edge.clone(), block_group_edge.clone()]);
+        let initially_created = BlockGroupEdge::select(conn)
+            .block_group_id(block_group.id)
+            .load()
+            .expect("should load block group edges");
+        BlockGroupEdge::bulk_create(conn, core::slice::from_ref(&block_group_edge));
+        let after_idempotent_create = BlockGroupEdge::select(conn)
+            .block_group_id(block_group.id)
+            .load()
+            .expect("should load block group edges after idempotent create");
+
+        assert_eq!(initially_created.len(), 1, "should create one unique row");
+        assert_eq!(
+            after_idempotent_create, initially_created,
+            "existing row and creation timestamp should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_bulk_create_does_not_ignore_unrelated_id_conflict() {
+        let conn = &get_connection(None).expect("should create graph connection");
+        Collection::get_or_create(conn, "targeted-conflict").expect("should create collection");
+        let existing_block_group =
+            create_bg(conn, "targeted-conflict", "sample", "existing-block-group");
+        let target_block_group =
+            create_bg(conn, "targeted-conflict", "sample", "target-block-group");
+        let edge = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create edge");
+        let target = BlockGroupEdgeData {
+            block_group_id: target_block_group.id,
+            edge_id: edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        };
+        conn.execute(
+            "INSERT INTO block_group_edges
+             (id, block_group_id, edge_id, chromosome_index, phased, created_on)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                target.id_hash(),
+                existing_block_group.id,
+                edge.id,
+                0,
+                0,
+                Utc::now().timestamp_nanos_opt().unwrap()
+            ],
+        )
+        .expect("should create a conflicting primary-key row");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            BlockGroupEdge::bulk_create(conn, core::slice::from_ref(&target));
+        }));
+
+        assert!(
+            result.is_err(),
+            "an unrelated primary-key conflict should not be ignored"
         );
     }
 
